@@ -300,6 +300,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_problems))
             .on_action(cx.listener(Self::toggle_results))
             .on_action(cx.listener(Self::rerun_failed_tests))
+            .on_action(cx.listener(Self::show_local_history))
             .on_action(cx.listener(Self::next_result))
             .on_action(cx.listener(Self::previous_result))
             .on_action(cx.listener(Self::find))

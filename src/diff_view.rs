@@ -1,5 +1,6 @@
-//! The diff of one file: a working-tree change (from the Commit panel) or a
-//! file in a commit (from the Git log). Side by side or unified, with syntax
+//! The diff of one file: a working-tree change (from the Commit panel), a
+//! file in a commit (from the Git log) or a Local History version against
+//! the file as it is. Side by side or unified, with syntax
 //! colors, changed words emphasized, and Stage / Unstage per change.
 
 use std::{
@@ -44,6 +45,8 @@ pub enum DiffViewEvent {
     Close,
     OpenFile(PathBuf),
     Run(GitOp),
+    /// Put this text (a Local History version) back in the file.
+    Restore { path: PathBuf, text: Arc<str> },
     /// The user switched between side by side and unified.
     Layout { side_by_side: bool },
 }
@@ -56,6 +59,9 @@ pub enum DiffSource {
     Working { file: FileStatus, staged: bool, buffer: Option<String> },
     /// A commit's change to a file: first parent → commit.
     Commit { sha: String, summary: String, file: CommitFile },
+    /// A Local History version (`label`: when and why it was kept) → the
+    /// file as it is (the open editor's text, so unsaved edits show).
+    History { path: PathBuf, label: String, text: Arc<str>, buffer: Option<String> },
 }
 
 /// Syntax spans per line, in tab-expanded byte offsets.
@@ -159,6 +165,10 @@ impl DiffView {
                             let (base, current) = git::commit_file_texts(&repo, sha, file);
                             (base, current, repo.join(&file.rel))
                         }
+                        DiffSource::History { path, text, buffer, .. } => {
+                            let read = || std::fs::read(path).ok().map(|b| String::from_utf8_lossy(&b).into_owned());
+                            (text.to_string(), buffer.clone().or_else(read).unwrap_or_default(), path.clone())
+                        }
                     };
                     if git::is_binary(&base) || git::is_binary(&current) {
                         return Loaded {
@@ -235,6 +245,10 @@ impl DiffView {
                 (file.path.clone(), file.rel.clone(), change)
             }
             DiffSource::Commit { file, .. } => (self.repo.join(&file.rel), file.rel.clone(), file.change),
+            DiffSource::History { path, .. } => {
+                let rel = path.strip_prefix(&self.repo).unwrap_or(path).to_string_lossy().replace('\\', "/");
+                (path.clone(), rel, Change::Modified)
+            }
         }
     }
 
@@ -316,6 +330,8 @@ fn load_images(repo: &Path, source: &DiffSource) -> Option<ImageSides> {
             let before = if file.unstaged == Some(Change::Untracked) { None } else { git::blob_bytes(repo, &format!(":{}", file.rel)) };
             (file.path.clone(), before, std::fs::read(&file.path).ok())
         }
+        // Kept as text: no pictures.
+        DiffSource::History { .. } => return None,
         DiffSource::Commit { sha, file, .. } => {
             let old_rel = file.old_rel.as_deref().unwrap_or(&file.rel);
             let before = (file.change != Change::Added).then(|| git::blob_bytes(repo, &format!("{sha}^:{old_rel}"))).flatten();
@@ -437,6 +453,7 @@ impl Render for DiffView {
         let badge = match &self.source {
             DiffSource::Working { staged, .. } => format!("{} · {}", change.label(), if *staged { "Staged" } else { "Unstaged" }),
             DiffSource::Commit { sha, summary, .. } => format!("{} · {}", &sha[..sha.len().min(8)], summary),
+            DiffSource::History { label, .. } => format!("Local History · {label}"),
         };
         // Side by side / Unified switch.
         let segment = |id: &'static str, label: &'static str, on: bool| {
@@ -489,7 +506,7 @@ impl Render for DiffView {
             .when_some(
                 match &self.source {
                     DiffSource::Working { file, staged, .. } => Some((file.clone(), *staged)),
-                    DiffSource::Commit { .. } => None,
+                    DiffSource::Commit { .. } | DiffSource::History { .. } => None,
                 },
                 |el, (file, staged)| {
                     let rel = file.rel.clone();
@@ -505,6 +522,17 @@ impl Render for DiffView {
                             cx.emit(DiffViewEvent::Run(op));
                         },
                     )))
+                },
+            )
+            .when_some(
+                match &self.source {
+                    DiffSource::History { path, text, .. } => Some((path.clone(), text.clone())),
+                    _ => None,
+                },
+                |el, (path, text)| {
+                    el.child(text_button("diff-restore", "Restore", true, cx).on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(DiffViewEvent::Restore { path: path.clone(), text: text.clone() })
+                    })))
                 },
             )
             .when(!deleted, |el| {

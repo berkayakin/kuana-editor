@@ -123,6 +123,9 @@ impl Workspace {
             add(MenuEntry::item("Copy Relative Path", Icon::Clipboard), Some(TreeAction::CopyRelativePath(path.clone())));
         }
         add(MenuEntry::item(reveal_label(), Icon::FolderOpen), Some(TreeAction::Reveal(path.clone())));
+        if !is_dir {
+            add(MenuEntry::item("Local History", Icon::History), Some(TreeAction::LocalHistory(path.clone())));
+        }
         if is_dir {
             add(MenuEntry::item("Find in Folder…", Icon::TextSearch), Some(TreeAction::FindInFolder(path.clone())));
             add(MenuEntry::item("Collapse All", Icon::ChevronsDownUp), Some(TreeAction::CollapseAll));

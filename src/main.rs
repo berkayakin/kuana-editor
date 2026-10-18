@@ -35,6 +35,7 @@ mod instance;
 mod input_dialog;
 mod keymap;
 mod languages;
+mod local_history;
 mod lint;
 mod lsp;
 mod markdown_preview;
@@ -395,6 +396,7 @@ fn main() {
     theme::move_legacy_config();
     if let Some(config) = theme::config_dir() {
         panic_log::install(config.join("logs"));
+        local_history::init(&config);
     }
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.first().is_some_and(|a| a == "extension") {

@@ -940,7 +940,19 @@ impl Editor {
                     task.detach();
                 }
                 if let Ok(Some(reload)) = read {
-                    editor.reload(cx, |doc, selections| Ok(doc.apply_reload(reload, selections))).ok();
+                    let (before, path) = (editor.doc.read(cx).rope().clone(), editor.doc.read(cx).path.clone());
+                    let changed = editor.reload(cx, |doc, selections| Ok(doc.apply_reload(reload, selections)));
+                    // Local History: the text a change on disk replaced, and the new one.
+                    if let (Ok(true), Some(path)) = (changed, path) {
+                        let after = editor.doc.read(cx).rope().clone();
+                        cx.background_executor()
+                            .spawn(async move {
+                                use crate::local_history::{Kind, record_rope};
+                                record_rope(&path, &before, Kind::BeforeReload);
+                                record_rope(&path, &after, Kind::Reloaded);
+                            })
+                            .detach();
+                    }
                 }
                 // Changed again while it was read.
                 if std::mem::take(&mut editor.reload_again) {
@@ -1268,6 +1280,16 @@ impl Editor {
         self.goal_x = None;
         self.set_selections(selections, self.primary, cx);
         self.after_edit(cx);
+    }
+
+    /// Makes the text `text`, as one edit that changes only the lines that
+    /// differ (so carets and Undo behave): a Local History Restore.
+    pub fn replace_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let current = self.doc.read(cx).rope().to_string();
+        let edits = crate::format::line_edits(&current, text);
+        if !edits.is_empty() {
+            self.edit_and_remap(edits, EditKind::Other, cx);
+        }
     }
 
     /// Applies arbitrary edits and then remaps all selections through them.

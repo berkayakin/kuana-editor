@@ -42,6 +42,21 @@ Folder** (Find Action) opens `snippets/` in the config folder, with an example o
 with `"scope": "rust,go"`. Type a snippet's prefix and press Tab, or pick it from completion.
 Changes to the files apply right away.
 
+## Local History
+
+Kuana keeps earlier versions of your files, whatever Git knows, as JetBrains IDEs do: when you save
+(and, the first time Kuana saves a file, what it was before), before and after a change from outside
+replaces an open file (a checkout, a formatter, another editor), before a Git rollback and before a
+Restore. **Local History** (Find Action, the editor's right-click menu, or a file's right-click
+menu in the tree) lists a file's versions in the Find panel by day, each with its time, why it was
+kept and how long ago. ↑/↓ show each one's differences from the file as it is (unsaved edits
+included) over the editor; **Restore** in the diff puts that version back as one edit, which Undo
+takes back.
+
+Versions live in `~/.config/kuana/local_history/`, outside your projects. A version the same as
+the one before isn't kept again, saves less than a minute apart keep only the last (auto-save),
+and files over 2 MB have none. Versions go after 14 days, and a file keeps at most 200.
+
 ## Windows and projects
 
 Each window holds one project folder, so several projects can be open side by side.

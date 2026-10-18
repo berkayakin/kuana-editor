@@ -90,6 +90,8 @@ impl Workspace {
             let (entry, action) = run(MenuEntry::item("Toggle Inline Git Blame", Icon::GitCommit), Box::new(editor::ToggleInlineBlame));
             add(entry, action);
         }
+        let (entry, action) = run(MenuEntry::item("Local History", Icon::History), Box::new(ShowLocalHistory));
+        add(entry, action);
 
         add(MenuEntry::Separator, None);
         let wrap_entry = if soft_wrap { MenuEntry::item("Soft-Wrap", Icon::Check) } else { MenuEntry::text("Soft-Wrap") };
@@ -284,6 +286,7 @@ impl Workspace {
             TreeAction::ShowDiff(file, staged) => self.open_diff(file, staged, window, cx),
             TreeAction::AddToGitignore(rel) => self.add_to_gitignore(rel, cx),
             TreeAction::ShowHistory(rel) => self.show_history_of(rel, window, cx),
+            TreeAction::LocalHistory(path) => self.show_local_history_of(path, window, cx),
             TreeAction::AskGit(prompt) => self.ask_for_name(PendingInput::Git(prompt), window, cx),
             TreeAction::CopyText(text) => cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)),
             TreeAction::UndoFileChange => self.step_file_history(false, window, cx),

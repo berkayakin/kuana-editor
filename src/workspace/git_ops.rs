@@ -756,7 +756,12 @@ impl Workspace {
     }
 
     pub(super) fn show_diff(&mut self, source: DiffSource, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(repo) = self.repo.clone() else { return };
+        // A Local History version needs no repository: paths show from the project.
+        let repo = match &source {
+            DiffSource::History { path, .. } => self.root.clone().or_else(|| path.parent().map(Path::to_path_buf)),
+            _ => self.repo.clone(),
+        };
+        let Some(repo) = repo else { return };
         self.close_modal(window, cx);
         let side_by_side = SessionState::load().diff_side_by_side.unwrap_or(true);
         let view = cx.new(|cx| DiffView::new(repo, source, side_by_side, window, cx));
@@ -772,6 +777,11 @@ impl Workspace {
                 ws.diff_return = None;
                 ws.close_modal(window, cx);
                 ws.open_path(path.clone(), window, cx);
+            }
+            DiffViewEvent::Restore { path, text } => {
+                ws.diff_return = None;
+                ws.close_modal(window, cx);
+                ws.restore_version(path.clone(), text.clone(), window, cx);
             }
             DiffViewEvent::Run(op) => {
                 ws.diff_return = None;
@@ -992,6 +1002,10 @@ pub(super) fn perform_git(dir: &Path, op: GitOp, status: &RepoStatus) -> Result<
             })
         }),
         GitOp::Discard(files) => {
+            // Local History keeps what a rollback throws away.
+            for file in &files {
+                crate::local_history::record_disk(&file.path, crate::local_history::Kind::BeforeRollback);
+            }
             let n = files.len();
             git::discard(dir, &files).map(|_| Some(format!("Rolled back {n} file{}", if n == 1 { "" } else { "s" })))
         }

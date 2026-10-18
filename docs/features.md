@@ -111,6 +111,9 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   in the tree, or its right-click menu, undo and redo file operations, deletes included (they come
   back from the Trash; the notification after a delete has **Undo** too); tabs, custom title bar,
   IME support
+- Local History: earlier versions of each file (on save, before and after outside changes, before a
+  rollback), listed by day with a diff against the file as it is and Restore; see
+  [Local History](editing.md#local-history)
 - A Settings window for every option, with search across its pages; see [Settings](settings.md)
 - Project settings in `.kuana/settings.json`, shared through the repository: indentation, formatters,
   language server settings and run configurations over each person's own; see

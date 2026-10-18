@@ -78,6 +78,24 @@ impl Loader {
     }
 }
 
+/// What choosing a node does when it isn't a place to go (a Local History
+/// version shows its diff): called once the panel's update is over, with
+/// whether the keyboard should leave the panel (if not, it gives it back).
+#[derive(Clone)]
+pub struct Opener(pub Rc<dyn Fn(bool, &mut Window, &mut App)>);
+
+impl PartialEq for Opener {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for Opener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Opener")
+    }
+}
+
 impl PartialEq for Loader {
     fn eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.0, &other.0)
@@ -99,6 +117,8 @@ pub struct ResultNode {
     /// Dim text after the label (a file's folder, a count).
     pub detail: Option<SharedString>,
     pub target: Option<ResultTarget>,
+    /// Runs when it's chosen, for a node without a `target`.
+    pub open: Option<Opener>,
     pub children: Vec<ResultNode>,
     /// Fetches the children (until it has run).
     pub loader: Option<Loader>,
@@ -114,6 +134,7 @@ impl ResultNode {
             highlight: None,
             detail: Some(text.into()),
             target: None,
+            open: None,
             children: Vec::new(),
             loader: None,
             expanded: false,
@@ -410,18 +431,27 @@ impl ResultsPanel {
         }
     }
 
-    fn select(&mut self, row: usize, open: Option<bool>, cx: &mut Context<Self>) {
+    /// Selects a row; `open`: also goes to its place or runs its opener,
+    /// leaving the keyboard to the panel unless it's true.
+    fn select(&mut self, row: usize, open: Option<bool>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tab() else { return };
         tab.selected = Some(row);
-        let target = tab.rows.get(row).and_then(|r| tab.node(&r.path).target.clone());
+        let node = tab.rows.get(row).map(|r| tab.node(&r.path));
+        let (target, opener) = (node.and_then(|n| n.target.clone()), node.and_then(|n| n.open.clone()));
         self.reveal_selected();
-        if let (Some(target), Some(focus)) = (target, open) {
-            cx.emit(ResultsEvent::Open { target, focus });
+        if let Some(focus) = open {
+            if let Some(target) = target {
+                cx.emit(ResultsEvent::Open { target, focus });
+            } else if let Some(opener) = opener {
+                // After this update: what it opens reads the panel (to give
+                // it the keyboard back), which mustn't happen during one.
+                window.defer(cx, move |window, cx| (opener.0)(focus, window, cx));
+            }
         }
         cx.notify();
     }
 
-    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+    fn move_selection(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(self.active) else { return };
         if tab.rows.is_empty() {
             return;
@@ -431,15 +461,15 @@ impl ResultsPanel {
             None => 0,
         };
         // Arrows show the place without leaving the panel.
-        self.select(next, Some(false), cx);
+        self.select(next, Some(false), window, cx);
     }
 
-    fn on_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_selection(-1, cx);
+    fn on_up(&mut self, _: &MoveUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_selection(-1, window, cx);
     }
 
-    fn on_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_selection(1, cx);
+    fn on_down(&mut self, _: &MoveDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_selection(1, window, cx);
     }
 
     /// ←: close the selected node, else go to its parent.
@@ -475,16 +505,16 @@ impl ResultsPanel {
         cx.notify();
     }
 
-    fn on_enter(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_enter(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tab() else { return };
         let Some(row) = tab.selected else { return };
         let path = tab.rows[row].path.clone();
         let node = tab.node(&path);
-        if node.target.is_none() && node.expandable() {
+        if node.target.is_none() && node.open.is_none() && node.expandable() {
             let expanded = node.expanded;
             self.expand(row, !expanded, cx);
         } else {
-            self.select(row, Some(true), cx);
+            self.select(row, Some(true), window, cx);
         }
     }
 
@@ -565,7 +595,7 @@ impl ResultsPanel {
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     window.focus(&this.focus);
-                    this.select(ix, None, cx);
+                    this.select(ix, None, window, cx);
                     this.expand(ix, !expanded, cx);
                 }))
                 .into_any_element()
@@ -630,14 +660,15 @@ impl ResultsPanel {
             .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                 window.focus(&this.focus);
                 let Some(tab) = this.tabs.get(this.active) else { return };
-                let (has_target, expanded) = {
+                let (opens, expanded) = {
                     let node = tab.node(&tab.rows[ix].path);
-                    (node.target.is_some(), node.expanded)
+                    (node.target.is_some() || node.open.is_some(), node.expanded)
                 };
-                if !has_target || event.click_count() > 1 {
+                if !opens || event.click_count() > 1 {
                     this.expand(ix, !expanded, cx);
                 }
-                this.select(ix, Some(has_target), cx);
+                // A click keeps the keyboard in the panel when what it opens is a view (a diff).
+                this.select(ix, Some(opens), window, cx);
             }))
             .into_any_element()
     }
@@ -794,6 +825,7 @@ pub fn usages_tree(locations: Vec<Location>, lines: Vec<String>, encoding: Encod
             highlight: Some(highlight),
             detail: None,
             target: Some(ResultTarget { path: location.path.clone(), position: location.range.start, encoding }),
+            open: None,
             children: Vec::new(),
             loader: None,
             expanded: false,
@@ -812,6 +844,7 @@ pub fn usages_tree(locations: Vec<Location>, lines: Vec<String>, encoding: Encod
                     highlight: None,
                     detail: folder.map(Into::into),
                     target: None,
+                    open: None,
                     children: vec![usage],
                     loader: None,
                     expanded: true,
@@ -865,6 +898,32 @@ mod tests {
         assert_eq!(&text[range], "target");
         // "é" is one UTF-16 unit and two bytes.
         assert_eq!(column("é foo", 2, Encoding::Utf16), 3);
+    }
+
+    /// Choosing a node with an opener runs it once the panel's update is
+    /// over: what it opens may read the panel (Local History's diff gives it
+    /// the keyboard back), which panicked when it ran during the update.
+    #[gpui::test]
+    fn an_opener_may_read_the_panel(cx: &mut gpui::TestAppContext) {
+        use std::cell::Cell;
+
+        use gpui::AppContext;
+        let panel = cx.new(ResultsPanel::new);
+        let cx = cx.add_empty_window();
+        let opened = Rc::new(Cell::new(None));
+        let opener = {
+            let (panel, opened) = (panel.clone(), opened.clone());
+            Opener(Rc::new(move |focus, _, cx| opened.set(Some((focus, panel.read(cx).tabs.len())))))
+        };
+        let version = ResultNode { open: Some(opener), ..ResultNode::message("a version") };
+        cx.update(|window, cx| {
+            panel.update(cx, |p, cx| {
+                p.show("Local History".into(), vec![version], Vec::new(), false, cx);
+                p.select(0, Some(false), window, cx);
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(opened.get(), Some((false, 1)));
     }
 
     #[test]

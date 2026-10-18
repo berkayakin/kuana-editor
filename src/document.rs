@@ -1511,6 +1511,10 @@ impl SaveJob {
     /// overtook writes nothing, so the file ends with the newest text.
     pub fn write(self) -> Written {
         let SaveJob { id, ticket, version, path, rope, encoding, crlf, settles, in_flight } = self;
+        // Local History: what the file was before Kuana first saved it.
+        if !crate::local_history::has_history(&path) {
+            crate::local_history::record_disk(&path, crate::local_history::Kind::Original);
+        }
         let outcome = {
             let mut newest = settles.0.written.lock().unwrap_or_else(PoisonError::into_inner);
             if *newest > ticket {
@@ -1533,6 +1537,9 @@ impl SaveJob {
             }
         };
         drop(in_flight);
+        if matches!(outcome, Outcome::Written(_)) {
+            crate::local_history::record_rope(&path, &rope, crate::local_history::Kind::Saved);
+        }
         Written { id, ticket, version, encoding, crlf, outcome, _settles: settles }
     }
 }

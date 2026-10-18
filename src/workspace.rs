@@ -85,6 +85,7 @@ mod file_tree;
 mod git_ops;
 mod language_servers;
 mod line_endings;
+mod local_history;
 mod menus;
 mod navigation;
 mod pane_view;
@@ -190,6 +191,7 @@ actions!(
         OpenSettingsFile,
         OpenProjectSettings,
         ToggleResults,
+        ShowLocalHistory,
         NextResult,
         PreviousResult,
         OpenKeymap,
@@ -347,6 +349,8 @@ enum TreeAction {
     AddToGitignore(String),
     /// The commits touching this repository-relative path.
     ShowHistory(String),
+    /// This file's Local History.
+    LocalHistory(PathBuf),
     /// Asks for a name, then runs a Git operation with it.
     AskGit(GitPrompt),
     CopyText(String),
