@@ -407,7 +407,7 @@ impl LspStore {
     /// when turned off in settings; a command there replaces them all.
     #[allow(clippy::type_complexity)]
     fn server_keys(&self, language: Language, path: &Path, cx: &App) -> Vec<(ServerKey, Option<Vec<String>>, &'static servers::ServerSpec)> {
-        let custom = match Settings::get(cx).language_servers.get(language.name()) {
+        let custom = match Settings::get(cx).at(path).language_servers.get(language.name()) {
             Some(Value::Bool(false)) => return Vec::new(),
             Some(Value::Array(command)) => Some(command.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>()),
             _ => None,
@@ -453,7 +453,8 @@ impl LspStore {
         let generation = self.next_generation;
         self.generations.insert(key.clone(), generation);
         cx.notify();
-        let user = Settings::get(cx).lsp.clone();
+        // The user's settings with the project's for the server's folder.
+        let user = Settings::get(cx).at(&key.root).lsp.clone();
         // What extensions' code may read, and the other extensions' servers
         // for the language, which may add to this one's configuration.
         let tab_size = Settings::get(cx).for_file(language, Some(&file)).tab_size;
@@ -1094,9 +1095,9 @@ impl LspStore {
     /// (initialization options and programs apply when a server restarts).
     /// Extensions' code is asked again for the servers it configures.
     pub fn settings_changed(&mut self, cx: &mut Context<Self>) {
-        let user = Settings::get(cx).lsp.clone();
         let keys: Vec<ServerKey> = self.configs.keys().cloned().collect();
         for key in keys {
+            let user = Settings::get(cx).at(&key.root).lsp.clone();
             self.update_settings(&key, None, &user);
             let Some(asking) = self.configs.get(&key).and_then(|(_, _, _, code)| code.asking.clone()) else { continue };
             let generation = self.generations.get(&key).copied();

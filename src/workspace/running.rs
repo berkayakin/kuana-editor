@@ -393,6 +393,7 @@ impl Workspace {
             doc.path.clone().map(|p| (p, doc.language))
         });
         let mut targets: Vec<RunTarget> = Settings::get(cx)
+            .at(&root)
             .run_configurations
             .iter()
             .map(|c| RunTarget {

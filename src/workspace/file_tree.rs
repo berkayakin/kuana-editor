@@ -50,6 +50,11 @@ impl Workspace {
             self.detect_repo(root, cx);
         }
         self.save_state(cx);
+        // Problems in the project's settings file show when it opens.
+        if let Some(root) = &self.root {
+            crate::project_settings::layers(root);
+            self.check_config(cx);
+        }
         let root = self.root.clone();
         self.lsp.update(cx, |s, _| s.set_root(root));
         if self.items().next().is_none() {

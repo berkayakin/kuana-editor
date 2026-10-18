@@ -48,7 +48,7 @@ impl Editor {
             return Task::ready(Err("Formatting is off in Restricted Mode. Trust the project to use it.".into()));
         }
         let language = self.doc.read(cx).language;
-        let configured = Settings::get(cx).formatters.get(language.name()).cloned();
+        let configured = Settings::get(cx).at(&path).formatters.get(language.name()).cloned();
         let command: Option<Vec<String>> = match &configured {
             Some(Value::Bool(false)) => return Task::ready(Err(format!("Formatting is off for {}", language.name()))),
             Some(Value::Array(c)) => Some(c.iter().filter_map(Value::as_str).map(str::to_string).collect()),

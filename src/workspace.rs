@@ -186,6 +186,7 @@ actions!(
         FileStructure,
         OpenSettings,
         OpenSettingsFile,
+        OpenProjectSettings,
         OpenKeymap,
         RestartLanguageServer,
         IncreaseFontSize,

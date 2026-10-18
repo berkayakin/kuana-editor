@@ -45,6 +45,7 @@ mod picker;
 mod preview;
 mod problems_panel;
 mod project;
+mod project_settings;
 mod project_tree;
 mod process;
 mod trust;

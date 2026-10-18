@@ -261,6 +261,16 @@ impl Workspace {
         self.open_config_file(Settings::path(), settings::SETTINGS_TEMPLATE, window, cx);
     }
 
+    /// The project's `.kuana/settings.json`, created from a template when
+    /// it has none.
+    pub(super) fn open_project_settings(&mut self, _: &OpenProjectSettings, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else {
+            self.toast(ToastKind::Info, "Open a folder to give it settings", None, cx);
+            return;
+        };
+        self.open_config_file(Some(root.join(crate::project_settings::FILE)), crate::project_settings::TEMPLATE, window, cx);
+    }
+
     pub(super) fn open_keymap(&mut self, _: &OpenKeymap, window: &mut Window, cx: &mut Context<Self>) {
         self.open_config_file(keymap::keymap_path(), keymap::KEYMAP_TEMPLATE, window, cx);
     }

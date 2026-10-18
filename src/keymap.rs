@@ -27,7 +27,7 @@ use crate::{
         GitBranches, GitStash, ManageRemotes, GitClone, GitFetch, GitInit, GitPull, GitPush, OpenRemote, OpenThemesFolder, OpenSnippetsFolder, ReloadThemes, ReplaceInFiles,
         Save, SaveAs, SearchEverywhere, SelectTheme, ShowCommit, ShowFileHistory, ToggleCommit, ToggleGitLog, ToggleProblems,
         DebugConfiguration, Resume, PauseProgram, StepOver, StepInto, StepOut, ToggleDebugPanel, AttachToProcess, AddConditionalBreakpoint,
-        AddLogpoint, OpenExtensions, ReloadExtensions, ProjectTrust, UndoFileChange, RedoFileChange,
+        AddLogpoint, OpenExtensions, ReloadExtensions, ProjectTrust, UndoFileChange, RedoFileChange, OpenProjectSettings,
         ToggleAutoSave, ToggleSidebar, ToggleSidebarPosition, CheckForUpdates, WelcomeSetup, GoToSymbol, SplitTerminal, RenameTerminal, SelectOpenedFile, InstallShellCommand,
     },
 };
@@ -807,6 +807,7 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Preferences…", OpenSettings),
         a("Check for Updates…", CheckForUpdates),
         a("Open settings.json", OpenSettingsFile),
+        a("Open Project Settings (.kuana/settings.json)", OpenProjectSettings),
         a("Open keymap.json", OpenKeymap),
         a("Increase Font Size", IncreaseFontSize),
         a("Decrease Font Size", DecreaseFontSize),

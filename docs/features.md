@@ -108,5 +108,8 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   back from the Trash; the notification after a delete has **Undo** too); tabs, custom title bar,
   IME support
 - A Settings window for every option, with search across its pages; see [Settings](settings.md)
+- Project settings in `.kuana/settings.json`, shared through the repository: indentation, formatters,
+  language server settings and run configurations over each person's own; see
+  [Project settings](settings.md#project-settings)
 - Automatic updates from GitHub Releases (signed), installed with **Restart to Update**; see
   [Releases and updates](install.md#updates)

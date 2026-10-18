@@ -34,6 +34,7 @@ fn build(cx: &App) -> Value {
         { "fileMatch": [format!("{folder}/settings.json")], "schema": settings_schema() },
         { "fileMatch": [format!("{folder}/keymap.json")], "schema": keymap_schema(&actions) },
         { "fileMatch": [format!("{folder}/themes/*.json")], "schema": theme_schema() },
+        { "fileMatch": [crate::project_settings::FILE], "schema": project_settings_schema() },
     ])
 }
 
@@ -47,6 +48,17 @@ fn jsonc(mut schema: Value) -> Value {
 
 fn settings_schema() -> Value {
     jsonc(serde_json::to_value(schemars::schema_for!(crate::settings::Settings)).unwrap_or(Value::Null))
+}
+
+/// `settings.json`'s schema with only what a project's `.kuana/settings.json` takes.
+fn project_settings_schema() -> Value {
+    let mut schema = settings_schema();
+    if let Some(Value::Object(properties)) = schema.get_mut("properties") {
+        let allowed = |key: &str| crate::project_settings::PROJECT_KEYS.contains(&key) || crate::settings::EDITOR_KEYS.contains(&key);
+        properties.retain(|key, _| allowed(key));
+    }
+    schema["additionalProperties"] = json!(false);
+    schema
 }
 
 fn keymap_schema(actions: &[String]) -> Value {
@@ -109,6 +121,9 @@ mod tests {
             assert!(properties.get(key).is_some(), "{key} missing");
         }
         assert_eq!(settings["allowComments"], true);
+        let project = project_settings_schema();
+        assert!(project["properties"].get("tab_size").is_some() && project["properties"].get("formatters").is_some());
+        assert!(project["properties"].get("theme").is_none());
 
         let keymap = keymap_schema(&["editor::MoveLeft".into()]);
         assert_eq!(keymap["items"]["properties"]["bindings"]["additionalProperties"]["anyOf"][0]["enum"][0], "editor::MoveLeft");

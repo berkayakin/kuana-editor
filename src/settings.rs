@@ -3,9 +3,12 @@
 //! rewrites only that key's entry, so comments and formatting survive.
 //!
 //! Editor options resolve per file: built-in language defaults, then the
-//! top-level settings, then `languages.<Name>` overrides, then `.editorconfig`.
+//! top-level settings, then `languages.<Name>` overrides, then the same two
+//! from each project settings file above the file (`project_settings`), then
+//! `.editorconfig`.
 
 use std::{
+    borrow::Cow,
     collections::HashMap,
     path::{Path, PathBuf},
     time::SystemTime,
@@ -382,7 +385,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "minimap_width",
 ];
 
-const EDITOR_KEYS: &[&str] = &[
+pub const EDITOR_KEYS: &[&str] = &[
     "tab_size",
     "hard_tabs",
     "soft_wrap",
@@ -440,7 +443,12 @@ impl Settings {
         if text.trim().is_empty() {
             return Ok((Self::default(), Vec::new()));
         }
-        let mut value: Value = serde_json::from_str(&strip_jsonc(text)).map_err(|e| e.to_string())?;
+        let value: Value = serde_json::from_str(&strip_jsonc(text)).map_err(|e| e.to_string())?;
+        Self::from_value_reporting(value)
+    }
+
+    /// `parse_reporting` for JSON already read.
+    pub fn from_value_reporting(mut value: Value) -> Result<(Self, Vec<String>), String> {
         if let Ok(settings) = serde_json::from_value(value.clone()) {
             return Ok((settings, Vec::new()));
         }
@@ -632,9 +640,67 @@ impl Settings {
         })
     }
 
+    /// These settings with the project settings that apply at `path` (a file
+    /// or a folder) on top: what language servers, formatters and Run read.
+    /// Editor options for a file come from `for_file`, which layers them per
+    /// language.
+    pub fn at(&self, path: &Path) -> Cow<'_, Settings> {
+        let layers = crate::project_settings::layers(path);
+        if layers.is_empty() {
+            return Cow::Borrowed(self);
+        }
+        let mut settings = self.clone();
+        for layer in &layers {
+            settings.overlay(layer);
+        }
+        Cow::Owned(settings)
+    }
+
+    /// `project`'s settings over these: options and map entries it sets win,
+    /// language server settings merge key by key, and its run configurations
+    /// come first.
+    fn overlay(&mut self, project: &Settings) {
+        self.editor = project.editor.clone().or(std::mem::take(&mut self.editor));
+        for (name, overrides) in &project.languages {
+            let base = self.languages.remove(name).unwrap_or_default();
+            self.languages.insert(name.clone(), overrides.clone().or(base));
+        }
+        self.language_servers.extend(project.language_servers.clone());
+        self.formatters.extend(project.formatters.clone());
+        for (id, over) in &project.lsp {
+            let entry = self.lsp.entry(id.clone()).or_default();
+            let merged = |base: &mut Option<Value>, over: &Option<Value>, dotted: bool| {
+                let Some(over) = over else { return };
+                let expand = |v: &Value| if dotted { crate::lsp::servers::expand_dotted(v) } else { v.clone() };
+                let mut value = base.as_ref().map(expand).unwrap_or(Value::Null);
+                crate::lsp::servers::merge(&mut value, &expand(over));
+                *base = Some(value);
+            };
+            // Settings may be written with dotted sections on either side.
+            merged(&mut entry.settings, &over.settings, true);
+            merged(&mut entry.initialization_options, &over.initialization_options, false);
+            if over.binary.is_some() {
+                entry.binary = over.binary.clone();
+            }
+        }
+        let user_runs = std::mem::take(&mut self.run_configurations);
+        self.run_configurations = project.run_configurations.iter().cloned().chain(user_runs).collect();
+    }
+
     /// Editor options for a file of `language` at `path`.
     pub fn for_file(&self, language: Language, path: Option<&Path>) -> FileSettings {
-        let language_overrides = self.languages.get(language.name()).cloned().unwrap_or_default();
+        // Lowest first: each layer's top-level options, then its language's.
+        let mut layered = EditorSettings::language_default(language);
+        let mut add = |settings: &Settings| {
+            layered = settings.editor.clone().or(std::mem::take(&mut layered));
+            if let Some(overrides) = settings.languages.get(language.name()) {
+                layered = overrides.clone().or(std::mem::take(&mut layered));
+            }
+        };
+        add(self);
+        for layer in path.map(crate::project_settings::layers).unwrap_or_default() {
+            add(&layer);
+        }
         let config = path.map(EditorConfig::for_file).unwrap_or_default();
         let from_config = EditorSettings {
             tab_size: config.indent_size.or(config.tab_width),
@@ -650,10 +716,7 @@ impl Settings {
             minimap: None,
             syntax_errors: None,
         };
-        let s = from_config
-            .or(language_overrides)
-            .or(self.editor.clone())
-            .or(EditorSettings::language_default(language));
+        let s = from_config.or(layered);
         FileSettings {
             tab_size: s.tab_size.unwrap_or(4).clamp(1, 16),
             hard_tabs: s.hard_tabs.unwrap_or(false),
@@ -794,6 +857,13 @@ pub fn reload_if_changed(cx: &mut App) -> Vec<String> {
             theme::apply_fonts(cx);
         }
     }
+    // A project settings file changed: setting the same global again tells
+    // its observers, which re-apply settings everywhere.
+    if crate::project_settings::refresh() && settings_time == old_settings {
+        let settings = Settings::get(cx).clone();
+        cx.set_global(settings);
+    }
+    problems.extend(crate::project_settings::take_problems());
     // A different base keymap needs the bindings rebuilt too.
     let installed = cx.try_global::<keymap::Installed>().map(|i| i.0);
     if keymap_time != old_keymap || installed != Some(Settings::get(cx).base_keymap.unwrap_or_default()) {
@@ -827,7 +897,8 @@ impl Global for StartupProblems {}
 /// Written by Open Settings when there's no file yet: every option, commented
 /// out at its default.
 pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you save this file.
-// Comments and trailing commas are allowed.
+// Comments and trailing commas are allowed. A project can add its own in
+// .kuana/settings.json (Open Project Settings), which go over these there.
 {
   // "theme": "Ember",
 

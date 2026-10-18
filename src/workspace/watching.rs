@@ -94,6 +94,9 @@ impl Workspace {
         if !changed.lsp.is_empty() {
             self.lsp.read(cx).send_file_events(changed.lsp);
         }
+        if changed.project_settings {
+            self.check_config(cx);
+        }
         self.read_status(changed.git, cx);
         let paths = changed.open;
         if paths.is_empty() {
@@ -226,6 +229,8 @@ pub(super) struct Classified {
     open: HashSet<PathBuf>,
     /// Each language server's `didChangeWatchedFiles`, for what it watches.
     lsp: Vec<(ServerKey, serde_json::Value)>,
+    /// A project settings file changed (a checkout, another editor).
+    project_settings: bool,
 }
 
 /// Sorts out a batch of changes (blocking: in the background). Paths in
@@ -256,6 +261,7 @@ pub(super) fn classify(changes: Vec<FsChange>, state: &WatchState) -> Classified
         (kind, is_dir == Some(true))
     };
     let mut file_changes = Vec::new();
+    out.project_settings = changes.iter().any(|c| crate::project_settings::is_settings_file(&c.path) || c.path.ends_with(crate::project_settings::DIR));
     for change in changes {
         match watcher::git_path(&change.path) {
             GitPath::Metadata => out.git.add(StatusWork::all()),

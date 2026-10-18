@@ -76,6 +76,46 @@ A file's existing indentation wins over `tab_size`/`hard_tabs`. A project's `.ed
 wins over both: `indent_style`, `indent_size`, `tab_width`, `trim_trailing_whitespace` and
 `insert_final_newline` are supported, read up to the nearest `root = true`.
 
+## Project settings
+
+A project can carry its own settings in `.kuana/settings.json`, committed with the code, so
+everyone who opens it gets the same indentation, formatters, language server settings and run
+configurations (like Zed's `.zed/settings.json`). **Open Project Settings** (Find Action) creates
+it from a commented template. For files in that folder its values go over your own
+`settings.json`; a `.kuana/settings.json` in a subfolder (a package in a monorepo) goes over the
+project's for files under it. Saving the file applies it, and so does a change from outside Kuana
+(a checkout, a pull).
+
+It takes the editor options (`tab_size`, `hard_tabs`, `soft_wrap`, `format_on_save`, `rulers`,
+`trim_trailing_whitespace`, `insert_final_newline`, …), `languages`, `language_servers`, `lsp`,
+`formatters` and `run_configurations`, written as in `settings.json`. Everything else (theme,
+fonts, keymap, Vim mode, auto-save…) stays yours; such keys are reported and ignored.
+
+- Editor options resolve per file: built-in defaults, then your top-level options, then your
+  `languages` entry, then the project's top-level options, then its `languages` entry, then
+  `.editorconfig`. So a project's `"tab_size": 2` applies even where you set a tab size for
+  that language yourself.
+- `language_servers` and `formatters` entries replace yours for the same language; `lsp`
+  settings and initialization options merge key by key (a project's `binary` replaces yours);
+  the project's `run_configurations` are listed before yours, their `cwd` relative to the project.
+- Until you [trust](#project-trust) the project, only its editor options and `languages` apply:
+  the rest names programs to run.
+
+```jsonc
+// .kuana/settings.json
+{
+  "tab_size": 2,
+  "format_on_save": true,
+  "languages": { "Python": { "tab_size": 4, "rulers": [88] } },
+  "formatters": { "Python": ["ruff", "format", "-"] },
+  "lsp": { "rust-analyzer": { "initialization_options": { "check": { "command": "clippy" } } } },
+  "run_configurations": [{ "name": "Dev server", "command": "npm run dev" }]
+}
+```
+
+With the JSON language server installed, the file gets completion and checks from a schema of
+just these keys.
+
 ## Project trust
 
 A cloned repository can make an editor run its code without asking: a language server builds it,

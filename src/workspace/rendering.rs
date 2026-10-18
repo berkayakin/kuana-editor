@@ -312,6 +312,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::file_structure))
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::open_settings_file))
+            .on_action(cx.listener(Self::open_project_settings))
             .on_action(cx.listener(Self::restart_language_server))
             .on_action(cx.listener(Self::toggle_terminal))
             .on_action(cx.listener(Self::split_right))

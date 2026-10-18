@@ -288,7 +288,7 @@ pub fn config(spec: &ServerSpec, program: &Path, user: &HashMap<String, LspSetti
 /// Settings with dotted keys as nested objects, the way servers ask for
 /// them: `{"basedpyright.analysis": {…}}` (as Zed's and VS Code's settings
 /// write it) becomes `{"basedpyright": {"analysis": {…}}}`.
-fn expand_dotted(value: &Value) -> Value {
+pub fn expand_dotted(value: &Value) -> Value {
     let Value::Object(map) = value else { return value.clone() };
     let mut out = Value::Object(serde_json::Map::new());
     for (key, value) in map {
