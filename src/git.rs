@@ -3,6 +3,7 @@
 //! blocks; call them from a background task.
 
 use std::{
+    borrow::Cow,
     collections::HashMap,
     io::{Read, Write},
     ops::Range,
@@ -557,23 +558,56 @@ fn parse_batch(mut out: &[u8], count: usize) -> Result<Vec<Option<Vec<u8>>>, Str
 /// write text back the same way.
 pub struct BlobText {
     pub text: String,
+    /// `text` with each line's own line end, as the blob has it.
+    raw: String,
     encoding: TextEncoding,
+    /// The line end most of its lines have, for lines that come without one
+    /// of their own (an editor's LF text).
     crlf: bool,
 }
 
 impl BlobText {
     /// Decodes `bytes`; `hint` is the encoding the editor uses for the file.
     pub fn new(bytes: &[u8], hint: Option<TextEncoding>) -> Self {
-        let (text, encoding) = crate::encoding::decode(bytes, hint);
-        let crlf = text.contains("\r\n");
-        BlobText { text: crate::encoding::to_lf(text), encoding, crlf }
+        let (raw, encoding) = crate::encoding::decode(bytes, hint);
+        let crlf = raw.matches("\r\n").count() * 2 > raw.matches('\n').count();
+        BlobText { text: crate::encoding::to_lf(raw.clone()), raw, encoding, crlf }
     }
 
-    /// `text` (with LF line ends) in this blob's line ends and encoding.
-    fn encode(&self, text: &str) -> Result<Vec<u8>, String> {
-        let text = if self.crlf { text.replace('\n', "\r\n") } else { text.to_string() };
-        crate::encoding::encode(&text, self.encoding)
+    /// `text`'s lines (LF line ends) in this blob's usual line end, for lines
+    /// new to it. (Not a working copy's own: with `core.autocrlf` it has
+    /// CRLF where the index has LF.)
+    fn lines_for<'a>(&self, text: &'a str) -> Vec<Cow<'a, str>> {
+        split_lines(text)
+            .into_iter()
+            .map(|line| match line.strip_suffix('\n') {
+                Some(body) if self.crlf => Cow::Owned(format!("{body}\r\n")),
+                _ => Cow::Borrowed(line),
+            })
+            .collect()
     }
+
+    fn encode(&self, text: &str) -> Result<Vec<u8>, String> {
+        crate::encoding::encode(text, self.encoding)
+    }
+}
+
+/// `text`'s lines with their own line ends: the lines `encoding::to_lf`
+/// makes of it (a lone `\r` ends one too).
+fn own_lines(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' || (b == b'\r' && bytes.get(i + 1) != Some(&b'\n')) {
+            lines.push(&text[start..=i]);
+            start = i + 1;
+        }
+    }
+    if start < text.len() {
+        lines.push(&text[start..]);
+    }
+    lines
 }
 
 /// The index version of `rel` to stage lines into; a file new to the index
@@ -583,7 +617,7 @@ fn index_blob_text(root: &Path, rel: &str) -> BlobText {
         Some(bytes) => BlobText::new(&bytes, None),
         None => {
             let style = BlobText::new(&std::fs::read(root.join(rel)).unwrap_or_default(), None);
-            BlobText { text: String::new(), ..style }
+            BlobText { text: String::new(), raw: String::new(), ..style }
         }
     }
 }
@@ -1456,18 +1490,24 @@ pub fn rows_touch(a: &Range<usize>, b: &Range<usize>) -> bool {
     }
 }
 
-/// `base` with the hunks of `base → target` that `pick` selects applied.
-pub fn apply_hunks(base: &str, target: &str, pick: impl Fn(&Hunk) -> bool) -> String {
-    let base_lines = split_lines(base);
-    let target_lines = split_lines(target);
-    let mut out = String::with_capacity(base.len().max(target.len()));
+/// `base` with the hunks of `base → target` that `pick` selects applied
+/// (`splice` with LF lines; staging keeps each line's own line end).
+#[cfg(test)]
+fn apply_hunks(base: &str, target: &str, pick: impl Fn(&Hunk) -> bool) -> String {
+    splice(&split_lines(base), &split_lines(target), &diff_hunks(base, target), pick)
+}
+
+/// `base_lines` with the `hunks` (rows of `base_lines` → `target_lines`)
+/// that `pick` selects replaced by their target lines.
+fn splice(base_lines: &[impl AsRef<str>], target_lines: &[impl AsRef<str>], hunks: &[Hunk], pick: impl Fn(&Hunk) -> bool) -> String {
+    let mut out = String::new();
     let mut at = 0;
-    for hunk in diff_hunks(base, target).iter().filter(|h| pick(h)) {
-        out.extend(base_lines[at..hunk.old_rows.start].iter().copied());
-        out.extend(target_lines[hunk.new_rows.clone()].iter().copied());
+    for hunk in hunks.iter().filter(|h| pick(h)) {
+        out.extend(base_lines[at..hunk.old_rows.start].iter().map(AsRef::as_ref));
+        out.extend(target_lines[hunk.new_rows.clone()].iter().map(AsRef::as_ref));
         at = hunk.old_rows.end;
     }
-    out.extend(base_lines[at..].iter().copied());
+    out.extend(base_lines[at..].iter().map(AsRef::as_ref));
     out
 }
 
@@ -1497,10 +1537,13 @@ pub fn map_rows_to_base(base: &str, target: &str, rows: Range<usize>) -> Range<u
 /// Stages the changes in `current` (the working copy or an editor's text)
 /// that touch `rows` of it, leaving the file's other changes unstaged.
 pub fn stage_lines(root: &Path, rel: &str, current: &str, rows: Range<usize>) -> Result<(), String> {
-    // Compared with LF line ends, as editors hold text; written back in the
-    // index's own line ends and encoding, so only the picked lines change.
+    // Compared with LF line ends, as editors hold text; written back with
+    // each line's own line end and the index's encoding, so only the picked
+    // lines change (in a file of mixed line ends too).
     let index = index_blob_text(root, rel);
-    let staged = apply_hunks(&index.text, &crate::encoding::to_lf(current.to_string()), |h| rows_touch(&h.new_rows, &rows));
+    let target = crate::encoding::to_lf(current.to_string());
+    let hunks = diff_hunks(&index.text, &target);
+    let staged = splice(&own_lines(&index.raw), &index.lines_for(&target), &hunks, |h| rows_touch(&h.new_rows, &rows));
     write_index(root, rel, &index.encode(&staged)?)
 }
 
@@ -1516,8 +1559,9 @@ pub fn unstage_lines(root: &Path, rel: &str, current: Option<&str>, rows: Range<
         // Not in HEAD: unstaging part of a new file isn't meaningful.
         return unstage(root, &[rel.to_string()], has_head(root));
     };
-    let head = BlobText::new(&head, Some(index.encoding)).text;
-    let unstaged = apply_hunks(&index.text, &head, |h| rows_touch(&h.old_rows, &rows));
+    let head = BlobText::new(&head, Some(index.encoding));
+    let hunks = diff_hunks(&index.text, &head.text);
+    let unstaged = splice(&own_lines(&index.raw), &own_lines(&head.raw), &hunks, |h| rows_touch(&h.old_rows, &rows));
     write_index(root, rel, &index.encode(&unstaged)?)
 }
 
@@ -2245,24 +2289,20 @@ u UU N... 100644 100644 100644 100644 f g h conflict.js\0\
     }
 
     #[test]
-    fn discarding_trashes_untracked_files() {
+    fn staging_lines_keeps_each_line_end_in_a_mixed_file() {
         if !is_available() {
             return;
         }
-        let root = test_repo("discard-trash");
-        std::fs::write(root.join("kept.txt"), "one\n").unwrap();
-        stage(&root, &["kept.txt".into()]).unwrap();
+        let root = test_repo("mixed-ends");
+        let original = b"a\r\nb\nc\r\nd\r\n".to_vec();
+        std::fs::write(root.join("m.txt"), &original).unwrap();
+        stage(&root, &["m.txt".into()]).unwrap();
         commit(&root, "first", false).unwrap();
-        std::fs::write(root.join("kept.txt"), "two\n").unwrap();
-        std::fs::write(root.join("new.txt"), "new\n").unwrap();
-        let trashed = std::cell::RefCell::new(Vec::new());
-        discard_with(&root, &status(&root).unwrap().files, |path| {
-            trashed.borrow_mut().push(path.to_path_buf());
-            std::fs::remove_file(path)
-        })
-        .unwrap();
-        assert_eq!(trashed.into_inner(), [root.join("new.txt")]);
-        assert_eq!(std::fs::read_to_string(root.join("kept.txt")).unwrap(), "one\n");
+        // The editor holds LF; only the changed line takes the file's usual CRLF.
+        stage_lines(&root, "m.txt", "a\nb\nC\nd\n", 2..3).unwrap();
+        assert_eq!(index_blob(&root, "m.txt").unwrap(), b"a\r\nb\nC\r\nd\r\n");
+        unstage_lines(&root, "m.txt", None, 2..3).unwrap();
+        assert_eq!(index_blob(&root, "m.txt").unwrap(), original);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2298,6 +2338,28 @@ u UU N... 100644 100644 100644 100644 f g h conflict.js\0\
         discard_here(&root, &files.into_iter().filter(|f| f.rel == "[A].sh").collect::<Vec<_>>()).unwrap();
         assert_eq!(std::fs::read_to_string(root.join("[A].sh")).unwrap(), "one\n");
         assert_eq!(std::fs::read_to_string(root.join("A.sh")).unwrap(), "two\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discarding_trashes_untracked_files() {
+        if !is_available() {
+            return;
+        }
+        let root = test_repo("discard-trash");
+        std::fs::write(root.join("kept.txt"), "one\n").unwrap();
+        stage(&root, &["kept.txt".into()]).unwrap();
+        commit(&root, "first", false).unwrap();
+        std::fs::write(root.join("kept.txt"), "two\n").unwrap();
+        std::fs::write(root.join("new.txt"), "new\n").unwrap();
+        let trashed = std::cell::RefCell::new(Vec::new());
+        discard_with(&root, &status(&root).unwrap().files, |path| {
+            trashed.borrow_mut().push(path.to_path_buf());
+            std::fs::remove_file(path)
+        })
+        .unwrap();
+        assert_eq!(trashed.into_inner(), [root.join("new.txt")]);
+        assert_eq!(std::fs::read_to_string(root.join("kept.txt")).unwrap(), "one\n");
         let _ = std::fs::remove_dir_all(&root);
     }
 
