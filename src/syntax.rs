@@ -113,6 +113,93 @@ impl Language {
             _ => crate::languages::def(self).and_then(|d| d.block_comment),
         }
     }
+
+    /// What typing does here: the pairs it closes, the lines it outdents.
+    pub fn editing(self) -> &'static EditingRules {
+        static DEFAULT: LazyLock<EditingRules> = LazyLock::new(EditingRules::default);
+        let rules = match self {
+            Language::Extension(_) => self.extension().map(|l| &l.editing),
+            _ => crate::languages::def(self).map(|d| &d.editing),
+        };
+        rules.unwrap_or(&DEFAULT)
+    }
+}
+
+/// A pair typing the opening character closes, from a language's
+/// `brackets` (Zed's format; only one-character ones with `close`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AutoPair {
+    pub open: char,
+    pub close: char,
+    /// Where it isn't closed: `"string"`, `"comment"` (see `Syntax::scope_at`).
+    pub not_in: Vec<String>,
+}
+
+/// A line that goes back a level once it reads like this (`else:`), Zed's
+/// `decrease_indent_patterns`: level with the nearest less indented line
+/// above, or the nearest one starting with a word of `valid_after`.
+#[derive(Clone, Debug)]
+pub struct Decrease {
+    pub pattern: regex::Regex,
+    pub valid_after: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct EditingRules {
+    pub pairs: Vec<AutoPair>,
+    pub decrease: Vec<Decrease>,
+}
+
+impl Default for EditingRules {
+    /// Brackets and quotes, closed outside strings and comments.
+    fn default() -> Self {
+        let pairs = [('(', ')'), ('[', ']'), ('{', '}'), ('"', '"'), ('\'', '\''), ('`', '`')]
+            .into_iter()
+            .map(|(open, close)| AutoPair { open, close, not_in: vec!["string".into(), "comment".into()] })
+            .collect();
+        EditingRules { pairs, decrease: Vec::new() }
+    }
+}
+
+impl EditingRules {
+    /// From a `config.toml`: `brackets` (else the default pairs) and
+    /// `decrease_indent_pattern` / `decrease_indent_patterns`.
+    pub(crate) fn from_config(config: &toml::Table) -> Self {
+        use toml::Value;
+        let single = |v: Option<&Value>| {
+            let mut chars = v.and_then(Value::as_str)?.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => Some(c),
+                _ => None,
+            }
+        };
+        let words = |v: Option<&Value>| -> Vec<String> {
+            v.and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
+        };
+        let pairs = match config.get("brackets").and_then(Value::as_array) {
+            Some(brackets) => brackets
+                .iter()
+                .filter_map(Value::as_table)
+                .filter(|b| b.get("close").and_then(Value::as_bool) != Some(false))
+                .filter_map(|b| Some(AutoPair { open: single(b.get("start"))?, close: single(b.get("end"))?, not_in: words(b.get("not_in")) }))
+                .collect(),
+            None => Self::default().pairs,
+        };
+        let pattern = |p: &str| regex::Regex::new(p).ok();
+        let mut decrease: Vec<Decrease> =
+            config.get("decrease_indent_pattern").and_then(Value::as_str).and_then(pattern).map(|pattern| Decrease { pattern, valid_after: Vec::new() }).into_iter().collect();
+        for entry in config.get("decrease_indent_patterns").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_table) {
+            if let Some(pattern) = entry.get("pattern").and_then(Value::as_str).and_then(pattern) {
+                decrease.push(Decrease { pattern, valid_after: words(entry.get("valid_after")) });
+            }
+        }
+        EditingRules { pairs, decrease }
+    }
+
+    /// The pair `c` opens.
+    pub fn pair_opened_by(&self, c: char) -> Option<&AutoPair> {
+        self.pairs.iter().find(|p| p.open == c)
+    }
 }
 
 /// The tree-sitter grammar for `language`, used for highlighting and for
@@ -492,10 +579,11 @@ pub(crate) fn queries(language: Language) -> Option<&'static LanguageQueries> {
     }
 }
 
-/// The highlighting for an embedded language named in an injection query
-/// (a built-in language, an extension's, or one known by its file
-/// extension), with its queries for what it embeds in turn.
-fn injected(name: &str) -> Option<(&'static LangConfig, Option<&'static LanguageQueries>)> {
+/// An embedded language named in an injection query (a built-in language,
+/// an extension's, or one known by its file extension): the language, its
+/// highlighting, and its queries for what it embeds in turn. Markdown's
+/// inline grammar is Markdown.
+fn injected(name: &str) -> Option<(Language, &'static LangConfig, Option<&'static LanguageQueries>)> {
     let name = name.trim().to_lowercase();
     let builtin = match name.as_str() {
         "javascript" | "js" | "jsx" => Language::JavaScript,
@@ -512,7 +600,7 @@ fn injected(name: &str) -> Option<(&'static LangConfig, Option<&'static Language
         "yaml" | "yml" => Language::Yaml,
         "toml" => Language::Toml,
         "markdown" | "md" => Language::Markdown,
-        "markdown_inline" | "markdown-inline" => return Some((&MARKDOWN_INLINE, None)),
+        "markdown_inline" | "markdown-inline" => return Some((Language::Markdown, &MARKDOWN_INLINE, None)),
         _ => {
             let extension = crate::extensions::languages().into_iter().map(Language::Extension).find(|l| {
                 l.extension().is_some_and(|d| d.name.to_lowercase() == name || d.id == name)
@@ -520,7 +608,7 @@ fn injected(name: &str) -> Option<(&'static LangConfig, Option<&'static Language
             extension.unwrap_or_else(|| Language::from_path(Path::new(&format!("file.{name}"))))
         }
     };
-    Some((config(builtin)?, queries(builtin)))
+    Some((builtin, config(builtin)?, queries(builtin)))
 }
 
 /// An embedded language's tree: one per region (a code fence, a
@@ -529,6 +617,8 @@ fn injected(name: &str) -> Option<(&'static LangConfig, Option<&'static Language
 /// an injected tree has injections of its own (HTML in Markdown, then the
 /// CSS in that HTML), up to `MAX_INJECTION_DEPTH`.
 struct Injection {
+    /// What editing there follows: comments, pairs, indentation.
+    language: Language,
     config: &'static LangConfig,
     /// Its language's queries, for the injections inside it.
     queries: Option<&'static LanguageQueries>,
@@ -787,7 +877,7 @@ impl Syntax {
                             injection.ranges.extend(found.ranges);
                             injection.dirty = true;
                         }
-                        None => self.injections.push(Injection { config: found.config, queries: found.queries, tree: None, ranges: found.ranges, combined: true, depth, dirty: true }),
+                        None => self.injections.push(Injection { language: found.language, config: found.config, queries: found.queries, tree: None, ranges: found.ranges, combined: true, depth, dirty: true }),
                     }
                     continue;
                 }
@@ -796,7 +886,7 @@ impl Syntax {
                     i.depth == depth && std::ptr::eq(i.config, found.config) && i.ranges.first().map(|r| r.start) == found.ranges.first().map(|r| r.start)
                 });
                 let tree = same.and_then(|ix| reusable.swap_remove(ix).tree);
-                self.injections.push(Injection { config: found.config, queries: found.queries, tree, ranges: found.ranges, combined: false, depth, dirty: true });
+                self.injections.push(Injection { language: found.language, config: found.config, queries: found.queries, tree, ranges: found.ranges, combined: false, depth, dirty: true });
             }
             for injection in self.injections.iter_mut().filter(|i| i.dirty) {
                 normalize(&mut injection.ranges);
@@ -827,14 +917,115 @@ impl Syntax {
         true
     }
 
+    /// The innermost layer at `offset`: the deepest embedded language whose
+    /// text holds it, else the file's own. A `caret` sits between
+    /// characters, so a region's end still counts (typing at the end of a
+    /// `<script>`'s text is JavaScript); otherwise `offset` is a character's.
+    fn layer_at(&self, offset: usize, caret: bool) -> Layer<'_> {
+        let holds = |r: &Range<usize>| r.start <= offset && (offset < r.end || caret && offset == r.end);
+        // Sorted by depth: the deepest last.
+        match self.injections.iter().rev().find(|i| i.ranges.iter().any(holds)) {
+            Some(i) => Layer { language: i.language, tree: i.tree.as_ref(), queries: i.queries },
+            None => Layer { language: self.language, tree: self.tree.as_ref(), queries: queries(self.language) },
+        }
+    }
+
+    /// The language editing at a caret at `offset` follows (pairs, comments,
+    /// indentation): JavaScript in an HTML `<script>`, Rust in a Markdown
+    /// fence, as Zed's `language_scope_at`.
+    pub fn language_at(&self, offset: usize) -> Language {
+        self.layer_at(offset, true).language
+    }
+
+    /// The language of the character at `offset`: for a line's first
+    /// character, which a `</script>` right after the script's text isn't in.
+    pub fn language_of_char(&self, offset: usize) -> Language {
+        self.layer_at(offset, false).language
+    }
+
+    /// What a caret at `offset` is inside, by the innermost tree: `"string"`
+    /// or `"comment"` (the names Zed's `not_in` uses), None in code. Strings'
+    /// interpolations (`${…}`, `{…}` in an f-string) are code.
+    pub fn scope_at(&self, rope: &Rope, offset: usize) -> Option<&'static str> {
+        let layer = self.layer_at(offset, true);
+        // From the character before the caret: a line comment ending at the
+        // caret holds it, and nothing else at that point does.
+        let mut node = layer.tree?.root_node().descendant_for_byte_range(offset.saturating_sub(1), offset)?;
+        loop {
+            let kind = node.kind();
+            if ["substitution", "interpolation", "expansion"].iter().any(|k| kind.contains(k)) {
+                return None;
+            }
+            let (start, end) = (node.start_byte(), node.end_byte());
+            if kind.contains("comment") && start < offset {
+                // A line comment ends at its line's end, where the caret still is in it.
+                let line_comment = || {
+                    layer.language.line_comment().is_some_and(|token| rope.byte_slice(start..end).to_string().starts_with(token.trim_end()))
+                };
+                if offset < end || offset == end && line_comment() {
+                    return Some("comment");
+                }
+            }
+            if (kind.contains("string") || kind.ends_with("quote_scalar")) && start < offset && offset < end {
+                return Some("string");
+            }
+            node = node.parent()?;
+        }
+    }
+
+    /// Where the `open` bracket a `close` typed at `offset` would close
+    /// starts: the nearest one before it that isn't closed in between, by the
+    /// grammar's tokens (so not brackets in strings and comments). Read before
+    /// the closing one is typed, as the tree for code still being written
+    /// has its closing brackets missing.
+    pub fn unclosed_bracket(&self, offset: usize, open: &str, close: &str) -> Option<usize> {
+        let tree = self.layer_at(offset, true).tree?;
+        let mut depth = 0;
+        unclosed_in(tree.root_node(), offset, open, close, &mut depth)
+    }
+
+    /// For a line whose first character is at `first`, after typing made a
+    /// token there end at `caret`: the language's `indents.scm` says it goes
+    /// back out. An `@end` (a closing `}`, `end`) goes level with the row its
+    /// `@indent` node starts on; an `@outdent` one level less than the line
+    /// above. As Zed reads these captures.
+    pub fn dedent_at(&self, rope: &Rope, first: usize, caret: usize) -> Option<Dedent> {
+        let layer = self.layer_at(first, false);
+        let query = layer.queries?.indents.as_ref()?;
+        let tree = layer.tree?;
+        let (end, outdent) = (query.capture_index_for_name("end"), query.capture_index_for_name("outdent"));
+        if end.is_none() && outdent.is_none() {
+            return None;
+        }
+        let indent = query.capture_index_for_name("indent");
+        let row = rope.byte_to_line(first);
+        let mut cursor = QueryCursor::new();
+        cursor.set_byte_range(first..caret.max(first + 1));
+        let mut matches = cursor.matches(query, tree.root_node(), RopeProvider(rope));
+        while let Some(m) = matches.next() {
+            let typed = |c: &tree_sitter::QueryCapture| c.node.start_byte() == first && c.node.end_byte() == caret;
+            if m.captures.iter().any(|c| Some(c.index) == outdent && typed(c)) {
+                return Some(Dedent::OneLevel);
+            }
+            if m.captures.iter().any(|c| Some(c.index) == end && typed(c))
+                && let Some(node) = m.captures.iter().find(|c| Some(c.index) == indent).map(|c| c.node)
+                && node.start_position().row < row
+            {
+                return Some(Dedent::LikeRow(node.start_position().row));
+            }
+        }
+        None
+    }
+
     /// Whether a line break at `offset` (on `row`) should indent the next
     /// line, by the language's `indents.scm`: an `@indent` node starts on
     /// this row and goes on past the caret. With an `@start` in the match
     /// (`then`, a `:`), that token is on this row before the caret instead.
     /// None without such a query.
     pub fn indent_after(&self, rope: &Rope, offset: usize, row: usize) -> Option<bool> {
-        let query = queries(self.language)?.indents.as_ref()?;
-        let tree = self.tree.as_ref()?;
+        let layer = self.layer_at(offset, true);
+        let query = layer.queries?.indents.as_ref()?;
+        let tree = layer.tree?;
         let indent = query.capture_index_for_name("indent")?;
         let start = query.capture_index_for_name("start");
         let mut cursor = QueryCursor::new();
@@ -950,8 +1141,9 @@ impl Syntax {
 
     /// The pair from `brackets.scm` (`@open`, `@close`) one end of which starts at `at`.
     fn query_bracket(&self, rope: &Rope, at: usize) -> Option<(Range<usize>, Range<usize>)> {
-        let query = queries(self.language)?.brackets.as_ref()?;
-        let tree = self.tree.as_ref()?;
+        let layer = self.layer_at(at, false);
+        let query = layer.queries?.brackets.as_ref()?;
+        let tree = layer.tree?;
         let (open, close) = (query.capture_index_for_name("open")?, query.capture_index_for_name("close")?);
         let mut cursor = QueryCursor::new();
         cursor.set_byte_range(at..at + 1);
@@ -1016,6 +1208,55 @@ impl Syntax {
         }
         spans
     }
+}
+
+/// One language's part of a file: the file's own, or an embedded one's.
+struct Layer<'a> {
+    language: Language,
+    /// None until it's parsed.
+    tree: Option<&'a Tree>,
+    queries: Option<&'static LanguageQueries>,
+}
+
+/// Where a line goes when a token typed at its start closes a block (see
+/// `Syntax::dedent_at`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dedent {
+    /// Level with this row.
+    LikeRow(usize),
+    /// One level less than the line above.
+    OneLevel,
+}
+
+/// `node`'s tokens before `before`, from the last, for `unclosed_bracket`:
+/// a whole node without errors holds its brackets in pairs, so only the one
+/// holding `before` and broken ones are looked into.
+fn unclosed_in(node: Node, before: usize, open: &str, close: &str, depth: &mut usize) -> Option<usize> {
+    let mut cursor = node.walk();
+    let children: Vec<Node> = node.children(&mut cursor).take_while(|c| c.start_byte() < before).collect();
+    for child in children.into_iter().rev() {
+        if child.is_missing() {
+            continue;
+        }
+        if child.child_count() == 0 {
+            if child.is_named() {
+                continue;
+            }
+            if child.kind() == close {
+                *depth += 1;
+            } else if child.kind() == open {
+                if *depth == 0 {
+                    return Some(child.start_byte());
+                }
+                *depth -= 1;
+            }
+        } else if (child.has_error() || child.end_byte() > before)
+            && let Some(found) = unclosed_in(child, before, open, close, depth)
+        {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// The offset of the bracket matching the bracket token at `at`: the nearest
@@ -1094,6 +1335,7 @@ fn apply_query(
 
 /// An injection a query found: the language and the text it covers.
 struct Found {
+    language: Language,
     config: &'static LangConfig,
     queries: Option<&'static LanguageQueries>,
     ranges: Vec<Range<usize>>,
@@ -1110,7 +1352,7 @@ fn find_injections(
     within: &[Range<usize>],
 ) -> Vec<Found> {
     let mut out: Vec<Found> = Vec::new();
-    let mut known: HashMap<String, Option<(&'static LangConfig, Option<&'static LanguageQueries>)>> = HashMap::new();
+    let mut known: HashMap<String, Option<(Language, &'static LangConfig, Option<&'static LanguageQueries>)>> = HashMap::new();
     let mut cursor = QueryCursor::new();
     for range in within {
         cursor.set_byte_range(range.clone());
@@ -1123,7 +1365,7 @@ fn find_injections(
             };
             // Looked up once per name: comments (JSDoc) and regexes match often,
             // and are usually languages Kuana doesn't have.
-            let Some((config, queries)) = named.or_else(set).and_then(|name| *known.entry(name).or_insert_with_key(|name| injected(name))) else {
+            let Some((language, config, queries)) = named.or_else(set).and_then(|name| *known.entry(name).or_insert_with_key(|name| injected(name))) else {
                 continue;
             };
             if own.is_some_and(|own| std::ptr::eq(own, config)) {
@@ -1135,7 +1377,7 @@ fn find_injections(
                 continue;
             }
             let combined = settings.iter().any(|p| p.key.as_ref() == "injection.combined");
-            out.push(Found { config, queries, ranges, combined });
+            out.push(Found { language, config, queries, ranges, combined });
         }
     }
     out
@@ -1395,6 +1637,63 @@ mod tests {
             assert!(syntax.reparse_within(&rope, None));
             assert_eq!(layers(&syntax), layers(&Syntax::new(Language::Markdown, &rope)), "after inserting {insert:?}");
         }
+    }
+
+    /// The language at a caret is the innermost embedded one holding it.
+    #[test]
+    fn the_language_at_an_offset_is_the_innermost() {
+        let text = "<p>a</p>\n<script>\nlet a = 1;\n</script>\n<style>\nb { c: d }\n</style>\n";
+        let syntax = Syntax::new(Language::Html, &Rope::from_str(text));
+        let at = |s: &str| text.find(s).unwrap();
+        assert_eq!(syntax.language_at(at("<p>")), Language::Html);
+        assert_eq!(syntax.language_at(at("let")), Language::JavaScript);
+        assert_eq!(syntax.language_at(at("c: d")), Language::Css);
+        // A caret at the end of the script's text is in it; `</script>` isn't.
+        assert_eq!(syntax.language_at(at("</script>")), Language::JavaScript);
+        assert_eq!(syntax.language_of_char(at("</script>")), Language::Html);
+
+        let md = "Some *text*.\n\n```python\nx = 1\n```\n\n```html\n<style>a { b: c }</style>\n```\n";
+        let syntax = Syntax::new(Language::Markdown, &Rope::from_str(md));
+        let at = |s: &str| md.find(s).unwrap();
+        assert_eq!(syntax.language_at(at("text")), Language::Markdown);
+        assert_eq!(syntax.language_at(at("x = 1")), Language::Python);
+        assert_eq!(syntax.language_at(at("<style>")), Language::Html);
+        assert_eq!(syntax.language_at(at("b: c")), Language::Css);
+        assert_eq!(syntax.language_of_char(at("```\n\n```html")), Language::Markdown);
+    }
+
+    #[test]
+    fn strings_and_comments_are_found_at_a_caret() {
+        let scope = |language: Language, text: &str| {
+            let at = text.find('|').unwrap();
+            let rope = Rope::from_str(&text.replacen('|', "", 1));
+            Syntax::new(language, &rope).scope_at(&rope, at)
+        };
+        assert_eq!(scope(Language::Rust, "let s = \"a|b\";"), Some("string"));
+        assert_eq!(scope(Language::Rust, "let s = |\"ab\";"), None);
+        assert_eq!(scope(Language::Rust, "let s = \"ab\"|;"), None);
+        assert_eq!(scope(Language::Rust, "// a comment|\nfn f() {}"), Some("comment"));
+        assert_eq!(scope(Language::Rust, "/* a */| fn f() {}"), None);
+        assert_eq!(scope(Language::Python, "x = f\"{y|}\""), None);
+        assert_eq!(scope(Language::Python, "x = f\"a|{y}\""), Some("string"));
+        assert_eq!(scope(Language::JavaScript, "let s = `a${b|}`;"), None);
+        assert_eq!(scope(Language::Html, "<!-- a| -->"), Some("comment"));
+        assert_eq!(scope(Language::Html, "<script>let s = '|';</script>"), Some("string"));
+    }
+
+    /// The bracket a closing one typed would close, by tokens: complete pairs
+    /// and brackets in strings don't count, broken code does.
+    #[test]
+    fn unclosed_brackets_are_found_before_a_caret() {
+        let unclosed = |language: Language, text: &str, open: &str, close: &str| {
+            let at = text.find('|').unwrap();
+            let rope = Rope::from_str(&text.replacen('|', "", 1));
+            Syntax::new(language, &rope).unclosed_bracket(at, open, close)
+        };
+        assert_eq!(unclosed(Language::Rust, "fn f() {\n    g(\"{\", { 1 });\n    |", "{", "}"), Some(7));
+        assert_eq!(unclosed(Language::Rust, "fn f() {\n    if x {\n        |\n}", "{", "}"), Some(18));
+        assert_eq!(unclosed(Language::Python, "f(a, [b],\n  |", "(", ")"), Some(1));
+        assert_eq!(unclosed(Language::Rust, "fn f() {}\n|", "{", "}"), None);
     }
 
     #[test]

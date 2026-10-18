@@ -32,7 +32,7 @@ my-extension/
   languages/mylang/outline.scm        File Structure, breadcrumbs, sticky scroll
   languages/mylang/injections.scm     embedded languages (CSS in <style>, SQL in strings…)
   languages/mylang/brackets.scm       bracket pairs, words too (do … end)
-  languages/mylang/indents.scm        what Enter indents after
+  languages/mylang/indents.scm        what Enter indents after; @end / @outdent go back out
   languages/mylang/textobjects.scm    functions and classes for Vim's af / if / ac / ic
   languages/mylang/runnables.scm      gutter ▶ for tests and mains, with tasks.json
   languages/mylang/tasks.json         commands for runnables' tags ($ZED_FILE, $ZED_ROW…)
@@ -103,7 +103,18 @@ block_comment = ["/* ", " */"]
 tab_size = 2
 hard_tabs = false
 formatter = ["mylang-fmt", "-"] # Kuana only: reads stdin, writes stdout ({file} is the path)
+# Pairs typing closes (one character each); not in strings or comments when not_in says so
+brackets = [
+    { start = "{", end = "}", close = true, not_in = ["string", "comment"] },
+    { start = "\"", end = "\"", close = true, not_in = ["string"] },
+]
+# Lines that go back a level as they're typed, level with the nearest line above starting with a word of valid_after
+decrease_indent_patterns = [{ pattern = "^\\s*(else|end)\\b", valid_after = ["if", "do"] }]
 ```
+
+Without `brackets`, typing pairs `()`, `[]`, `{}` and quotes outside strings and comments. Editing follows the
+language at the caret: in an embedded language (a `<script>`, a Markdown fence) its comments, pairs and
+indentation apply.
 
 Without `highlights.scm` (or `outline.scm`), the grammar's own `queries/highlights.scm` (and
 `tags.scm`) are used. A language from an extension gets highlighting, File Structure, breadcrumbs,

@@ -3,6 +3,14 @@ grammar = "yaml"
 path_suffixes = ["yaml", "yml"]
 line_comments = ["# "]
 tab_size = 2
+# Pairs typing closes (Zed's format), not inside strings and comments.
+brackets = [
+    { start = "(", end = ")", not_in = ["string", "comment"] },
+    { start = "[", end = "]", not_in = ["string", "comment"] },
+    { start = "{", end = "}", not_in = ["string", "comment"] },
+    { start = "\"", end = "\"", not_in = ["string", "comment"] },
+    { start = "'", end = "'", not_in = ["string", "comment"] },
+]
 
 [queries]
 highlights = ["crate:yaml/highlights"]

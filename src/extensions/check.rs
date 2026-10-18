@@ -36,11 +36,12 @@ const ZED_MANIFEST_KEYS: &[&str] =
     &["lib", "slash_commands", "context_servers", "indexed_docs_providers", "snippets", "capabilities", "agent_servers", "themes", "icon_themes", "languages"];
 const LANGUAGE_KEYS: &[&str] = &[
     "name", "grammar", "path_suffixes", "line_comments", "line_comment", "block_comment", "tab_size", "hard_tabs", "formatter", "language_id",
+    "brackets", "decrease_indent_pattern", "decrease_indent_patterns",
 ];
 const ZED_LANGUAGE_KEYS: &[&str] = &[
-    "autoclose_before", "brackets", "word_characters", "completion_query_characters", "linked_edit_characters", "code_fence_block_name",
+    "autoclose_before", "word_characters", "completion_query_characters", "linked_edit_characters", "code_fence_block_name",
     "first_line_pattern", "prettier_parser_name", "prettier_plugins", "scope_opt_in_language_servers", "increase_indent_pattern",
-    "decrease_indent_pattern", "decrease_indent_patterns", "collapsed_placeholder", "documentation", "documentation_comment",
+    "collapsed_placeholder", "documentation", "documentation_comment",
     "wrap_characters", "jsx_tag_auto_close", "hidden", "auto_indent_using_last_non_empty_line", "auto_indent_on_paste", "overrides",
     "soft_wrap", "ignored_import_segments", "import_path_strip_regex", "debuggers", "rewrap_prefixes", "unordered_list", "ordered_list",
     "task_list", "libraries",

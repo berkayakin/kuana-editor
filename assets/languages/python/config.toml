@@ -2,6 +2,21 @@ name = "Python"
 grammar = "python"
 path_suffixes = ["py", "pyw", "pyi"]
 line_comments = ["# "]
+# Pairs typing closes (Zed's format), not inside strings and comments.
+brackets = [
+    { start = "(", end = ")", not_in = ["string", "comment"] },
+    { start = "[", end = "]", not_in = ["string", "comment"] },
+    { start = "{", end = "}", not_in = ["string", "comment"] },
+    { start = "\"", end = "\"", not_in = ["string", "comment"] },
+    { start = "'", end = "'", not_in = ["string", "comment"] },
+]
+# A block's continuation goes back level with the statement it continues.
+decrease_indent_patterns = [
+    { pattern = "^\\s*elif\\b.*:", valid_after = ["if", "elif"] },
+    { pattern = "^\\s*else\\s*:", valid_after = ["if", "elif", "for", "while", "try", "except"] },
+    { pattern = "^\\s*except\\b.*:", valid_after = ["try", "except"] },
+    { pattern = "^\\s*finally\\s*:", valid_after = ["try", "except", "else"] },
+]
 
 [queries]
 highlights = ["crate:python/highlights"]

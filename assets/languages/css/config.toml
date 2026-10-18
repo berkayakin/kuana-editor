@@ -2,6 +2,14 @@ name = "CSS"
 grammar = "css"
 path_suffixes = ["css"]
 block_comment = { start = "/*", end = "*/" }
+# Pairs typing closes (Zed's format), not inside strings and comments.
+brackets = [
+    { start = "(", end = ")", not_in = ["string", "comment"] },
+    { start = "[", end = "]", not_in = ["string", "comment"] },
+    { start = "{", end = "}", not_in = ["string", "comment"] },
+    { start = "\"", end = "\"", not_in = ["string", "comment"] },
+    { start = "'", end = "'", not_in = ["string", "comment"] },
+]
 
 [queries]
 highlights = ["crate:css/highlights"]

@@ -2,6 +2,13 @@ name = "Shell Script"
 grammar = "bash"
 path_suffixes = ["sh", "bash", "zsh", ".bashrc", ".bash_profile", ".bash_aliases", ".bash_logout", ".profile", ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".envrc"]
 line_comments = ["# "]
+# A block's last line goes back level with the line that opened it.
+decrease_indent_patterns = [
+    { pattern = "^\\s*(fi|else)\\s*$", valid_after = ["if", "elif", "else"] },
+    { pattern = "^\\s*elif\\s", valid_after = ["if", "elif"] },
+    { pattern = "^\\s*done\\s*$", valid_after = ["for", "while", "until", "select"] },
+    { pattern = "^\\s*esac\\s*$", valid_after = ["case"] },
+]
 
 [queries]
 highlights = ["crate:bash/highlights"]

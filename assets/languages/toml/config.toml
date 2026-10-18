@@ -2,6 +2,13 @@ name = "TOML"
 grammar = "toml"
 path_suffixes = ["toml", "Cargo.lock", "poetry.lock", "uv.lock", "Pipfile"]
 line_comments = ["# "]
+# Pairs typing closes (Zed's format), not inside strings and comments.
+brackets = [
+    { start = "[", end = "]", not_in = ["string", "comment"] },
+    { start = "{", end = "}", not_in = ["string", "comment"] },
+    { start = "\"", end = "\"", not_in = ["string", "comment"] },
+    { start = "'", end = "'", not_in = ["string", "comment"] },
+]
 
 [queries]
 highlights = ["crate:toml/highlights"]
