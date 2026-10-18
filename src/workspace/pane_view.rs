@@ -86,10 +86,12 @@ impl Workspace {
                     .map(|el| tab_slot_width(el, slot, naturals[ix]))
                     .cursor_pointer()
                     .map(|el| tab_shape(el, active, after_active, separator, group.clone(), edge, &theme))
-                    .when(icon_only || compact, |el| {
-                        let name = name.clone();
-                        el.tooltip(move |_, cx| tooltip_view(name.clone(), cx))
-                    })
+                    // The full path, as Zed shows it; an untitled tab's name
+                    // only when the tab doesn't show it whole.
+                    .when_some(
+                        look.path.as_deref().map(crate::clone_dialog::display_path).or_else(|| (icon_only || compact).then(|| name.clone())),
+                        |el, tip| el.tooltip(move |_, cx| tooltip_view(tip.clone(), cx)),
+                    )
                     .on_click(cx.listener(move |ws, _, window, cx| ws.activate_in(pane_ix, ix, window, cx)))
                     .on_mouse_down(
                         MouseButton::Middle,

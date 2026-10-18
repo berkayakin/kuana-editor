@@ -179,6 +179,8 @@ impl Item for MarkdownPreview {
 #[derive(Clone, PartialEq)]
 pub struct TabLook {
     pub title: String,
+    /// The tab's tooltip: the file's full path.
+    pub path: Option<PathBuf>,
     pub icon: TabIcon,
     pub dirty: bool,
     pub errors: bool,
@@ -276,7 +278,13 @@ impl PaneItem {
     /// What its tab shows now.
     pub fn look(&self, cx: &App) -> TabLook {
         let item = self.read(cx);
-        TabLook { title: item.tab_title(cx), icon: item.tab_icon(cx), dirty: item.is_dirty(cx), errors: item.has_errors(cx) }
+        TabLook {
+            title: item.tab_title(cx),
+            path: item.path(cx),
+            icon: item.tab_icon(cx),
+            dirty: item.is_dirty(cx),
+            errors: item.has_errors(cx),
+        }
     }
 
     /// A second view of the same thing, for a split: an editor of the same
