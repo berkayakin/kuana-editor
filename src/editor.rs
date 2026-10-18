@@ -20,7 +20,12 @@ pub use run::{EditorBreakpointMenu, EditorBreakpointsChanged, EditorRunEvent};
 pub use sticky::Crumb;
 pub use unloaded::{EditorLoaded, Unloaded};
 
-use std::{collections::HashMap, ops::Range, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    ops::Range,
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
 
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element, ElementId,
@@ -398,6 +403,8 @@ pub struct Editor {
     soft_wrap: bool,
     /// Line breaks for soft wrap, recomputed lazily (see `sync_wrap`).
     wrap: Option<WrapMap>,
+    /// A big file's lines being measured for a new width (see `WrapJob`).
+    wrap_job: Option<WrapJob>,
     /// Language server state: completion, hover, signature help.
     lsp: lsp::EditorLsp,
     /// A parse finishing in the background (see `schedule_parse`).
@@ -548,6 +555,7 @@ impl Editor {
             blame_task: None,
             soft_wrap: false,
             wrap: None,
+            wrap_job: None,
             lsp: lsp::EditorLsp::default(),
             highlight_cache: None,
             parse_task: None,
@@ -1786,13 +1794,13 @@ impl Editor {
     /// the top of the view stays there as rows above it come and go (code
     /// lenses or problems arriving after a restored tab took its place,
     /// folds, a new width, lines a reload added or removed above it).
-    fn sync_wrap(&mut self, window: &mut Window, cx: &App) {
+    fn sync_wrap(&mut self, cx: &mut Context<Self>) {
         let reloaded = self.reloaded_top.take();
         let top = self.layout.as_ref().map(|layout| {
             let line = self.line_at_row((self.scroll.y / layout.line_height).floor() as usize, cx);
             (line, self.first_display_row(line))
         });
-        self.update_wrap(window, cx);
+        self.update_wrap(cx);
         if let (Some((line, before)), Some(layout)) = (top, self.layout.as_ref()) {
             // After a reload that line's text can be on another line now.
             let line = match reloaded {
@@ -1806,43 +1814,117 @@ impl Editor {
         }
     }
 
-    fn update_wrap(&mut self, window: &mut Window, cx: &App) {
+    fn update_wrap(&mut self, cx: &mut Context<Self>) {
         let wrap = self.soft_wrap && !self.is_single_line();
         let blocks = self.block_rows(cx);
         // Without wrapping, folds, long lines or blocks, display rows are buffer lines.
         if !wrap && blocks.is_empty() && self.folds.is_empty() && !self.doc.read(cx).has_long_lines() {
             self.wrap = None;
+            self.wrap_job = None;
             return;
         }
         let Some(layout) = self.layout.as_ref() else { return };
         let font = self.editor_font(cx);
+        let char_width = layout.char_width;
         let key = WrapKey {
             // Without soft wrap only long lines break, at a fixed column, so
-            // resizing the view mustn't measure every line again.
-            width: if wrap { layout.wrap_width } else { px(0.) },
+            // resizing the view mustn't measure every line again. With it,
+            // in whole columns: the font is monospaced, so a resize within
+            // one moves no break and measures nothing.
+            width: if wrap { char_width * (layout.wrap_width / char_width).floor() } else { px(0.) },
             font_family: font.family.clone(),
             font_size: self.font_size(cx),
             tab_size: self.tab_size,
             wrap,
         };
-        let (char_width, version, folds, rope) = (layout.char_width, self.doc.read(cx).version(), self.folds.ranges(), self.doc.read(cx).rope());
+        // A background measure for this key that landed takes over (and
+        // catches up below); one for another is moot.
+        match self.wrap_job.as_mut() {
+            Some(job) if job.key == key => {
+                if let Some(map) = job.done.take() {
+                    self.wrap = Some(map);
+                    self.wrap_job = None;
+                }
+            }
+            Some(_) => self.wrap_job = None,
+            None => {}
+        }
+        let text_system = cx.text_system().clone();
+        let doc = self.doc.read(cx);
+        let (version, folds, rope) = (doc.version(), self.folds.ranges(), doc.rope());
         let inlays = self.inlays(cx);
-        // Edits and new hints re-measure only their lines; a new width, font
-        // or tab size measures them all.
-        if let Some(map) = self.wrap.as_mut().filter(|map| map.key == key) {
-            let edits = self.doc.read(cx).line_edits_since(map.version);
-            let caught_up = match edits {
-                Some(edits) => map.update(edits, version, folds, inlays, rope, window.text_system(), font.clone(), char_width),
-                None => false,
-            };
-            if caught_up {
-                map.set_blocks(&blocks, rope);
+        // Edits, folds and new hints re-measure only their lines, at the
+        // map's width: an older one's while a new one's measure runs, so the
+        // rows shown meanwhile are the old ones moved by the edits.
+        let caught_up = self.wrap.as_mut().is_some_and(|map| {
+            let edits = doc.line_edits_since(map.version);
+            edits.is_some_and(|edits| map.update(edits, version, folds, inlays, rope, &text_system, font.clone(), char_width))
+        });
+        if let Some(map) = self.wrap.as_mut().filter(|_| caught_up) {
+            map.set_blocks(&blocks);
+            if map.key == key || self.wrap_job.is_some() {
                 return;
             }
         }
-        let mut map = WrapMap::new(key, version, folds, inlays, rope, window.text_system(), font, char_width);
-        map.set_blocks(&blocks, rope);
-        self.wrap = Some(map);
+        // Every line to measure: a new width, font or tab size, a new map,
+        // or more edits than the document's log keeps (Replace All). A big
+        // file is measured in the background unless it's done within a
+        // frame's budget.
+        let measured = if key.wrap && rope.len_bytes() > WRAP_IN_PLACE {
+            self.start_wrap_job(key.clone(), font.clone(), char_width, cx)
+        } else {
+            Some(WrapMap::new(key.clone(), version, folds, inlays, rope, &text_system, font.clone(), char_width))
+        };
+        let doc = self.doc.read(cx);
+        let rope = doc.rope();
+        let map = match measured {
+            Some(map) => map,
+            // Still running and nothing that follows the text to show
+            // meanwhile: lines unwrapped (long ones still break), which is
+            // quick, then wrapped when the measure lands.
+            None if !caught_up => {
+                let unwrapped = WrapKey { width: px(0.), wrap: false, ..key };
+                WrapMap::new(unwrapped, version, self.folds.ranges(), self.inlays(cx), rope, &text_system, font, char_width)
+            }
+            None => return,
+        };
+        let map = self.wrap.insert(map);
+        map.set_blocks(&blocks);
+    }
+
+    /// Measures every line of the document for `key` in the background:
+    /// the map if it's done within `WRAP_BUDGET`, else None, and it lands
+    /// in `wrap_job` (redrawing the editor) when it is.
+    fn start_wrap_job(&mut self, key: WrapKey, font: Font, char_width: Pixels, cx: &mut Context<Self>) -> Option<WrapMap> {
+        let doc = self.doc.read(cx);
+        let (version, folds, rope) = (doc.version(), self.folds.ranges().to_vec(), doc.rope().clone());
+        let inlays = self.inlays(cx);
+        let (hints, generation) = (inlays.hints.to_vec(), inlays.generation);
+        let text_system = cx.text_system().clone();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let task = cx.background_spawn({
+            let (key, cancelled) = (key.clone(), cancelled.clone());
+            async move {
+                let inlays = wrap::Inlays { hints: &hints, generation };
+                WrapMap::measure(key, version, &folds, inlays, &rope, &text_system, font, char_width, &cancelled)
+            }
+        });
+        let task = match cx.background_executor().block_with_timeout(WRAP_BUDGET, task) {
+            Ok(map) => return map,
+            Err(task) => task,
+        };
+        let watcher = cx.spawn(async move |this, cx| {
+            let Some(map) = task.await else { return };
+            this.update(cx, |editor, cx| {
+                if let Some(job) = editor.wrap_job.as_mut().filter(|job| job.key == map.key) {
+                    job.done = Some(map);
+                    cx.notify();
+                }
+            })
+            .ok();
+        });
+        self.wrap_job = Some(WrapJob { key, done: None, cancelled, _task: watcher });
+        None
     }
 
     /// The block rows (see `build_blocks`), built again only when what they
@@ -2145,7 +2227,7 @@ impl Editor {
     }
 
     fn move_vertically(&mut self, rows: isize, extend: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.sync_wrap(window, cx);
+        self.sync_wrap(cx);
         let goals: Vec<Pixels> = self
             .selections
             .iter()
@@ -2752,7 +2834,7 @@ impl Editor {
     }
 
     fn add_cursor_vertical(&mut self, rows: isize, window: &mut Window, cx: &mut Context<Self>) {
-        self.sync_wrap(window, cx);
+        self.sync_wrap(cx);
         let primary = self.primary_selection();
         let goal = self.goal_x.unwrap_or_else(|| self.x_for_offset(primary.head, window, cx));
         let edge = if rows < 0 {
@@ -2964,7 +3046,7 @@ impl Editor {
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle);
-        self.sync_wrap(window, cx);
+        self.sync_wrap(cx);
         let Some(layout) = self.layout.clone() else { return };
 
         if self.minimap_mouse_down(event.position, cx) {
@@ -3161,7 +3243,7 @@ impl Editor {
             return;
         }
         window.focus(&self.focus_handle);
-        self.sync_wrap(window, cx);
+        self.sync_wrap(cx);
         self.open_hunk = None;
         if let Some(layout) = self.layout.clone()
             && let Some(row) = self.breakpoint_row_at(event.position, &layout, cx)
@@ -3258,7 +3340,7 @@ impl Editor {
         }
         let Some(drag) = self.drag.as_ref() else { return };
         let (mode, origin, column_from) = (drag.mode, drag.origin.clone(), drag.column_from);
-        self.sync_wrap(window, cx);
+        self.sync_wrap(cx);
         if let Some(from) = column_from {
             let row = self.doc.read(cx).row_of(self.offset_for_position(event.position, window, cx));
             // Still on the spot it started: an Alt+click, not a box yet.
@@ -3372,7 +3454,7 @@ impl Editor {
             rows_per_page,
             wrap_width,
         });
-        self.sync_wrap(window, cx);
+        self.sync_wrap(cx);
         let wrapping = self.wrap.as_ref().is_some_and(|w| w.key.wrap);
 
         // Keep the primary cursor visible after keyboard navigation.
@@ -4754,6 +4836,32 @@ fn restyle_runs(runs: Vec<TextRun>, ranges: &[Range<usize>], restyle: impl Fn(&m
     out
 }
 
+/// Documents up to this size are soft-wrapped where they're shown; every
+/// line of a bigger one is measured in the background (`WrapJob`).
+const WRAP_IN_PLACE: usize = 256 * 1024;
+/// How long a frame waits for a background measure before it shows the rows
+/// it had, as Zed's wrap map does.
+const WRAP_BUDGET: Duration = Duration::from_millis(5);
+
+/// Soft wrap of every line of a big document for a new width, font or tab
+/// size (or after more edits than the document's log keeps), measured in the
+/// background; the old rows show meanwhile, moved by edits. Dropping it (a
+/// newer width) stops the measure.
+struct WrapJob {
+    key: WrapKey,
+    /// The result once it landed; `update_wrap` catches it up with the edits
+    /// made meanwhile.
+    done: Option<WrapMap>,
+    cancelled: Arc<AtomicBool>,
+    _task: Task<()>,
+}
+
+impl Drop for WrapJob {
+    fn drop(&mut self) {
+        self.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// A buffer line prepared for display: tabs are expanded to spaces and
 /// control characters shown as symbols (`control_symbol`), with a mapping
 /// between buffer columns and display columns (both in bytes). It can be a
@@ -4811,6 +4919,11 @@ fn has_tabs_or_controls(line: &str) -> bool {
     })
 }
 
+/// The columns a hint takes, which tab stops after it count.
+pub fn inlay_columns(label: &str, pad_left: bool, pad_right: bool) -> usize {
+    label.chars().count() + pad_left as usize + pad_right as usize
+}
+
 pub struct InlaySpan {
     pub whole: Range<usize>,
     pub label: Range<usize>,
@@ -4845,7 +4958,9 @@ impl DisplayLine {
         let mut spans = Vec::new();
         let mut controls = Vec::new();
         let mut next = 0;
-        let mut insert = |at: usize, out: &mut String| {
+        // Hints take columns like text, so tab stops after them count them
+        // (as in Zed).
+        let mut insert = |at: usize, out: &mut String, col: &mut usize| {
             while let Some(&(column, label, pad_left, pad_right)) = inlays.get(next).filter(|i| i.0 <= at) {
                 let start = base + out.len();
                 out.push_str(if pad_left { " " } else { "" });
@@ -4854,13 +4969,14 @@ impl DisplayLine {
                 let label_end = base + out.len();
                 out.push_str(if pad_right { " " } else { "" });
                 spans.push(InlaySpan { whole: start..base + out.len(), label: label_start..label_end, column });
+                *col += inlay_columns(label, pad_left, pad_right);
                 next += 1;
             }
         };
         let mut col = from.col as usize;
         for (i, ch) in text.char_indices() {
             let before = base + out.len();
-            insert(first + i, &mut out);
+            insert(first + i, &mut out, &mut col);
             for _ in 0..ch.len_utf8() {
                 map.push(before);
             }
@@ -4878,7 +4994,7 @@ impl DisplayLine {
             }
         }
         let before = base + out.len();
-        insert(first + text.len(), &mut out);
+        insert(first + text.len(), &mut out, &mut col);
         map.push(before);
         Self { text: out, start: from, map: Some(map), inlays: spans, controls }
     }
@@ -5524,7 +5640,7 @@ impl EntityInputHandler for Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        self.sync_wrap(window, cx);
+        self.sync_wrap(cx);
         let layout = self.layout.clone()?;
         let range = self.range_from_utf16(&range_utf16, cx);
         let drow = self.display_row_of(range.start, cx);
@@ -6546,6 +6662,22 @@ mod display_tests {
         let plain = DisplayLine::new("a — b", 4);
         assert!(plain.controls.is_empty() && plain.map.is_none());
     }
+
+    /// A tab after a hint goes to the stop after the hint's columns, as if
+    /// the hint were text; a window of the line from a break agrees.
+    #[test]
+    fn tabs_after_hints_count_the_hint() {
+        // "a" + ": i32" (5 columns) ends at column 6; the tab goes to 8.
+        let line = "a\tb\tc";
+        let dl = DisplayLine::with_inlays(line, 4, &[(1, ": i32", false, false)]);
+        assert_eq!(dl.text, "a: i32  b   c");
+        // With padding on both sides: "a : i32 " ends at 8, the tab takes 4.
+        let padded = DisplayLine::with_inlays(line, 4, &[(1, ": i32", true, true)]);
+        assert_eq!(padded.text, "a : i32     b   c");
+        let from = wrap::Resume { byte: 1, ix: 1, col: 1 };
+        let part = DisplayLine::window(&line[1..], from, 4, &[(1, ": i32", true, true)]);
+        assert_eq!(part.slice(1..padded.end()), &padded.text[1..]);
+    }
 }
 
 /// What a frame does doesn't grow with the document: lists as long as the
@@ -6771,5 +6903,176 @@ mod frame_tests {
         for [small, big] in [busy, long] {
             assert!(big < small * 2, "{big:?} vs {small:?}");
         }
+    }
+
+    fn frame_width(host: &Entity<Host>, width: f32, cx: &mut VisualTestContext) -> FrameLayout {
+        cx.draw(point(px(0.), px(0.)), size(px(width), px(600.)), |_, _| AnyView::from(host.clone()));
+        host.update(cx, |h, _| h.frame.borrow_mut().take()).expect("laid out")
+    }
+
+    /// Markdown of about `bytes` bytes: headings, short lines and paragraphs
+    /// on one long line each, as prose is written.
+    fn markdown(bytes: usize) -> String {
+        let words = ["the", "editor", "wraps", "paragraphs", "at", "its", "width,", "keeping", "words", "whole", "and", "indentation."];
+        let paragraph = |n: usize| (0..60).map(|i| words[(i * 7 + n) % words.len()]).collect::<Vec<_>>().join(" ");
+        let mut out = String::with_capacity(bytes + 1024);
+        let mut n = 0;
+        while out.len() < bytes {
+            out.push_str(&format!("## Section {n}\n\n{}\n- an item that fits on its row\n\n", paragraph(n)));
+            n += 1;
+        }
+        out
+    }
+
+    /// The slowest of `frames` (what a user notices) and their total.
+    fn timed(frames: impl Iterator<Item = std::time::Duration>) -> (std::time::Duration, std::time::Duration) {
+        frames.fold(Default::default(), |(max, sum), t| (max.max(t), sum + t))
+    }
+
+    /// A big file wraps in the background: until the measure lands the
+    /// rows shown are the old ones (unwrapped at first, then the last
+    /// width's, moved by edits), the line at the top stays there, and what
+    /// lands, caught up, is what measuring there and then gives.
+    #[gpui::test]
+    fn big_files_wrap_in_the_background(cx: &mut TestAppContext) {
+        let (editor, host, cx) = editor(markdown(2 * WRAP_IN_PLACE), cx);
+        // No frame waits for the measure.
+        cx.executor().set_block_on_ticks(0..=0);
+        editor.update(cx, |e, _| e.soft_wrap = true);
+        frame(&host, cx);
+        let rows = |cx: &mut VisualTestContext| editor.update(cx, |e, cx| e.display_row_count(cx));
+        let lines = editor.update(cx, |e, cx| e.doc.read(cx).line_count());
+        assert_eq!(rows(cx), lines, "unwrapped meanwhile");
+        cx.run_until_parked();
+        frame(&host, cx);
+        let wrapped = rows(cx);
+        assert!(wrapped > lines + 1000, "{wrapped} rows");
+        let top = |cx: &mut VisualTestContext| {
+            editor.update(cx, |e, cx| {
+                let line_height = e.layout.as_ref().expect("laid out").line_height;
+                e.line_at_row((e.scroll.y / line_height).floor() as usize, cx)
+            })
+        };
+        editor.update(cx, |e, _| {
+            e.autoscroll = false;
+            e.scroll.y = e.layout.as_ref().expect("laid out").line_height * e.first_display_row(1000) as f32;
+        });
+        frame(&host, cx);
+        assert_eq!(top(cx), 1000);
+        // Narrower, and a line added above meanwhile: the old rows, moved.
+        frame_width(&host, 500., cx);
+        assert_eq!(rows(cx), wrapped);
+        // As another editor of the document would.
+        editor.update(cx, |e, cx| drop(e.doc.as_mut(cx).edit(vec![(0..0, "\n".into())], &[], EditKind::Other)));
+        frame_width(&host, 500., cx);
+        assert_eq!((rows(cx), top(cx)), (wrapped + 1, 1000));
+        cx.run_until_parked();
+        frame_width(&host, 500., cx);
+        assert!(rows(cx) > wrapped + 1, "narrower: more rows");
+        assert_eq!(top(cx), 1000);
+        // A resize within a column measures nothing.
+        let (generation, room, char_width) = editor.update(cx, |e, _| {
+            let layout = e.layout.as_ref().expect("laid out");
+            let room = (1. - (layout.wrap_width / layout.char_width).fract()) * f32::from(layout.char_width);
+            (e.wrap.as_ref().map(WrapMap::generation), room, layout.char_width)
+        });
+        frame_width(&host, 500. + room / 2., cx);
+        editor.update(cx, |e, _| assert!(e.wrap.as_ref().map(WrapMap::generation) == generation && e.wrap_job.is_none()));
+        editor.update(cx, |e, cx| {
+            let map = e.wrap.as_ref().expect("wrapped");
+            let doc = e.doc.read(cx);
+            let fresh = WrapMap::new(map.key.clone(), doc.version(), &[], wrap::Inlays::NONE, doc.rope(), cx.text_system(), e.editor_font(cx), char_width);
+            assert_eq!(map.row_count(), fresh.row_count());
+            assert!((0..doc.line_count()).all(|row| map.breaks(row) == fresh.breaks(row)));
+        });
+    }
+
+    /// `cargo test bench_wrap -- --ignored --nocapture`: soft wrap of a
+    /// 10 MB Markdown file (opening, dragging the sidebar, typing, Replace
+    /// All) and typing in a 300k-line file with one fold.
+    #[gpui::test]
+    #[ignore]
+    fn bench_wrap(cx: &mut TestAppContext) {
+        bench_markdown(cx);
+        bench_fold(false, cx);
+        bench_fold(true, cx);
+    }
+
+    fn bench_markdown(cx: &mut TestAppContext) {
+        use std::time::Instant;
+        let (editor, host, cx) = editor(markdown(10 << 20), cx);
+        // Frames don't wait for a background measure (it takes longer than
+        // the budget): frame times are the UI thread's, `landed` times the
+        // background's.
+        cx.executor().set_block_on_ticks(0..=0);
+        let landed = |cx: &mut VisualTestContext| {
+            let start = Instant::now();
+            cx.run_until_parked();
+            start.elapsed()
+        };
+        editor.update(cx, |e, _| e.soft_wrap = true);
+        let start = Instant::now();
+        frame(&host, cx);
+        let open = (start.elapsed(), landed(cx));
+        frame(&host, cx);
+        let rows = editor.update(cx, |e, cx| (e.display_row_count(cx), e.doc.read(cx).line_count()));
+        // A sidebar drag: a few pixels a frame.
+        let (drag_max, drag_sum) = timed((0..30).map(|i| {
+            let start = Instant::now();
+            frame_width(&host, 800. - 3. * i as f32, cx);
+            start.elapsed()
+        }));
+        // Where the drag ended, from now on.
+        let width = 800. - 3. * 29.;
+        let drag_landed = landed(cx);
+        let mid = editor.update(cx, |e, cx| e.doc.read(cx).line_start(rows.1 / 2 + 2) + 10);
+        editor.update(cx, |e, cx| e.set_selections(vec![Selection::cursor(mid)], 0, cx));
+        frame_width(&host, width, cx);
+        let (key_max, _) = timed((0..10).map(|i| {
+            editor.update(cx, |e, cx| e.insert(if i == 5 { "\n" } else { "x" }, cx));
+            let start = Instant::now();
+            frame_width(&host, width, cx);
+            start.elapsed()
+        }));
+        // Replace All of 20k matches: more edits than the line edit log keeps.
+        cx.run_until_parked();
+        editor.update(cx, |e, cx| {
+            let text = e.text(cx);
+            let edits: Vec<_> = text.match_indices("Section").take(20_000).map(|(at, _)| (at..at + 7, "Part".to_string())).collect();
+            e.replace_ranges(edits, cx);
+        });
+        let start = Instant::now();
+        frame_width(&host, width, cx);
+        let replace = (start.elapsed(), landed(cx));
+        frame_width(&host, width, cx);
+        let wrapped = editor.update(cx, |e, cx| e.display_row_count(cx));
+        assert!(wrapped > rows.1 + 50_000, "wrapped again: {wrapped} rows");
+        println!(
+            "wrap 10 MB Markdown ({} lines, {} rows): open {:?} (landed {:?}); drag max {drag_max:?}, total {drag_sum:?} (landed {drag_landed:?}); keystroke max {key_max:?}; replace all {:?} (landed {:?})",
+            rows.1, rows.0, open.0, open.1, replace.0, replace.1
+        );
+    }
+
+    /// 300k short lines, one fold (a WrapMap without soft wrap) or none.
+    fn bench_fold(fold: bool, cx: &mut TestAppContext) {
+        use std::time::Instant;
+        let (editor, host, cx) = editor(LINE.repeat(300_000), cx);
+        editor.update(cx, |e, cx| {
+            let doc = e.doc.read(cx);
+            if fold {
+                e.folds.fold_rows(doc, 100, 120);
+            }
+        });
+        frame(&host, cx);
+        let at = 150_000 * LINE.len() + 4;
+        editor.update(cx, |e, cx| e.set_selections(vec![Selection::cursor(at)], 0, cx));
+        frame(&host, cx);
+        let (fold_max, fold_sum) = timed((0..20).map(|i| {
+            editor.update(cx, |e, cx| e.insert(if i % 5 == 4 { "\n" } else { "x" }, cx));
+            let start = Instant::now();
+            frame(&host, cx);
+            start.elapsed()
+        }));
+        println!("300k lines, {} fold: keystroke max {fold_max:?}, mean {:?}", if fold { "one" } else { "no" }, fold_sum / 20);
     }
 }

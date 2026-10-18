@@ -1100,7 +1100,7 @@ impl Editor {
 
     /// Editor-local pixel position of the top-left of `offset`'s character.
     fn local_position(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) -> Option<Point<Pixels>> {
-        self.sync_wrap(window, cx);
+        self.sync_wrap(cx);
         let layout = self.layout.clone()?;
         let x = self.x_for_offset(offset, window, cx);
         let drow = self.display_row_of(offset, cx);
@@ -1184,7 +1184,7 @@ impl Editor {
         if !over_text || self.sticky_at(position).is_some() {
             return None;
         }
-        self.sync_wrap(window, cx);
+        self.sync_wrap(cx);
         let word = super::word_range(self.doc.read(cx), self.offset_for_position(position, window, cx));
         let drow = ((position.y - layout.bounds.top() + self.scroll.y) / layout.line_height).floor() as usize;
         if word.is_empty() || self.display_row_of(word.start, cx) != drow || self.display_row_of(word.end, cx) != drow {
