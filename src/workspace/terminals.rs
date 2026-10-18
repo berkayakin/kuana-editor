@@ -176,14 +176,26 @@ impl Workspace {
     }
 
     /// A Run tab finished: what its output reports goes to Problems (a run
-    /// without problems clears the last one's).
+    /// without problems clears the last one's), and a test runner's results
+    /// to the Find panel and the gutter.
     pub(super) fn collect_run_problems(&mut self, terminal: &Entity<TerminalView>, cx: &mut Context<Self>) {
         let Some((target, _)) = terminal.read(cx).run().cloned() else { return };
         let output = terminal.read(cx).output();
+        let framework = crate::test_run::Framework::of(&target.command);
         let task = cx.spawn(async move |ws, cx| {
             let cwd = target.cwd.clone();
-            let problems = cx.background_executor().spawn(async move { run::output_problems(&output.text(), &cwd) }).await;
+            let (problems, tests) = cx
+                .background_executor()
+                .spawn(async move {
+                    let text = output.text();
+                    let tests = framework.map(|f| crate::test_run::parse(f, &text, &cwd)).filter(|t| !t.results.is_empty());
+                    (run::output_problems(&text, &cwd), tests)
+                })
+                .await;
             ws.update(cx, |ws, cx| {
+                if let Some(tests) = tests {
+                    ws.show_test_run(target.clone(), tests, cx);
+                }
                 let run = (!problems.is_empty()).then_some((target.name, problems));
                 ws.problems.update(cx, |p, cx| p.set_run(run, cx));
                 cx.notify();

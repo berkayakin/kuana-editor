@@ -64,6 +64,7 @@ mod snippets;
 mod state;
 mod syntax;
 mod terminal;
+mod test_run;
 mod theme;
 mod theme_picker;
 mod transition;

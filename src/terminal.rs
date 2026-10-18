@@ -2238,7 +2238,7 @@ mod tests {
         use std::os::unix::process::ExitStatusExt;
         let terminal = cx.new(|cx| {
             let mut view = without_shell(cx);
-            let target = RunTarget { name: "Test".into(), command: "exit 3".into(), cwd: "/".into(), row: None, rows: 0..0, debug: None };
+            let target = RunTarget { name: "Test".into(), command: "exit 3".into(), cwd: "/".into(), row: None, rows: 0..0, debug: None, test: None };
             view.run = Some((target, RunState::Running));
             view
         });

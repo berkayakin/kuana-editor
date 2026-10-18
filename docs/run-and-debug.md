@@ -36,8 +36,8 @@ A ▶ in the gutter marks what can run in the file; click it to run that one thi
 | Language | ▶ on | Runs with |
 | --- | --- | --- |
 | Rust | `#[test]` functions, `#[cfg(test)]` modules, `fn main` | `cargo test … --exact`, `cargo run` (with `--bin`/`--example`/`--test` as needed) |
-| Go | `Test…`, `Benchmark…`, `Example…` functions, `func main` | `go test -run '^Name$'`, `go run .` |
-| Python | `test_…` functions, `Test…` classes and methods, `if __name__ == "__main__"` | `python3 -m pytest file::Class::test`, `python3 file` |
+| Go | `Test…`, `Benchmark…`, `Example…` functions, `func main` | `go test -v -run '^Name$'`, `go run .` |
+| Python | `test_…` functions, `Test…` classes and methods, `if __name__ == "__main__"` | `python3 -m pytest -v file::Class::test`, `python3 file` |
 | JavaScript, TypeScript | `test(…)`, `it(…)`, `describe(…)` | the project's vitest or jest, else `node --test` |
 
 **Run at caret** (⌃⇧R / Ctrl+Shift+F10) runs the innermost test or function around the caret.
@@ -61,6 +61,24 @@ Unsaved files are saved first. Add your own commands in `settings.json`:
 
 `cwd` is relative to the project folder. Commands run through your login shell, so aliases and
 PATH work as in the terminal.
+
+### Test results
+
+When a test run ends (cargo test, `go test -v`, pytest, Jest, Vitest or `node --test`, from the
+gutter, Run… or your own configurations), Kuana reads its results from the output:
+
+- A notification says how it went ("Tests failed: 1 failed, 12 passed"), with **Show Results**.
+- The **Find** panel gets a tab for the run: the tests in a tree by module, file and class (Go's
+  subtests under their test), each with ✓, ✕ or a dash for skipped ones, and every group marked
+  with its tests' worst. A failed test is open, showing what it printed (the panic or assertion),
+  and goes to the line where it failed. **Rerun Failed** runs only the failed tests the same way
+  (`cargo test -- a b --exact`, `go test -run '^(A|B)$'`, pytest node ids, `-t` for Jest and
+  Vitest, `--test-name-pattern` for node); **Rerun** runs it all again. A new run replaces the tab
+  unless you pin it.
+- The gutter's ▶ next to a test that ran turns into its result, ✓ or ✕ (a module, class or test
+  with subtests shows ✕ if any test under it failed); clicking it still runs it.
+
+**Rerun Failed Tests** (Find Action) does the same for the last test run from anywhere.
 
 When a run ends, the errors and warnings in its output go to **Problems** (under the run's name,
 below the current file's own), each opening its file at the line: rustc and cargo messages, Rust

@@ -926,6 +926,7 @@ impl Workspace {
         match button {
             ToastButton::UndoFile(id) => self.file_history.undo_id() == Some(id),
             ToastButton::SaveBackground => !self.documents.read(cx).kept(cx).is_empty(),
+            ToastButton::ShowTestResults => self.has_results && !self.shows(BottomPanel::Results),
         }
     }
 
@@ -936,6 +937,7 @@ impl Workspace {
         match button {
             ToastButton::UndoFile(_) => self.step_file_history(false, window, cx),
             ToastButton::SaveBackground => self.save_background(false, false, cx),
+            ToastButton::ShowTestResults => self.toggle_results(&ToggleResults, window, cx),
         }
     }
 

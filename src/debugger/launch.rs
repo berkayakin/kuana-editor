@@ -412,7 +412,7 @@ pub fn project_configurations(root: &Path, file: Option<&Path>) -> Vec<RunTarget
                 }
             }
             let cwd = config["cwd"].as_str().map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
-            RunTarget { name, command: String::new(), cwd, row: None, rows: 0..0, debug: Some(DebugSpec::Config { adapter, request, config }) }
+            RunTarget { name, command: String::new(), cwd, row: None, rows: 0..0, debug: Some(DebugSpec::Config { adapter, request, config }), test: None }
         })
         .collect()
 }

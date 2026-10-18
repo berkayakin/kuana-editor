@@ -28,7 +28,7 @@ use crate::{
         Save, SaveAs, SearchEverywhere, SelectTheme, ShowCommit, ShowFileHistory, ToggleCommit, ToggleGitLog, ToggleProblems,
         DebugConfiguration, Resume, PauseProgram, StepOver, StepInto, StepOut, ToggleDebugPanel, AttachToProcess, AddConditionalBreakpoint,
         AddLogpoint, OpenExtensions, ReloadExtensions, ProjectTrust, UndoFileChange, RedoFileChange, OpenProjectSettings,
-        ToggleResults, NextResult, PreviousResult,
+        ToggleResults, NextResult, PreviousResult, RerunFailedTests,
         ToggleAutoSave, ToggleSidebar, ToggleSidebarPosition, CheckForUpdates, WelcomeSetup, GoToSymbol, SplitTerminal, RenameTerminal, SelectOpenedFile, InstallShellCommand,
     },
 };
@@ -758,6 +758,7 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Toggle Problems", ToggleProblems),
         a("Toggle Find Panel", ToggleResults),
         a("Next Result", NextResult),
+        a("Rerun Failed Tests", RerunFailedTests),
         a("Previous Result", PreviousResult),
         a("Duplicate Line or Selection", DuplicateLine),
         a("Delete Line", DeleteLine),

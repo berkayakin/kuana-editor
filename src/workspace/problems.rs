@@ -27,7 +27,7 @@ impl Workspace {
 
     /// Shows results in the Find panel and gives it the keyboard.
     pub(super) fn show_results(&mut self, title: SharedString, nodes: Vec<ResultNode>, window: &mut Window, cx: &mut Context<Self>) {
-        self.results.update(cx, |p, cx| p.show(title, nodes, cx));
+        self.results.update(cx, |p, cx| p.show(title, nodes, Vec::new(), true, cx));
         self.has_results = true;
         self.bottom = Some(BottomPanel::Results);
         window.focus(&self.results.focus_handle(cx));

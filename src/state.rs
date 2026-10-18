@@ -567,6 +567,7 @@ mod tests {
                 row: None,
                 rows: 0..0,
                 debug: Some(DebugSpec::Cargo { build: vec!["test".into(), "--no-run".into()], args: vec!["tests".into()] }),
+                test: None,
             }),
             other: Default::default(),
         };
@@ -583,6 +584,7 @@ mod tests {
             row: None,
             rows: 0..0,
             debug: Some(DebugSpec::Go { mode: "test".into(), program: "/work/kuana/pkg".into(), args: vec!["-test.run".into()] }),
+            test: None,
         };
         let json = serde_json::to_string(&go).unwrap();
         assert_eq!(serde_json::from_str::<RunTarget>(&json).unwrap(), go);

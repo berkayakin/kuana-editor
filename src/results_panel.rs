@@ -43,8 +43,26 @@ pub enum Leading {
     /// A line in a file, 1-based.
     Line(u32),
     Icon(Icon),
+    /// An icon in a color that means something (a test's pass or fail).
+    Tinted(Icon, Tone),
     /// Nothing ("Loading…", a message).
     Blank,
+}
+
+/// What a tinted icon's color says; the theme picks the color.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Tone {
+    Success,
+    Error,
+    Muted,
+}
+
+/// A button in the panel's header while its tab is current (Rerun Failed).
+#[derive(Clone)]
+pub struct TabButton {
+    pub icon: Icon,
+    pub label: SharedString,
+    pub on_click: Rc<dyn Fn(&mut Window, &mut App)>,
 }
 
 /// What a node's children take to load: the workspace or a hierarchy hands
@@ -126,6 +144,7 @@ struct ResultTab {
     rows: Vec<Row>,
     selected: Option<usize>,
     pinned: bool,
+    buttons: Vec<TabButton>,
 }
 
 impl ResultTab {
@@ -141,7 +160,7 @@ impl ResultTab {
                 }
             })
         }
-        let mut tab = ResultTab { id, title, count: leaves(&nodes), nodes, rows: Vec::new(), selected: None, pinned: false };
+        let mut tab = ResultTab { id, title, count: leaves(&nodes), nodes, rows: Vec::new(), selected: None, pinned: false, buttons: Vec::new() };
         tab.relayout();
         tab
     }
@@ -317,10 +336,16 @@ impl ResultsPanel {
     }
 
     /// Shows a search's results: in place of the current tab unless that's
-    /// pinned.
-    pub fn show(&mut self, title: SharedString, nodes: Vec<ResultNode>, cx: &mut Context<Self>) {
+    /// pinned; `buttons` show in the header while it's current. `counted`:
+    /// the tab shows how many places it lists (a test run's title says how
+    /// it went instead).
+    pub fn show(&mut self, title: SharedString, nodes: Vec<ResultNode>, buttons: Vec<TabButton>, counted: bool, cx: &mut Context<Self>) {
         self.next_id += 1;
         let mut tab = ResultTab::new(self.next_id, title, nodes);
+        tab.buttons = buttons;
+        if !counted {
+            tab.count = None;
+        }
         let loads = tab.take_open_loaders();
         match self.tabs.get(self.active) {
             Some(current) if !current.pinned => self.tabs[self.active] = tab,
@@ -558,6 +583,14 @@ impl ResultsPanel {
                 .child(line.to_string())
                 .into_any_element(),
             Leading::Icon(icon) => icon_el(*icon, px(14.), theme.text_dim.into()).into_any_element(),
+            Leading::Tinted(icon, tone) => {
+                let color = match tone {
+                    Tone::Success => theme.success,
+                    Tone::Error => theme.error,
+                    Tone::Muted => theme.text_dim,
+                };
+                icon_el(*icon, px(14.), color.into()).into_any_element()
+            }
             Leading::Blank => div().into_any_element(),
         };
         let label = match &node.highlight {
@@ -624,6 +657,25 @@ impl Render for ResultsPanel {
             .child(div().flex_shrink_0().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_muted).child("FIND"))
             .child(self.render_tabs(cx))
             .child(div().flex_1())
+            .children(self.tabs.get(self.active).into_iter().flat_map(|t| t.buttons.clone()).enumerate().map(|(ix, button)| {
+                let on_click = button.on_click.clone();
+                div()
+                    .id(("results-button", ix))
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_1()
+                    .h(px(24.))
+                    .px_2()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .text_size(px(12.))
+                    .text_color(theme.text_muted)
+                    .hover_bg(theme.hover)
+                    .child(icon_el(button.icon, px(13.), theme.text_muted.into()))
+                    .child(button.label.clone())
+                    .on_click(move |_, window, cx| on_click(window, cx))
+            }))
             .when(!self.tabs.is_empty(), |el| {
                 el.child(
                     crate::ui::icon_button("results-pin", Icon::Pin, if pinned { theme.accent } else { theme.text_dim }.into(), cx)

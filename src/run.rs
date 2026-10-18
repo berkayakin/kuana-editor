@@ -12,7 +12,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tree_sitter::{Node, Tree};
 
-use crate::{lint::Severity, syntax::Language};
+use crate::{lint::Severity, syntax::Language, test_run::Framework};
 
 /// Something runnable: a configuration in Run…, or a gutter ▶ on `row`.
 /// The project's session keeps the last one run (without its place in a file).
@@ -32,6 +32,10 @@ pub struct RunTarget {
     /// How to start it under a debugger instead, when that's possible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug: Option<DebugSpec>,
+    /// The test, or group of tests, it runs, as test results name it
+    /// (`test_run::key`), for the gutter's pass / fail mark.
+    #[serde(skip)]
+    pub test: Option<(Framework, String)>,
 }
 
 /// What a debug session starts (see `crate::debugger`).
@@ -94,6 +98,7 @@ pub fn from_rust_analyzer(runnable: &serde_json::Value) -> Option<RunTarget> {
         cwd,
         row: None,
         rows: 0..0,
+        test: (subcommand == "test").then(|| exe.first().filter(|a| !a.starts_with('-')).map(|a| (Framework::Cargo, a.clone()))).flatten(),
         debug: build.map(|build| DebugSpec::Cargo { build, args: exe }),
     })
 }
@@ -154,7 +159,14 @@ fn target(name: String, command: String, cwd: &Path, node: Node, header: Node, d
         row: Some(header.start_position().row),
         rows: node.start_position().row..node.end_position().row + 1,
         debug,
+        test: None,
     }
+}
+
+/// `target` names the test it runs.
+fn testing(mut target: RunTarget, framework: Framework, key: String) -> RunTarget {
+    target.test = Some((framework, key));
+    target
 }
 
 /// `[package] name` from a Cargo.toml (the default binary's name).
@@ -241,6 +253,7 @@ fn extension_targets(language: Language, path: &Path, text: &str, tree: &Tree, o
                 row: Some(node.start_position().row),
                 rows: node.start_position().row..node.end_position().row + 1,
                 debug: None,
+                test: None,
             });
         }
     }
@@ -367,14 +380,15 @@ fn rust_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>) {
         match node.kind() {
             "function_item" if has_test_attr(node, text) => {
                 let filter = full.join("::");
-                out.push(target(
+                let test = target(
                     format!("Test '{ident}'"),
                     format!("cargo test{target_flag} -- {} --exact", shell_quote(&filter)),
                     &crate_dir,
                     node,
                     name,
                     debug_test(&filter, true),
-                ));
+                );
+                out.push(testing(test, Framework::Cargo, filter));
             }
             "function_item" if ident == "main" && mods.is_empty() && is_main_file => {
                 let run = if target_flag.contains("--test") { String::new() } else { target_flag.clone() };
@@ -390,7 +404,8 @@ fn rust_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>) {
             {
                 let filter = full.join("::");
                 let command = format!("cargo test{target_flag} -- {}", shell_quote(&filter));
-                out.push(target(format!("Tests in '{ident}'"), command, &crate_dir, node, name, debug_test(&filter, false)));
+                let tests = target(format!("Tests in '{ident}'"), command, &crate_dir, node, name, debug_test(&filter, false));
+                out.push(testing(tests, Framework::Cargo, filter));
             }
             _ => {}
         }
@@ -420,14 +435,16 @@ fn go_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>) {
             } else {
                 vec!["-test.run".into(), pattern.clone()]
             };
-            out.push(target(
+            // -v lists every test's result, which the test results read.
+            let test = target(
                 format!("Test '{ident}'"),
-                format!("go test {flag} {} .", shell_quote(&pattern)),
+                format!("go test -v {flag} {} .", shell_quote(&pattern)),
                 dir,
                 node,
                 name,
                 Some(DebugSpec::Go { mode: "test".into(), program: dir.to_path_buf(), args }),
-            ));
+            );
+            out.push(testing(test, Framework::Go, ident.to_string()));
         } else if ident == "main" && is_main_package {
             let debug = Some(DebugSpec::Go { mode: "debug".into(), program: dir.to_path_buf(), args: Vec::new() });
             out.push(target("Run 'main'".into(), "go run .".into(), dir, node, name, debug));
@@ -440,6 +457,9 @@ fn go_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>) {
 fn python_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>) {
     let dir = path.parent().unwrap_or(path);
     let file = shell_quote(&path.to_string_lossy());
+    // Test results name pytest's tests by file name and node path.
+    let base = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let key = |parts: &[&str]| std::iter::once(base.as_str()).chain(parts.iter().copied()).collect::<Vec<_>>().join("::");
     let mut cursor = root.walk();
     for node in root.named_children(&mut cursor) {
         let node = if node.kind() == "decorated_definition" { node.child_by_field_name("definition").unwrap_or(node) } else { node };
@@ -449,7 +469,8 @@ fn python_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>)
                 let ident = node_text(name, text);
                 if ident.starts_with("test") {
                     let debug = pytest(path, &[ident]);
-                    out.push(target(format!("Test '{ident}'"), format!("{PYTHON} -m pytest {file}::{ident}"), dir, node, name, debug));
+                    let test = target(format!("Test '{ident}'"), format!("{PYTHON} -m pytest -v {file}::{ident}"), dir, node, name, debug);
+                    out.push(testing(test, Framework::Pytest, key(&[ident])));
                 }
             }
             "class_definition" => {
@@ -459,7 +480,8 @@ fn python_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>)
                     continue;
                 }
                 let debug = pytest(path, &[class]);
-                out.push(target(format!("Tests in '{class}'"), format!("{PYTHON} -m pytest {file}::{class}"), dir, node, name, debug));
+                let tests = target(format!("Tests in '{class}'"), format!("{PYTHON} -m pytest -v {file}::{class}"), dir, node, name, debug);
+                out.push(testing(tests, Framework::Pytest, key(&[class])));
                 let Some(body) = node.child_by_field_name("body") else { continue };
                 let mut c = body.walk();
                 for method in body.named_children(&mut c) {
@@ -475,7 +497,8 @@ fn python_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>)
                     let m = node_text(mname, text);
                     if m.starts_with("test") {
                         let debug = pytest(path, &[class, m]);
-                        out.push(target(format!("Test '{m}'"), format!("{PYTHON} -m pytest {file}::{class}::{m}"), dir, method, mname, debug));
+                        let test = target(format!("Test '{m}'"), format!("{PYTHON} -m pytest -v {file}::{class}::{m}"), dir, method, mname, debug);
+                        out.push(testing(test, Framework::Pytest, key(&[class, m])));
                     }
                 }
             }
@@ -539,7 +562,8 @@ fn js_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>) {
         let title = node_text(first, text).trim_matches(['"', '\'', '`']).to_string();
         let pattern = regex::escape(&title);
         let command = match runner {
-            "vitest" => format!("npx vitest run {file} -t {}", shell_quote(&pattern)),
+            // The verbose reporter lists every test's result.
+            "vitest" => format!("npx vitest run --reporter=verbose {file} -t {}", shell_quote(&pattern)),
             "jest" => format!("npx jest {file} -t {}", shell_quote(&pattern)),
             _ => format!("node --test --test-name-pattern={} {file}", shell_quote(&pattern)),
         };
@@ -550,8 +574,12 @@ fn js_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>) {
             "jest" => node_debug("npx", &["jest", &path, "-t", &pattern, "--runInBand"]),
             _ => node_debug("node", &["--test", &format!("--test-name-pattern={pattern}"), &path]),
         };
-        let label = if base == "describe" { format!("Tests in '{title}'") } else { format!("Test '{title}'") };
-        out.push(target(label, command, &package_dir, node, node, debug));
+        let found = target(String::new(), command, &package_dir, node, node, debug);
+        // Results name a test by its title only (a suite's aren't listed).
+        out.push(match base {
+            "describe" => RunTarget { name: format!("Tests in '{title}'"), ..found },
+            _ => RunTarget { name: format!("Test '{title}'"), ..testing(found, Framework::Js, title.clone()) },
+        });
     }
 }
 
@@ -562,7 +590,7 @@ fn js_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>) {
 pub fn project_targets(root: &Path, current: Option<(&Path, Language)>) -> Vec<RunTarget> {
     let mut out = Vec::new();
     let mut add = |name: String, command: String, cwd: &Path, debug: Option<DebugSpec>| {
-        out.push(RunTarget { name, command, cwd: cwd.to_path_buf(), row: None, rows: 0..0, debug });
+        out.push(RunTarget { name, command, cwd: cwd.to_path_buf(), row: None, rows: 0..0, debug, test: None });
     };
     let cargo = |build: &[&str]| Some(DebugSpec::Cargo { build: build.iter().map(|s| s.to_string()).collect(), args: Vec::new() });
     if root.join("Cargo.toml").is_file() {
@@ -604,7 +632,7 @@ pub fn project_targets(root: &Path, current: Option<(&Path, Language)>) -> Vec<R
     if root.join("go.mod").is_file() {
         let debug = Some(DebugSpec::Go { mode: "debug".into(), program: root.to_path_buf(), args: Vec::new() });
         add("go run .".into(), "go run .".into(), root, debug);
-        add("go test ./...".into(), "go test ./...".into(), root, None);
+        add("go test ./...".into(), "go test -v ./...".into(), root, None);
         add("go build ./...".into(), "go build ./...".into(), root, None);
     }
     if let Ok(makefile) = std::fs::read_to_string(root.join("Makefile")) {
@@ -621,7 +649,7 @@ pub fn project_targets(root: &Path, current: Option<(&Path, Language)>) -> Vec<R
     }
     if root.join("pyproject.toml").is_file() || root.join("pytest.ini").is_file() {
         let debug = Some(DebugSpec::Python { program: None, module: Some("pytest".into()), args: Vec::new() });
-        add("pytest".into(), format!("{PYTHON} -m pytest"), root, debug);
+        add("pytest".into(), format!("{PYTHON} -m pytest -v"), root, debug);
     }
     if let Some((path, language)) = current {
         let file = shell_quote(&path.to_string_lossy());
@@ -844,18 +872,18 @@ mod tests {
     fn go_python_and_js() {
         let go = "package main\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {}\n";
         let got = targets(Language::Go, Path::new("/p/add_test.go"), go);
-        assert_eq!(got, [("Test 'TestAdd'".into(), "go test -run '^TestAdd$' .".into(), Some(4))]);
+        assert_eq!(got, [("Test 'TestAdd'".into(), "go test -v -run '^TestAdd$' .".into(), Some(4))]);
 
         let py = "def test_one():\n    pass\n\nclass TestThing:\n    def test_two(self):\n        pass\n\nif __name__ == \"__main__\":\n    main()\n";
         let got = targets(Language::Python, Path::new("/p/t.py"), py);
         assert_eq!(got.iter().map(|t| t.0.as_str()).collect::<Vec<_>>(), ["Test 'test_one'", "Tests in 'TestThing'", "Test 'test_two'", "Run file"]);
-        assert_eq!(got[2].1, format!("{PYTHON} -m pytest /p/t.py::TestThing::test_two"));
+        assert_eq!(got[2].1, format!("{PYTHON} -m pytest -v /p/t.py::TestThing::test_two"));
 
         let dir = temp_project(&[("package.json", "{\"devDependencies\": {\"vitest\": \"1\"}}"), ("a.test.ts", "")]);
         let ts = "describe('math', () => {\n  it('adds 1+1', () => {});\n});\n";
         let got = targets(Language::TypeScript, &dir.join("a.test.ts"), ts);
         assert_eq!(got[0].0, "Tests in 'math'");
-        assert!(got[1].1.starts_with("npx vitest run ") && got[1].1.ends_with("-t 'adds 1\\+1'"), "{}", got[1].1);
+        assert!(got[1].1.starts_with("npx vitest run --reporter=verbose ") && got[1].1.ends_with("-t 'adds 1\\+1'"), "{}", got[1].1);
         std::fs::remove_dir_all(&dir).ok();
     }
 

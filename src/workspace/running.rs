@@ -359,6 +359,7 @@ impl Workspace {
                     row: None,
                     rows: 0..0,
                     debug: Some(DebugSpec::Attach { pid: p.pid, program: p.program }),
+                    test: None,
                 })
                 .collect();
             ws.update(cx, |ws, cx| {
@@ -403,6 +404,7 @@ impl Workspace {
                 row: None,
                 rows: 0..0,
                 debug: None,
+                test: None,
             })
             .collect();
         if debug {
@@ -575,6 +577,62 @@ impl Workspace {
         }
         for terminal in closing {
             self.remove_terminal(&terminal, window, cx);
+        }
+    }
+}
+
+impl Workspace {
+    // ---- Test results -----------------------------------------------------------------
+
+    /// A test run's results: the gutter's marks (every editor), a tab in the
+    /// Find panel with Rerun Failed and Rerun, and a notification that says
+    /// how it went (the panel isn't shown over the run's output unasked).
+    pub(super) fn show_test_run(&mut self, target: RunTarget, run: crate::test_run::TestRun, cx: &mut Context<Self>) {
+        use crate::{results_panel::TabButton, test_run};
+        let mut statuses = (*self.test_statuses).clone();
+        test_run::record(&mut statuses, &run);
+        self.test_statuses = Arc::new(statuses);
+        for editor in self.editors.clone() {
+            let statuses = self.test_statuses.clone();
+            editor.update(cx, |e, cx| e.set_test_statuses(statuses, cx));
+        }
+        let this = cx.entity().downgrade();
+        let run_button = |label: &str, icon: Icon, target: RunTarget| {
+            let this = this.clone();
+            TabButton {
+                icon,
+                label: label.to_string().into(),
+                on_click: std::rc::Rc::new(move |window, cx| {
+                    this.update(cx, |ws, cx| ws.run_target(target.clone(), window, cx)).ok();
+                }),
+            }
+        };
+        let mut buttons = Vec::new();
+        if let Some(failed) = test_run::rerun_failed(&target, &run) {
+            buttons.push(run_button("Rerun Failed", Icon::Refresh, failed));
+        }
+        buttons.push(run_button("Rerun", Icon::Play, target.clone()));
+        let failed = run.count(test_run::TestStatus::Failed);
+        let summary = run.summary();
+        let title = format!("{}: {summary}", target.name);
+        self.results.update(cx, |p, cx| p.show(title.into(), test_run::tree(&run), buttons, false, cx));
+        self.has_results = true;
+        let (kind, message) = match failed {
+            0 => (ToastKind::Success, format!("Tests passed: {summary}")),
+            _ => (ToastKind::Error, format!("Tests failed: {summary}")),
+        };
+        let button = (!self.shows(BottomPanel::Results)).then_some(ToastButton::ShowTestResults);
+        self.toast_with_button(kind, message, None, button, cx);
+        self.last_tests = Some((target, run));
+        cx.notify();
+    }
+
+    /// Rerun Failed Tests: the last test run's failed tests, the way it ran them.
+    pub(super) fn rerun_failed_tests(&mut self, _: &RerunFailedTests, window: &mut Window, cx: &mut Context<Self>) {
+        let rerun = self.last_tests.as_ref().and_then(|(target, run)| crate::test_run::rerun_failed(target, run));
+        match rerun {
+            Some(target) => self.run_target(target, window, cx),
+            None => self.toast(ToastKind::Info, "No failed tests to run again", None, cx),
         }
     }
 }

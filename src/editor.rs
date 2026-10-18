@@ -294,6 +294,10 @@ struct LayoutSnapshot {
     wrap_width: Pixels,
 }
 
+/// The run targets and test results `Editor::shown_run_rows` was made from,
+/// and its rows.
+type RunRows = (Option<(Arc<Vec<crate::run::RunTarget>>, Arc<crate::test_run::Statuses>)>, Arc<Vec<(usize, Option<crate::test_run::TestStatus>)>>);
+
 pub struct Editor {
     pub doc: Entity<Document>,
     mode: EditorMode,
@@ -346,7 +350,9 @@ pub struct Editor {
     /// Finds the diagnostics reaching into what's on screen.
     reach: Reach,
     /// Rows with a gutter ▶, for the run targets they're from.
-    run_rows: (Option<Arc<Vec<crate::run::RunTarget>>>, Arc<Vec<usize>>),
+    run_rows: RunRows,
+    /// The last results of the workspace's test runs, for the ▶'s pass / fail mark.
+    test_statuses: Arc<crate::test_run::Statuses>,
     /// See `row_problems`, for a document state.
     row_problems: (Option<(u64, u64, u64)>, Arc<Vec<(usize, Option<usize>, usize)>>),
     marked_range: Option<Range<usize>>,
@@ -506,6 +512,7 @@ impl Editor {
             blocks_cache: None,
             reach: Reach::default(),
             run_rows: (None, Arc::default()),
+            test_statuses: Arc::default(),
             row_problems: (None, Arc::default()),
             marked_range: None,
             indent_unit: String::new(),
@@ -1912,15 +1919,29 @@ impl Editor {
         self.row_problems.1.clone()
     }
 
-    /// Rows with a gutter ▶, sorted, for the run targets drawn.
-    fn shown_run_rows(&mut self, cx: &mut Context<Self>) -> Arc<Vec<usize>> {
+    /// Rows with a gutter ▶, sorted, each with its test's last status, for
+    /// the run targets drawn (found again when they or the results change).
+    fn shown_run_rows(&mut self, cx: &mut Context<Self>) -> Arc<Vec<(usize, Option<crate::test_run::TestStatus>)>> {
         let targets = self.shown_run_targets(cx);
-        if !self.run_rows.0.as_ref().is_some_and(|t| Arc::ptr_eq(t, &targets)) {
-            let mut rows: Vec<usize> = targets.iter().filter_map(|t| t.row).collect();
-            rows.sort_unstable();
-            self.run_rows = (Some(targets), Arc::new(rows));
+        let current = self.run_rows.0.as_ref().is_some_and(|(t, s)| Arc::ptr_eq(t, &targets) && Arc::ptr_eq(s, &self.test_statuses));
+        if !current {
+            let statuses = self.test_statuses.clone();
+            let mut rows: Vec<_> = targets
+                .iter()
+                .filter_map(|t| Some((t.row?, t.test.as_ref().and_then(|test| crate::test_run::status_of(test, &statuses)))))
+                .collect();
+            rows.sort_unstable_by_key(|(row, _)| *row);
+            self.run_rows = (Some((targets, statuses)), Arc::new(rows));
         }
         self.run_rows.1.clone()
+    }
+
+    /// The workspace's test results changed: the ▶ marks follow.
+    pub fn set_test_statuses(&mut self, statuses: Arc<crate::test_run::Statuses>, cx: &mut Context<Self>) {
+        if !Arc::ptr_eq(&self.test_statuses, &statuses) {
+            self.test_statuses = statuses;
+            cx.notify();
+        }
     }
 
     /// Both brackets of the pairs around carets at `heads` (a few, so many
@@ -3866,12 +3887,18 @@ impl Editor {
                         ));
                     }
 
-                    if run_rows.binary_search(&row).is_ok() {
+                    if let Ok(ix) = run_rows.binary_search_by_key(&row, |(r, _)| *r) {
                         let icon_size = px(RUN_ICON);
+                        // A test that ran shows how it went; clicking still runs it.
+                        let (icon, color) = match run_rows[ix].1 {
+                            Some(crate::test_run::TestStatus::Passed) => (Icon::CircleCheck, theme.success),
+                            Some(crate::test_run::TestStatus::Failed) => (Icon::CircleX, theme.error),
+                            _ => (Icon::Play, theme.success),
+                        };
                         frame.fold_icons.push((
                             Bounds::new(point(bounds.left() + px(5.), y + (line_height - icon_size) / 2.), size(icon_size, icon_size)),
-                            Icon::Play.path(),
-                            theme.success.into(),
+                            icon.path(),
+                            color.into(),
                         ));
                     } else if let Some((worst, _)) = worst {
                         let dot = px(6.);

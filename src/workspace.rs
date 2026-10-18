@@ -151,6 +151,7 @@ actions!(
         NextPane,
         RunConfiguration,
         Rerun,
+        RerunFailedTests,
         StopRun,
         DebugConfiguration,
         AttachToProcess,
@@ -278,6 +279,8 @@ enum ToastButton {
     UndoFile(u64),
     /// Save the files changed without a tab; shown while there are any.
     SaveBackground,
+    /// The last test run's results, in the Find panel.
+    ShowTestResults,
 }
 
 impl ToastButton {
@@ -285,6 +288,7 @@ impl ToastButton {
         match self {
             ToastButton::UndoFile(_) => "Undo",
             ToastButton::SaveBackground => "Save All",
+            ToastButton::ShowTestResults => "Show Results",
         }
     }
 }
@@ -732,6 +736,10 @@ pub struct Workspace {
     /// Whether it has any, for the title bar's toggle (the root render
     /// doesn't read the panel, which notifies as its selection moves).
     has_results: bool,
+    /// The last status of each test run here, for the gutter's marks
+    /// (given to every editor), and the last test run, for Rerun Failed.
+    test_statuses: Arc<crate::test_run::Statuses>,
+    last_tests: Option<(RunTarget, crate::test_run::TestRun)>,
     git_log: Entity<GitLog>,
     /// The Push dialog a diff was opened from; it comes back when the diff closes.
     diff_return: Option<Entity<PushDialog>>,
@@ -1103,6 +1111,8 @@ impl Workspace {
             problems,
             results,
             has_results: false,
+            test_statuses: Arc::default(),
+            last_tests: None,
             git_log,
             diff_return: None,
             repo: None,
@@ -1388,6 +1398,8 @@ impl Workspace {
     /// What starts once a tab's text is there (when it opens, or when a
     /// restored tab is first shown): breakpoints, language server, Git changes.
     fn file_opened(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
+        let statuses = self.test_statuses.clone();
+        editor.update(cx, |e, cx| e.set_test_statuses(statuses, cx));
         // Another editor of the document has what's per document already
         // (breakpoints, the language server, the Git changes): this one shows them.
         if self.siblings(editor, cx).iter().any(|s| s.read(cx).is_loaded()) {
