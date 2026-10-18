@@ -40,7 +40,10 @@ Everything Kuana does, in one list. Each area has its own page with the details.
 - Inline diagnostics, gutter markers, scrollbar markers, a Problems panel and Next / Previous Problem
 - Multi-cursor (next/all occurrences, of the caret's word as a whole word with its case; ⌥-click,
   add caret above/below), syntax-aware Extend Selection,
-  auto-closing pairs, smart indent, line/block comments, move/duplicate/join/delete lines
+  auto-closing pairs (not in strings and comments; typing steps over only the closing characters
+  they put in), smart indent (closing brackets and `else:`/`fi` go back out as they're typed, pasted
+  lines keep their shape at the caret's indentation), line/block comments, move/duplicate/join/delete lines;
+  in an embedded language (JavaScript in `<script>`, a Markdown code fence) these follow that language
 - Matching-bracket highlight (ignores brackets in strings and comments) and an editor right-click menu
 - Soft wrap that keeps indentation, on by default for Markdown and plain text (View → Soft-Wrap
   toggles it per file)

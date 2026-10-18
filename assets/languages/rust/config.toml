@@ -3,6 +3,14 @@ grammar = "rust"
 path_suffixes = ["rs"]
 line_comments = ["// "]
 block_comment = { start = "/*", end = "*/" }
+# Pairs typing closes (Zed's format), not inside strings and comments; no `'`:
+# lifetimes (`Foo<'a>`) outnumber char literals.
+brackets = [
+    { start = "(", end = ")", not_in = ["string", "comment"] },
+    { start = "[", end = "]", not_in = ["string", "comment"] },
+    { start = "{", end = "}", not_in = ["string", "comment"] },
+    { start = "\"", end = "\"", not_in = ["string", "comment"] },
+]
 
 [queries]
 highlights = ["crate:rust/highlights", "highlights.scm"]

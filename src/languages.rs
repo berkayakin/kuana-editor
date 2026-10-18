@@ -16,7 +16,7 @@ use std::{
 use toml::{Table, Value};
 use tree_sitter::Language as TsLanguage;
 
-use crate::syntax::{LangConfig, Language, LanguageQueries, OutlineConfig};
+use crate::syntax::{EditingRules, LangConfig, Language, LanguageQueries, OutlineConfig};
 
 /// The files under `assets/languages`, by path.
 const FILES: &[(&str, &str)] = &[
@@ -96,6 +96,8 @@ pub struct BuiltinDef {
     pub tab_size: Option<usize>,
     pub hard_tabs: Option<bool>,
     pub soft_wrap: Option<bool>,
+    /// Auto-closed pairs and outdenting lines (`brackets`, `decrease_indent_patterns`).
+    pub editing: EditingRules,
     grammar: String,
     queries: Table,
     loaded: OnceLock<Loaded>,
@@ -170,6 +172,7 @@ fn read(language: Language, dir: &'static str) -> BuiltinDef {
         tab_size: config.get("tab_size").and_then(Value::as_integer).map(|n| n.clamp(1, 16) as usize),
         hard_tabs: config.get("hard_tabs").and_then(Value::as_bool),
         soft_wrap: config.get("soft_wrap").and_then(Value::as_bool),
+        editing: EditingRules::from_config(&config),
         grammar: text("grammar").unwrap_or_else(|| dir.to_string()),
         queries: config.get("queries").and_then(Value::as_table).cloned().unwrap_or_default(),
         loaded: OnceLock::new(),

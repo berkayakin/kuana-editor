@@ -5,3 +5,10 @@ path_suffixes = ["json", "jsonc", ".babelrc", ".eslintrc", ".swcrc"]
 line_comments = ["// "]
 block_comment = { start = "/*", end = "*/" }
 tab_size = 2
+# Pairs typing closes (Zed's format), not inside strings and comments.
+brackets = [
+    { start = "(", end = ")", not_in = ["string", "comment"] },
+    { start = "[", end = "]", not_in = ["string", "comment"] },
+    { start = "{", end = "}", not_in = ["string", "comment"] },
+    { start = "\"", end = "\"", not_in = ["string", "comment"] },
+]

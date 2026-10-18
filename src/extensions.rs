@@ -153,6 +153,8 @@ pub struct LanguageDef {
     pub block_comment: Option<(&'static str, &'static str)>,
     pub tab_size: Option<usize>,
     pub hard_tabs: Option<bool>,
+    /// Auto-closed pairs and outdenting lines (`brackets`, `decrease_indent_patterns`).
+    pub editing: crate::syntax::EditingRules,
     /// A command reading the file on stdin and writing it formatted.
     pub formatter: Option<Vec<String>>,
     extension: String,
@@ -799,6 +801,7 @@ fn read_language(dir: &Path, grammars: &HashMap<String, Grammar>, extension: &st
         block_comment: block_comment.map(|(start, end)| (leak(start), leak(end))),
         tab_size: config.get("tab_size").and_then(Value::as_integer).map(|n| n.clamp(1, 16) as usize),
         hard_tabs: config.get("hard_tabs").and_then(Value::as_bool),
+        editing: crate::syntax::EditingRules::from_config(&config),
         formatter,
         extension: extension.to_string(),
         highlights: query("highlights.scm", "highlights.scm").unwrap_or_default(),

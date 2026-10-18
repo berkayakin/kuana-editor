@@ -41,6 +41,7 @@ use crate::{
     lint::{self, Severity, external::ExternalLinter},
     search::SearchMatches,
     settings::{FileSettings, Settings, ShowWhitespace},
+    syntax::Dedent,
     theme::Theme,
     ui::HoverFill,
     wrap::{self, Break, WrapKey, WrapMap},
@@ -417,6 +418,9 @@ pub struct Editor {
     folds: crate::fold::Folds,
     /// The tab stops of a snippet being filled in here (they follow edits).
     snippet: Option<crate::snippets::SnippetStops>,
+    /// Closing characters typing put in (they follow edits): typing that
+    /// character there steps over it, others are typed as they are.
+    autoclosed: Vec<Autoclosed>,
     /// File Structure's symbols for a document version (breadcrumbs, sticky scroll).
     outline: derived::Derived<(u64, crate::syntax::Language), Vec<crate::syntax::Symbol>>,
     /// Markdown: a preview of the document is open (the workspace says so),
@@ -554,6 +558,7 @@ impl Editor {
             fold_pills: Vec::new(),
             folds: Default::default(),
             snippet: None,
+            autoclosed: Vec::new(),
             outline: derived::Derived::new(),
             previewed: false,
             sticky_rows: Vec::new(),
@@ -606,11 +611,21 @@ impl Editor {
         result
     }
 
-    /// Moves what this editor keeps in the text (folds, a snippet's stops)
-    /// across the document's edits since `version`.
+    /// Moves what this editor keeps in the text (folds, a snippet's stops,
+    /// closing characters it typed) across the document's edits since `version`.
     fn follow_edits(&mut self, version: u64, cx: &App) {
         let doc = self.doc.read(cx);
         self.folds.follow(doc, version);
+        if !self.autoclosed.is_empty() {
+            let patches: Option<Vec<&crate::document::Patch>> = doc.patches_since(version).map(Iterator::collect);
+            let map = |offset: usize| patches.iter().flatten().fold(offset, |offset, patch| patch.map(offset));
+            // The closing character's end moves past text typed before it; one
+            // the edits replaced or removed isn't there any more.
+            self.autoclosed.retain_mut(|a| {
+                (a.start, a.end) = (map(a.start), map(a.end));
+                patches.is_some() && a.end > a.start && doc.char_before(a.end) == Some(a.close)
+            });
+        }
         if let Some(snippet) = &mut self.snippet {
             let kept = doc.patches_since(version).is_some_and(|mut patches| patches.all(|patch| snippet.shift(patch)));
             if !kept {
@@ -1230,6 +1245,12 @@ impl Editor {
             .iter()
             .position(|s| s.range().start <= primary_sel.range().start && primary_sel.range().end <= s.range().end)
             .unwrap_or(merged.len() - 1);
+        // A pair typing closed is stepped over only while a caret is in it:
+        // the first selection from its start on (they're sorted and apart).
+        self.autoclosed.retain(|a| {
+            let at = merged.partition_point(|s| s.range().start < a.start);
+            merged.get(at).is_some_and(|s| s.is_empty() && a.holds(s.head))
+        });
         self.selections = merged;
         self.selections_generation += 1;
         if !std::mem::take(&mut self.expanding) {
@@ -1273,12 +1294,13 @@ impl Editor {
     /// Applies one edit per selection. The closure returns the replaced range,
     /// the new text, and where the cursor lands within the new text (`None`
     /// selects the whole inserted text).
+    /// Returns where each selection's new text went, in their order.
     fn edit_selections(
         &mut self,
         kind: EditKind,
         cx: &mut Context<Self>,
         mut f: impl FnMut(&Document, &Selection) -> (Range<usize>, String, Option<usize>),
-    ) {
+    ) -> Vec<Range<usize>> {
         let before = self.selections.clone();
         let mut edits = Vec::with_capacity(before.len());
         let mut placements = Vec::with_capacity(before.len());
@@ -1289,7 +1311,7 @@ impl Editor {
         }
         let new_ranges = self.change_doc(cx, |doc| doc.edit(edits, &before, kind));
         let selections = new_ranges
-            .into_iter()
+            .iter()
             .zip(placements)
             .map(|(r, place)| match place {
                 Some(off) => Selection::cursor(r.start + off),
@@ -1299,6 +1321,7 @@ impl Editor {
         self.goal_x = None;
         self.set_selections(selections, self.primary, cx);
         self.after_edit(cx);
+        new_ranges
     }
 
     /// Makes the text `text`, as one edit that changes only the lines that
@@ -1365,42 +1388,83 @@ impl Editor {
             EditKind::Typing
         };
         let typed = text.to_string();
+        let mut chars = typed.chars();
+        let single = match (chars.next(), chars.next()) {
+            (Some(c), None) => Some(c),
+            _ => None,
+        };
         // Text fields take text as typed: a closing bracket added to a search
         // would change what it finds.
-        let pairs = !self.is_chromeless();
-        self.edit_selections(kind, cx, |doc, sel| {
-            let range = sel.range();
-            let mut chars = typed.chars();
-            let single = match (chars.next(), chars.next()) {
-                (Some(c), None) => Some(c),
-                _ => None,
-            };
-            if let Some(c) = single.filter(|_| pairs) {
-                let next = doc.char_at(range.end);
-                // Type over an auto-inserted closing character.
-                if sel.is_empty() && matches!(c, ')' | ']' | '}' | '"' | '\'' | '`') && next == Some(c) {
-                    return (range.end..range.end + 1, c.to_string(), Some(1));
-                }
-                if let Some(close) = closing_pair(c) {
-                    if !sel.is_empty() {
-                        // Wrap the selection.
-                        let inner = doc.slice(range.clone());
-                        let len = inner.len();
-                        return (range, format!("{c}{inner}{close}"), Some(len + 2));
-                    }
-                    let prev = doc.char_before(range.start);
-                    let next_ok = next.is_none_or(|n| n.is_whitespace() || matches!(n, ')' | ']' | '}' | ',' | ';' | '>'));
-                    let is_quote = matches!(c, '"' | '\'' | '`');
-                    let prev_ok = !is_quote || prev.is_none_or(|p| !p.is_alphanumeric() && p != c);
-                    if next_ok && prev_ok {
-                        return (range, format!("{c}{close}"), Some(1));
-                    }
-                }
-            }
-            let len = typed.len();
-            (range, typed.clone(), Some(len))
+        let Some(c) = single.filter(|_| !self.is_chromeless()) else {
+            self.edit_selections(kind, cx, |_, sel| (sel.range(), typed.clone(), Some(typed.len())));
+            self.after_typing(text, cx);
+            return;
+        };
+        let autoclosed: HashMap<usize, Autoclosed> = self.autoclosed.iter().map(|a| (a.end, a.clone())).collect();
+        // Per selection, the closing character typing it put in.
+        let mut closed: Vec<Option<char>> = Vec::with_capacity(self.selections.len());
+        let ranges = self.edit_selections(kind, cx, |doc, sel| {
+            let (edit, close) = type_char(doc, sel, c, &autoclosed);
+            closed.push(close);
+            edit
         });
+        for (range, close) in ranges.into_iter().zip(closed) {
+            if let Some(close) = close {
+                self.autoclosed.push(Autoclosed { start: range.start + c.len_utf8(), end: range.end, close });
+            }
+        }
+        self.outdent_typed(c, kind, cx);
         self.after_typing(text, cx);
+    }
+
+    /// After typing `c`: a line it made read like the end of a block goes
+    /// back out, by the language's `indents.scm` (`@end`, `@outdent`: Ruby's
+    /// `end`) or its decrease-indent patterns (Python's `else:`), once, when
+    /// the character completes it. In the typing's undo step.
+    fn outdent_typed(&mut self, c: char, kind: EditKind, cx: &mut Context<Self>) {
+        let (unit, tab_size) = (self.indent_unit.clone(), self.tab_size);
+        let doc = self.doc.read(cx);
+        let mut edits = Vec::new();
+        for s in &self.selections {
+            if !s.is_empty() || doc.char_before(s.head) != Some(c) {
+                continue;
+            }
+            let row = doc.row_of(s.head);
+            let start = doc.line_start(row);
+            let line = doc.line_text(row);
+            let current = leading_whitespace(&line);
+            let first = start + current.len();
+            if first >= s.head {
+                continue;
+            }
+            let columns = indent_columns(&current, tab_size);
+            let dedent = doc.syntax().dedent_at(doc.rope(), first, s.head);
+            let target = match dedent {
+                Some(Dedent::LikeRow(row)) => Some(leading_whitespace(&doc.line_text(row))),
+                Some(Dedent::OneLevel) => (0..row).rev().map(|r| doc.line_text(r)).find(|t| !t.trim().is_empty()).map(|above| {
+                    let above = indent_columns(&leading_whitespace(&above), tab_size);
+                    indent_of_columns(above.saturating_sub(indent_columns(&unit, tab_size)), &unit, tab_size)
+                }),
+                None => {
+                    // The line before `c` went in didn't read like that yet.
+                    let at = s.head - start;
+                    let before = format!("{}{}", &line[..at - c.len_utf8()], &line[at..]);
+                    let rules = doc.syntax().language_at(first).editing();
+                    rules.decrease.iter().find(|d| d.pattern.is_match(&line) && !d.pattern.is_match(&before)).and_then(|d| {
+                        decreased_indent(doc, row, columns, &d.valid_after, tab_size)
+                    })
+                }
+            };
+            let Some(target) = target else { continue };
+            // Level with an opening line goes either way; the others only out.
+            let level = matches!(dedent, Some(Dedent::LikeRow(_)));
+            if target != current && (level || indent_columns(&target, tab_size) < columns) {
+                edits.push((start..first, target));
+            }
+        }
+        if !edits.is_empty() {
+            self.edit_and_remap(edits, kind, cx);
+        }
     }
 
     fn schedule_lint(&mut self, delay: Duration, cx: &mut Context<Self>) {
@@ -2291,7 +2355,7 @@ impl Editor {
             let prev = doc.char_before(head);
             if pairs
                 && let (Some(p), Some(n)) = (prev, doc.char_at(head))
-                && closing_pair(p) == Some(n)
+                && doc.syntax().language_at(head).editing().pair_opened_by(p).is_some_and(|pair| pair.close == n)
             {
                 return (head - p.len_utf8()..head + n.len_utf8(), String::new(), Some(0));
             }
@@ -2341,14 +2405,13 @@ impl Editor {
             return;
         }
         let unit = self.indent_unit.clone();
-        let is_html = self.doc.read(cx).language == crate::syntax::Language::Html;
-        // Python blocks and YAML mappings open with a trailing `:`.
-        let colon_opens = matches!(
-            self.doc.read(cx).language,
-            crate::syntax::Language::Python | crate::syntax::Language::Yaml
-        );
         self.edit_selections(EditKind::Other, cx, |doc, s| {
             let r = s.range();
+            // The language at the caret: JavaScript in a `<script>`, Python in a Markdown fence.
+            let language = doc.syntax().language_at(r.start);
+            let is_html = language == crate::syntax::Language::Html;
+            // Python blocks and YAML mappings open with a trailing `:`.
+            let colon_opens = matches!(language, crate::syntax::Language::Python | crate::syntax::Language::Yaml);
             let row = doc.row_of(r.start);
             let line = doc.line_text(row);
             let line_start = doc.line_start(row);
@@ -2487,13 +2550,22 @@ impl Editor {
     }
 
     fn toggle_comment(&mut self, _: &ToggleComment, _: &mut Window, cx: &mut Context<Self>) {
-        let language = self.doc.read(cx).language;
+        self.toggle_line_comments(cx);
+    }
+
+    fn toggle_line_comments(&mut self, cx: &mut Context<Self>) {
         let mut edits = Vec::new();
         for block in self.selected_row_blocks(cx) {
             let rows: Vec<usize> = block.clone().filter(|&r| !self.doc.read(cx).line_text(r).trim().is_empty()).collect();
-            if rows.is_empty() {
+            let Some(&first) = rows.first() else {
                 continue;
-            }
+            };
+            // The language of the block's first line: `//` for JavaScript in a `<script>`.
+            let language = {
+                let doc = self.doc.read(cx);
+                let text = doc.line_text(first);
+                doc.syntax().language_of_char(doc.line_start(first) + text.len() - text.trim_start().len())
+            };
             match language.line_comment() {
                 Some(prefix) => {
                     let token = prefix.trim_end();
@@ -2746,14 +2818,29 @@ impl Editor {
         }
     }
 
+    /// `text` for the clipboard. One selection's copy notes how far its
+    /// first line was indented, which its text may not show (it's usually
+    /// selected from the first word), for `paste` to indent the rest by.
+    fn clipboard_item(&self, text: String, whole_lines: bool, cx: &App) -> ClipboardItem {
+        match self.selections.as_slice() {
+            [s] if !whole_lines && !s.is_empty() => {
+                let doc = self.doc.read(cx);
+                let line = doc.line_text(doc.row_of(s.range().start));
+                let indent = indent_columns(&leading_whitespace(&line), self.tab_size);
+                ClipboardItem::new_string_with_json_metadata(text, CopiedIndent { first_line_indent: indent })
+            }
+            _ => ClipboardItem::new_string(text),
+        }
+    }
+
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        let (text, _) = self.copy_text(cx);
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        let (text, whole_lines) = self.copy_text(cx);
+        cx.write_to_clipboard(self.clipboard_item(text, whole_lines, cx));
     }
 
     fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
         let (text, whole_lines) = self.copy_text(cx);
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        cx.write_to_clipboard(self.clipboard_item(text, whole_lines, cx));
         if whole_lines {
             let mut edits = Vec::new();
             for block in self.selected_row_blocks(cx) {
@@ -2768,9 +2855,19 @@ impl Editor {
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+        let Some(item) = cx.read_from_clipboard() else {
             return;
         };
+        let Some(text) = item.text() else {
+            return;
+        };
+        let first_line_indent = item.metadata().and_then(|m| serde_json::from_str::<CopiedIndent>(m).ok()).map(|c| c.first_line_indent);
+        self.paste_text(text, first_line_indent, cx);
+    }
+
+    /// Pastes `text`; `first_line_indent` is how far its first line was
+    /// indented where it was copied, when Kuana copied it.
+    fn paste_text(&mut self, text: String, first_line_indent: Option<usize>, cx: &mut Context<Self>) {
         let mut text = crate::encoding::to_lf(text);
         if self.is_single_line() {
             text = text.trim_end_matches('\n').replace('\n', " ");
@@ -2786,8 +2883,15 @@ impl Editor {
                 (s.range(), t, Some(len))
             });
         } else {
-            let len = text.len();
-            self.edit_selections(EditKind::Other, cx, |_, s| (s.range(), text.clone(), Some(len)));
+            // Lines of code go in as a block, indented to the caret's line.
+            let block = !self.is_chromeless() && text.trim_end_matches('\n').contains('\n');
+            let (unit, tab_size) = (self.indent_unit.clone(), self.tab_size);
+            self.edit_selections(EditKind::Other, cx, |doc, s| {
+                let indented = block.then(|| reindent_block(doc, s.range().start, &text, first_line_indent, &unit, tab_size)).flatten();
+                let text = indented.unwrap_or_else(|| text.clone());
+                let len = text.len();
+                (s.range(), text, Some(len))
+            });
         }
     }
 
@@ -4193,16 +4297,198 @@ fn severity_color(theme: &Theme, severity: Severity) -> Hsla {
     .into()
 }
 
-fn closing_pair(c: char) -> Option<char> {
-    match c {
-        '(' => Some(')'),
-        '[' => Some(']'),
-        '{' => Some('}'),
-        '"' => Some('"'),
-        '\'' => Some('\''),
-        '`' => Some('`'),
-        _ => None,
+/// A closing character typing put in: `start` is just after its opening
+/// one, `end` just after it. Typing it with a caret right before it steps
+/// over it, as in Zed (`autoclose_regions`); one typed by hand is typed.
+#[derive(Clone, Debug, PartialEq)]
+struct Autoclosed {
+    start: usize,
+    end: usize,
+    close: char,
+}
+
+impl Autoclosed {
+    /// Whether a caret at `offset` is between the pair.
+    fn holds(&self, offset: usize) -> bool {
+        self.start <= offset && offset + self.close.len_utf8() <= self.end
     }
+}
+
+/// What typing `c` at `sel` does in a code editor: the edit (range, text,
+/// caret in the text) and the closing character it adds, if any. It steps
+/// over a closing character typing put in, wraps a selection in a pair,
+/// closes a pair of the language at the caret (outside the strings and
+/// comments its `not_in` names), and puts a closing bracket starting its
+/// line level with the line its opening one is on.
+/// `autoclosed` is by where each ends.
+fn type_char(
+    doc: &Document,
+    sel: &Selection,
+    c: char,
+    autoclosed: &HashMap<usize, Autoclosed>,
+) -> ((Range<usize>, String, Option<usize>), Option<char>) {
+    let range = sel.range();
+    let len = c.len_utf8();
+    let next = doc.char_at(range.end);
+    if sel.is_empty() && next == Some(c) && autoclosed.get(&(range.end + len)).is_some_and(|a| a.close == c && a.holds(range.end)) {
+        return ((range.end..range.end + len, c.to_string(), Some(len)), None);
+    }
+    let syntax = doc.syntax();
+    let rules = syntax.language_at(range.start).editing();
+    if let Some(pair) = rules.pair_opened_by(c) {
+        if !sel.is_empty() {
+            let inner = doc.slice(range.clone());
+            let caret = inner.len() + len + pair.close.len_utf8();
+            return ((range, format!("{c}{inner}{}", pair.close), Some(caret)), None);
+        }
+        let prev = doc.char_before(range.start);
+        let next_ok = next.is_none_or(|n| n.is_whitespace() || matches!(n, ')' | ']' | '}' | ',' | ';' | '>'));
+        let prev_ok = pair.open != pair.close || prev.is_none_or(|p| !p.is_alphanumeric() && p != c);
+        let scope_ok = || syntax.scope_at(doc.rope(), range.start).is_none_or(|scope| !pair.not_in.iter().any(|n| n == scope));
+        if next_ok && prev_ok && scope_ok() {
+            return ((range, format!("{c}{}", pair.close), Some(len)), Some(pair.close));
+        }
+    }
+    let open = match c {
+        ')' => Some("("),
+        ']' => Some("["),
+        '}' => Some("{"),
+        _ => None,
+    };
+    if let Some(open) = open.filter(|_| sel.is_empty()) {
+        let line_start = doc.line_start(doc.row_of(range.start));
+        let before = doc.slice(line_start..range.start);
+        if before.chars().all(|ch| ch == ' ' || ch == '\t')
+            && syntax.scope_at(doc.rope(), range.start).is_none()
+            && let Some(at) = syntax.unclosed_bracket(range.start, open, &c.to_string())
+        {
+            let indent = leading_whitespace(&doc.line_text(doc.row_of(at)));
+            if indent != before {
+                let caret = indent.len() + len;
+                return ((line_start..range.end, format!("{indent}{c}"), Some(caret)), None);
+            }
+        }
+    }
+    ((range, c.to_string(), Some(len)), None)
+}
+
+/// For a line at `row` with `columns` of indentation that a decrease-indent
+/// pattern matched: the indentation of the nearest line above that's less
+/// indented and starts with a word of `valid_after` (any, when empty), not
+/// looking past a less indented one that doesn't (another block).
+fn decreased_indent(doc: &Document, row: usize, columns: usize, valid_after: &[String], tab_size: usize) -> Option<String> {
+    let mut limit = columns;
+    for r in (0..row).rev().take(1000) {
+        let text = doc.line_text(r);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let indent = leading_whitespace(&text);
+        let width = indent_columns(&indent, tab_size);
+        if width >= limit {
+            continue;
+        }
+        if valid_after.is_empty() || valid_after.iter().any(|w| starts_with_word(trimmed, w)) {
+            return Some(indent);
+        }
+        limit = width;
+    }
+    None
+}
+
+/// What Kuana's copies tell its pastes (clipboard metadata, JSON).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CopiedIndent {
+    /// The columns the copied text's first line was indented by.
+    first_line_indent: usize,
+}
+
+/// Lines of code pasted at `at`, indented as a block, as Zed's
+/// `AutoindentMode::Block`: the first line goes at the caret (its own
+/// indentation dropped when only indentation is before the caret, kept at
+/// a line's start), the others move by as much as it did, keeping their
+/// structure. Its first line's indentation where it came from is
+/// `first_line_indent` when Kuana copied it, else read off the text. None
+/// in prose, which goes in as it is.
+fn reindent_block(doc: &Document, at: usize, text: &str, first_line_indent: Option<usize>, unit: &str, tab_size: usize) -> Option<String> {
+    use crate::syntax::Language;
+    if matches!(doc.syntax().language_at(at), Language::PlainText | Language::Markdown) {
+        return None;
+    }
+    let row = doc.row_of(at);
+    let before = doc.slice(doc.line_start(row)..at);
+    let lines: Vec<&str> = text.split('\n').collect();
+    let only_indent = !before.is_empty() && before.chars().all(|c| c == ' ' || c == '\t');
+    // At a line's start the first line keeps its own indentation.
+    let target = indent_columns(&leading_whitespace(if before.is_empty() { lines[0] } else { &before }), tab_size);
+    let original = first_line_indent.unwrap_or_else(|| copied_indent(&lines, unit, tab_size));
+    let delta = target as isize - original as isize;
+    let mut out = String::with_capacity(text.len());
+    for (i, line) in lines.iter().enumerate() {
+        if i == 0 {
+            out.push_str(if only_indent { line.trim_start_matches([' ', '\t']) } else { line });
+            continue;
+        }
+        out.push('\n');
+        let indent = leading_whitespace(line);
+        let columns = indent_columns(&indent, tab_size);
+        let moved = (columns as isize + delta).max(0) as usize;
+        if line.trim().is_empty() || moved == columns {
+            out.push_str(line);
+        } else {
+            out.push_str(&indent_of_columns(moved, unit, tab_size));
+            out.push_str(&line[indent.len()..]);
+        }
+    }
+    Some(out)
+}
+
+/// How far pasted `lines` were indented where they came from, by their
+/// first line: its own indentation if it has some. Else it was copied from
+/// its first word: level with a closing line at the end (`}`), else a level
+/// out from the others when it opens a block (`{`, `:`), else level with them.
+fn copied_indent(lines: &[&str], unit: &str, tab_size: usize) -> usize {
+    let first = lines[0];
+    let own = leading_whitespace(first);
+    if !own.is_empty() {
+        return indent_columns(&own, tab_size);
+    }
+    let rest: Vec<&str> = lines[1..].iter().copied().filter(|l| !l.trim().is_empty()).collect();
+    let columns = |l: &str| indent_columns(&leading_whitespace(l), tab_size);
+    let Some(least) = rest.iter().map(|l| columns(l)).min() else { return 0 };
+    let last = rest[rest.len() - 1];
+    if last.trim_start().starts_with(['}', ')', ']']) {
+        columns(last)
+    } else if first.trim_end().ends_with(['{', '(', '[', ':']) {
+        least.saturating_sub(indent_columns(unit, tab_size))
+    } else {
+        least
+    }
+}
+
+fn leading_whitespace(line: &str) -> String {
+    line.chars().take_while(|c| *c == ' ' || *c == '\t').collect()
+}
+
+/// How many columns `indent` takes.
+fn indent_columns(indent: &str, tab_size: usize) -> usize {
+    indent.chars().fold(0, |col, c| if c == '\t' { col + tab_size - col % tab_size } else { col + 1 })
+}
+
+/// `columns` of indentation the way `unit` indents: tabs (then spaces for
+/// what's left) or spaces.
+fn indent_of_columns(columns: usize, unit: &str, tab_size: usize) -> String {
+    if unit == "\t" {
+        format!("{}{}", "\t".repeat(columns / tab_size), " ".repeat(columns % tab_size))
+    } else {
+        " ".repeat(columns)
+    }
+}
+
+/// Whether `line` (trimmed) starts with the word `word`.
+fn starts_with_word(line: &str, word: &str) -> bool {
+    line.strip_prefix(word).is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
 }
 
 /// The indentation a file already uses, if it has indented lines.
@@ -5092,11 +5378,20 @@ impl Editor {
     }
 
     fn toggle_block_comment(&mut self, _: &ToggleBlockComment, _: &mut Window, cx: &mut Context<Self>) {
-        let Some((open, close)) = self.doc.read(cx).language.block_comment() else {
+        self.toggle_block_comments(cx);
+    }
+
+    fn toggle_block_comments(&mut self, cx: &mut Context<Self>) {
+        let syntax = self.doc.read(cx).syntax();
+        if self.selections.iter().all(|s| syntax.language_at(s.range().start).block_comment().is_none()) {
             return;
-        };
+        }
         self.edit_selections(EditKind::Other, cx, |doc, s| {
             let range = s.range();
+            // The language where the selection starts: `/* */` in a `<style>`.
+            let Some((open, close)) = doc.syntax().language_at(range.start).block_comment() else {
+                return (range, doc.slice(s.range()), None);
+            };
             let text = doc.slice(range.clone());
             if s.is_empty() {
                 return (range, format!("{open}{close}"), Some(open.len()));
@@ -6051,6 +6346,153 @@ mod text_field_tests {
         // The code editor pairs them.
         let code = cx.new(|cx| Editor::new(Document::empty(), cx));
         assert_eq!(typed(&code, "f(", cx), "f()");
+    }
+}
+
+#[cfg(test)]
+mod editing_tests {
+    use gpui::{AppContext, TestAppContext};
+
+    use super::*;
+
+    /// An editor of `text` as the file `name`, its caret where `|` is.
+    fn open(cx: &mut TestAppContext, name: &str, text: &str) -> Entity<Editor> {
+        let at = text.find('|').expect("a caret");
+        let text = text.replacen('|', "", 1);
+        let editor = cx.new(|cx| Editor::new(Document::from_text(text, Some(name.into())), cx));
+        editor.update(cx, |e, cx| e.set_selections(vec![Selection::cursor(at)], 0, cx));
+        editor
+    }
+
+    /// The text with `|` at the caret.
+    fn shown(editor: &Entity<Editor>, cx: &mut TestAppContext) -> String {
+        editor.read_with(cx, |e, cx| {
+            let mut text = e.text(cx);
+            text.insert(e.primary_selection().head, '|');
+            text
+        })
+    }
+
+    fn typed(editor: &Entity<Editor>, keys: &str, cx: &mut TestAppContext) -> String {
+        for c in keys.chars() {
+            editor.update(cx, |e, cx| e.insert(&c.to_string(), cx));
+            // Background parses land between keys, as they do while typing.
+            cx.run_until_parked();
+        }
+        shown(editor, cx)
+    }
+
+    fn commented(name: &str, text: &str, cx: &mut TestAppContext) -> String {
+        let editor = open(cx, name, text);
+        editor.update(cx, |e, cx| e.toggle_line_comments(cx));
+        shown(&editor, cx)
+    }
+
+    #[gpui::test]
+    fn comments_follow_the_language_at_the_caret(cx: &mut TestAppContext) {
+        let html = "<p>x</p>\n<script>\n  let a = 1;\n</script>\n";
+        let at = |line: &str| {
+            let i = html.find(line).unwrap();
+            format!("{}|{}", &html[..i], &html[i..])
+        };
+        // JavaScript in a `<script>`; the HTML around it, `</script>` included.
+        assert_eq!(commented("a.html", &at("let"), cx), "<p>x</p>\n<script>\n  // |let a = 1;\n</script>\n");
+        assert_eq!(commented("a.html", &at("<p>"), cx), "<!-- |<p>x</p> -->\n<script>\n  let a = 1;\n</script>\n");
+        assert_eq!(commented("a.html", &at("</script>"), cx), "<p>x</p>\n<script>\n  let a = 1;\n<!-- |</script> -->\n");
+        // Rust in a Markdown fence, Markdown outside it.
+        let md = "# Title\n\n```rust\n|fn main() {}\n```\n";
+        assert_eq!(commented("a.md", md, cx), "# Title\n\n```rust\n// |fn main() {}\n```\n");
+        assert_eq!(commented("a.md", "|# Title\n", cx), "<!-- |# Title -->\n");
+        // Block comments too: CSS's in a `<style>`.
+        let editor = open(cx, "a.html", "<style>\nbody { color: red; |}\n</style>\n");
+        editor.update(cx, |e, cx| e.toggle_block_comments(cx));
+        assert_eq!(shown(&editor, cx), "<style>\nbody { color: red; /* | */}\n</style>\n");
+    }
+
+    #[gpui::test]
+    fn pairs_follow_the_language_at_the_caret(cx: &mut TestAppContext) {
+        // Rust has no `'` pair (lifetimes); a fence of it in Markdown neither.
+        let rust = open(cx, "a.rs", "type T = |;\n");
+        assert_eq!(typed(&rust, "Foo<'a>", cx), "type T = Foo<'a>|;\n");
+        let md = open(cx, "a.md", "```rust\n|\n```\n");
+        assert_eq!(typed(&md, "x: &'a (", cx), "```rust\nx: &'a (|)\n```\n");
+        // JavaScript's `'` pairs, in a `<script>` too.
+        let html = open(cx, "a.html", "<script>\nlet s = |;\n</script>\n");
+        assert_eq!(typed(&html, "'", cx), "<script>\nlet s = '|';\n</script>\n");
+    }
+
+    #[gpui::test]
+    fn only_closing_characters_typing_put_in_are_stepped_over(cx: &mut TestAppContext) {
+        let js = open(cx, "a.js", "|\n");
+        assert_eq!(typed(&js, "f(\"x\"", cx), "f(\"x\"|)\n");
+        assert_eq!(typed(&js, ")", cx), "f(\"x\")|\n");
+        // A `)` that was there is typed: the caret was never in a pair typing closed.
+        let there = open(cx, "a.js", "f(g(|);\n");
+        assert_eq!(typed(&there, ")", cx), "f(g()|);\n");
+        // Moving out of a pair forgets it.
+        let left = open(cx, "a.js", "|\n");
+        typed(&left, "f(", cx);
+        left.update(cx, |e, cx| e.set_selections(vec![Selection::cursor(0)], 0, cx));
+        left.update(cx, |e, cx| e.set_selections(vec![Selection::cursor(2)], 0, cx));
+        assert_eq!(typed(&left, ")", cx), "f()|)\n");
+    }
+
+    #[gpui::test]
+    fn nothing_pairs_in_strings_and_comments(cx: &mut TestAppContext) {
+        let string = open(cx, "a.rs", "let s = \"a|\";\n");
+        assert_eq!(typed(&string, "(", cx), "let s = \"a(|\";\n");
+        let comment = open(cx, "a.rs", "// see |\nfn f() {}\n");
+        assert_eq!(typed(&comment, "(\"", cx), "// see (\"|\nfn f() {}\n");
+        let python = open(cx, "a.py", "s = \"a |\"\n");
+        assert_eq!(typed(&python, "'", cx), "s = \"a '|\"\n");
+        // In a template string's `${…}` it's code again.
+        let js = open(cx, "a.js", "let s = `${f|}`;\n");
+        assert_eq!(typed(&js, "(", cx), "let s = `${f(|)}`;\n");
+    }
+
+    #[gpui::test]
+    fn closing_lines_go_back_out(cx: &mut TestAppContext) {
+        let rust = open(cx, "a.rs", "fn f() {\n    if x {\n        y();\n        |\n}\n");
+        assert_eq!(typed(&rust, "}", cx), "fn f() {\n    if x {\n        y();\n    }|\n}\n");
+        let call = open(cx, "a.py", "f(\n    a,\n    |\n");
+        assert_eq!(typed(&call, ")", cx), "f(\n    a,\n)|\n");
+        // Python's `else:` goes level with its `if`, not with the `for` inside.
+        let python = open(cx, "a.py", "if x:\n    for y in z:\n        pass\n    |\n");
+        assert_eq!(typed(&python, "else:", cx), "if x:\n    for y in z:\n        pass\nelse:|\n");
+        let nested = open(cx, "a.py", "if x:\n    for y in z:\n        pass\n        |\n");
+        assert_eq!(typed(&nested, "else:", cx), "if x:\n    for y in z:\n        pass\n    else:|\n");
+        let shell = open(cx, "a.sh", "if true; then\n    echo\n    |\n");
+        assert_eq!(typed(&shell, "fi", cx), "if true; then\n    echo\nfi|\n");
+        // Undone together with the typing.
+        python.update(cx, |e, cx| e.undo_step(cx));
+        assert_eq!(shown(&python, cx), "if x:\n    for y in z:\n        pass\n    |\n");
+    }
+
+    #[gpui::test]
+    fn pasted_lines_are_indented_as_a_block(cx: &mut TestAppContext) {
+        let pasted = |name: &str, text: &str, clip: &str, indent: Option<usize>, cx: &mut TestAppContext| {
+            let editor = open(cx, name, text);
+            editor.update(cx, |e, cx| e.paste_text(clip.into(), indent, cx));
+            shown(&editor, cx)
+        };
+        let rust = "fn main() {\n    |\n}\n";
+        let want = "fn main() {\n    if x {\n        y();\n    }|\n}\n";
+        // From another editor, selected from its first word…
+        assert_eq!(pasted("a.rs", rust, "if x {\n            y();\n        }", None, cx), want);
+        // …from Kuana, which says how far its first line was indented…
+        assert_eq!(pasted("a.rs", rust, "if x {\n            y();\n        }", Some(8), cx), want);
+        // …or whole lines.
+        assert_eq!(pasted("a.rs", rust, "        if x {\n            y();\n        }", None, cx), want);
+        // A Python block keeps its shape; after code on the line, by that line's indentation.
+        let python = pasted("a.py", "def f():\n    |\n", "if a:\n    b()\nelse:\n    c()", None, cx);
+        assert_eq!(python, "def f():\n    if a:\n        b()\n    else:\n        c()|\n");
+        let after = pasted("a.rs", "fn f() {\n    let v = |\n}\n", "vec![\n    1,\n]", None, cx);
+        assert_eq!(after, "fn f() {\n    let v = vec![\n        1,\n    ]|\n}\n");
+        // At a line's start the first line keeps its indentation, the others follow it.
+        assert_eq!(pasted("a.rs", "|\n", "  a\n    b", None, cx), "  a\n    b|\n");
+        assert_eq!(pasted("a.rs", "|\n", "if x {\n        y();\n    }", Some(4), cx), "if x {\n    y();\n}|\n");
+        // In prose, as it was copied.
+        assert_eq!(pasted("a.md", "- |\n", "a\n    b", None, cx), "- a\n    b|\n");
     }
 }
 
