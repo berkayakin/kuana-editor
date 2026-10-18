@@ -380,17 +380,19 @@ impl LspStore {
                 self.apply_diagnostics(&path, &key, cx);
             }
             if partial {
-                let keys = self.server_keys(language, &path, cx);
+                let mut keys = self.server_keys(language, &path, cx);
+                keys.retain(|(key, _, _)| crate::trust::is_trusted(&key.root));
                 self.connect(&path, language, keys, cx);
             }
             return;
         }
-        // Servers run the project's code (build scripts, plugins, its own binaries).
-        if !crate::trust::is_trusted(&path) {
-            return;
-        }
         let mut keys = self.server_keys(language, &path, cx);
         let all = keys.len();
+        // Servers run their root's code (build scripts, plugins, its own
+        // binaries), so it's the root that has to be trusted: a dependency
+        // outside the project (the standard library under ~/.rustup) joins
+        // the project's running server.
+        keys.retain(|(key, _, _)| crate::trust::is_trusted(&key.root));
         if editor.is_none() {
             keys.retain(|(key, _, _)| self.servers.contains_key(key));
         }
