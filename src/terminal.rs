@@ -106,6 +106,9 @@ pub struct TerminalView {
     custom_title: Option<SharedString>,
     /// The shell's process, to find the folder it's in now.
     pid: Option<u32>,
+    /// A copy of the pty's master end, to ask which process group is in the
+    /// foreground (Unix only).
+    master: Option<std::fs::File>,
     focus_handle: FocusHandle,
     /// Columns, rows and cell size last sent to the shell.
     size: Option<(u16, u16, Pixels, Pixels)>,
@@ -143,6 +146,7 @@ enum Pty {
 struct Started {
     notifier: Notifier,
     pid: Option<u32>,
+    master: Option<std::fs::File>,
 }
 
 /// Text an input method is composing (Chinese, Japanese, Korean, dead
@@ -207,9 +211,10 @@ impl TerminalView {
     /// size the view has by now.
     fn pty_started(&mut self, started: std::io::Result<Started>, cx: &mut Context<Self>) {
         match started {
-            Ok(Started { notifier, pid }) => {
+            Ok(Started { notifier, pid, master }) => {
                 let Pty::Starting(typed) = std::mem::replace(&mut self.pty, Pty::Running(notifier)) else { return };
                 self.pid = pid;
+                self.master = master;
                 if let (Pty::Running(notifier), Some(size)) = (&mut self.pty, self.size) {
                     notifier.on_resize(window_size(size));
                 }
@@ -271,6 +276,7 @@ impl TerminalView {
             title: shell_name.into(),
             custom_title: None,
             pid: None,
+            master: None,
             focus_handle: cx.focus_handle(),
             size: None,
             origin: Point::default(),
@@ -302,6 +308,18 @@ impl TerminalView {
         self.custom_title = title.filter(|t| !t.trim().is_empty()).map(Into::into);
         cx.emit(TerminalEvent::TitleChanged);
         cx.notify();
+    }
+
+    /// What closing the tab would end: a Run tab's program until it exits,
+    /// else the command the shell is running (the pty's foreground process
+    /// group isn't the shell's own), by name. None at the shell's prompt.
+    pub fn running_process(&self) -> Option<String> {
+        if let Some((target, state)) = &self.run {
+            return (*state == RunState::Running).then(|| target.name.clone());
+        }
+        let shell = self.pid?;
+        let group = foreground_group(self.master.as_ref()?)?;
+        (group != shell).then(|| process_name(group).unwrap_or_else(|| "A process".into()))
     }
 
     /// The folder the shell is in now (after any `cd`), else where it started.
@@ -986,6 +1004,43 @@ fn process_cwd(_pid: u32) -> Option<PathBuf> {
     None
 }
 
+/// The process group in the foreground of a pty, from its master end: the
+/// shell's own at its prompt, a command's while it runs.
+#[cfg(unix)]
+fn foreground_group(master: &std::fs::File) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: a file descriptor `master` keeps open.
+    let group = unsafe { libc::tcgetpgrp(master.as_raw_fd()) };
+    // Negative: an error (the shell is gone); 0: no foreground group yet.
+    u32::try_from(group).ok().filter(|&g| g > 0)
+}
+
+#[cfg(not(unix))]
+fn foreground_group(_master: &std::fs::File) -> Option<u32> {
+    None
+}
+
+/// A process's name (a group's leader names the command running).
+#[cfg(target_os = "macos")]
+fn process_name(pid: u32) -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: `buf` has room for the `buf.len()` bytes `proc_name` may write.
+    let len = unsafe { libc::proc_name(pid as libc::c_int, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    let name = String::from_utf8_lossy(buf.get(..usize::try_from(len).ok()?)?).into_owned();
+    (!name.is_empty()).then_some(name)
+}
+
+#[cfg(target_os = "linux")]
+fn process_name(pid: u32) -> Option<String> {
+    let name = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    Some(name.trim_end().to_string()).filter(|n| !n.is_empty())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn process_name(_pid: u32) -> Option<String> {
+    None
+}
+
 /// A shell's title with a program's path in it shortened to the program's
 /// name. The Windows console titles itself with its program's path:
 /// `C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe`, and
@@ -1153,9 +1208,9 @@ fn start_pty(
         tty::new(&options, window_size, 0)?
     };
     #[cfg(unix)]
-    let pid = Some(pty.child().id());
+    let (pid, master) = (Some(pty.child().id()), pty.file().try_clone().ok());
     #[cfg(not(unix))]
-    let pid = None;
+    let (pid, master) = (None, None);
     let event_loop = EventLoop::new(term, listener, pty, false, false)?;
     let notifier = Notifier(event_loop.channel());
     event_loop.spawn();
@@ -1163,7 +1218,7 @@ fn start_pty(
         // The shell reads it once it's ready.
         notifier.notify((line + "\r").into_bytes());
     }
-    Ok(Started { notifier, pid })
+    Ok(Started { notifier, pid, master })
 }
 
 /// No signals blocked on this thread while it lives. A process inherits its
@@ -2290,6 +2345,28 @@ mod tests {
                 }
             }
         }
+        let _ = started.notifier.0.send(Msg::Shutdown);
+    }
+
+    /// A command the shell runs is in the pty's foreground (closing the tab
+    /// asks first); at the prompt, the shell itself is.
+    #[cfg(unix)]
+    #[test]
+    fn finds_the_command_a_shell_runs() {
+        let (tx, _events) = mpsc::unbounded();
+        let term = Arc::new(FairMutex::new(Term::new(Config::default(), &TermSize::new(80, 24), Listener(tx.clone()))));
+        let shell = Some(vec!["/bin/sh".into(), "-i".into()]);
+        let started = start_pty(shell, &std::env::temp_dir(), None, term, Listener(tx)).unwrap();
+        let (shell, master) = (started.pid.unwrap(), started.master.as_ref().unwrap());
+        let running = || foreground_group(master).filter(|&g| g != shell).and_then(process_name);
+        assert_eq!(running(), None);
+        started.notifier.notify(&b"sleep 30\r"[..]);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while running().is_none() {
+            assert!(std::time::Instant::now() < deadline, "the command never got the foreground");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(running().as_deref(), Some("sleep"));
         let _ = started.notifier.0.send(Msg::Shutdown);
     }
 }

@@ -13,8 +13,11 @@ pub(super) enum TerminalPanelEvent {
     RunExited(Entity<TerminalView>),
     /// A Run tab started, ended or went (see `Workspace::running`).
     RunsChanged,
-    /// Close this tab (its close button, a middle click, its shell exited).
+    /// Close this tab (its close button, a middle click): asks first while
+    /// something runs in it.
     Close(Entity<TerminalView>),
+    /// This tab's shell exited: the tab goes.
+    Exited(Entity<TerminalView>),
     /// This tab's shell couldn't start.
     Failed(Entity<TerminalView>, String),
     /// A tab was right-clicked.
@@ -109,7 +112,7 @@ impl TerminalPanel {
                 cx.emit(TerminalPanelEvent::RunExited(terminal));
                 cx.emit(TerminalPanelEvent::RunsChanged);
             }
-            TerminalEvent::Exited => cx.emit(TerminalPanelEvent::Close(terminal)),
+            TerminalEvent::Exited => cx.emit(TerminalPanelEvent::Exited(terminal)),
             TerminalEvent::Failed(error) => cx.emit(TerminalPanelEvent::Failed(terminal, error.clone())),
             TerminalEvent::OpenFile { path, line, column } => {
                 cx.emit(TerminalPanelEvent::OpenFile { path: path.clone(), line: *line, column: *column })

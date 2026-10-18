@@ -887,7 +887,8 @@ impl Workspace {
             TerminalPanelEvent::OpenFile { path, line, column } => ws.open_at(path.clone(), *line, *column, window, cx),
             TerminalPanelEvent::RunExited(terminal) => ws.collect_run_problems(terminal, cx),
             TerminalPanelEvent::RunsChanged => ws.update_running(cx),
-            TerminalPanelEvent::Close(terminal) => ws.remove_terminal(terminal, window, cx),
+            TerminalPanelEvent::Close(terminal) => ws.close_terminals(vec![terminal.clone()], window, cx),
+            TerminalPanelEvent::Exited(terminal) => ws.remove_terminal(terminal, window, cx),
             TerminalPanelEvent::Failed(terminal, error) => ws.terminal_failed(terminal, error.clone(), window, cx),
             TerminalPanelEvent::TabMenu { terminal, position } => ws.open_terminal_tab_menu(terminal.clone(), *position, window, cx),
             TerminalPanelEvent::Overflow { terminals, position } => {

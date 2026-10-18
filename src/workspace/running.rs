@@ -431,8 +431,43 @@ impl Workspace {
 
     pub(super) fn close_terminal(&mut self, _: &CloseTerminal, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(terminal) = self.active_terminal(cx) {
-            self.remove_terminal(&terminal, window, cx);
+            self.close_terminals(vec![terminal], window, cx);
         }
+    }
+
+    /// Closes terminal tabs, asking first when that would end a command
+    /// running in one (the shell isn't at its prompt) or a Run tab's program.
+    /// Cancel keeps them all.
+    pub(super) fn close_terminals(&mut self, terminals: Vec<Entity<TerminalView>>, window: &mut Window, cx: &mut Context<Self>) {
+        let running: Vec<(SharedString, String)> =
+            terminals.iter().filter_map(|t| Some((t.read(cx).title(), t.read(cx).running_process()?))).collect();
+        let Some((title, process)) = running.first() else {
+            for terminal in &terminals {
+                self.remove_terminal(terminal, window, cx);
+            }
+            return;
+        };
+        let (message, detail) = match running.len() {
+            1 if terminals.len() == 1 => (format!("Close “{title}”?"), format!("{process} is still running in it. Closing the tab ends it.")),
+            1 => ("Close the terminals?".into(), format!("{process} is still running in “{title}”. Closing the tabs ends it.")),
+            n => {
+                let list = running.iter().map(|(title, process)| format!("{process} in “{title}”")).collect::<Vec<_>>().join(", ");
+                ("Close the terminals?".into(), format!("{n} processes are still running: {list}. Closing the tabs ends them."))
+            }
+        };
+        // Ending a process can't be undone: Return doesn't confirm.
+        let answer = ask(window, &message, &detail, "Close", false, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await {
+                this.update_in(cx, |ws, window, cx| {
+                    for terminal in &terminals {
+                        ws.remove_terminal(terminal, window, cx);
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// Opens a new shell in a group of its own beside the current group.
@@ -575,9 +610,7 @@ impl Workspace {
             // The tab that was right-clicked stays, as the current one.
             self.activate_terminal(g, ix, window, cx);
         }
-        for terminal in closing {
-            self.remove_terminal(&terminal, window, cx);
-        }
+        self.close_terminals(closing, window, cx);
     }
 }
 
