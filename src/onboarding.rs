@@ -8,13 +8,15 @@ use gpui::{
     KeyDownEvent, Render, Rgba, SharedString, Window, div, img, prelude::*, px,
 };
 use serde_json::{Value, json};
+use std::{cell::Cell, rc::Rc};
 
 use crate::{
     assets::{self, Icon},
     keymap,
     settings::{self, AutoSave, BaseKeymap, Settings, VisualEffects},
     theme::{self, Appearance, Theme, ThemeRegistry},
-    ui::{Button, HoverFill, focus_glow, icon_el, kbd, switch},
+    transition::{self, TransitionExt, mix},
+    ui::{Button, HoverFill, faded, field_glow, icon_el, kbd, switch},
     workspace::{FindAction, GoToFile, OpenSettings},
 };
 use crate::editor::{DeleteLine, DuplicateLine};
@@ -95,16 +97,12 @@ impl Onboarding {
             .map(|(ix, t)| {
                 let selected = t.name == current.name;
                 let name = t.name.clone();
-                div()
+                let card = div()
                     .id(("welcome-theme", ix))
                     .flex()
                     .flex_col()
                     .rounded(px(12.))
-                    .border_2()
-                    .border_color(if selected { Hsla::from(current.accent) } else { Hsla::from(current.border_subtle) })
-                    .when(selected, |el| el.shadow(focus_glow(&current)))
                     .cursor_pointer()
-                    .hover(|s| s.border_color(Hsla::from(current.accent).alpha(0.6)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.choose_theme(name.clone(), cx)))
                     .child(code_preview(&t))
                     .child(
@@ -115,8 +113,8 @@ impl Onboarding {
                             .h(px(32.))
                             .px_3()
                             // Clipping doesn't follow rounded corners, so the
-                            // halves round their own (inside the 2px border).
-                            .rounded_b(px(8.))
+                            // halves round their own (inside the 1px border).
+                            .rounded_b(px(11.))
                             .bg(t.panel)
                             .border_t_1()
                             .border_color(t.border)
@@ -130,8 +128,8 @@ impl Onboarding {
                                     .child(if t.appearance == Appearance::Light { "Light" } else { "Dark" }),
                             )
                             .when(selected, |el| el.child(icon_el(Icon::CircleCheck, px(14.), t.accent.into()))),
-                    )
-                    .into_any_element()
+                    );
+                choice_card(card, format!("welcome-theme-{ix}"), selected, &current).into_any_element()
             })
             .collect();
         div()
@@ -191,20 +189,15 @@ impl Onboarding {
                         .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme.text_muted).child(*label))
                         .child(kbd(keymap::shortcut_in(base, *action).unwrap_or_else(|| "—".into()), cx))
                 });
-                div()
+                let card = div()
                     .id(("welcome-keymap", ix))
                     .flex()
                     .flex_col()
                     .gap_2()
                     .p(px(14.))
                     .rounded(px(12.))
-                    .border_2()
-                    .border_color(if selected { Hsla::from(theme.accent) } else { Hsla::from(theme.border_subtle) })
-                    // Like the theme cards: the outline and glow mark the choice, not a fill.
-                    .when(selected, |el| el.shadow(focus_glow(&theme)))
                     .bg(theme.panel)
                     .cursor_pointer()
-                    .hover(|s| s.border_color(Hsla::from(theme.accent).alpha(0.6)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.set_or_default("base_keymap", base.key().into(), BaseKeymap::default().key().into(), cx);
                     }))
@@ -234,8 +227,8 @@ impl Onboarding {
                             .child(keymap_blurb(base)),
                     )
                     .child(div().h(px(1.)).bg(theme.border_subtle))
-                    .children(rows)
-                    .into_any_element()
+                    .children(rows);
+                choice_card(card, format!("welcome-keymap-{ix}"), selected, &theme).into_any_element()
             })
             .collect();
         grid(cards, columns, px(12.)).into_any_element()
@@ -542,6 +535,28 @@ fn option_rows(rows: Vec<(&str, &str, AnyElement)>, theme: &Theme) -> AnyElement
         .into_any_element()
 }
 
+/// A card that stands for a choice. Like the Welcome tiles and focused text
+/// fields, the outline and glow say what it is, not a fill: the chosen card's
+/// border is the accent with a soft glow, and hovering another lights it part
+/// of the way. Both fade, so a new choice hands the light over.
+fn choice_card(card: gpui::Stateful<gpui::Div>, id: String, selected: bool, theme: &Theme) -> impl IntoElement {
+    let (edge, lit) = (Hsla::from(theme.border_subtle), Hsla::from(theme.accent).alpha(0.7));
+    let glow = field_glow(theme);
+    // The choice's progress, handed from the outer transition (laid out
+    // first) to the hover one inside it, which styles the card from both.
+    let chosen = Rc::new(Cell::new(0f32));
+    let set_chosen = chosen.clone();
+    card.border_1()
+        .with_hover_transition(SharedString::from(format!("{id}-hover")), transition::FOCUS, move |el, hover| {
+            let t = chosen.get().max(hover * 0.6);
+            el.border_color(mix(edge, lit, t)).when(t > 0., |el| el.shadow(faded(glow, t)))
+        })
+        .with_transition(SharedString::from(format!("{id}-chosen")), selected, transition::FOCUS, move |el, t| {
+            set_chosen.set(t);
+            el
+        })
+}
+
 fn grid(mut cells: Vec<AnyElement>, columns: usize, gap: gpui::Pixels) -> gpui::Div {
     while !cells.len().is_multiple_of(columns) {
         cells.push(div().into_any_element());
@@ -599,7 +614,7 @@ fn code_preview(t: &Theme) -> impl IntoElement {
         .h(px(96.))
         .px_3()
         .py(px(10.))
-        .rounded_t(px(8.))
+        .rounded_t(px(11.))
         .bg(t.background)
         .font_family(t.mono_font.clone())
         .text_size(px(11.))
