@@ -6,7 +6,8 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc::RecvTimeoutError,
     },
     time::{Duration, Instant},
 };
@@ -75,9 +76,15 @@ impl SearchQuery {
             .collect()
     }
 
+    /// Whether a replacement depends on what each match holds: in regex
+    /// mode, through `$1`-style groups.
+    fn expands(&self, replacement: &str) -> bool {
+        self.is_regex && replacement.contains('$')
+    }
+
     /// The replacement text for a match, expanding `$1`-style groups in regex mode.
     pub fn replacement_for(&self, text: &str, range: Range<usize>, replacement: &str) -> String {
-        if !self.is_regex {
+        if !self.expands(replacement) {
             return replacement.to_string();
         }
         match self.regex.captures_at(text, range.start) {
@@ -88,6 +95,17 @@ impl SearchQuery {
             }
             _ => replacement.to_string(),
         }
+    }
+
+    /// The replacements for `ranges`, matches in `rope`. Its text is copied
+    /// (once) only when they depend on it (`$1`-style groups); a literal
+    /// replacement needs none, however big the file.
+    pub fn replacements_in(&self, rope: &ropey::Rope, ranges: &[Range<usize>], replacement: &str) -> Vec<String> {
+        if !self.expands(replacement) {
+            return vec![replacement.to_string(); ranges.len()];
+        }
+        let text = rope.to_string();
+        ranges.iter().map(|range| self.replacement_for(&text, range.clone(), replacement)).collect()
     }
 }
 
@@ -186,11 +204,12 @@ fn walker(root: &Path) -> ignore::Walk {
 }
 
 /// Searches every text file of `paths` (the project's, see
-/// `crate::project`). `overrides` supplies the contents of unsaved open
-/// buffers so results reflect what the user sees. Matches go to `found` in
-/// batches as they're found (with the number of files with matches so
-/// far), so the list fills while it runs; `cancel` stops it between files
-/// (a newer query took over).
+/// `crate::project`) on several threads, listing matches in the order of
+/// `paths` whichever thread finds them first. `overrides` supplies the
+/// contents of unsaved open buffers so results reflect what the user sees.
+/// Matches go to `found` in batches as they're found (with the number of
+/// files with matches so far), so the list fills while it runs; `cancel`
+/// stops it between files (a newer query took over).
 pub fn search_project(
     root: &Path,
     paths: Vec<PathBuf>,
@@ -199,76 +218,130 @@ pub fn search_project(
     cancel: &AtomicBool,
     mut found: impl FnMut(Vec<ProjectMatch>, usize),
 ) -> SearchEnd {
-    let mut batch = Vec::new();
-    let (mut files, mut total) = (0, 0);
-    let mut last_batch = Instant::now();
-    for path in paths {
-        if cancel.load(Ordering::Relaxed) {
-            break;
-        }
-        if files >= MAX_FILES || total >= MAX_MATCHES {
-            found(batch, files);
-            return SearchEnd { truncated: true };
-        }
-        let contents: Arc<str> = match overrides.get(&path) {
-            Some(text) => text.clone(),
-            None => {
-                if std::fs::metadata(&path).map(|m| m.len() > MAX_FILE_SIZE).unwrap_or(true) {
-                    continue;
+    // One thread is left for the rest of the app (this one only waits).
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(1)).clamp(1, paths.len().max(1));
+    // Workers take files in order, so the files taken are always the first
+    // so many: once those hold enough matches (or files with matches) for
+    // the caps, no file after them can be listed, and the workers stop.
+    let next = AtomicUsize::new(0);
+    let (matched, matched_files) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    let full = || matched.load(Ordering::Relaxed) >= MAX_MATCHES || matched_files.load(Ordering::Relaxed) >= MAX_FILES;
+    let (sender, results) = std::sync::mpsc::channel::<(usize, Vec<ProjectMatch>)>();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let (sender, paths, next, full) = (sender.clone(), &paths, &next, &full);
+            let (matched, matched_files) = (&matched, &matched_files);
+            scope.spawn(move || {
+                while !cancel.load(Ordering::Relaxed) && !full() {
+                    let ix = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(path) = paths.get(ix) else { break };
+                    let matches = search_file(root, path, query, overrides);
+                    if !matches.is_empty() {
+                        matched.fetch_add(matches.len(), Ordering::Relaxed);
+                        matched_files.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if sender.send((ix, matches)).is_err() {
+                        break;
+                    }
                 }
-                let Ok(bytes) = std::fs::read(&path) else { continue };
-                if bytes.iter().take(8000).any(|b| *b == 0) {
-                    continue; // binary
-                }
-                // Line ends as an editor of the file has them, so a match's
-                // offsets select the same text there.
-                match String::from_utf8(bytes) {
-                    Ok(s) => crate::encoding::to_lf(s).into(),
-                    Err(_) => continue,
-                }
-            }
-        };
-        let ranges = query.find_all(&contents);
-        if ranges.is_empty() {
-            continue;
-        }
-        files += 1;
-        let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
-        let mut line = 0;
-        let mut line_start = 0;
-        let mut scanned = 0;
-        for range in ranges.into_iter().take(MAX_MATCHES - total) {
-            // Advance line counters incrementally.
-            for (i, b) in contents.as_bytes()[scanned..range.start].iter().enumerate() {
-                if *b == b'\n' {
-                    line += 1;
-                    line_start = scanned + i + 1;
-                }
-            }
-            scanned = range.start;
-            let line_end = contents[line_start..].find('\n').map_or(contents.len(), |e| line_start + e);
-            let match_end = range.end.min(line_end);
-            let from = contents.floor_char_boundary(range.start.saturating_sub(SNIPPET_BEFORE).max(line_start));
-            let to = contents.ceil_char_boundary((match_end + SNIPPET_AFTER).min(line_end));
-            batch.push(ProjectMatch {
-                path: path.clone(),
-                relative: relative.clone(),
-                line,
-                line_start,
-                line_text: contents[from..to].to_string(),
-                line_range: range.start - from..match_end - from,
-                range,
-                contents: contents.clone(),
             });
-            total += 1;
         }
-        if last_batch.elapsed() >= BATCH_EVERY {
-            found(std::mem::take(&mut batch), files);
-            last_batch = Instant::now();
+        drop(sender);
+        // A file's results wait here until those of the files before it are in.
+        let mut waiting: HashMap<usize, Vec<ProjectMatch>> = HashMap::new();
+        let mut batch = Vec::new();
+        let (mut ix, mut files, mut total, mut truncated) = (0, 0, 0, false);
+        let mut last_batch = Instant::now();
+        loop {
+            if !batch.is_empty() && last_batch.elapsed() >= BATCH_EVERY {
+                found(std::mem::take(&mut batch), files);
+                last_batch = Instant::now();
+            }
+            if ix == paths.len() || cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            if files >= MAX_FILES || total >= MAX_MATCHES {
+                truncated = true;
+                break;
+            }
+            let Some(matches) = waiting.remove(&ix) else {
+                // Waits for the next file's, sending what's found meanwhile.
+                match results.recv_timeout(BATCH_EVERY) {
+                    Ok((done, matches)) => _ = waiting.insert(done, matches),
+                    Err(RecvTimeoutError::Timeout) => {}
+                    // Every worker stopped: cancelled.
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+                continue;
+            };
+            ix += 1;
+            if !matches.is_empty() {
+                files += 1;
+                let room = MAX_MATCHES - total;
+                total += matches.len().min(room);
+                batch.extend(matches.into_iter().take(room));
+            }
         }
+        found(batch, files);
+        SearchEnd { truncated: truncated || total >= MAX_MATCHES }
+    })
+}
+
+/// The matches in one file (at most `MAX_MATCHES`); none when it's too big,
+/// binary or unreadable.
+fn search_file(root: &Path, path: &Path, query: &SearchQuery, overrides: &HashMap<PathBuf, Arc<str>>) -> Vec<ProjectMatch> {
+    let contents: Arc<str> = match overrides.get(path) {
+        Some(text) => text.clone(),
+        None => {
+            if std::fs::metadata(path).map(|m| m.len() > MAX_FILE_SIZE).unwrap_or(true) {
+                return Vec::new();
+            }
+            let Ok(bytes) = std::fs::read(path) else { return Vec::new() };
+            if bytes.iter().take(8000).any(|b| *b == 0) {
+                return Vec::new(); // binary
+            }
+            // Line ends as an editor of the file has them, so a match's
+            // offsets select the same text there.
+            match String::from_utf8(bytes) {
+                Ok(s) => crate::encoding::to_lf(s).into(),
+                Err(_) => return Vec::new(),
+            }
+        }
+    };
+    let ranges = query.find_all(&contents);
+    if ranges.is_empty() {
+        return Vec::new();
     }
-    found(batch, files);
-    SearchEnd { truncated: total >= MAX_MATCHES }
+    let relative = path.strip_prefix(root).unwrap_or(path).to_string_lossy().into_owned();
+    let mut matches = Vec::new();
+    let mut line = 0;
+    let mut line_start = 0;
+    let mut scanned = 0;
+    for range in ranges.into_iter().take(MAX_MATCHES) {
+        // Advance line counters incrementally.
+        for (i, b) in contents.as_bytes()[scanned..range.start].iter().enumerate() {
+            if *b == b'\n' {
+                line += 1;
+                line_start = scanned + i + 1;
+            }
+        }
+        scanned = range.start;
+        let line_end = contents[line_start..].find('\n').map_or(contents.len(), |e| line_start + e);
+        let match_end = range.end.min(line_end);
+        let from = contents.floor_char_boundary(range.start.saturating_sub(SNIPPET_BEFORE).max(line_start));
+        let to = contents.ceil_char_boundary((match_end + SNIPPET_AFTER).min(line_end));
+        matches.push(ProjectMatch {
+            path: path.to_path_buf(),
+            relative: relative.clone(),
+            line,
+            line_start,
+            line_text: contents[from..to].to_string(),
+            line_range: range.start - from..match_end - from,
+            range,
+            contents: contents.clone(),
+        });
+    }
+    matches
 }
 
 /// The lines around line `line` (which starts at `line_start`), `context`
@@ -296,6 +369,7 @@ pub fn context_lines(contents: &str, line_start: usize, line: usize, context: us
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn matches_know_their_lines() {
@@ -374,6 +448,63 @@ mod tests {
     }
 
     #[test]
+    fn project_search_lists_files_in_order_and_keeps_the_caps() {
+        let q = SearchQuery::new("x", SearchOptions::default()).unwrap().unwrap();
+        let search = |paths: &[PathBuf], overrides: &HashMap<PathBuf, Arc<str>>| {
+            let (mut all, mut counts) = (Vec::new(), Vec::new());
+            let end = search_project(Path::new("/p"), paths.to_vec(), &q, overrides, &AtomicBool::new(false), |batch, files| {
+                all.extend(batch);
+                counts.push(files);
+            });
+            (all, counts, end.truncated)
+        };
+        let files = |n: usize, text: &dyn Fn(usize) -> String| -> (Vec<PathBuf>, HashMap<PathBuf, Arc<str>>) {
+            let paths: Vec<PathBuf> = (0..n).map(|i| PathBuf::from(format!("/p/{i:05}.txt"))).collect();
+            let overrides = paths.iter().enumerate().map(|(i, p)| (p.clone(), Arc::from(text(i)))).collect();
+            (paths, overrides)
+        };
+        // Files with matches here and there, some with many: listed in the
+        // paths' order, each file's in its own order, whichever thread was quicker.
+        let (paths, overrides) = files(2000, &|i| if i % 3 == 0 { "nothing\n".into() } else { "ax\n".repeat(i % 7) });
+        let (all, counts, truncated) = search(&paths, &overrides);
+        let expected: Vec<(String, usize)> =
+            (0..2000).filter(|i| i % 3 != 0).flat_map(|i| (0..i % 7).map(move |n| (format!("{i:05}.txt"), n * 3 + 1))).collect();
+        assert_eq!(all.iter().map(|m| (m.relative.clone(), m.range.start)).collect::<Vec<_>>(), expected);
+        assert!(!truncated);
+        assert_eq!(counts.last(), Some(&expected.iter().map(|(f, _)| f).collect::<HashSet<_>>().len()));
+        assert!(counts.is_sorted());
+        // Too many files with matches: the first `MAX_FILES`.
+        let (paths, overrides) = files(MAX_FILES + 500, &|_| "x".into());
+        let (all, counts, truncated) = search(&paths, &overrides);
+        assert!(truncated);
+        assert_eq!((all.len(), counts.last()), (MAX_FILES, Some(&MAX_FILES)));
+        assert_eq!(all.last().unwrap().relative, format!("{:05}.txt", MAX_FILES - 1));
+        // Too many matches: the first `MAX_MATCHES`, the last file cut short.
+        let (paths, overrides) = files(100, &|_| "x ".repeat(150));
+        let (all, _, truncated) = search(&paths, &overrides);
+        assert!(truncated);
+        assert_eq!(all.len(), MAX_MATCHES);
+        assert_eq!((all.last().unwrap().relative.as_str(), all.last().unwrap().range.start), ("00066.txt", 99 * 2));
+    }
+
+    /// Times Find in Files over a big folder:
+    /// `KUANA_SEARCH_DIR=<folder> cargo test bench_project_search -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn bench_project_search() {
+        let dir = std::env::var("KUANA_SEARCH_DIR").map_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")), PathBuf::from);
+        let files = project_files(&dir);
+        // A rare word (every file read through) and one that hits the caps.
+        for text in ["kuana_nowhere_to_be_found", "unsafe impl", "e"] {
+            let q = SearchQuery::new(text, SearchOptions::default()).unwrap().unwrap();
+            let started = Instant::now();
+            let mut count = 0;
+            let end = search_project(&dir, files.clone(), &q, &HashMap::new(), &AtomicBool::new(false), |batch, _| count += batch.len());
+            println!("{} files, {text:?}: {count} matches (truncated: {}) in {:?}", files.len(), end.truncated, started.elapsed());
+        }
+    }
+
+    #[test]
     fn context_lines_look_only_near_the_match() {
         let text = "zero\none\ntwo\nthree\nfour\nfive";
         let lines = context_lines(text, text.find("three").unwrap(), 3, 1, 3);
@@ -390,5 +521,18 @@ mod tests {
         assert_eq!(q.replacement_for(text, 4..7, "$2@$1"), "d@c");
         let found: Vec<String> = q.find_all(text).into_iter().map(|r| q.replacement_for(text, r, "$2@$1")).collect();
         assert_eq!(found, ["b@a", "d@c"]);
+    }
+
+    #[test]
+    fn replacements_in_a_rope_expand_groups_only_in_regex_mode() {
+        let rope = ropey::Rope::from_str("a@b c@d");
+        let ranges = [0..3, 4..7];
+        let re = SearchOptions { regex: true, case_sensitive: true, ..Default::default() };
+        let regex = SearchQuery::new(r"(\w+)@(\w+)", re).unwrap().unwrap();
+        assert_eq!(regex.replacements_in(&rope, &ranges, "$2@$1"), ["b@a", "d@c"]);
+        assert_eq!(regex.replacements_in(&rope, &ranges, "x"), ["x", "x"]);
+        // A literal query's `$` is just a dollar sign.
+        let literal = SearchQuery::new("a@b", SearchOptions::default()).unwrap().unwrap();
+        assert_eq!(literal.replacements_in(&rope, &ranges[..1], "$2"), ["$2"]);
     }
 }

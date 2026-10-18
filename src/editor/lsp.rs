@@ -5,6 +5,7 @@
 
 use std::{
     cmp::Reverse,
+    collections::{HashMap, HashSet},
     ops::Range,
     path::{Path, PathBuf},
     sync::{
@@ -32,6 +33,7 @@ use crate::{
     lint::Severity,
     lsp::{
         LspStore, Server,
+        rpc::RpcError,
         protocol::{
             self, CodeAction, CompletionItem, Encoding, HoverBlock, Location, Position, TextEdit, offset_to_position,
             offsets_to_range, path_to_uri, position_to_offset,
@@ -347,6 +349,41 @@ fn lens_command(lens: &Value) -> Option<(String, Value)> {
     (!title.is_empty()).then(|| (title, command.clone()))
 }
 
+/// Sends `method` to each server with its params, all at once; the answers
+/// in the servers' order.
+async fn ask_all(requests: Vec<(Arc<Server>, Value)>, method: &'static str) -> Vec<(Arc<Server>, Result<Value, RpcError>)> {
+    futures::future::join_all(requests.into_iter().map(|(server, params)| async move {
+        let result = server.request(method, params).await;
+        (server, result)
+    }))
+    .await
+}
+
+/// Several servers' locations as one list, in the first's encoding and
+/// without repeats (servers often agree on a definition). A location from a
+/// server counting columns otherwise is converted through its file's text
+/// (`text_of`), and kept as it is when that can't be read.
+fn merge_locations(answers: Vec<(Encoding, Vec<Location>)>, mut text_of: impl FnMut(&Path) -> Option<ropey::Rope>) -> (Encoding, Vec<Location>) {
+    let encoding = answers.iter().find(|(_, found)| !found.is_empty()).map_or(Encoding::Utf16, |(e, _)| *e);
+    let mut texts: HashMap<PathBuf, Option<ropey::Rope>> = HashMap::new();
+    let mut seen = HashSet::new();
+    let mut merged = Vec::new();
+    for (from, found) in answers {
+        for mut location in found {
+            if from != encoding
+                && let Some(rope) = texts.entry(location.path.clone()).or_insert_with(|| text_of(&location.path))
+            {
+                location.range = offsets_to_range(rope, protocol::range_to_offsets(rope, location.range, from), encoding);
+            }
+            let (start, end) = (location.range.start, location.range.end);
+            if seen.insert((location.path.clone(), start.line, start.character, end.line, end.character)) {
+                merged.push(location);
+            }
+        }
+    }
+    (encoding, merged)
+}
+
 /// Whether `text` starts with `typed` ignoring case, and if so, whether
 /// that's all of it.
 fn starts_with_typed(text: &str, typed: &str) -> Option<bool> {
@@ -382,6 +419,21 @@ impl Editor {
     /// The first server that has `capability` (`hoverProvider`…).
     pub(super) fn lsp_server_with(&self, capability: &str, cx: &gpui::App) -> Option<Arc<Server>> {
         self.lsp_servers(cx).into_iter().find(|s| s.capability(capability))
+    }
+
+    /// Every server that has `capability`, the main one first, each with its
+    /// request for `offset` (columns in its own encoding). A file often has
+    /// several (TypeScript plus Tailwind or ESLint), and the others know
+    /// things the main one doesn't, so these requests go to all of them.
+    fn position_requests(&self, capability: &str, offset: usize, cx: &App) -> Vec<(Arc<Server>, Value)> {
+        self.lsp_servers(cx)
+            .into_iter()
+            .filter(|s| s.capability(capability))
+            .filter_map(|server| {
+                let params = self.position_params(offset, &server, cx)?;
+                Some((server, params))
+            })
+            .collect()
     }
 
     /// Records an edit: tells the server and the workspace, and drops
@@ -881,17 +933,19 @@ impl Editor {
     // ---- Signature help ----------------------------------------------------------------
 
     fn request_signature_help(&mut self, cx: &mut Context<Self>) {
-        let Some(server) = self.lsp_server_with("signatureHelpProvider", cx) else { return };
         let head = self.primary_selection().head;
         let row = self.doc.read(cx).row_of(head);
-        let Some(params) = self.position_params(head, &server, cx) else { return };
+        let requests = self.position_requests("signatureHelpProvider", head, cx);
+        if requests.is_empty() {
+            return;
+        }
         self.lsp.signature_task = Some(cx.spawn(async move |this, cx| {
-            let result = server.request("textDocument/signatureHelp", params).await;
+            let answers = ask_all(requests, "textDocument/signatureHelp").await;
             this.update(cx, |e, cx| {
-                e.lsp.signature = result
-                    .ok()
-                    .as_ref()
-                    .and_then(protocol::signature)
+                // One signature shows: the first server's that has one.
+                e.lsp.signature = answers
+                    .iter()
+                    .find_map(|(_, result)| protocol::signature(result.as_ref().ok()?))
                     .map(|(label, active)| SignatureHelp { label, active, row });
                 cx.notify();
             })
@@ -1022,17 +1076,17 @@ impl Editor {
             self.lsp.hover = Some(HoverPopover { range: range.clone(), diagnostics: diagnostics.clone(), blocks: Vec::new(), anchor });
             cx.notify();
         }
-        let server = self.lsp_server_with("hoverProvider", cx);
-        let params = server.as_ref().and_then(|s| self.position_params(range.start, s, cx));
-        let (Some(server), Some(params)) = (server, params) else {
+        let requests = self.position_requests("hoverProvider", range.start, cx);
+        if requests.is_empty() {
             self.lsp.hover_pending = None;
             return;
-        };
+        }
         self.lsp.hover_task = Some(cx.spawn(async move |this, cx| {
-            let result = server.request("textDocument/hover", params).await;
+            let answers = ask_all(requests, "textDocument/hover").await;
             this.update(cx, |e, cx| {
                 e.lsp.hover_pending = None;
-                let blocks = result.ok().map(|v| protocol::hover_blocks(&v)).unwrap_or_default();
+                // Every server's documentation, the main one's first.
+                let blocks: Vec<HoverBlock> = answers.iter().filter_map(|(_, r)| r.as_ref().ok()).flat_map(protocol::hover_blocks).collect();
                 if blocks.is_empty() && diagnostics.is_empty() {
                     return;
                 }
@@ -1097,11 +1151,14 @@ impl Editor {
             cx.notify();
             return;
         }
-        let Some(server) = self.lsp_server_with("definitionProvider", cx) else { return };
-        let Some(params) = self.position_params(word.start, &server, cx) else { return };
+        let requests = self.position_requests("definitionProvider", word.start, cx);
+        if requests.is_empty() {
+            return;
+        }
         self.lsp.link_pending = Some(word.clone());
         self.lsp.link_task = Some(cx.spawn(async move |this, cx| {
-            let found = server.request("textDocument/definition", params).await.is_ok_and(|v| !protocol::locations(&v).is_empty());
+            let answers = ask_all(requests, "textDocument/definition").await;
+            let found = answers.iter().any(|(_, r)| r.as_ref().is_ok_and(|v| !protocol::locations(v).is_empty()));
             this.update(cx, |e, cx| {
                 e.lsp.link_pending = None;
                 if !found {
@@ -1512,28 +1569,33 @@ impl Editor {
         }
         self.lsp.symbol_highlight_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
-            let Ok(Some((server, params, version))) = this.update(cx, |e, cx| {
-                let server = e.lsp_server_with("documentHighlightProvider", cx)?;
-                let params = e.position_params(e.primary_selection().head, &server, cx)?;
-                Some((server, params, e.doc.read(cx).version()))
+            let Ok((requests, version)) = this.update(cx, |e, cx| {
+                (e.position_requests("documentHighlightProvider", e.primary_selection().head, cx), e.doc.read(cx).version())
             }) else {
                 return;
             };
-            let result = server.request("textDocument/documentHighlight", params).await;
+            if requests.is_empty() {
+                return;
+            }
+            let answers = ask_all(requests, "textDocument/documentHighlight").await;
             this.update(cx, |e, cx| {
                 if e.doc.read(cx).version() != version {
                     return;
                 }
                 let rope = e.doc.read(cx).rope();
-                let mut ranges: Vec<std::ops::Range<usize>> = result
-                    .ok()
-                    .and_then(|v| v.as_array().cloned())
-                    .unwrap_or_default()
+                // Every server's, each read in its own encoding.
+                let mut ranges: Vec<std::ops::Range<usize>> = answers
                     .iter()
-                    .filter_map(|h| protocol::LspRange::from_json(h.get("range")?))
-                    .map(|r| protocol::range_to_offsets(rope, r, server.encoding))
+                    .filter_map(|(server, result)| Some((server, result.as_ref().ok()?.as_array()?)))
+                    .flat_map(|(server, highlights)| {
+                        highlights
+                            .iter()
+                            .filter_map(|h| protocol::LspRange::from_json(h.get("range")?))
+                            .map(|r| protocol::range_to_offsets(rope, r, server.encoding))
+                    })
                     .collect();
-                ranges.sort_by_key(|r| r.start);
+                ranges.sort_by_key(|r| (r.start, r.end));
+                ranges.dedup();
                 // A lone match is just the word itself: nothing worth pointing out.
                 if ranges.len() < 2 {
                     ranges.clear();
@@ -1637,31 +1699,63 @@ impl Editor {
     ) {
         // `textDocument/definition` → `definitionProvider`.
         let capability = format!("{}Provider", method.trim_start_matches("textDocument/"));
-        let Some(server) = self.lsp_server_with(&capability, cx).or_else(|| self.lsp_server(cx)) else {
+        let mut requests = self.position_requests(&capability, offset, cx);
+        // No server says it can: the main one is asked anyway.
+        if requests.is_empty()
+            && let Some(server) = self.lsp_server(cx)
+            && let Some(params) = self.position_params(offset, &server, cx)
+        {
+            requests.push((server, params));
+        }
+        if requests.is_empty() {
             cx.emit(EditorLspEvent::Message("No language server for this file".into()));
             return;
-        };
-        let Some(mut params) = self.position_params(offset, &server, cx) else { return };
+        }
         if !context.is_null() {
-            params["context"] = context;
+            for (_, params) in &mut requests {
+                params["context"] = context.clone();
+            }
         }
         let title: SharedString = title.to_string().into();
+        let (path, rope) = (self.doc.read(cx).path.clone(), self.doc.read(cx).rope().clone());
         cx.spawn(async move |this, cx| {
-            let result = server.request(method, params).await;
-            this.update(cx, |this, cx| match result {
-                Ok(value) => {
-                    let locations = protocol::locations(&value);
-                    if show == Show::OrUsages && this.is_declaration_at(offset, &locations, server.encoding, cx) {
-                        this.find_usages_at(offset, false, cx);
-                    } else if locations.is_empty() {
-                        cx.emit(EditorLspEvent::Message(none.into()));
-                    } else {
-                        cx.emit(EditorLspEvent::Navigate { title, locations, encoding: server.encoding, panel: show == Show::Panel });
-                    }
+            let answers = ask_all(requests, method).await;
+            let mut found = Vec::new();
+            let mut error = None;
+            for (server, result) in answers {
+                match result {
+                    Ok(value) => found.push((server.encoding, protocol::locations(&value))),
+                    // The server dropped it (the text changed meanwhile): not an error.
+                    Err(err) if err.is_cancelled() => {}
+                    Err(err) => _ = error.get_or_insert(err),
                 }
-                // The server dropped it (the text changed meanwhile): not an error.
-                Err(err) if err.is_cancelled() => {}
-                Err(err) => cx.emit(EditorLspEvent::Message(err.message.into())),
+            }
+            // Only when no server answered is a failure worth telling.
+            if found.is_empty() {
+                if let Some(err) = error {
+                    this.update(cx, |_, cx| cx.emit(EditorLspEvent::Message(err.message.into()))).ok();
+                }
+                return;
+            }
+            // A server counting columns otherwise may point into other files:
+            // they're read off the UI thread.
+            let (encoding, locations) = cx
+                .background_executor()
+                .spawn(async move {
+                    merge_locations(found, |p| match path.as_deref() == Some(p) {
+                        true => Some(rope.clone()),
+                        false => std::fs::read_to_string(p).ok().map(|text| ropey::Rope::from_str(&text)),
+                    })
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if show == Show::OrUsages && this.is_declaration_at(offset, &locations, encoding, cx) {
+                    this.find_usages_at(offset, false, cx);
+                } else if locations.is_empty() {
+                    cx.emit(EditorLspEvent::Message(none.into()));
+                } else {
+                    cx.emit(EditorLspEvent::Navigate { title, locations, encoding, panel: show == Show::Panel });
+                }
             })
             .ok();
         })
@@ -2694,6 +2788,20 @@ mod tests {
         wait_for(cx, "triggered completion", |cx| editor.read_with(cx, |e, _| e.lsp.completion.is_some()));
         assert_eq!(labels(cx), ["main-item"]);
 
+        // Both know the same declaration: it's listed once.
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = events.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&editor, move |_, event: &EditorLspEvent, _| {
+                if let EditorLspEvent::Navigate { locations, .. } = event {
+                    seen.borrow_mut().push(locations.len());
+                }
+            })
+        });
+        editor.update(cx, |e, cx| e.navigate_from(0, cx));
+        wait_for(cx, "the declaration", |_| !events.borrow().is_empty());
+        assert_eq!(*events.borrow(), [1]);
+
         store.update(cx, |s, _| s.shutdown_all());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2761,5 +2869,150 @@ mod tests {
         });
         store.update(cx, |s, _| s.shutdown_all());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A server answering hover, definitions, signature help and highlights
+    /// by its name ("main" or "extra"), each in its own way.
+    const ANSWERING_SERVER: &str = r#"
+import sys, json
+name = sys.argv[1]
+def read():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        line = line.strip()
+        if not line:
+            break
+        k, v = line.split(b":", 1)
+        headers[k.lower()] = v.strip()
+    return json.loads(sys.stdin.buffer.read(int(headers[b"content-length"])))
+def send(msg):
+    body = json.dumps(msg).encode()
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+    sys.stdout.buffer.flush()
+def line(n):
+    return {"start": {"line": n, "character": 0}, "end": {"line": n, "character": 1}}
+while True:
+    m = read()
+    method, id = m.get("method"), m.get("id")
+    if method == "exit":
+        sys.exit(0)
+    if method is None or id is None:
+        continue
+    uri = ((m.get("params") or {}).get("textDocument") or {}).get("uri")
+    result = None
+    if method == "initialize":
+        caps = {"hoverProvider": True, "definitionProvider": True, "signatureHelpProvider": {}, "documentHighlightProvider": True}
+        result = {"capabilities": dict(caps, textDocumentSync=1)}
+    elif method == "textDocument/hover":
+        result = {"contents": {"kind": "plaintext", "value": name + " docs"}}
+    elif method == "textDocument/definition":
+        # Both know line 1's; only "extra" knows line 2's.
+        result = [{"uri": uri, "range": line(n)} for n in ([0, 1] if name == "extra" else [0])]
+    elif method == "textDocument/signatureHelp" and name == "extra":
+        result = {"signatures": [{"label": "extra(a)"}]}
+    elif method == "textDocument/documentHighlight":
+        result = [{"range": line(0)}, {"range": line(1 if name == "main" else 2)}]
+    send({"jsonrpc": "2.0", "id": id, "result": result})
+"#;
+
+    fn answering_server(name: &str) -> &'static crate::lsp::servers::ServerSpec {
+        let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+        let args: &'static [&'static str] = Box::leak(vec!["-c", ANSWERING_SERVER, leak(name.to_string())].into_boxed_slice());
+        let candidates: &'static [(&'static str, &'static [&'static str])] = Box::leak(vec![("python3", args)].into_boxed_slice());
+        let id = leak(format!("answering-{name}"));
+        Box::leak(Box::new(crate::lsp::servers::ServerSpec { id, candidates, ..crate::lsp::servers::SPEC }))
+    }
+
+    /// Hover, declarations, signature help and highlights ask every server
+    /// (the second may know what the first doesn't) and put their answers together.
+    #[gpui::test]
+    fn position_requests_ask_every_server(cx: &mut TestAppContext) {
+        if crate::lsp::servers::which("python3").is_none() {
+            return;
+        }
+        cx.executor().allow_parking();
+        crate::trust::set_trust_all(true);
+        cx.update(|cx| cx.set_global(crate::theme::Theme::blank_for_tests()));
+        let dir = std::env::temp_dir().join(format!("kuana-lsp-every-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.rs");
+        std::fs::write(&path, "fn a() {}\nfn b() {}\nfn c() {}\n").unwrap();
+        let store = cx.new(|_| {
+            let mut store = LspStore::new();
+            store.test_specs = Some(vec![answering_server("main"), answering_server("extra")]);
+            store
+        });
+        let editor: Entity<Editor> = cx.new(|cx| Editor::new(Document::open(&path).unwrap(), cx));
+        store.update(cx, |s, cx| s.register(&editor, cx));
+        wait_for(cx, "both servers", |cx| editor.read_with(cx, |e, cx| e.lsp_servers(cx).len() == 2));
+
+        // Declarations: the main server's and the other's, the shared one once.
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = events.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&editor, move |_, event: &EditorLspEvent, _| {
+                if let EditorLspEvent::Navigate { locations, .. } = event {
+                    seen.borrow_mut().push(locations.iter().map(|l| l.range.start.line).collect::<Vec<_>>());
+                }
+            })
+        });
+        editor.update(cx, |e, cx| e.navigate_from(3, cx));
+        wait_for(cx, "the declarations", |_| !events.borrow().is_empty());
+        assert_eq!(*events.borrow(), [vec![0, 1]]);
+
+        // Signature help: the main server has none, the other one does.
+        editor.update(cx, |e, cx| {
+            e.select_range(4..4, cx);
+            e.request_signature_help(cx);
+        });
+        wait_for(cx, "signature help", |cx| editor.read_with(cx, |e, _| e.lsp.signature.is_some()));
+        editor.read_with(cx, |e, _| assert_eq!(e.lsp.signature.as_ref().unwrap().label, "extra(a)"));
+
+        // Highlights: both servers', each once, in order.
+        editor.update(cx, |e, cx| {
+            e.select_range(0..0, cx);
+            e.schedule_symbol_highlights(cx);
+        });
+        wait_for(cx, "highlights", |cx| {
+            cx.executor().advance_clock(Duration::from_millis(250));
+            editor.read_with(cx, |e, cx| !e.current_symbol_highlights(cx).is_empty())
+        });
+        editor.read_with(cx, |e, cx| assert_eq!(e.current_symbol_highlights(cx), [0..1, 10..11, 20..21]));
+
+        // Hover: both servers' documentation, the main one's first.
+        let cx = cx.add_empty_window();
+        cx.draw(gpui::point(px(0.), px(0.)), gpui::size(px(800.), px(600.)), |_, _| gpui::AnyView::from(editor.clone()));
+        cx.update(|window, cx| editor.update(cx, |e, cx| e.show_hover(3..4, window, cx)));
+        wait_for(cx, "hover", |cx| editor.read_with(cx, |e, _| e.lsp.hover.is_some()));
+        editor.read_with(cx, |e, _| {
+            let blocks: Vec<&str> = e.lsp.hover.as_ref().unwrap().blocks.iter().map(|b| b.text.as_str()).collect();
+            assert_eq!(blocks, ["main docs", "extra docs"]);
+        });
+        store.update(cx, |s, _| s.shutdown_all());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn locations_from_servers_counting_otherwise_are_converted_and_merged() {
+        use protocol::{LspRange, Position};
+        let at = |line, start, end| Location {
+            path: PathBuf::from("/p/a.rs"),
+            range: LspRange { start: Position { line, character: start }, end: Position { line, character: end } },
+        };
+        // "ğ" is 2 bytes in UTF-8, 1 unit in UTF-16: `x` is at 2 or 1.
+        let rope = ropey::Rope::from_str("ğx\n");
+        let answers = vec![
+            (Encoding::Utf8, vec![at(0, 2, 3)]),
+            // The same place and one more, counted in UTF-16.
+            (Encoding::Utf16, vec![at(0, 1, 2), at(1, 0, 0)]),
+        ];
+        let (encoding, merged) = merge_locations(answers, |_| Some(rope.clone()));
+        assert_eq!((encoding, merged), (Encoding::Utf8, vec![at(0, 2, 3), at(1, 0, 0)]));
+        // A file that can't be read keeps what the server said.
+        let (_, merged) = merge_locations(vec![(Encoding::Utf8, vec![at(0, 0, 1)]), (Encoding::Utf16, vec![at(0, 1, 2)])], |_| None);
+        assert_eq!(merged, [at(0, 0, 1), at(0, 1, 2)]);
     }
 }
