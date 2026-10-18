@@ -45,6 +45,7 @@ use crate::{
     git::{self, Change, FileStatus, RepoStatus},
     git_panel::{GitOp, GitPanel, GitPanelEvent},
     problems_panel::{ProblemsEvent, ProblemsPanel},
+    results_panel::{ResultsEvent, ResultsPanel},
     project::{Applied, ProjectSnapshot, project_ignore},
     project_tree::{ProjectTree, TreeEvent},
     find_bar::{FindBar, FindBarEvent},
@@ -187,6 +188,9 @@ actions!(
         OpenSettings,
         OpenSettingsFile,
         OpenProjectSettings,
+        ToggleResults,
+        NextResult,
+        PreviousResult,
         OpenKeymap,
         RestartLanguageServer,
         IncreaseFontSize,
@@ -373,6 +377,8 @@ enum GitPrompt {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum BottomPanel {
     Problems,
+    /// The Find panel (`results_panel`).
+    Results,
     Terminal,
     GitLog,
     Debug,
@@ -721,6 +727,11 @@ pub struct Workspace {
     terminals: Entity<TerminalPanel>,
     /// The active file's problems and the last Run's.
     problems: Entity<ProblemsPanel>,
+    /// The Find panel: Find Usages' results.
+    results: Entity<ResultsPanel>,
+    /// Whether it has any, for the title bar's toggle (the root render
+    /// doesn't read the panel, which notifies as its selection moves).
+    has_results: bool,
     git_log: Entity<GitLog>,
     /// The Push dialog a diff was opened from; it comes back when the diff closes.
     diff_return: Option<Entity<PushDialog>>,
@@ -879,6 +890,16 @@ impl Workspace {
         let problems_subscription = cx.subscribe_in(&problems, window, |ws, _, event: &ProblemsEvent, window, cx| match event {
             ProblemsEvent::Open { path, line, column } => ws.open_at(path.clone(), Some(*line), *column, window, cx),
             ProblemsEvent::Close => ws.toggle_problems(&ToggleProblems, window, cx),
+        });
+        let results = cx.new(ResultsPanel::new);
+        let results_subscription = cx.subscribe_in(&results, window, |ws, _, event: &ResultsEvent, window, cx| match event {
+            ResultsEvent::Open { target, focus } => ws.open_result(target.clone(), *focus, window, cx),
+            ResultsEvent::Leave => ws.focus_active(window, cx),
+            ResultsEvent::Close => ws.hide_results(window, cx),
+            ResultsEvent::Emptied => {
+                ws.has_results = false;
+                ws.hide_results(window, cx);
+            }
         });
         let git_log = cx.new(GitLog::new);
         let log_subscription = cx.subscribe_in(&git_log, window, |ws, _, event: &GitLogEvent, window, cx| match event {
@@ -1069,6 +1090,8 @@ impl Workspace {
             tree,
             terminals,
             problems,
+            results,
+            has_results: false,
             git_log,
             diff_return: None,
             repo: None,
@@ -1113,6 +1136,7 @@ impl Workspace {
                 git_subscription,
                 log_subscription,
                 problems_subscription,
+                results_subscription,
                 tree_subscription,
                 terminals_subscription,
                 activation,

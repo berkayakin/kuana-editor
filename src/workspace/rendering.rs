@@ -298,6 +298,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_sidebar_position))
             .on_action(cx.listener(Self::toggle_problems))
+            .on_action(cx.listener(Self::toggle_results))
+            .on_action(cx.listener(Self::next_result))
+            .on_action(cx.listener(Self::previous_result))
             .on_action(cx.listener(Self::find))
             .on_action(cx.listener(Self::replace))
             .on_action(cx.listener(Self::find_next))
@@ -420,6 +423,7 @@ impl Render for Workspace {
                             .gap(px(GAP))
                             .child(div().flex_1().min_h_0().child(panes))
                             .when(self.shows(BottomPanel::Problems), |el| el.child(self.render_problems(cx)))
+                            .when(self.shows(BottomPanel::Results), |el| el.child(self.render_results(cx)))
                             .when(self.shows(BottomPanel::Terminal), |el| el.child(terminal_panel.unwrap()))
                             .when(self.shows(BottomPanel::GitLog), |el| el.child(self.render_git_log_panel(cx)))
                             .when(self.shows(BottomPanel::Debug), |el| el.children(self.render_debug_panel(cx))),

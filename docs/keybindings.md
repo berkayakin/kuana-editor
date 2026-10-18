@@ -66,7 +66,8 @@ The table below is the JetBrains keymap.
 | Go to Implementation | ⌥⌘B | Ctrl+Alt+B |
 | Go to Type Definition | ⌃⇧B | Ctrl+Shift+B |
 | Go to Symbol (project) | Find Action | Ctrl+Alt+Shift+N |
-| Find Usages | ⌥F7 | Alt+F7 |
+| Find Usages (in the Find panel) | ⌥F7 | Alt+F7 |
+| Find panel | ⌘3 | Alt+3 |
 | Rename | ⇧F6 | Shift+F6 |
 | Show Context Actions | ⌥↩ | Alt+Enter |
 | Quick Documentation | F1 | Ctrl+Q |

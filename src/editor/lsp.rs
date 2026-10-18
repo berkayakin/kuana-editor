@@ -43,8 +43,9 @@ use crate::{
 
 /// Requests the workspace carries out, since they reach beyond this editor.
 pub enum EditorLspEvent {
-    /// Jump to one location, or let the user pick among several.
-    Navigate { title: SharedString, locations: Vec<Location>, encoding: Encoding },
+    /// Jump to one location, or let the user pick among several; `panel`:
+    /// list them in the Find panel instead (Find Usages).
+    Navigate { title: SharedString, locations: Vec<Location>, encoding: Encoding, panel: bool },
     /// Ask for a new name, then rename through the server.
     Rename { server: Arc<Server>, path: PathBuf, position: Position, current: String },
     /// Offer code actions (each with the server that offered it) in a menu
@@ -57,6 +58,18 @@ pub enum EditorLspEvent {
 }
 
 impl gpui::EventEmitter<EditorLspEvent> for Editor {}
+
+/// How `locations_request` shows what the server found.
+#[derive(Clone, Copy, PartialEq)]
+enum Show {
+    /// Go there, or pick among several.
+    Pick,
+    /// As `Pick`, unless the request was made on the answer (a declaration):
+    /// then its usages, to pick from.
+    OrUsages,
+    /// In the Find panel.
+    Panel,
+}
 
 const MENU_ROWS: usize = 10;
 const MENU_ROW_HEIGHT: f32 = 22.;
@@ -1431,7 +1444,7 @@ impl Editor {
         let row = self.doc.read(cx).row_of(lens.line_start);
         let navigate = |locations: Vec<protocol::Location>, server: Option<Arc<Server>>, cx: &mut Context<Self>| match server {
             Some(server) if !locations.is_empty() => {
-                cx.emit(EditorLspEvent::Navigate { title: lens.title.clone().into(), locations, encoding: server.encoding })
+                cx.emit(EditorLspEvent::Navigate { title: lens.title.clone().into(), locations, encoding: server.encoding, panel: false })
             }
             _ => cx.emit(EditorLspEvent::Message("Nothing found".into())),
         };
@@ -1527,34 +1540,35 @@ impl Editor {
     /// the declaration itself it lists the usages instead, like JetBrains' Go to
     /// Declaration or Usages (and VS Code's ⌘-click on a definition).
     pub(super) fn navigate_from(&mut self, offset: usize, cx: &mut Context<Self>) {
-        self.locations_request("textDocument/definition", offset, "Declaration", "No declaration found", Value::Null, true, cx);
+        self.locations_request("textDocument/definition", offset, "Declaration", "No declaration found", Value::Null, Show::OrUsages, cx);
     }
 
     pub(super) fn go_to_implementation(&mut self, _: &super::GoToImplementation, _: &mut Window, cx: &mut Context<Self>) {
         let head = self.primary_selection().head;
         let name = self.doc.read(cx).slice(super::word_range(self.doc.read(cx), head));
         let title = format!("Implementations of {name}");
-        self.locations_request("textDocument/implementation", head, &title, "No implementations found", Value::Null, false, cx);
+        self.locations_request("textDocument/implementation", head, &title, "No implementations found", Value::Null, Show::Pick, cx);
     }
 
     pub(super) fn go_to_type_definition(&mut self, _: &super::GoToTypeDefinition, _: &mut Window, cx: &mut Context<Self>) {
         let head = self.primary_selection().head;
-        self.locations_request("textDocument/typeDefinition", head, "Type Definition", "No type definition found", Value::Null, false, cx);
+        self.locations_request("textDocument/typeDefinition", head, "Type Definition", "No type definition found", Value::Null, Show::Pick, cx);
     }
 
     pub(super) fn find_usages(&mut self, _: &super::FindUsages, _: &mut Window, cx: &mut Context<Self>) {
         let head = self.primary_selection().head;
-        self.find_usages_at(head, cx);
+        self.find_usages_at(head, true, cx);
     }
 
-    fn find_usages_at(&mut self, offset: usize, cx: &mut Context<Self>) {
+    /// `panel`: in the Find panel (Find Usages), else to pick from (Go to
+    /// Declaration on a declaration, as JetBrains' popup).
+    fn find_usages_at(&mut self, offset: usize, panel: bool, cx: &mut Context<Self>) {
         let name = self.doc.read(cx).slice(super::word_range(self.doc.read(cx), offset));
         let context = json!({ "includeDeclaration": true });
-        self.locations_request("textDocument/references", offset, &format!("Usages of {name}"), "No usages found", context, false, cx);
+        let show = if panel { Show::Panel } else { Show::Pick };
+        self.locations_request("textDocument/references", offset, &format!("Usages of {name}"), "No usages found", context, show, cx);
     }
 
-    /// `or_usages`: when the answer is where the request was made (the
-    /// declaration itself), list the usages there instead.
     #[allow(clippy::too_many_arguments)]
     fn locations_request(
         &mut self,
@@ -1563,7 +1577,7 @@ impl Editor {
         title: &str,
         none: &'static str,
         context: Value,
-        or_usages: bool,
+        show: Show,
         cx: &mut Context<Self>,
     ) {
         // `textDocument/definition` → `definitionProvider`.
@@ -1582,12 +1596,12 @@ impl Editor {
             this.update(cx, |this, cx| match result {
                 Ok(value) => {
                     let locations = protocol::locations(&value);
-                    if or_usages && this.is_declaration_at(offset, &locations, server.encoding, cx) {
-                        this.find_usages_at(offset, cx);
+                    if show == Show::OrUsages && this.is_declaration_at(offset, &locations, server.encoding, cx) {
+                        this.find_usages_at(offset, false, cx);
                     } else if locations.is_empty() {
                         cx.emit(EditorLspEvent::Message(none.into()));
                     } else {
-                        cx.emit(EditorLspEvent::Navigate { title, locations, encoding: server.encoding });
+                        cx.emit(EditorLspEvent::Navigate { title, locations, encoding: server.encoding, panel: show == Show::Panel });
                     }
                 }
                 // The server dropped it (the text changed meanwhile): not an error.

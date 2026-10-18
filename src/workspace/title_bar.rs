@@ -226,6 +226,12 @@ impl Workspace {
                 })
                 .tooltip(|window, cx| status_tooltip("Problems", &ToggleProblems, window, cx)),
             ))
+            .when(self.has_results && (fit.problems || self.shows(BottomPanel::Results)), |el| el.child(
+                toggle("toggle-results", Icon::TextSearch, self.shows(BottomPanel::Results), cx, |ws, window, cx| {
+                    ws.toggle_results(&ToggleResults, window, cx)
+                })
+                .tooltip(|window, cx| status_tooltip("Find", &ToggleResults, window, cx)),
+            ))
             .when(self.repo.is_some() && (fit.git_log || self.shows(BottomPanel::GitLog)), |el| {
                 el.child(
                     toggle("toggle-git-log", Icon::GitCommit, self.shows(BottomPanel::GitLog), cx, |ws, window, cx| {

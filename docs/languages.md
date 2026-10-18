@@ -53,6 +53,16 @@ Tailwind beside TypeScript). All of them get the file; their problems show toget
 and code actions list all of theirs, and the rest (hover, Go to Declaration, rename, formatting)
 goes to the first that offers it. The status bar names the ones running.
 
+**Find Usages** (⌥F7 / Alt+F7 in the JetBrains keymap, ⇧F12 in VS Code's) lists a symbol's usages
+in the **Find** panel at the bottom, grouped by file, each with its line and the usage highlighted.
+↑/↓ show each one in the editor while the panel keeps the keyboard, Enter (or a click) goes there,
+←/→ collapse and expand a file, and Escape goes back to the editor. **Next / Previous Result**
+(F4 / ⇧F4 in the VS Code keymap, or Find Action) steps through them from anywhere. A new search
+replaces the panel's tab unless you pin it (the pin at its top right); pinned searches stay as
+tabs. **Toggle Find Panel** (⌘3 / Alt+3 in the JetBrains keymap, View → Find Panel) shows it again,
+and the title bar has a toggle once it has results. Go to Declaration on a declaration still lists
+its usages in a quick popup, as in JetBrains.
+
 **Code lenses** sit above lines, as the server offers them: rust-analyzer's ▶ Run / Debug (run in a
 Run tab or the debugger, like the gutter ▶), implementations and references (which open the
 usages list), and other servers' commands. A lens's title, which can cost the server a search, is

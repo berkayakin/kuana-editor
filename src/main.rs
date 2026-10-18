@@ -56,6 +56,7 @@ mod schemas;
 mod project_search;
 mod push_dialog;
 mod remotes_dialog;
+mod results_panel;
 mod search;
 mod settings;
 mod snippets;
@@ -84,7 +85,7 @@ use crate::{
         GitInit, GitPull, GitPush, GoToFile, GoToLine, MinimizeWindow, ZoomWindow, NewFile, NewWindow, NextTab, OpenFile,
         OpenFolder, OpenFolderInThisWindow, OpenRemote, PrevTab, Quit, RecentFiles, RecentProjects,
         Replace, ReplaceInFiles, Save, SaveAs, SearchEverywhere, SelectTheme, ShowCommit,
-        ToggleProblems, ToggleSidebar, WelcomeSetup, GoToSymbol, InstallShellCommand,
+        ToggleProblems, ToggleResults, ToggleSidebar, WelcomeSetup, GoToSymbol, InstallShellCommand,
         DebugConfiguration, Resume, PauseProgram, StepOver, StepInto, StepOut, AttachToProcess, AddConditionalBreakpoint, AddLogpoint,
     },
 };
@@ -192,6 +193,7 @@ fn menus_for(mac: bool) -> Vec<Menu> {
             items: vec![
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
                 MenuItem::action("Toggle Problems", ToggleProblems),
+                MenuItem::action("Find Panel", ToggleResults),
                 MenuItem::action("Terminal", ToggleTerminal),
                 MenuItem::action("Soft-Wrap", ToggleSoftWrap),
                 MenuItem::separator(),

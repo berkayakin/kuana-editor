@@ -7,7 +7,10 @@ impl Workspace {
 
     pub(super) fn on_editor_lsp_event(&mut self, event: &EditorLspEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            EditorLspEvent::Navigate { title, locations, encoding } => match locations.as_slice() {
+            EditorLspEvent::Navigate { title, locations, encoding, panel: true } => {
+                self.show_usages(title.clone(), locations.clone(), *encoding, window, cx)
+            }
+            EditorLspEvent::Navigate { title, locations, encoding, panel: false } => match locations.as_slice() {
                 [one] => self.open_location(one.clone(), *encoding, window, cx),
                 many => self.show_locations(title.clone(), many.to_vec(), *encoding, window, cx),
             },
@@ -71,37 +74,65 @@ impl Workspace {
         }
     }
 
-    /// Lists usages (or several declarations) to pick from, each with its
-    /// line: from the tab's text where the file is open, else read in the
-    /// background, only as far as the last line wanted.
-    pub(super) fn show_locations(&mut self, title: SharedString, locations: Vec<Location>, encoding: Encoding, window: &mut Window, cx: &mut Context<Self>) {
+    /// Each location's line (as it reads today, untrimmed): from the tab's
+    /// text where the file is open, else read in the background, only as far
+    /// as the last line wanted.
+    fn location_lines(&self, locations: &[Location], cx: &App) -> Task<Vec<String>> {
         let mut tabs: HashMap<PathBuf, Option<Entity<Editor>>> = HashMap::new();
-        // Per file not open: the lines wanted, and the rows wanting them.
+        // Per file not open: the lines wanted, and the locations wanting them.
         let mut unread: HashMap<PathBuf, Vec<(usize, usize)>> = HashMap::new();
-        let mut rows = Vec::with_capacity(locations.len());
-        for location in locations {
+        let mut lines = Vec::with_capacity(locations.len());
+        for (ix, location) in locations.iter().enumerate() {
             let line = location.range.start.line as usize;
             let tab = tabs.entry(location.path.clone()).or_insert_with(|| self.tab_for(&location.path, cx));
-            let preview = match tab {
-                Some(editor) => editor.read(cx).doc.read(cx).rope().get_line(line).map(|l| l.to_string().trim().to_string()).unwrap_or_default(),
+            lines.push(match tab {
+                Some(editor) => editor.read(cx).doc.read(cx).rope().get_line(line).map(|l| l.to_string()).unwrap_or_default(),
                 None => {
-                    unread.entry(location.path.clone()).or_default().push((line, rows.len()));
+                    unread.entry(location.path.clone()).or_default().push((line, ix));
                     String::new()
                 }
-            };
-            rows.push(LocationRow { file: self.location_label(&location.path), line: line + 1, preview, location, encoding });
+            });
         }
-        let read = cx.background_executor().spawn(async move {
-            unread.into_iter().flat_map(|(path, wanted)| {
-                let lines = read_lines(&path, wanted.iter().map(|(line, _)| *line).max().unwrap_or(0));
-                wanted.into_iter().map(move |(line, row)| (row, lines.get(line).cloned().unwrap_or_default())).collect::<Vec<_>>()
-            }).collect::<Vec<_>>()
-        });
+        cx.background_executor().spawn(async move {
+            for (path, wanted) in unread {
+                let read = read_lines(&path, wanted.iter().map(|(line, _)| *line).max().unwrap_or(0));
+                for (line, ix) in wanted {
+                    lines[ix] = read.get(line).cloned().unwrap_or_default();
+                }
+            }
+            lines
+        })
+    }
+
+    /// Lists usages in the Find panel, grouped by file.
+    pub(super) fn show_usages(&mut self, title: SharedString, locations: Vec<Location>, encoding: Encoding, window: &mut Window, cx: &mut Context<Self>) {
+        let read = self.location_lines(&locations, cx);
         self.locations_task = Some(cx.spawn_in(window, async move |ws, cx| {
-            let previews = read.await;
+            let lines = read.await;
             ws.update_in(cx, |ws, window, cx| {
-                for (row, preview) in previews {
-                    rows[row].preview = preview;
+                let nodes = crate::results_panel::usages_tree(locations, lines, encoding, |path| ws.location_label(path));
+                ws.show_results(title, nodes, window, cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// Lists usages (or several declarations) to pick from, each with its
+    /// line.
+    pub(super) fn show_locations(&mut self, title: SharedString, locations: Vec<Location>, encoding: Encoding, window: &mut Window, cx: &mut Context<Self>) {
+        let read = self.location_lines(&locations, cx);
+        let mut rows: Vec<LocationRow> = locations
+            .into_iter()
+            .map(|location| {
+                let line = location.range.start.line as usize + 1;
+                LocationRow { file: self.location_label(&location.path), line, preview: String::new(), location, encoding }
+            })
+            .collect();
+        self.locations_task = Some(cx.spawn_in(window, async move |ws, cx| {
+            let lines = read.await;
+            ws.update_in(cx, |ws, window, cx| {
+                for (row, line) in rows.iter_mut().zip(lines) {
+                    row.preview = line.trim().to_string();
                 }
                 ws.close_modal(window, cx);
                 ws.open_picker(PickerMode::Locations, window, cx);
@@ -276,7 +307,7 @@ impl Workspace {
     }
 }
 
-/// A file's lines up to `last` (0-based), trimmed: read only that far.
+/// A file's lines up to `last` (0-based): read only that far.
 fn read_lines(path: &Path, last: usize) -> Vec<String> {
     use std::io::BufRead;
     let Ok(file) = std::fs::File::open(path) else { return Vec::new() };
@@ -286,7 +317,7 @@ fn read_lines(path: &Path, last: usize) -> Vec<String> {
         line.clear();
         match reader.read_until(b'\n', &mut line) {
             Ok(0) | Err(_) => break,
-            Ok(_) => lines.push(String::from_utf8_lossy(&line).trim().to_string()),
+            Ok(_) => lines.push(String::from_utf8_lossy(&line).trim_end_matches(['\n', '\r']).to_string()),
         }
     }
     lines
@@ -317,8 +348,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("a.rs");
         std::fs::write(&path, b"fn a() {}\r\n    let x = caf\xe9;\nlast").unwrap();
-        assert_eq!(super::read_lines(&path, 1), ["fn a() {}", "let x = caf\u{fffd};"]);
-        assert_eq!(super::read_lines(&path, 9), ["fn a() {}", "let x = caf\u{fffd};", "last"]);
+        assert_eq!(super::read_lines(&path, 1), ["fn a() {}", "    let x = caf\u{fffd};"]);
+        assert_eq!(super::read_lines(&path, 9), ["fn a() {}", "    let x = caf\u{fffd};", "last"]);
         assert_eq!(super::read_lines(&path, 0).len(), 1);
         assert!(super::read_lines(&dir.join("gone.rs"), 3).is_empty());
         std::fs::remove_dir_all(&dir).ok();
