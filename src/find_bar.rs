@@ -246,8 +246,8 @@ impl FindBar {
             self.select_next(cx);
             return;
         }
-        let text = target.read(cx).doc.read(cx).rope().to_string();
-        let replacement = query.replacement_for(&text, range.clone(), &self.replacement.read(cx).text(cx));
+        let replacement = self.replacement.read(cx).text(cx);
+        let replacement = query.replacements_in(target.read(cx).doc.read(cx).rope(), std::slice::from_ref(&range), &replacement).remove(0);
         let after = range.start + replacement.len();
         target.update(cx, |e, cx| {
             e.replace_ranges(vec![(range, replacement)], cx);
@@ -262,14 +262,10 @@ impl FindBar {
         let (Some(target), Ok(Some(query))) = (self.target.clone(), self.query(cx)) else {
             return;
         };
-        let text = target.read(cx).doc.read(cx).rope().to_string();
         let replacement = self.replacement.read(cx).text(cx);
-        let edits: Vec<_> = self
-            .matches
-            .ranges
-            .iter()
-            .map(|m| (m.clone(), query.replacement_for(&text, m.clone(), &replacement)))
-            .collect();
+        let ranges = &self.matches.ranges;
+        let replacements = query.replacements_in(target.read(cx).doc.read(cx).rope(), ranges, &replacement);
+        let edits: Vec<_> = ranges.iter().cloned().zip(replacements).collect();
         target.update(cx, |e, cx| e.replace_ranges(edits, cx));
     }
 

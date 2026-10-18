@@ -1,14 +1,14 @@
 //! Reformat Code and format on save, through the language server or a
 //! command-line formatter (see `crate::format`).
 
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
 use gpui::{App, Context, Task, Window};
 use serde_json::{Value, json};
 
 use super::{Editor, EditorLspEvent};
 use crate::{
-    document::EditKind,
+    document::{EditKind, Patch},
     format,
     lsp::{Server, protocol},
     settings::Settings,
@@ -99,13 +99,17 @@ impl Editor {
                     language.name()
                 ));
             };
+            let edits = cx.background_executor().spawn(async move { format::line_edits(&text, &formatted) }).await;
             this.update(cx, |e, cx| {
-                if e.doc.read(cx).version() != version {
-                    return Err("The file changed while formatting".to_string());
-                }
-                let edits = format::line_edits(&text, &formatted);
                 if edits.is_empty() {
                     return Ok(false);
+                }
+                // Typing went on meanwhile: the formatter's edits move past it.
+                let changed = "The file changed while formatting".to_string();
+                let patches = e.doc.read(cx).patches_since(version).ok_or_else(|| changed.clone())?;
+                let edits = rebase_edits(edits, patches);
+                if edits.is_empty() {
+                    return Err(changed);
                 }
                 e.edit_and_remap(edits, EditKind::Other, cx);
                 Ok(true)
@@ -113,6 +117,27 @@ impl Editor {
             .map_err(|_| "The editor closed".to_string())?
         })
     }
+}
+
+/// A formatter's edits to the text it was given, moved to today's text
+/// through the edits made since (`patches`). One that an edit since touched
+/// is left out, so what was typed meanwhile stays (as Zed's
+/// `Buffer::apply_diff` does); the others still apply.
+fn rebase_edits<'a>(edits: Vec<(Range<usize>, String)>, patches: impl Iterator<Item = &'a Patch>) -> Vec<(Range<usize>, String)> {
+    let patches: Vec<&Patch> = patches.collect();
+    edits
+        .into_iter()
+        .filter_map(|(mut range, text)| {
+            for patch in &patches {
+                let (delta, touching) = patch.around(range.clone());
+                if !touching.is_empty() {
+                    return None;
+                }
+                range = range.start.checked_add_signed(delta)?..range.end.checked_add_signed(delta)?;
+            }
+            Some((range, text))
+        })
+        .collect()
 }
 
 /// Asks the server to format, and applies its edits to a copy of `text`.
@@ -143,4 +168,32 @@ async fn lsp_format(
         out.replace_range(range.clone(), new_text);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn apply(text: &str, edits: &[(Range<usize>, String)]) -> String {
+        let mut out = text.to_string();
+        for (range, new_text) in edits.iter().rev() {
+            out.replace_range(range.clone(), new_text);
+        }
+        out
+    }
+
+    #[test]
+    fn typing_while_formatting_keeps_the_edits_it_did_not_touch() {
+        let (text, formatted) = ("a  =1\nb=2\nc  =3\nd=4\ne  =5\n", "a = 1\nb=2\nc = 3\nd=4\ne = 5\n");
+        assert_eq!(format::line_edits(text, formatted).len(), 3);
+        // Meanwhile: "x" typed on line 2 (which the formatter leaves), then
+        // "y" on line 3 (which it reformats).
+        let typed = [Patch::new(vec![(7..7, 1)]), Patch::new(vec![(12..12, 1)])];
+        let now = "a  =1\nbx=2\ncy  =3\nd=4\ne  =5\n";
+        let rebased = rebase_edits(format::line_edits(text, formatted), typed.iter());
+        // Lines 1 and 5 are formatted; line 3 keeps what was typed.
+        assert_eq!(apply(now, &rebased), "a = 1\nbx=2\ncy  =3\nd=4\ne = 5\n");
+        // Nothing since: every edit applies as it was.
+        assert_eq!(apply(text, &rebase_edits(format::line_edits(text, formatted), std::iter::empty())), formatted);
+    }
 }
