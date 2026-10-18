@@ -387,6 +387,14 @@ impl ResultsPanel {
         cx.notify();
     }
 
+    /// Drops every tab (another project replaced this one: its results
+    /// point into a folder that's no longer open).
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.tabs.clear();
+        self.active = 0;
+        cx.notify();
+    }
+
     /// Runs a node's loader and puts its children in, if its tab is still there.
     fn load(&mut self, tab: u64, path: Vec<usize>, loader: Loader, cx: &mut Context<Self>) {
         let task = (loader.0)(cx);

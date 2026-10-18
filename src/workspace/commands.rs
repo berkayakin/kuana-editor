@@ -135,6 +135,12 @@ impl Workspace {
         self.hide_bottom(BottomPanel::Debug);
         self.debug_location = None;
         self.breakpoints.clear();
+        // Searches, test results and Local History list the old project's files.
+        self.results.update(cx, |p, cx| p.clear(cx));
+        self.has_results = false;
+        self.hide_bottom(BottomPanel::Results);
+        self.last_tests = None;
+        self.test_statuses = Arc::default();
         self.lsp.update(cx, |s, _| {
             s.shutdown_all();
             s.set_root(None);
