@@ -38,7 +38,18 @@ impl SearchQuery {
             regex::escape(text)
         };
         if options.whole_word {
-            pattern = format!(r"\b(?:{pattern})\b");
+            pattern = if options.regex {
+                // A regex's edges aren't its first and last characters.
+                format!(r"\b(?:{pattern})\b")
+            } else {
+                // A boundary only on a side that ends in a word character
+                // (as Zed does): `\b` beside `@`, `$`, `.` or `(` would need a
+                // word character next to it, so `@Override` or `foo(` never matched.
+                let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+                let start = if word(text.chars().next()) { r"\b" } else { "" };
+                let end = if word(text.chars().next_back()) { r"\b" } else { "" };
+                format!("{start}{pattern}{end}")
+            };
         }
         RegexBuilder::new(&pattern)
             .case_insensitive(!options.case_sensitive)
@@ -310,6 +321,19 @@ mod tests {
         assert_eq!(q("i\\w+s", re).find_all(text), vec![10..15]);
         assert!(SearchQuery::new("(", re).is_err());
         assert_eq!(q("a.b", SearchOptions::default()).find_all("a.b axb"), vec![0..3]);
+    }
+
+    #[test]
+    fn whole_word_bounds_only_word_edges() {
+        let ww = SearchOptions { whole_word: true, ..Default::default() };
+        let find = |t: &str, text: &str| SearchQuery::new(t, ww).unwrap().unwrap().find_all(text);
+        assert_eq!(find("@Override", " @Override\n@Overrides"), vec![1..10]);
+        assert_eq!(find("$id", "x = $id; $idx"), vec![4..7]);
+        assert_eq!(find(".map", "a.map(f) a.mapped"), vec![1..5]);
+        assert_eq!(find("foo(", "foo(1) barfoo(2)"), vec![0..4]);
+        assert_eq!(find("item", "item items"), vec![0..4]);
+        // Non-ASCII letters are word characters too.
+        assert_eq!(find("ğ", "ğ ağ"), vec![0..2]);
     }
 
     #[test]

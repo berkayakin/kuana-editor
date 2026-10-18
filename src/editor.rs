@@ -383,7 +383,8 @@ pub struct Editor {
     hunks: Arc<Vec<Hunk>>,
     /// Per hunk: whether it's fully staged.
     hunk_staged: Arc<Vec<bool>>,
-    /// Index into `hunks` of the change popover that is open.
+    /// Index into `hunks` of the change popover that is open (found again
+    /// by its rows at HEAD whenever `hunks` change).
     open_hunk: Option<usize>,
     /// Blame shown for the caret's line: its row, the version, the commit.
     blame: Option<(usize, u64, BlameLine)>,
@@ -908,12 +909,26 @@ impl Editor {
         }
         self.git_file = git_file;
         self.has_diff_base = diff.has_base();
+        // The open popover's change, which a new diff may list at another
+        // index (one above it went) or not at all. Its rows at HEAD stay the
+        // same while the text changes around it.
+        let open = self.open_hunk.and_then(|i| self.hunks.get(i)).map(|h| h.old_rows.clone());
         self.hunks = diff.hunks().clone();
         self.hunk_staged = diff.staged().clone();
-        if self.open_hunk.is_some_and(|i| i >= self.hunks.len()) {
-            self.open_hunk = None;
-        }
+        self.open_hunk = open.and_then(|old| self.hunks.iter().position(|h| h.old_rows == old));
         cx.notify();
+    }
+
+    /// Brings `hunks` up to the text as it is before acting on one: they're
+    /// diffed `EDIT_DELAY` after an edit, and until then their rows are the
+    /// text's before it (Rollback after a format would overwrite other lines).
+    /// False when the open popover's change is gone with that.
+    fn diff_now(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((diff, _)) = &self.git_diff else { return true };
+        let was_open = self.open_hunk.is_some();
+        diff.clone().update(cx, |diff, cx| diff.diff_now(cx));
+        self.git_diff_changed(cx);
+        !was_open || self.open_hunk.is_some()
     }
 
     /// The rows of each change, for tests.
@@ -4653,6 +4668,14 @@ impl Editor {
     }
 
     fn rollback_hunk(&mut self, _: &RollbackHunk, _: &mut Window, cx: &mut Context<Self>) {
+        self.rollback_current_hunk(cx);
+    }
+
+    /// Puts the HEAD text back for the change at the caret (or the open popover's).
+    fn rollback_current_hunk(&mut self, cx: &mut Context<Self>) {
+        if !self.diff_now(cx) {
+            return;
+        }
         let Some(hunk) = self.current_hunk(cx).and_then(|i| self.hunks.get(i)).cloned() else {
             return;
         };
@@ -4679,6 +4702,10 @@ impl Editor {
     /// Stages (or unstages) the change at the caret, as the buffer shows it,
     /// unsaved edits included.
     fn stage_current_hunk(&mut self, stage: bool, cx: &mut Context<Self>) {
+        // `git::stage_lines` picks the changes at these rows of this text.
+        if !self.diff_now(cx) {
+            return;
+        }
         let (Some(hunk), Some(git_file)) = (self.current_hunk(cx).and_then(|i| self.hunks.get(i)).cloned(), self.git_file.clone()) else {
             cx.emit(EditorLspEvent::Message("No change at the caret".into()));
             return;
@@ -5704,6 +5731,49 @@ impl Element for EditorElement {
         for q in frame.scrollbar.drain(..) {
             window.paint_quad(q);
         }
+    }
+}
+
+#[cfg(test)]
+mod hunk_tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    /// Rollback right after an edit (a format, Replace All), before the
+    /// change markers are diffed again, acts on the text as it is: the
+    /// popover's change, wherever the edit moved it, not the rows it had.
+    #[gpui::test]
+    fn rollback_acts_on_the_text_as_it_is(cx: &mut TestAppContext) {
+        let editor = cx.new(|cx| Editor::new(Document::from_text("a\nB\nc\nd\n".into(), Some(std::path::PathBuf::from("/x/a.txt"))), cx));
+        let doc = editor.read_with(cx, |e, _| e.doc.clone());
+        let diff = cx.new(|cx| DocumentDiff::new(&doc, cx));
+        editor.update(cx, |e, cx| e.set_git_diff(diff.clone(), cx));
+        diff.update(cx, |d, cx| d.set_base(None, Some("a\nb\nc\nd\n".into()), None, cx));
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |e, _| e.hunk_rows()), [1..2]);
+        editor.update(cx, |e, cx| {
+            e.open_hunk = Some(0);
+            // Two lines above it: the hunk's rows are stale until the re-diff.
+            e.replace_ranges(vec![(0..0, "x\ny\n".into())], cx);
+            e.rollback_current_hunk(cx);
+        });
+        assert_eq!(editor.read_with(cx, |e, cx| e.text(cx)), "x\ny\na\nb\nc\nd\n");
+
+        // A re-diff keeps the popover on its change, at its new index.
+        editor.update(cx, |e, cx| e.replace_ranges(vec![(6..7, "B".into())], cx));
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+        editor.update(cx, |e, cx| {
+            assert_eq!(e.hunk_rows(), [0..2, 3..4]);
+            e.open_hunk = Some(1);
+            e.replace_ranges(vec![(0..4, String::new())], cx);
+        });
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+        editor.read_with(cx, |e, _| {
+            assert_eq!(e.hunk_rows(), [1..2]);
+            assert_eq!(e.open_hunk, Some(0));
+        });
     }
 }
 

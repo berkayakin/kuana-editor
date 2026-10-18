@@ -28,6 +28,9 @@ pub struct DocumentDiff {
     staged: Arc<Vec<bool>>,
     /// The document (id, version) `hunks` were computed for, or are being.
     diffed: Option<(u64, u64)>,
+    /// The document (id, version) `hunks` were computed for: until an edit's
+    /// diff lands (`EDIT_DELAY`), their rows are the text's before it.
+    hunks_at: Option<(u64, u64)>,
     task: Option<Task<()>>,
     /// Diffs computed, for tests.
     #[cfg(test)]
@@ -46,6 +49,7 @@ impl DocumentDiff {
             hunks: Arc::default(),
             staged: Arc::default(),
             diffed: None,
+            hunks_at: None,
             task: None,
             #[cfg(test)]
             runs: 0,
@@ -60,6 +64,7 @@ impl DocumentDiff {
         self.base = base.map(Arc::from);
         self.index = index.map(Arc::from);
         self.diffed = None;
+        self.hunks_at = None;
         self.schedule(Duration::ZERO, cx);
         cx.notify();
     }
@@ -79,6 +84,26 @@ impl DocumentDiff {
 
     pub fn staged(&self) -> &Arc<Vec<bool>> {
         &self.staged
+    }
+
+    /// Diffs the document at once if `hunks` are for an earlier version of
+    /// it (an edit, a format or a Replace All less than `EDIT_DELAY` ago):
+    /// acting on a hunk (Rollback, Stage) needs its rows in the text as it is.
+    pub fn diff_now(&mut self, cx: &mut Context<Self>) {
+        let (Some(doc), Some(base)) = (self.doc.upgrade(), self.base.clone()) else { return };
+        let doc = doc.read(cx);
+        let at = (doc.id(), doc.version());
+        if self.hunks_at == Some(at) || doc.is_stand_in() {
+            return;
+        }
+        let (hunks, staged) = diff(&base, self.index.as_deref(), &doc.rope().to_string());
+        // The one scheduled for this version (or an older one) isn't needed.
+        self.task = None;
+        self.diffed = Some(at);
+        self.hunks_at = Some(at);
+        self.hunks = Arc::new(hunks);
+        self.staged = Arc::new(staged);
+        cx.notify();
     }
 
     /// Diffs the document again unless it's what was (or is being) diffed;
@@ -107,20 +132,8 @@ impl DocumentDiff {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
             }
-            let (hunks, staged) = cx
-                .background_executor()
-                .spawn(async move {
-                    let text = rope.to_string();
-                    let hunks = git::diff_hunks(&base, &text);
-                    // A change is staged when nothing differs from the index there.
-                    let unstaged = index.map(|index| git::diff_hunks(&index, &text));
-                    let staged: Vec<bool> = hunks
-                        .iter()
-                        .map(|h| unstaged.as_ref().is_some_and(|u| !u.iter().any(|u| git::rows_touch(&u.new_rows, &h.new_rows))))
-                        .collect();
-                    (hunks, staged)
-                })
-                .await;
+            let (hunks, staged) =
+                cx.background_executor().spawn(async move { diff(&base, index.as_deref(), &rope.to_string()) }).await;
             this.update(cx, |diff, cx| {
                 #[cfg(test)]
                 {
@@ -128,9 +141,22 @@ impl DocumentDiff {
                 }
                 diff.hunks = Arc::new(hunks);
                 diff.staged = Arc::new(staged);
+                diff.hunks_at = Some(at);
                 cx.notify();
             })
             .ok();
         }));
     }
+}
+
+/// `text`'s changes against `base`, and per change whether it's staged:
+/// nothing differs from the `index` text there.
+fn diff(base: &str, index: Option<&str>, text: &str) -> (Vec<Hunk>, Vec<bool>) {
+    let hunks = git::diff_hunks(base, text);
+    let unstaged = index.map(|index| git::diff_hunks(index, text));
+    let staged = hunks
+        .iter()
+        .map(|h| unstaged.as_ref().is_some_and(|u| !u.iter().any(|u| git::rows_touch(&u.new_rows, &h.new_rows))))
+        .collect();
+    (hunks, staged)
 }

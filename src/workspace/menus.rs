@@ -753,7 +753,7 @@ impl Workspace {
             if answer.await != Ok(0) {
                 return;
             }
-            let mut args = vec!["add".to_string(), "--".to_string()];
+            let mut args = vec!["--literal-pathspecs".to_string(), "add".to_string(), "--".to_string()];
             args.extend(names);
             let result = cx
                 .background_executor()
