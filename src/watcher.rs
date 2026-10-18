@@ -91,13 +91,21 @@ pub fn git_path(path: &Path) -> GitPath {
     }
 }
 
-/// Folders whose churn (builds, package installs) never matters beyond the
-/// file tree: Kuana hides `target`, and `node_modules` is never indexed.
-pub fn in_heavy_folder(root: &Path, path: &Path) -> bool {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .components()
-        .any(|c| matches!(c, Component::Normal(name) if name == "target" || name == "node_modules"))
+/// The outermost folder named like build output or dependencies (`target`,
+/// `node_modules`) that `path` is in, under `root`. Their churn (builds,
+/// package installs) matters to the file tree only, when they're ignored as
+/// such folders nearly always are; a `target` package in a Java project is
+/// source like any other (`workspace::watching::classify` checks).
+pub fn heavy_folder(root: &Path, path: &Path) -> Option<PathBuf> {
+    let relative = path.strip_prefix(root).ok()?;
+    let mut folder = root.to_path_buf();
+    for component in relative.components() {
+        folder.push(component);
+        if matches!(component, Component::Normal(name) if name == "target" || name == "node_modules") {
+            return Some(folder);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -116,9 +124,11 @@ mod tests {
         assert_eq!(git_path(Path::new("/p/.git/refs/heads/main.lock")), GitPath::Internal);
         assert_eq!(git_path(Path::new("/p/.git/objects/ab/cdef")), GitPath::Internal);
         assert_eq!(git_path(Path::new("/p/.git/logs/HEAD")), GitPath::Internal);
-        assert!(in_heavy_folder(Path::new("/p"), Path::new("/p/target/debug/kuana")));
-        assert!(in_heavy_folder(Path::new("/p"), Path::new("/p/web/node_modules/x/index.js")));
-        assert!(!in_heavy_folder(Path::new("/p"), Path::new("/p/src/targets.rs")));
+        let heavy = |path: &str| heavy_folder(Path::new("/p"), Path::new(path));
+        assert_eq!(heavy("/p/target/debug/kuana"), Some(PathBuf::from("/p/target")));
+        assert_eq!(heavy("/p/web/node_modules/x/node_modules/y.js"), Some(PathBuf::from("/p/web/node_modules")));
+        assert_eq!(heavy("/p/src/targets.rs"), None);
+        assert_eq!(heavy("/elsewhere/target/x"), None);
     }
 
     #[test]
