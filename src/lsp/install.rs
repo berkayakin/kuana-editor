@@ -278,9 +278,7 @@ fn install_github(installer: &Installer, home: &Path, repo: &str, asset: &Asset)
     let found = found.ok_or_else(|| format!("{repo}'s latest release has no {asset}"))?;
     let url = found["browser_download_url"].as_str().ok_or("the release lists no download address")?;
     let version = folder_name(tag);
-    let dir = home.join(&version);
-    let binary = installer.binary(&dir);
-    if binary.is_file() {
+    if installer.binary(&home.join(&version)).is_file() {
         return set_current(home, &version);
     }
 
@@ -293,44 +291,60 @@ fn install_github(installer: &Installer, home: &Path, repo: &str, asset: &Asset)
         std::fs::remove_file(&temp).ok();
         return Err(format!("{asset} didn't match its checksum"));
     }
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let unpacked = if asset.ends_with(".gz") {
-        let mut input = flate2::read::GzDecoder::new(std::fs::File::open(&temp).map_err(|e| e.to_string())?);
-        let mut output = std::fs::File::create(&binary).map_err(|e| e.to_string())?;
-        std::io::copy(&mut input, &mut output).map(|_| ()).map_err(|e| format!("couldn't unpack {asset}: {e}"))
-    } else if asset.ends_with(".zip") {
-        unzip(&temp, &dir).and_then(|()| {
+    let installed = install_into(home, &version, |dir| {
+        let binary = installer.binary(dir);
+        if asset.ends_with(".gz") {
+            let mut input = flate2::read::GzDecoder::new(std::fs::File::open(&temp).map_err(|e| e.to_string())?);
+            let mut output = std::fs::File::create(&binary).map_err(|e| e.to_string())?;
+            std::io::copy(&mut input, &mut output).map_err(|e| format!("couldn't unpack {asset}: {e}"))?;
+        } else if asset.ends_with(".zip") {
+            unzip(&temp, dir)?;
             // The binary may sit in a folder inside the archive.
             let name = exe_name(installer.command);
-            let inside = find_file(&dir, &name).ok_or_else(|| format!("{asset} has no {name}"))?;
-            if inside != binary { std::fs::rename(&inside, &binary).map_err(|e| e.to_string()) } else { Ok(()) }
-        })
-    } else {
-        std::fs::copy(&temp, &binary).map(|_| ()).map_err(|e| e.to_string())
-    };
+            let inside = find_file(dir, &name).ok_or_else(|| format!("{asset} has no {name}"))?;
+            if inside != binary {
+                std::fs::rename(&inside, &binary).map_err(|e| e.to_string())?;
+            }
+        } else {
+            std::fs::copy(&temp, &binary).map_err(|e| e.to_string())?;
+        }
+        make_executable(&binary)
+    });
     std::fs::remove_file(&temp).ok();
-    if let Err(err) = unpacked {
+    installed
+}
+
+/// Fills version folder `version` through `fill`, which gets a folder beside
+/// it that's renamed into place only once it's done, then makes it current:
+/// an install that stops half way (Kuana quit, the disk filled) never looks
+/// installed.
+fn install_into(home: &Path, version: &str, fill: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
+    let staging = home.join(format!("{version}.partial-{}", std::process::id()));
+    std::fs::remove_dir_all(&staging).ok();
+    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    let dir = home.join(version);
+    let filled = fill(&staging).and_then(|()| {
+        // One left by a Kuana from before installs were staged.
         std::fs::remove_dir_all(&dir).ok();
-        return Err(err);
+        std::fs::rename(&staging, &dir).map_err(|e| e.to_string())
+    });
+    if filled.is_err() {
+        std::fs::remove_dir_all(&staging).ok();
     }
-    make_executable(&binary)?;
-    set_current(home, &version)
+    filled?;
+    set_current(home, version)
 }
 
 fn install_npm(installer: &Installer, home: &Path, package: &str) -> Result<(), String> {
     let version = npm_latest(package)?;
     let folder = folder_name(&version);
-    let dir = home.join(&folder);
-    if servers::executable(&installer.binary(&dir)).is_some() {
+    if servers::executable(&installer.binary(&home.join(&folder))).is_some() {
         return set_current(home, &folder);
     }
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let installed = npm_install(&dir, package, &version);
-    if installed.is_err() || servers::executable(&installer.binary(&dir)).is_none() {
-        std::fs::remove_dir_all(&dir).ok();
-        return Err(installed.err().unwrap_or_else(|| format!("{package} has no {}", installer.command)));
-    }
-    set_current(home, &folder)
+    install_into(home, &folder, |dir| {
+        npm_install(dir, package, &version)?;
+        servers::executable(&installer.binary(dir)).map(drop).ok_or_else(|| format!("{package} has no {}", installer.command))
+    })
 }
 
 /// The newest version of an npm package, from the registry.
@@ -579,6 +593,25 @@ mod tests {
         std::fs::remove_file(&file).ok();
         assert_eq!(folder_name("v1.2/x"), "v1.2_x");
         assert!(rust_analyzer_asset().is_some() && taplo_asset().is_some());
+    }
+
+    #[test]
+    fn a_half_done_install_never_looks_installed() {
+        let home = std::env::temp_dir().join(format!("kuana-install-staged-{}", std::process::id()));
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::create_dir_all(&home).unwrap();
+        let failed = install_into(&home, "1.0", |dir| {
+            std::fs::write(dir.join("server"), "half of it").unwrap();
+            Err("the disk filled".into())
+        });
+        assert_eq!(failed, Err("the disk filled".into()));
+        assert!(!home.join("1.0").exists() && current(&home).is_none());
+        assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0, "nothing left behind");
+
+        install_into(&home, "1.0", |dir| std::fs::write(dir.join("server"), "all of it").map_err(|e| e.to_string())).unwrap();
+        assert_eq!(std::fs::read_to_string(home.join("1.0/server")).unwrap(), "all of it");
+        assert_eq!(current(&home), Some(home.join("1.0")));
+        std::fs::remove_dir_all(&home).ok();
     }
 
     /// The real thing: downloads marksman from GitHub into a temporary

@@ -950,16 +950,27 @@ pub fn uninstall(path: &Path) -> Result<(), String> {
 static NATIVE: AtomicBool = AtomicBool::new(false);
 
 /// Whether a grammar is compiled to (and loaded as) native code: only with
-/// `native_grammars` on, and for an extension in a trusted folder (a folder
-/// install is a link, so where it points).
+/// `native_grammars` on, and for an extension the user may run as their own
+/// code (`native_allowed`).
 fn native(grammar: &Grammar) -> bool {
     NATIVE.load(Ordering::Relaxed)
-        && grammar
-            .checkout
-            .parent()
-            .and_then(Path::parent)
-            .and_then(|extension| crate::paths::canonicalize(extension).ok())
-            .is_some_and(|extension| crate::trust::is_trusted(&extension))
+        && grammar.checkout.parent().and_then(Path::parent).is_some_and(|extension| {
+            let config = config_dir().and_then(|dir| crate::paths::canonicalize(&dir).ok());
+            native_allowed(extension, config.as_deref(), crate::trust::is_trusted_by_user)
+        })
+}
+
+/// A native grammar runs in Kuana's own process, so only a folder install
+/// (a link to the user's folder, judged where it points) in a folder the user
+/// trusted builds one. Extensions installed from the registry or Git live in
+/// the config folder, which the user's trust in, say, their home folder
+/// mustn't cover: those load grammars as WebAssembly only, as in Zed.
+fn native_allowed(extension: &Path, config: Option<&Path>, trusted: impl Fn(&Path) -> bool) -> bool {
+    if !extension.is_symlink() {
+        return false;
+    }
+    let Ok(real) = crate::paths::canonicalize(extension) else { return false };
+    !config.is_some_and(|config| real.starts_with(config)) && trusted(&real)
 }
 
 /// Not compiled yet, or its sources changed since. A prebuilt WASM grammar
@@ -990,6 +1001,13 @@ fn build(grammar: &Grammar) -> Result<(), String> {
 /// A shallow fetch of exactly `rev`, or the default branch.
 fn fetch(grammar: &Grammar) -> Result<(), String> {
     let Some(repository) = grammar.repository.as_deref() else { return Ok(()) };
+    // Both come from the manifest and reach git as arguments.
+    if !usable_repository(repository) {
+        return Err(format!("\"{repository}\" isn't a repository address Kuana fetches"));
+    }
+    if let Some(rev) = grammar.rev.as_deref().filter(|rev| !usable_rev(rev)) {
+        return Err(format!("\"{rev}\" isn't a commit or a branch or tag name"));
+    }
     let dir = &grammar.checkout;
     let git = |args: &[&str]| crate::git::run(dir, args);
     if grammar.src.join("parser.c").is_file() {
@@ -1001,12 +1019,34 @@ fn fetch(grammar: &Grammar) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     if !dir.join(".git").exists() {
         git(&["init", "--quiet"])?;
-        git(&["remote", "add", "origin", repository])?;
+        git(&["remote", "add", "--", "origin", repository])?;
     }
     let rev = grammar.rev.as_deref().unwrap_or("HEAD");
-    git(&["fetch", "--depth", "1", "origin", rev]).map_err(|e| format!("couldn't fetch {repository}: {e}"))?;
+    git(&["fetch", "--depth", "1", "--", "origin", rev]).map_err(|e| format!("couldn't fetch {repository}: {e}"))?;
     git(&["checkout", "--quiet", "--force", "FETCH_HEAD"])?;
     Ok(())
+}
+
+/// A repository address git can't read as an option (`--upload-pack=…` runs
+/// a program) or as a remote helper (`ext::<command>`).
+fn usable_repository(repository: &str) -> bool {
+    !repository.is_empty()
+        && !repository.starts_with('-')
+        && !repository.contains("::")
+        && !repository.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// A commit (hex, SHA-1 or SHA-256) or a branch or tag name: no option, and
+/// no refspec (`+a:b` would write a ref of its own).
+fn usable_rev(rev: &str) -> bool {
+    let commit = matches!(rev.len(), 40 | 64) && rev.chars().all(|c| c.is_ascii_hexdigit());
+    let name = !rev.is_empty()
+        && !rev.starts_with(['-', '/', '.'])
+        && !rev.ends_with(['/', '.'])
+        && !rev.contains("..")
+        && !rev.contains("//")
+        && rev.chars().all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c));
+    commit || name
 }
 
 /// To WebAssembly with wasi-sdk, or with the system's C compiler when
@@ -1369,5 +1409,55 @@ formatter = ["gleam", "format", "--stdin"]
         drop(languages);
         std::fs::remove_dir_all(&repo).ok();
         std::fs::remove_dir_all(&ext).ok();
+    }
+
+    #[test]
+    fn grammar_sources_cant_be_options() {
+        assert!(usable_rev("0123456789abcdef0123456789abcdef01234567") && usable_rev("v0.21.0") && usable_rev("release/1.x"));
+        for rev in ["--upload-pack=touch x", "-x", "+main:refs/heads/x", "main:x", "a..b", "/a", "a/", ""] {
+            assert!(!usable_rev(rev), "{rev}");
+        }
+        assert!(usable_repository("https://github.com/tree-sitter/tree-sitter-json") && usable_repository("git@github.com:a/b.git"));
+        for repository in ["--upload-pack=touch x", "-x", "ext::sh -c x", "fd::3", "https://a b", ""] {
+            assert!(!usable_repository(repository), "{repository}");
+        }
+
+        // Refused before git runs.
+        let dir = temp_dir("bad-rev");
+        let grammar = |repository: &str, rev: &str| Grammar {
+            name: "x".into(),
+            src: dir.join("src"),
+            library: dir.join("x.so"),
+            wasm: dir.join("x.wasm"),
+            repository: Some(repository.into()),
+            rev: Some(rev.into()),
+            checkout: dir.join("checkout"),
+        };
+        assert!(fetch(&grammar("file:///nowhere", "--upload-pack=touch x")).unwrap_err().contains("isn't a commit"));
+        assert!(fetch(&grammar("--upload-pack=touch x", "main")).unwrap_err().contains("isn't a repository"));
+        assert!(!dir.join("checkout").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_grammars_only_for_linked_folders_the_user_trusts() {
+        let root = temp_dir("native");
+        let (config, own) = (root.join("config"), root.join("own"));
+        let installed = config.join("extensions/installed");
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::create_dir_all(&own).unwrap();
+        let (linked, into_config) = (config.join("extensions/linked"), config.join("extensions/into-config"));
+        std::os::unix::fs::symlink(&own, &linked).unwrap();
+        std::os::unix::fs::symlink(&installed, &into_config).unwrap();
+        let config = crate::paths::canonicalize(&config).unwrap();
+        let own = crate::paths::canonicalize(&own).unwrap();
+        let everything = |_: &Path| true;
+        assert!(!native_allowed(&installed, Some(&config), everything), "installed from the registry or Git");
+        assert!(!native_allowed(&into_config, Some(&config), everything), "a link into the config folder");
+        assert!(native_allowed(&linked, Some(&config), everything));
+        assert!(native_allowed(&linked, Some(&config), |p: &Path| p.starts_with(&own)), "judged where it points");
+        assert!(!native_allowed(&linked, Some(&config), |p: &Path| !p.starts_with(&own)), "a folder the user didn't trust");
+        std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -13,7 +13,8 @@
 //! GitHub, its Node.js and npm, the augmented PATH, the `lsp.<id>` settings
 //! (by Zed's server id). Running a program (`process`) needs the project to be
 //! trusted. A call may run only so much of the code (`FUEL`), in so much
-//! memory (`MEMORY`). Slash commands, context servers, the docs database and
+//! memory (`MEMORY`), for so long (`CALL_DEADLINE`; a program it runs,
+//! `COMMAND_TIMEOUT`). Slash commands, context servers, the docs database and
 //! debug adapters answer with errors.
 
 use std::{
@@ -26,8 +27,10 @@ use std::{
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
-    time::SystemTime,
+    time::{Duration, Instant, SystemTime},
 };
+
+use futures::future::Either;
 
 use serde_json::{Value, json};
 use wasmtime::{
@@ -227,15 +230,40 @@ impl WasmExtension {
         &'static self,
         job: impl FnOnce(&'static WasmExtension, &mut Option<Instance>) -> Result<T, String> + Send + 'static,
     ) -> impl Future<Output = Result<T, String>> + Send + 'static {
+        self.run_within(CALL_DEADLINE, job)
+    }
+
+    /// `run`, answered with an error after `deadline`. Fuel doesn't count
+    /// the time the code waits in Kuana (a download, a program), so a call
+    /// stuck there would hold the extension's queue, and with it every
+    /// server start for its languages: past the deadline the thread is left
+    /// to finish on its own and later calls get a new one (and instance).
+    fn run_within<T: Send + 'static>(
+        &'static self,
+        deadline: Duration,
+        job: impl FnOnce(&'static WasmExtension, &mut Option<Instance>) -> Result<T, String> + Send + 'static,
+    ) -> impl Future<Output = Result<T, String>> + Send + 'static {
         let (answer, answered) = futures::channel::oneshot::channel();
         let job: Job = Box::new(move |instance| {
             answer.send(job(self, instance)).ok();
         });
         // A job that isn't run (no thread) drops its sender: an error below.
-        if let Some(jobs) = worker(&self.id) {
-            jobs.send(job).ok();
+        let generation = worker(&self.id).and_then(|(generation, jobs)| jobs.send(job).ok().map(|()| generation));
+        let late = after(deadline);
+        let not_running = move || Err(format!("the {} extension's code isn't running", self.id));
+        async move {
+            match futures::future::select(answered, late).await {
+                Either::Left((answer, _)) => answer.unwrap_or_else(|_| not_running()),
+                Either::Right((Ok(()), _)) => {
+                    if let Some(generation) = generation {
+                        abandon(&self.id, generation);
+                    }
+                    Err(format!("the {} extension's code took over {} s, so Kuana stopped waiting", self.id, deadline.as_secs()))
+                }
+                // No timer: no deadline.
+                Either::Right((Err(_), answered)) => answered.await.unwrap_or_else(|_| not_running()),
+            }
         }
-        async move { answered.await.unwrap_or_else(|_| Err(format!("the {} extension's code isn't running", self.id))) }
     }
 
     /// Runs `f` on the extension's instance (made first if it has none, or
@@ -323,7 +351,7 @@ fn work_dir_of(id: &str) -> Option<PathBuf> {
 /// An uninstalled extension: its instance ends and its work folder (the
 /// servers its code downloaded) goes.
 pub fn forget(id: &str) {
-    let jobs = WORKERS.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+    let jobs = WORKERS.lock().unwrap_or_else(|e| e.into_inner()).remove(id).map(|(_, jobs)| jobs);
     let work = work_dir_of(id);
     if let Some(dir) = &work {
         std::fs::remove_dir_all(dir).ok();
@@ -365,24 +393,32 @@ static LINKER: LazyLock<Result<Linker<State>, String>> = LazyLock::new(|| {
     Ok(linker)
 });
 
-/// Each extension's thread, by id, to send it jobs. The thread keeps the
-/// extension's instance between calls (its code remembers things, such as
-/// where it put a server) and runs one job at a time. A call can wait on the
+/// How long a call may take, downloads and programs included: longer than
+/// a server's download may (`updater::download`, 15 minutes).
+const CALL_DEADLINE: Duration = Duration::from_secs(20 * 60);
+/// How long a program the code runs (`process`) may take before it's ended.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// Each extension's thread, by id, to send it jobs (with a number that tells
+/// it from a later one). The thread keeps the extension's instance between
+/// calls (its code remembers things, such as where it put a server) and runs
+/// one job at a time. A call can wait on the
 /// network for minutes (a download, npm): it does so on that thread, not on
 /// GPUI's shared ones (a thread per core on Linux), which parsing, linting
 /// and search need, and other calls for the extension wait in its queue
 /// instead of each holding a thread.
-static WORKERS: LazyLock<Mutex<HashMap<String, mpsc::Sender<Job>>>> = LazyLock::new(Default::default);
+static WORKERS: LazyLock<Mutex<HashMap<String, (u64, mpsc::Sender<Job>)>>> = LazyLock::new(Default::default);
 
 /// A job for an extension's thread, given its instance.
 type Job = Box<dyn FnOnce(&mut Option<Instance>) + Send>;
 
-/// The queue of extension `id`'s thread, started first if it has none; None
-/// when no thread could start.
-fn worker(id: &str) -> Option<mpsc::Sender<Job>> {
+/// The queue of extension `id`'s thread (and its number), started first if
+/// it has none; None when no thread could start.
+fn worker(id: &str) -> Option<(u64, mpsc::Sender<Job>)> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let mut workers = WORKERS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(jobs) = workers.get(id) {
-        return Some(jobs.clone());
+    if let Some((generation, jobs)) = workers.get(id) {
+        return Some((*generation, jobs.clone()));
     }
     let (jobs, queue) = mpsc::channel::<Job>();
     std::thread::Builder::new()
@@ -402,8 +438,53 @@ fn worker(id: &str) -> Option<mpsc::Sender<Job>> {
             }
         })
         .ok()?;
-    workers.insert(id.to_string(), jobs.clone());
-    Some(jobs)
+    let generation = NEXT.fetch_add(1, Ordering::Relaxed);
+    workers.insert(id.to_string(), (generation, jobs.clone()));
+    Some((generation, jobs))
+}
+
+/// Stops sending extension `id`'s calls to thread `generation`, stuck in a
+/// call: it ends once that call and those queued behind it return.
+fn abandon(id: &str, generation: u64) {
+    let mut workers = WORKERS.lock().unwrap_or_else(|e| e.into_inner());
+    if workers.get(id).is_some_and(|(current, _)| *current == generation) {
+        workers.remove(id);
+    }
+}
+
+/// Ready after `duration` (an error if there's no timer thread). One thread
+/// keeps every deadline; there are only as many as calls under way.
+fn after(duration: Duration) -> futures::channel::oneshot::Receiver<()> {
+    type Timer = (Instant, futures::channel::oneshot::Sender<()>);
+    static TIMERS: LazyLock<Mutex<mpsc::Sender<Timer>>> = LazyLock::new(|| {
+        let (add, added) = mpsc::channel::<Timer>();
+        let timers = move || {
+            let mut waiting: Vec<Timer> = Vec::new();
+            loop {
+                let now = Instant::now();
+                let (due, later) = waiting.drain(..).partition::<Vec<_>, _>(|(at, _)| *at <= now);
+                for (_, fire) in due {
+                    fire.send(()).ok();
+                }
+                // Those whose call was answered go too.
+                waiting = later.into_iter().filter(|(_, fire)| !fire.is_canceled()).collect();
+                let next = match waiting.iter().map(|(at, _)| *at).min() {
+                    Some(at) => added.recv_timeout(at.saturating_duration_since(now)),
+                    None => added.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+                };
+                match next {
+                    Ok(timer) => waiting.push(timer),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        };
+        std::thread::Builder::new().name("extension deadlines".into()).spawn(timers).ok();
+        Mutex::new(add)
+    });
+    let (fire, fired) = futures::channel::oneshot::channel();
+    TIMERS.lock().unwrap_or_else(|e| e.into_inner()).send((Instant::now() + duration, fire)).ok();
+    fired
 }
 
 struct Instance {
@@ -505,9 +586,14 @@ impl State {
     }
 
     fn check_real(&self, path: &Path, named: &str) -> Result<(), String> {
-        let real = |p: &Path| std::fs::canonicalize(p).map_err(|e| format!("{}: {e}", p.display()));
-        if real(path)?.starts_with(real(&self.work)?) { Ok(()) } else { Err(format!("{named} is outside the extension's folder")) }
+        check_real(&self.work, path, named)
     }
+}
+
+/// That `path` really is in `work` (no link leads out).
+fn check_real(work: &Path, path: &Path, named: &str) -> Result<(), String> {
+    let real = |p: &Path| std::fs::canonicalize(p).map_err(|e| format!("{}: {e}", p.display()));
+    if real(path)?.starts_with(real(work)?) { Ok(()) } else { Err(format!("{named} is outside the extension's folder")) }
 }
 
 /// `path` (relative to `base`, or absolute in it) inside `base`, unless `..`
@@ -677,16 +763,48 @@ impl zed::extension::process::Host for State {
         if !crate::trust::is_trusted(&root) {
             return Err(format!("{} isn't trusted, so extensions don't run programs for it", root.display()));
         }
-        let output = crate::process::command(program_path(&self.work, &command.command))
-            .args(&command.args)
-            .env("PATH", servers::search_path())
-            .envs(command.env)
-            .current_dir(&self.work)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| format!("couldn't run {}: {e}", command.command))?;
+        let mut program = crate::process::command(program_path(&self.work, &command.command));
+        program.args(&command.args).env("PATH", servers::search_path()).envs(command.env).current_dir(&self.work);
+        let output = output_within(program, COMMAND_TIMEOUT).map_err(|e| format!("{}: {e}", command.command))?;
         Ok(Output { status: output.status.code(), stdout: output.stdout, stderr: output.stderr })
     }
+}
+
+/// `command`'s output, or an error once it has run for `timeout` (it's
+/// ended then, with what it started).
+fn output_within(mut command: std::process::Command, timeout: Duration) -> Result<std::process::Output, String> {
+    // Its own process group, so ending it reaches what it started too.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child =
+        command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("couldn't run it: {e}"))?;
+    fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            if let Some(mut pipe) = pipe {
+                pipe.read_to_end(&mut out).ok();
+            }
+            out
+        })
+    }
+    let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break status;
+        }
+        if started.elapsed() >= timeout {
+            #[cfg(unix)]
+            // SAFETY: signals the process group made for the child above.
+            unsafe {
+                libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+            }
+            crate::process::kill_tree(&mut child);
+            return Err(format!("it ran for over {} s, so Kuana ended it", timeout.as_secs()));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    Ok(std::process::Output { status, stdout: stdout.join().unwrap_or_default(), stderr: stderr.join().unwrap_or_default() })
 }
 
 impl zed::extension::nodejs::Host for State {
@@ -766,7 +884,7 @@ fn release(value: &Value) -> Option<GithubRelease> {
 
 impl zed::extension::http_client::Host for State {
     fn fetch(&mut self, request: HttpRequest) -> Result<HttpResponse, String> {
-        let headers = header_file();
+        let headers = header_file()?;
         let result = (|| {
             let mut child = curl(&request, &headers)?.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("couldn't run curl: {e}"))?;
             send_body(&mut child, request.body)?;
@@ -783,7 +901,7 @@ impl zed::extension::http_client::Host for State {
     }
 
     fn fetch_stream(&mut self, request: HttpRequest) -> Result<Resource<ResponseStream>, String> {
-        let headers = header_file();
+        let headers = header_file()?;
         let mut child = curl(&request, &headers)?.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("couldn't run curl: {e}"))?;
         send_body(&mut child, request.body)?;
         let body = child.stdout.take().ok_or("curl gave no output")?;
@@ -868,9 +986,14 @@ fn send_body(child: &mut Child, body: Option<Vec<u8>>) -> Result<(), String> {
     Ok(())
 }
 
-fn header_file() -> PathBuf {
+/// Where curl writes a response's headers: a folder of Kuana's own, not the
+/// shared temporary one (where another user could put a link by that name
+/// first) nor the extension's (where its code could).
+fn header_file() -> Result<PathBuf, String> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    std::env::temp_dir().join(format!("kuana-headers-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)))
+    let dir = super::extensions_dir().ok_or("Kuana has no config folder")?.join(".http");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("couldn't make {}: {e}", dir.display()))?;
+    Ok(dir.join(format!("headers-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))))
 }
 
 /// The last response's headers (after redirects) from curl's `--dump-header`.
@@ -894,26 +1017,33 @@ fn curl_error(stderr: &[u8]) -> String {
 fn download(url: &str, destination: &Path, work: &Path, file_type: DownloadedFileType, label: &str) -> Result<(), String> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let temp = work.join(format!(".download-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
-    let name = destination.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     crate::updater::download(url, &temp, label, None)?;
-    let unpacked = (|| match file_type {
+    let unpacked = unpack(&temp, destination, work, file_type);
+    std::fs::remove_file(&temp).ok();
+    unpacked
+}
+
+/// A downloaded file (`temp`) put at `destination`, unpacked as asked.
+fn unpack(temp: &Path, destination: &Path, work: &Path, file_type: DownloadedFileType) -> Result<(), String> {
+    let name = destination.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    match file_type {
         DownloadedFileType::Uncompressed => {
             remove_link(destination);
-            std::fs::rename(&temp, destination).map_err(|e| e.to_string())
+            std::fs::rename(temp, destination).map_err(|e| e.to_string())
         }
         DownloadedFileType::Gzip => {
             remove_link(destination);
-            let mut input = flate2::read::GzDecoder::new(std::fs::File::open(&temp).map_err(|e| e.to_string())?);
+            let mut input = flate2::read::GzDecoder::new(std::fs::File::open(temp).map_err(|e| e.to_string())?);
             let mut output = std::fs::File::create(destination).map_err(|e| e.to_string())?;
             std::io::copy(&mut input, &mut output).map(|_| ()).map_err(|e| format!("couldn't unpack {name}: {e}"))
         }
         DownloadedFileType::GzipTar | DownloadedFileType::Zip => {
             std::fs::create_dir_all(destination).map_err(|e| e.to_string())?;
-            crate::lsp::install::unzip(&temp, destination)
+            // The folder itself may be a link the code made to one elsewhere.
+            check_real(work, destination, &name)?;
+            crate::lsp::install::unzip(temp, destination)
         }
-    })();
-    std::fs::remove_file(&temp).ok();
-    unpacked
+    }
 }
 
 /// A link where a file goes is replaced, not written through.
@@ -1063,9 +1193,61 @@ mod tests {
 
     #[test]
     fn response_headers_after_redirects() {
-        let path = header_file();
+        let path = std::env::temp_dir().join(format!("kuana-wasm-headers-{}", std::process::id()));
         std::fs::write(&path, "HTTP/2 302\r\nlocation: x\r\n\r\nHTTP/2 200\r\ncontent-type: text/plain\r\nx-a: b: c\r\n\r\n").unwrap();
         assert_eq!(read_headers(&path), [("content-type".to_string(), "text/plain".to_string()), ("x-a".into(), "b: c".into())]);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_stuck_call_doesnt_hold_later_ones() {
+        let extension: &'static WasmExtension = Box::leak(Box::new(WasmExtension { id: "deadline-test".into(), dir: PathBuf::new() }));
+        let (release, stuck) = mpsc::channel::<()>();
+        let started = Instant::now();
+        let first = futures::executor::block_on(extension.run_within(Duration::from_millis(100), move |_, _| {
+            stuck.recv().ok();
+            Ok(1)
+        }));
+        assert!(first.unwrap_err().contains("stopped waiting"));
+        // A new thread answers, not the stuck one's queue.
+        let second = futures::executor::block_on(extension.run_within(Duration::from_secs(30), |_, _| Ok(2)));
+        assert_eq!(second, Ok(2));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        release.send(()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn programs_end_at_their_timeout() {
+        let mut quick = crate::process::command("sh");
+        quick.args(["-c", "echo hi"]);
+        assert_eq!(output_within(quick, Duration::from_secs(30)).unwrap().stdout, b"hi\n");
+        // What it started in the background goes too, or its pipes stay open.
+        let mut slow = crate::process::command("sh");
+        slow.args(["-c", "sleep 30 & sleep 30"]);
+        let started = Instant::now();
+        assert!(output_within(slow, Duration::from_millis(200)).unwrap_err().contains("ended it"));
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archives_dont_unpack_through_a_link() {
+        let root = std::env::temp_dir().join(format!("kuana-wasm-unpack-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let (work, elsewhere) = (root.join("work"), root.join("elsewhere"));
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, work.join("server")).unwrap();
+        let download = work.join(".download-0");
+        std::fs::write(&download, b"an archive").unwrap();
+        for file_type in [DownloadedFileType::GzipTar, DownloadedFileType::Zip] {
+            let err = unpack(&download, &work.join("server"), &work, file_type).unwrap_err();
+            assert!(err.contains("outside"), "{err}");
+        }
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+        unpack(&download, &work.join("file"), &work, DownloadedFileType::Uncompressed).unwrap();
+        assert!(work.join("file").is_file());
+        std::fs::remove_dir_all(&root).ok();
     }
 }

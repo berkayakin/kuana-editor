@@ -37,10 +37,16 @@ pub fn set_trust_all(on: bool) {
 
 /// Whether Kuana may run what `path` (a project folder or a file) configures.
 pub fn is_trusted(path: &Path) -> bool {
-    TRUST_ALL.load(Ordering::Relaxed)
-        || trusted_by(path).is_some()
+    is_trusted_by_user(path)
         // Kuana's own settings, keymap and themes.
         || crate::theme::config_dir().is_some_and(|dir| path.starts_with(dir))
+}
+
+/// Whether the user trusted the folder `path` is in, Kuana's config folder
+/// not counting: what's installed there (extensions from the registry or
+/// Git, servers) came from elsewhere.
+pub fn is_trusted_by_user(path: &Path) -> bool {
+    TRUST_ALL.load(Ordering::Relaxed) || trusted_by(path).is_some()
 }
 
 /// The trusted folder that covers `path`.

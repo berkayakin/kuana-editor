@@ -49,8 +49,9 @@ enum State {
     #[default]
     Idle,
     Checking,
-    /// Downloaded and verified, waiting for a restart.
-    Ready { version: String, archive: PathBuf },
+    /// Downloaded and verified, waiting for a restart; checked again against
+    /// `sha256` right before it's unpacked.
+    Ready { version: String, archive: PathBuf, sha256: String },
     /// Swapped in; it runs from the next start.
     Installed { version: String },
 }
@@ -135,13 +136,13 @@ pub fn check(cx: &mut App) -> Task<Result<Check, String>> {
     cx.spawn(async move |cx| {
         let result = cx.background_executor().spawn(async move { download_latest() }).await;
         let state = match &result {
-            Ok(Some((version, archive))) => State::Ready { version: version.clone(), archive: archive.clone() },
+            Ok(Some(update)) => State::Ready { version: update.version.clone(), archive: update.archive.clone(), sha256: update.sha256.clone() },
             // A failed check keeps an update that's already downloaded.
             Ok(None) | Err(_) => previous,
         };
         cx.update_global(|u: &mut Updater, _| u.state = state).ok();
         result.map(|update| match update {
-            Some((version, _)) => Check::Ready(version),
+            Some(update) => Check::Ready(update.version),
             None => Check::UpToDate,
         })
     })
@@ -152,8 +153,13 @@ pub fn check(cx: &mut App) -> Task<Result<Check, String>> {
 pub fn restart(cx: &mut App) -> Result<(), String> {
     let state = cx.global::<Updater>().state.clone();
     match state {
-        State::Ready { version, archive } => {
-            install(&archive)?;
+        State::Ready { version, archive, sha256 } => {
+            let installed = install(&archive, &sha256);
+            if installed.is_err() {
+                // The next check downloads it again if it changed.
+                cx.update_global(|u: &mut Updater, _| u.state = State::Idle);
+            }
+            installed?;
             std::fs::remove_file(&archive).ok();
             cx.update_global(|u: &mut Updater, _| u.state = State::Installed { version });
         }
@@ -180,9 +186,23 @@ struct Asset {
     sha256: String,
 }
 
+/// A downloaded update.
+struct Downloaded {
+    version: String,
+    archive: PathBuf,
+    sha256: String,
+}
+
+/// Where updates download to: in the config folder, which only this user
+/// can write to (the shared temporary folder is anyone's, so another user
+/// could swap the archive between its check and its unpacking).
+fn downloads_dir() -> Result<PathBuf, String> {
+    crate::theme::config_dir().map(|d| d.join("updates")).ok_or_else(|| "Kuana has no config folder.".into())
+}
+
 /// Downloads the newest release's archive for this platform if it's newer
-/// than this build; returns its version and path. Blocking.
-fn download_latest() -> Result<Option<(String, PathBuf)>, String> {
+/// than this build. Blocking.
+fn download_latest() -> Result<Option<Downloaded>, String> {
     let base = format!("https://github.com/{REPO}/releases/latest/download");
     let manifest = fetch(&format!("{base}/latest.json"))?;
     let signature = fetch(&format!("{base}/latest.json.minisig"))?;
@@ -194,7 +214,7 @@ fn download_latest() -> Result<Option<(String, PathBuf)>, String> {
     let Some(asset) = platform().and_then(|p| manifest.assets.get(p)) else {
         return Ok(None);
     };
-    let dir = std::env::temp_dir().join("kuana-update");
+    let dir = downloads_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let archive = dir.join(&asset.name);
     // Only one update is kept; an earlier download isn't needed any more.
@@ -213,7 +233,7 @@ fn download_latest() -> Result<Option<(String, PathBuf)>, String> {
         }
         std::fs::rename(&partial, &archive).map_err(|e| e.to_string())?;
     }
-    Ok(Some((manifest.version, archive)))
+    Ok(Some(Downloaded { version: manifest.version, archive, sha256: asset.sha256.clone() }))
 }
 
 fn verified_manifest(data: &[u8], signature: &[u8], public_key: &str) -> Result<Manifest, String> {
@@ -355,11 +375,15 @@ fn installed_path() -> Result<PathBuf, String> {
 
 /// Unpacks `archive` next to the installed app and swaps it in. The running
 /// process keeps its files open, so it carries on until it quits.
-fn install(archive: &Path) -> Result<(), String> {
-    install_to(archive, &installed_path()?)
+fn install(archive: &Path, sha256: &str) -> Result<(), String> {
+    install_to(archive, sha256, &installed_path()?)
 }
 
-fn install_to(archive: &Path, target: &Path) -> Result<(), String> {
+fn install_to(archive: &Path, sha256: &str, target: &Path) -> Result<(), String> {
+    // It waited for a restart since it was checked.
+    if sha256_hex(archive).as_deref() != Some(sha256) {
+        return Err("The downloaded update changed since it was checked. Check for updates again.".into());
+    }
     let dir = target.parent().ok_or("Kuana's folder wasn't found.")?;
     let staging = dir.join(STAGING);
     let cant = |e: std::io::Error| format!("Couldn't update {}: {e}", target.display());
@@ -506,6 +530,21 @@ AxrB0JdAasRgQFsgqpgRL89NottkeVOjXZ4tCR71ugQX75l253CoRpkYNv4ZOlrhGWODeFXKIfyqi75T
         assert!(verified_manifest(TEST_MANIFEST.as_bytes(), TEST_SIGNATURE.as_bytes(), PUBLIC_KEY).is_err());
     }
 
+    #[test]
+    fn installs_only_the_archive_that_was_checked() {
+        let dir = std::env::temp_dir().join(format!("kuana-update-check-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let (archive, target) = (dir.join("Kuana.zip"), dir.join("kuana"));
+        std::fs::write(&archive, "swapped after the check").unwrap();
+        std::fs::write(&target, "old").unwrap();
+        let checked = "0".repeat(64);
+        assert!(install_to(&archive, &checked, &target).unwrap_err().contains("changed"));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
+        assert!(!dir.join(STAGING).exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn swaps_in_the_new_app() {
@@ -524,7 +563,9 @@ AxrB0JdAasRgQFsgqpgRL89NottkeVOjXZ4tCR71ugQX75l253CoRpkYNv4ZOlrhGWODeFXKIfyqi75T
         // Installed under another name, as users sometimes do.
         let target = dir.join("Applications/Kuana Editor.app");
         std::fs::rename(dir.join("Applications/Kuana.app"), &target).unwrap();
-        install_to(&archive, &target).unwrap();
+        assert!(install_to(&archive, "00", &target).is_err(), "not the archive that was checked");
+        assert_eq!(std::fs::read_to_string(target.join("Contents/MacOS/kuana")).unwrap(), "old");
+        install_to(&archive, &sha256_hex(&archive).unwrap(), &target).unwrap();
         assert_eq!(std::fs::read_to_string(target.join("Contents/MacOS/kuana")).unwrap(), "new");
         let left: Vec<_> = std::fs::read_dir(dir.join("Applications")).unwrap().flatten().map(|e| e.file_name()).collect();
         assert_eq!(left, vec![std::ffi::OsString::from("Kuana Editor.app")]);

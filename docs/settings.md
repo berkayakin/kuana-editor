@@ -57,7 +57,7 @@ and theme colors.
 | `run_configurations` | | `[{ "name", "command", "cwd" }]` added to Run…; see [Run and test](run-and-debug.md#run-and-test) |
 | `formatters` | | per language: `"language_server"`, a command reading stdin and writing stdout (`{file}` is the path), or `false` |
 | `trust_all_projects` | `false` | run language servers, formatters and project tools in every folder without asking; see [Project trust](#project-trust) |
-| `native_grammars` | `false` | compile extensions' grammars to native code with your C compiler instead of WebAssembly (only for extensions in trusted folders) |
+| `native_grammars` | `false` | compile extensions' grammars to native code with your C compiler instead of WebAssembly (only for extensions installed from a folder in a trusted folder) |
 | `auto_update` | `true` | download new releases in the background; see [Releases and updates](install.md#updates) |
 | `pull_strategy` | unset | how Update Project combines incoming commits with yours when both branches have new ones: `"merge"`, `"rebase"` or `"ff_only"` (stop instead); unset, Git's `pull.rebase` / `pull.ff` decide, else the first such pull asks and saves the answer; see [Git](git.md) |
 

@@ -133,9 +133,10 @@ Grammars run as WebAssembly, sandboxed in Kuana's runtime. One that comes prebui
 the first time, in the background, with [wasi-sdk](https://github.com/WebAssembly/wasi-sdk): Kuana
 asks before downloading it once (about 180 MB, 170 MB on disk in `~/.config/kuana/toolchains/`;
 `WASI_SDK_PATH` uses one you have). Files of that language are highlighted when it's done.
-Fetching uses `git`. With `native_grammars` on, grammars of extensions in trusted folders are
-compiled with your C compiler instead (`cc`; on macOS `xcode-select --install`), which C++
-scanners need.
+Fetching uses `git`. With `native_grammars` on, grammars of extensions installed from a folder
+(Install from Folder…, on macOS and Linux) that's in a trusted folder are compiled with your C
+compiler instead (`cc`; on macOS `xcode-select --install`), which C++ scanners need. Extensions
+installed from the registry or Git always run their grammars as WebAssembly.
 
 Zed extensions' own WebAssembly code (`extension.wasm`) runs for their language servers when it's
 built for extension API 0.6 or 0.7 (`[lib] version` in `extension.toml`): Kuana asks it for the
