@@ -611,13 +611,19 @@ pub fn unstage(root: &Path, rels: &[String], has_head: bool) -> Result<(), Strin
     run(root, &args).map(drop)
 }
 
-/// Throws away working-tree changes. Untracked files are deleted.
+/// Throws away working-tree changes. Untracked files go to the Trash.
 pub fn discard(root: &Path, files: &[FileStatus]) -> Result<(), String> {
+    discard_with(root, files, |path| crate::file_history::move_to_trash(path).map(drop))
+}
+
+/// `discard`, with `trash` taking untracked files away (tests keep them out
+/// of the user's Trash).
+fn discard_with(root: &Path, files: &[FileStatus], trash: impl Fn(&Path) -> std::io::Result<()>) -> Result<(), String> {
     let (untracked, tracked): (Vec<&FileStatus>, Vec<&FileStatus>) = files
         .iter()
         .partition(|f| f.unstaged == Some(Change::Untracked));
     for f in untracked {
-        std::fs::remove_file(&f.path).map_err(|e| format!("{}: {e}", f.rel))?;
+        trash(&f.path).map_err(|e| format!("{}: {e}", f.rel))?;
     }
     if !tracked.is_empty() {
         let mut args = vec!["restore", "--worktree", "--"];
@@ -2239,6 +2245,28 @@ u UU N... 100644 100644 100644 100644 f g h conflict.js\0\
     }
 
     #[test]
+    fn discarding_trashes_untracked_files() {
+        if !is_available() {
+            return;
+        }
+        let root = test_repo("discard-trash");
+        std::fs::write(root.join("kept.txt"), "one\n").unwrap();
+        stage(&root, &["kept.txt".into()]).unwrap();
+        commit(&root, "first", false).unwrap();
+        std::fs::write(root.join("kept.txt"), "two\n").unwrap();
+        std::fs::write(root.join("new.txt"), "new\n").unwrap();
+        let trashed = std::cell::RefCell::new(Vec::new());
+        discard_with(&root, &status(&root).unwrap().files, |path| {
+            trashed.borrow_mut().push(path.to_path_buf());
+            std::fs::remove_file(path)
+        })
+        .unwrap();
+        assert_eq!(trashed.into_inner(), [root.join("new.txt")]);
+        assert_eq!(std::fs::read_to_string(root.join("kept.txt")).unwrap(), "one\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn status_lists_what_git_ignores() {
         if !is_available() {
             return;
@@ -2411,7 +2439,7 @@ u UU N... 100644 100644 100644 100644 f g h conflict.js\0\
         assert_eq!(unstash(&root, 0, false).unwrap(), Unstashed::Applied);
         assert_eq!(stashes(&root).len(), 1);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "changed\n");
-        discard(&root, &status(&root).unwrap().unstaged().cloned().collect::<Vec<_>>()).unwrap();
+        discard_here(&root, &status(&root).unwrap().unstaged().cloned().collect::<Vec<_>>()).unwrap();
         assert_eq!(unstash(&root, 0, true).unwrap(), Unstashed::Applied);
         assert!(stashes(&root).is_empty());
         assert!(stash(&root, None, true).unwrap());
@@ -2504,6 +2532,11 @@ u UU N... 100644 100644 100644 100644 f g h conflict.js\0\
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// `discard`, deleting untracked files rather than filling the Trash.
+    fn discard_here(root: &Path, files: &[FileStatus]) -> Result<(), String> {
+        discard_with(root, files, |path| std::fs::remove_file(path))
+    }
+
     /// `git init`, with the files Git writes kept byte for byte: Git for
     /// Windows' `core.autocrlf=true` (the CI runners' default) would check
     /// out `\r\n` where the tests wrote `\n`.
@@ -2572,7 +2605,7 @@ u UU N... 100644 100644 100644 100644 f g h conflict.js\0\
         assert_eq!(stashes(&root).len(), 1);
 
         // With the files out of the way, the whole stash applies.
-        discard(&root, &status(&root).unwrap().files).unwrap();
+        discard_here(&root, &status(&root).unwrap().files).unwrap();
         assert!(stash_blockers(&root, 0).is_empty());
         assert_eq!(unstash(&root, 0, true).unwrap(), Unstashed::Applied);
         assert_eq!(std::fs::read_to_string(root.join("Cargo.lock")).unwrap(), "generated\n");
@@ -2698,7 +2731,7 @@ u UU N... 100644 100644 100644 100644 f g h conflict.js\0\
         let token = owner.token();
         drop(owner);
         assert!(blame_file(&root, "a.txt", b"one\n", &token).is_err());
-        discard(&root, &s.files).unwrap();
+        discard_here(&root, &s.files).unwrap();
         assert!(status(&root).unwrap().files.is_empty());
         create_branch(&root, "feature").unwrap();
         assert!(branches(&root).unwrap().iter().any(|b| b.name == "feature" && b.current));

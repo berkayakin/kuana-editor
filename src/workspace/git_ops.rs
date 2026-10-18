@@ -271,14 +271,16 @@ impl Workspace {
             return;
         }
         if let GitOp::Discard(files) = &op {
-            // Rolling back can't be undone, so ask first.
+            // Rolling back loses changes, so ask first.
             let message = match files.as_slice() {
                 [one] => format!("Roll back changes to {}?", one.rel),
                 many => format!("Roll back changes to {} files?", many.len()),
             };
-            let untracked = files.iter().any(|f| f.unstaged == Some(Change::Untracked));
-            let detail = if untracked {
-                "Untracked files will be deleted. This can't be undone."
+            let untracked = files.iter().filter(|f| f.unstaged == Some(Change::Untracked)).count();
+            let detail = if untracked == files.len() {
+                "Untracked files will be moved to the Trash."
+            } else if untracked > 0 {
+                "Untracked files will be moved to the Trash; other local changes will be lost. This can't be undone."
             } else {
                 "Local changes will be lost. This can't be undone."
             };
