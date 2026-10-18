@@ -240,8 +240,9 @@ pub(super) struct Classified {
     project_settings: bool,
 }
 
-/// Sorts out a batch of changes (blocking: in the background). Paths in
-/// `target` and `node_modules` matter to the tree only.
+/// Sorts out a batch of changes (blocking: in the background). Paths in a
+/// `target` or `node_modules` folder that's ignored matter to the tree (and
+/// open files) only.
 pub(super) fn classify(changes: Vec<FsChange>, state: &WatchState) -> Classified {
     let root = &state.root;
     let mut out = Classified::default();
@@ -251,8 +252,10 @@ pub(super) fn classify(changes: Vec<FsChange>, state: &WatchState) -> Classified
     }
     // New rules count for the whole batch.
     let mut ignore = state.ignore.clone();
-    let in_project = |path: &Path| path.starts_with(root) && !watcher::in_heavy_folder(root, path);
-    if changes.iter().any(|c| in_project(&c.path) && c.path.file_name().is_some_and(|n| n == ".gitignore") && watcher::git_path(&c.path) == GitPath::WorkTree) {
+    let in_project = |path: &Path, ignore: Option<&Gitignore>| path.starts_with(root) && !in_ignored_heavy_folder(path, state, ignore);
+    if changes.iter().any(|c| {
+        in_project(&c.path, ignore.as_deref()) && c.path.file_name().is_some_and(|n| n == ".gitignore") && watcher::git_path(&c.path) == GitPath::WorkTree
+    }) {
         ignore = project_ignore(root).map(Arc::new);
         out.ignore = Some(ignore.clone());
     }
@@ -278,7 +281,14 @@ pub(super) fn classify(changes: Vec<FsChange>, state: &WatchState) -> Classified
                 if change.structural && (change.path.parent().is_some_and(tree_read) || tree_read(&change.path)) {
                     out.tree.push(change.path.clone());
                 }
-                if !in_project(&change.path) {
+                if !change.path.starts_with(root) {
+                    continue;
+                }
+                // Generated code a tab shows (a build script's output) is read again.
+                if state.open.contains(&change.path) {
+                    out.open.insert(change.path.clone());
+                }
+                if !in_project(&change.path, ignore.as_deref()) {
                     continue;
                 }
                 if change.structural {
@@ -290,14 +300,21 @@ pub(super) fn classify(changes: Vec<FsChange>, state: &WatchState) -> Classified
                 if !state.watchers.is_empty() {
                     file_changes.push((change.path.clone(), kind_of(&change).0));
                 }
-                if state.open.contains(&change.path) {
-                    out.open.insert(change.path);
-                }
             }
         }
     }
     out.lsp = state.watchers.events(&file_changes);
     out
+}
+
+/// Whether `path` is in a `target` or `node_modules` folder that the
+/// project's rules or Git ignore: build output and dependencies, whose churn
+/// is skipped without a look at each path. One that isn't ignored (a Java
+/// package named `target`) is the project's like any other folder.
+fn in_ignored_heavy_folder(path: &Path, state: &WatchState, ignore: Option<&Gitignore>) -> bool {
+    let Some(folder) = watcher::heavy_folder(&state.root, path) else { return false };
+    folder.ancestors().take_while(|a| a.starts_with(&state.root)).any(|a| state.git_ignored.contains(a))
+        || ignore.is_some_and(|i| i.matched_path_or_any_parents(&folder, true).is_ignore())
 }
 
 /// What of Git status a change in the work tree needs read again: its
@@ -363,7 +380,7 @@ mod tests {
         for dir in ["src", "dist/out", ".git", "node_modules/x", "build/a"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }
-        std::fs::write(root.join(".gitignore"), "*.log\nbuild/\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "*.log\nbuild/\nnode_modules/\n").unwrap();
         for file in ["src/a.rs", "src/new.rs", "dist/out/x.js", "debug.log", "build/a/b.js", "build/a/c.js"] {
             std::fs::write(root.join(file), "").unwrap();
         }
@@ -396,9 +413,19 @@ mod tests {
         // A new build folder the rules ignore: its status, not its files'.
         let c = classify(vec![change("build", true), change("build/a/b.js", true), change("build/a/c.js", true)], &state);
         assert_eq!(status_of(&c), ["build"]);
-        // Dependencies: the tree only (where it has read).
+        // Dependencies the rules ignore: the tree only (where it has read).
         let c = classify(vec![change("node_modules/x/i.js", true)], &state);
         assert!(c.git.is_empty() && c.tree.is_empty() && c.structural.is_empty());
+        // Build output Git ignores, the same; but a tab showing a file there reads it again.
+        let target_ignored = WatchState { git_ignored: Arc::new([root.join("target")].into_iter().collect()), ..watch_state(&root) };
+        let c = classify(vec![change("target/debug/out.rs", false)], &target_ignored);
+        assert!(c.git.is_empty() && c.open.is_empty() && c.structural.is_empty());
+        let open_output = WatchState { open: [root.join("target/debug/out.rs")].into_iter().collect(), ..target_ignored };
+        assert!(classify(vec![change("target/debug/out.rs", false)], &open_output).open.contains(&root.join("target/debug/out.rs")));
+        // A `target` folder nothing ignores (a Java package) is the project's.
+        let c = classify(vec![change("src/target/T.java", true)], &state);
+        assert_eq!(c.structural, [root.join("src/target/T.java")]);
+        assert_eq!(status_of(&c), ["src/target/T.java"]);
         // Git's own: HEAD, the index, refs, all of the status; not objects.
         assert!(classify(vec![change(".git/index", false), change("src/a.rs", false)], &state).git.all);
         assert!(classify(vec![change(".git/objects/ab/cdef", true)], &state).git.is_empty());

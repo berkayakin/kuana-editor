@@ -77,6 +77,10 @@ struct EditRecord {
 }
 
 struct Transaction {
+    /// Names the text as of after this transaction (a new id whenever it
+    /// grows), so the undo history's position tells whether the text is the
+    /// one saved (`Document::saved_at`).
+    id: u64,
     edits: Vec<EditRecord>,
     before: Vec<Selection>,
     after: Vec<Selection>,
@@ -147,7 +151,12 @@ pub struct Document {
     pub language: Language,
     syntax: Syntax,
     version: u64,
-    saved_version: u64,
+    /// The undo history's position (`history_position`) when the text was
+    /// last saved or read; None when no position is the file's (an unsaved
+    /// buffer, a new encoding). Undoing back to it, the text is saved again.
+    saved_at: Option<u64>,
+    /// The last `Transaction::id` given.
+    last_transaction: u64,
     undo_stack: Vec<Transaction>,
     redo_stack: Vec<Transaction>,
     /// Merged view of built-in and external diagnostics, sorted by position.
@@ -329,7 +338,8 @@ impl Document {
             language,
             syntax,
             version: 0,
-            saved_version: 0,
+            saved_at: Some(0),
+            last_transaction: 0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             diagnostics: Vec::new(),
@@ -388,7 +398,18 @@ impl Document {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.version != self.saved_version
+        self.saved_at != Some(self.history_position())
+    }
+
+    /// Where the undo history is: the id of the transaction on top (0 for
+    /// none). Edits, undo and redo move it, and the same text has the same.
+    fn history_position(&self) -> u64 {
+        self.undo_stack.last().map_or(0, |t| t.id)
+    }
+
+    fn next_transaction(&mut self) -> u64 {
+        self.last_transaction += 1;
+        self.last_transaction
     }
 
     pub fn file_name(&self) -> String {
@@ -456,7 +477,7 @@ impl Document {
             return false;
         }
         self.take_changes(reload.changes, selections);
-        self.saved_version = self.version;
+        self.saved_at = Some(self.history_position());
         true
     }
 
@@ -488,7 +509,8 @@ impl Document {
         self.reparse();
         self.redo_stack.clear();
         let record = EditRecord { start: range.start, old, new: span };
-        self.undo_stack.push(Transaction { edits: vec![record], before: selections.to_vec(), after: Vec::new(), at: Instant::now(), kind: EditKind::Other });
+        let id = self.next_transaction();
+        self.undo_stack.push(Transaction { id, edits: vec![record], before: selections.to_vec(), after: Vec::new(), at: Instant::now(), kind: EditKind::Other });
     }
 
     /// Reads the file again as `encoding` (when it was guessed wrong).
@@ -504,7 +526,7 @@ impl Document {
             self.undo_stack.clear();
             self.redo_stack.clear();
         }
-        self.saved_version = self.version;
+        self.saved_at = Some(self.history_position());
         Ok(())
     }
 
@@ -526,7 +548,7 @@ impl Document {
 
     /// A change that isn't an edit (encoding, line endings) still needs a save.
     fn mark_unsaved(&mut self) {
-        self.saved_version = u64::MAX;
+        self.saved_at = None;
     }
 
     /// Saves here and now.
@@ -546,7 +568,7 @@ impl Document {
         Ok(SaveJob {
             id: self.id,
             ticket: self.tickets.0,
-            version: self.version,
+            position: self.history_position(),
             path,
             rope: self.rope.clone(),
             encoding: self.encoding,
@@ -557,7 +579,7 @@ impl Document {
     }
 
     /// Takes a save's result back in: written, the document counts as saved
-    /// as of the version it wrote (so unsaved again if edited since, or if
+    /// as of the text it wrote (so unsaved again if edited since, or if
     /// its encoding or line ends changed) and knows the file's new
     /// modification time. A save that a newer one overtook changes nothing.
     pub fn saved(&mut self, written: Written) -> std::io::Result<()> {
@@ -570,7 +592,7 @@ impl Document {
             self.tickets.1 = written.ticket;
             self.disk_mtime = mtime;
             if (written.encoding, written.crlf) == (self.encoding, self.uses_crlf) {
-                self.saved_version = written.version;
+                self.saved_at = Some(written.position);
             }
         }
         Ok(())
@@ -745,12 +767,15 @@ impl Document {
                     && t.kind == kind
                     && now.duration_since(t.at) < Duration::from_millis(800)
             });
+            let id = self.next_transaction();
             if merge {
                 let t = self.undo_stack.last_mut().unwrap();
+                t.id = id;
                 t.edits.extend(records);
                 t.at = now;
             } else {
                 self.undo_stack.push(Transaction {
+                    id,
                     edits: records,
                     before: selections_before.to_vec(),
                     after: Vec::new(),
@@ -776,6 +801,7 @@ impl Document {
         let mut merged = self.undo_stack.split_off(mark);
         let mut first = merged.remove(0);
         for t in merged {
+            first.id = t.id;
             first.edits.extend(t.edits);
             first.after = t.after;
             first.at = t.at;
@@ -1495,7 +1521,8 @@ fn mtime(path: &Path) -> Option<SystemTime> {
 pub struct SaveJob {
     id: u64,
     ticket: u64,
-    version: u64,
+    /// The undo history's position for the text written.
+    position: u64,
     path: PathBuf,
     rope: Rope,
     encoding: TextEncoding,
@@ -1510,7 +1537,7 @@ impl SaveJob {
     /// A document's saves write one at a time, and one that a newer save
     /// overtook writes nothing, so the file ends with the newest text.
     pub fn write(self) -> Written {
-        let SaveJob { id, ticket, version, path, rope, encoding, crlf, settles, in_flight } = self;
+        let SaveJob { id, ticket, position, path, rope, encoding, crlf, settles, in_flight } = self;
         // Local History: what the file was before Kuana first saved it.
         if !crate::local_history::has_history(&path) {
             crate::local_history::record_disk(&path, crate::local_history::Kind::Original);
@@ -1540,7 +1567,7 @@ impl SaveJob {
         if matches!(outcome, Outcome::Written(_)) {
             crate::local_history::record_rope(&path, &rope, crate::local_history::Kind::Saved);
         }
-        Written { id, ticket, version, encoding, crlf, outcome, _settles: settles }
+        Written { id, ticket, position, encoding, crlf, outcome, _settles: settles }
     }
 }
 
@@ -1548,7 +1575,7 @@ impl SaveJob {
 pub struct Written {
     id: u64,
     ticket: u64,
-    version: u64,
+    position: u64,
     encoding: TextEncoding,
     crlf: bool,
     outcome: Outcome,
@@ -2750,7 +2777,7 @@ mod tests {
         assert_eq!(doc.rope().to_string(), "typed other");
         // Nor what was saved while the file was read.
         std::fs::File::options().write(true).open(&path).unwrap().set_modified(later + Duration::from_secs(15)).unwrap();
-        doc.saved_version = doc.version;
+        doc.saved_at = Some(doc.history_position());
         let read = doc.reload_job().unwrap()().unwrap().unwrap();
         doc.save().unwrap();
         assert!(!doc.apply_reload(read, &[]));
@@ -2870,7 +2897,7 @@ mod tests {
         let mut doc = Document::from_text("fn a() {\n    one();\n}\n".into(), Some("a.rs".into()));
         doc.edit(vec![(13..16, "two".into())], &[Selection::cursor(13)], EditKind::Other);
         // Saved, and the server told.
-        doc.saved_version = doc.version;
+        doc.saved_at = Some(doc.history_position());
         doc.take_lsp_changes();
         let caret = [Selection::cursor(16)];
         assert!(reload_to(&mut doc, "use x;\nfn a() {\n    two(1);\n}\n", &caret));
@@ -2893,6 +2920,47 @@ mod tests {
         doc.edit(vec![(0..0, "x".into())], &[], EditKind::Typing);
         doc.undo();
         assert_eq!(doc.rope().to_string(), "use x;\nfn a() {\n    two(1);\n}\n");
+    }
+
+    /// Undone back to the text saved, a document is saved again (and the
+    /// file may reload it); redone, unsaved again. Typing that joins the
+    /// undo step saved last still counts as unsaved.
+    #[test]
+    fn undoing_back_to_the_saved_text_is_saved() {
+        let dir = std::env::temp_dir().join(format!("kuana-doc-undo-saved-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.txt");
+        std::fs::write(&path, "one\n").unwrap();
+        let mut doc = Document::open(&path).unwrap();
+        doc.edit(vec![(3..3, " two".into())], &[], EditKind::Other);
+        assert!(doc.is_dirty());
+        doc.undo();
+        assert!(!doc.is_dirty());
+        doc.redo();
+        assert!(doc.is_dirty());
+        doc.undo();
+        // Saved again, so a change on disk reloads it.
+        assert!(reload_to(&mut doc, "one\nfrom outside\n", &[]));
+        assert!(!doc.is_dirty());
+
+        // Saved mid-word: the next letter joins the word's undo step.
+        doc.edit(vec![(0..0, "x".into())], &[], EditKind::Typing);
+        doc.save().unwrap();
+        assert!(!doc.is_dirty());
+        doc.edit(vec![(1..1, "y".into())], &[], EditKind::Typing);
+        assert!(doc.is_dirty());
+        doc.undo();
+        assert_eq!(doc.rope().to_string(), "one\nfrom outside\n");
+        assert!(doc.is_dirty(), "the file has the x");
+        doc.redo();
+        assert!(doc.is_dirty());
+        // A new encoding needs a save whatever the undo history says.
+        doc.save().unwrap();
+        doc.convert_to(TextEncoding::from_key("windows-1251").unwrap());
+        doc.edit(vec![(0..0, "z".into())], &[], EditKind::Other);
+        doc.undo();
+        assert!(doc.is_dirty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// `old` with `changes` made, checking they're sorted and apart.
