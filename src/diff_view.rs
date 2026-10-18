@@ -481,7 +481,9 @@ impl Render for DiffView {
             .border_color(theme.border_subtle)
             .child(icon_el(Icon::GitCompare, px(15.), theme.text_muted.into()))
             .child(file_icon)
-            .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).child(rel.clone()))
+            // A long path (a file outside the project) gives way, so the
+            // buttons at the right stay on screen.
+            .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(rel.clone()))
             .child(
                 div()
                     .min_w_0()
