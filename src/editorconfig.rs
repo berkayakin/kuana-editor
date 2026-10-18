@@ -122,6 +122,7 @@ pub fn glob_matches(pattern: &str, rel: &str) -> bool {
     let chars: Vec<char> = pattern.chars().collect();
     let mut i = 0;
     let mut braces = 0;
+    let mut ranges = Vec::new();
     while i < chars.len() {
         let c = chars[i];
         match c {
@@ -146,10 +147,12 @@ pub fn glob_matches(pattern: &str, rel: &str) -> bool {
                 let close = chars[i..].iter().position(|&c| c == '}').map(|p| i + p);
                 let inner: Option<String> = close.map(|e| chars[i + 1..e].iter().collect());
                 if let Some((a, b)) = inner.as_deref().and_then(|s| s.split_once("..")) {
-                    // A numeric range.
+                    // A numeric range: any integer, checked against the
+                    // bounds after matching (spelling them all out would
+                    // hang on `{1..100000000000}`).
                     if let (Ok(a), Ok(b)) = (a.parse::<i64>(), b.parse::<i64>()) {
-                        let alts: Vec<String> = (a.min(b)..=a.max(b)).map(|n| n.to_string()).collect();
-                        re.push_str(&format!("(?:{})", alts.join("|")));
+                        re.push_str("([+-]?[0-9]+)");
+                        ranges.push(a.min(b)..=a.max(b));
                         i = close.unwrap();
                     } else {
                         re.push_str("\\{");
@@ -175,7 +178,12 @@ pub fn glob_matches(pattern: &str, rel: &str) -> bool {
         i += 1;
     }
     re.push('$');
-    Regex::new(&re).is_ok_and(|r| r.is_match(rel))
+    let Ok(re) = Regex::new(&re) else { return false };
+    let Some(caps) = re.captures(rel) else { return false };
+    // Group n + 1 is the nth range; one in an alternative not taken is absent.
+    ranges.iter().enumerate().all(|(n, range)| {
+        caps.get(n + 1).is_none_or(|m| m.as_str().parse::<i64>().is_ok_and(|v| range.contains(&v)))
+    })
 }
 
 #[cfg(test)]
@@ -195,6 +203,11 @@ mod tests {
         assert!(glob_matches("/docs/*.md", "docs/a.md"));
         assert!(glob_matches("file{1..3}.txt", "file2.txt"));
         assert!(!glob_matches("file{1..3}.txt", "file4.txt"));
+        assert!(glob_matches("file{3..1}.txt", "file1.txt"));
+        assert!(glob_matches("f{-2..2}.txt", "f-1.txt") && !glob_matches("f{-2..2}.txt", "f-3.txt"));
+        // A huge range is checked, not spelled out.
+        assert!(glob_matches("*.{1..100000000000}", "a.99999999999"));
+        assert!(!glob_matches("*.{1..100000000000}", "a.0"));
         assert!(glob_matches("[!a]*.md", "b.md"));
         assert!(!glob_matches("[!a]*.md", "a.md"));
         assert!(glob_matches("*.py", "a.py") && !glob_matches("*.py", "a.pyc"));
