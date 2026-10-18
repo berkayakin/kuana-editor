@@ -589,7 +589,7 @@ fn index_blob_text(root: &Path, rel: &str) -> BlobText {
 }
 
 pub fn stage(root: &Path, rels: &[String]) -> Result<(), String> {
-    let mut args = vec!["add", "--all", "--"];
+    let mut args = vec!["--literal-pathspecs", "add", "--all", "--"];
     args.extend(rels.iter().map(String::as_str));
     run(root, &args).map(drop)
 }
@@ -602,10 +602,10 @@ pub fn stage_tracked(root: &Path) -> Result<(), String> {
 
 pub fn unstage(root: &Path, rels: &[String], has_head: bool) -> Result<(), String> {
     let mut args: Vec<&str> = if has_head {
-        vec!["restore", "--staged", "--"]
+        vec!["--literal-pathspecs", "restore", "--staged", "--"]
     } else {
         // Before the first commit there is nothing to restore from.
-        vec!["rm", "--cached", "-r", "--quiet", "--"]
+        vec!["--literal-pathspecs", "rm", "--cached", "-r", "--quiet", "--"]
     };
     args.extend(rels.iter().map(String::as_str));
     run(root, &args).map(drop)
@@ -626,7 +626,7 @@ fn discard_with(root: &Path, files: &[FileStatus], trash: impl Fn(&Path) -> std:
         trash(&f.path).map_err(|e| format!("{}: {e}", f.rel))?;
     }
     if !tracked.is_empty() {
-        let mut args = vec!["restore", "--worktree", "--"];
+        let mut args = vec!["--literal-pathspecs", "restore", "--worktree", "--"];
         args.extend(tracked.iter().map(|f| f.rel.as_str()));
         run(root, &args)?;
     }
@@ -1528,7 +1528,7 @@ fn has_head(root: &Path) -> bool {
 /// Puts `contents` in the index as `rel`, keeping its file mode.
 fn write_index(root: &Path, rel: &str, contents: &[u8]) -> Result<(), String> {
     let sha = run_with_stdin(root, &["hash-object", "-w", "--stdin", "--path", rel], contents)?;
-    let mode = run(root, &["ls-files", "--stage", "--", rel])
+    let mode = run(root, &["--literal-pathspecs", "ls-files", "--stage", "--", rel])
         .ok()
         .and_then(|out| out.split_whitespace().next().map(str::to_string))
         .unwrap_or_else(|| {
@@ -2263,6 +2263,41 @@ u UU N... 100644 100644 100644 100644 f g h conflict.js\0\
         .unwrap();
         assert_eq!(trashed.into_inner(), [root.join("new.txt")]);
         assert_eq!(std::fs::read_to_string(root.join("kept.txt")).unwrap(), "one\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn paths_are_not_patterns() {
+        if !is_available() {
+            return;
+        }
+        // As a pattern `[A].sh` is `A.sh`, which sorts before it.
+        let root = test_repo("literal");
+        for rel in ["[A].sh", "A.sh"] {
+            std::fs::write(root.join(rel), "one\n").unwrap();
+        }
+        stage(&root, &["[A].sh".into(), "A.sh".into()]).unwrap();
+        run(&root, &["update-index", "--chmod=+x", "--", "A.sh"]).unwrap();
+        commit(&root, "first", false).unwrap();
+        for rel in ["[A].sh", "A.sh"] {
+            std::fs::write(root.join(rel), "two\n").unwrap();
+        }
+        let staged = || -> Vec<String> {
+            status(&root).unwrap().files.into_iter().filter(|f| f.staged.is_some()).map(|f| f.rel).collect()
+        };
+        stage(&root, &["[A].sh".into()]).unwrap();
+        assert_eq!(staged(), ["[A].sh"]);
+        unstage(&root, &["[A].sh".into()], true).unwrap();
+        assert!(staged().is_empty());
+        // Partial staging keeps the file's own mode, not `A.sh`'s.
+        stage_lines(&root, "[A].sh", "two\n", 0..1).unwrap();
+        let mode = run(&root, &["--literal-pathspecs", "ls-files", "--stage", "--", "[A].sh"]).unwrap();
+        assert!(mode.starts_with("100644"), "{mode}");
+        unstage(&root, &["[A].sh".into()], true).unwrap();
+        let files = status(&root).unwrap().files;
+        discard_here(&root, &files.into_iter().filter(|f| f.rel == "[A].sh").collect::<Vec<_>>()).unwrap();
+        assert_eq!(std::fs::read_to_string(root.join("[A].sh")).unwrap(), "one\n");
+        assert_eq!(std::fs::read_to_string(root.join("A.sh")).unwrap(), "two\n");
         let _ = std::fs::remove_dir_all(&root);
     }
 
