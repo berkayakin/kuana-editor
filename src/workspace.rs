@@ -1603,11 +1603,15 @@ fn reveal_label() -> &'static str {
 
 /// A tooltip naming the action and its current shortcut.
 fn status_tooltip(label: &str, action: &dyn gpui::Action, window: &mut Window, cx: &mut App) -> gpui::AnyView {
-    let text = match binding_label(action, window) {
+    tooltip_view(with_keys(label, binding_label(action, window).as_deref()), cx)
+}
+
+/// A tooltip's label with the shortcut for what it does, if there is one.
+fn with_keys(label: &str, keys: Option<&str>) -> String {
+    match keys {
         Some(keys) => format!("{label} ({keys})"),
         None => label.to_string(),
-    };
-    tooltip_view(text, cx)
+    }
 }
 
 fn folder_name(path: &Path) -> String {

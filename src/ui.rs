@@ -1032,6 +1032,28 @@ pub fn live_tooltip_view(text: fn() -> String, cx: &mut App) -> AnyView {
     cx.new(|_| LiveTooltip { text, tick: None }).into()
 }
 
+/// A tooltip that follows an entity while it's shown (GPUI builds a
+/// tooltip's view once per hover): `text` reads the entity again whenever it
+/// notifies, such as a count that changes under the pointer.
+pub struct EntityTooltip<T: 'static> {
+    entity: gpui::WeakEntity<T>,
+    text: Box<dyn Fn(&T, &App) -> String>,
+    _observe: gpui::Subscription,
+}
+
+impl<T: 'static> Render for EntityTooltip<T> {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let app: &App = cx;
+        let text = self.entity.upgrade().map(|entity| (self.text)(entity.read(app), app)).unwrap_or_default();
+        tooltip_box(Theme::get(cx)).child(text)
+    }
+}
+
+pub fn entity_tooltip_view<T: 'static>(entity: &Entity<T>, text: impl Fn(&T, &App) -> String + 'static, cx: &mut App) -> AnyView {
+    cx.new(|cx| EntityTooltip { entity: entity.downgrade(), text: Box::new(text), _observe: cx.observe(entity, |_, _, cx| cx.notify()) })
+        .into()
+}
+
 /// The floating panel used by all modal popups: chrome, like the window
 /// around the islands. Long content goes into an `island` inside it.
 pub fn modal_panel(cx: &App) -> Div {

@@ -154,6 +154,7 @@ impl Workspace {
         let files_on = self.sidebar_mode == SidebarMode::Files;
         let changes = self.git_status.files.len();
         let edge = crate::ui::island_edge(&theme);
+        let workspace = cx.entity();
         // Padding, icon and gap around a name; the change count adds a gap and itself.
         let count = (changes > 0).then(|| changes.to_string());
         let measured = measure_tab_names(&["Files".to_string(), "Commit".to_string(), count.clone().unwrap_or_default()], window, &theme);
@@ -220,9 +221,20 @@ impl Workspace {
                                 .child(count),
                         )
                     })
+                    // The count as it is now, also while the tooltip is shown.
                     .tooltip(move |window, cx| {
-                        let label = if changes > 0 { format!("Commit ({changes} changed)") } else { "Commit".to_string() };
-                        status_tooltip(&label, &ToggleCommit, window, cx)
+                        let keys = binding_label(&ToggleCommit, window);
+                        crate::ui::entity_tooltip_view(
+                            &workspace,
+                            move |ws, _| {
+                                let label = match ws.git_status.files.len() {
+                                    0 => "Commit".to_string(),
+                                    changes => format!("Commit ({changes} changed)"),
+                                };
+                                with_keys(&label, keys.as_deref())
+                            },
+                            cx,
+                        )
                     })
                     .on_click(cx.listener(|ws, _, window, cx| ws.show_commit(&ShowCommit, window, cx))),
             )

@@ -243,6 +243,9 @@ pub struct LspStore {
     /// Files each server asked to hear about (`workspace/didChangeWatchedFiles`),
     /// by registration id.
     watchers: HashMap<ServerKey, Vec<(String, Vec<FileWatcher>)>>,
+    /// The last error each server showed (`window/showMessage`) and when, so
+    /// the same one sent again right after shows once (`repeats_message`).
+    shown_messages: HashMap<ServerKey, (String, Instant)>,
     /// Tests: the servers every document gets, instead of its language's.
     #[cfg(test)]
     pub(crate) test_specs: Option<Vec<&'static servers::ServerSpec>>,
@@ -284,6 +287,22 @@ const PULL_OTHERS_DELAY: Duration = Duration::from_millis(800);
 /// else changes with it (`workspace/willRenameFiles`); later, it goes ahead
 /// without them, as VS Code does after its timeout.
 const WILL_RENAME_WAIT: Duration = Duration::from_secs(5);
+/// A server's error that repeats the last one within this long is shown
+/// once: rust-analyzer sends "Failed to discover workspace" twice in a row.
+/// About as long as its toast stays.
+const MESSAGE_REPEAT: Duration = Duration::from_secs(10);
+
+/// Whether `text` repeats the message `shown` holds for `key` from less than
+/// `MESSAGE_REPEAT` before `now`; if not, it becomes the one held. A repeat
+/// doesn't restart the wait, so a message sent again and again still shows
+/// every so often.
+fn repeats_message(shown: &mut HashMap<ServerKey, (String, Instant)>, key: &ServerKey, text: &str, now: Instant) -> bool {
+    if shown.get(key).is_some_and(|(last, at)| last == text && now.duration_since(*at) < MESSAGE_REPEAT) {
+        return true;
+    }
+    shown.insert(key.clone(), (text.to_string(), now));
+    false
+}
 
 /// A server's edits for a rename (`LspStore::will_rename`).
 pub struct RenameEdits {
@@ -295,6 +314,7 @@ impl LspStore {
     pub fn new() -> Self {
         Self {
             watchers: HashMap::new(),
+            shown_messages: HashMap::new(),
             workspace_root: None,
             servers: HashMap::new(),
             documents: HashMap::new(),
@@ -759,6 +779,7 @@ impl LspStore {
                     // 1 = error; warnings and info are mostly chatter.
                     if params.get("type").and_then(Value::as_u64) == Some(1)
                         && let Some(text) = params.get("message").and_then(Value::as_str)
+                        && !repeats_message(&mut self.shown_messages, key, text, Instant::now())
                     {
                         cx.emit(LspEvent::Message(text.to_string()));
                     }
@@ -2222,6 +2243,52 @@ mod tests {
         send("end", 0, cx);
         assert_eq!(shown.get(), after_pause + 1);
         assert!(store.read_with(cx, |s, _| s.progress[&key].is_empty()));
+    }
+
+    /// rust-analyzer sends the same error twice in a row; it shows once. Other
+    /// errors, and the same one from another server, still show.
+    #[gpui::test]
+    fn a_repeated_server_error_shows_once(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        let store = cx.new(|_| LspStore::new());
+        let messages = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = messages.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&store, move |_, event: &LspEvent, _| {
+                if let LspEvent::Message(text) = event {
+                    seen.borrow_mut().push(text.clone());
+                }
+            })
+        });
+        let show = |root: &str, kind: u64, text: &str, cx: &mut gpui::TestAppContext| {
+            let key = ServerKey { id: "s".into(), root: PathBuf::from(root) };
+            let params = json!({ "type": kind, "message": text });
+            store.update(cx, |s, cx| s.handle(&key, Incoming::Notification { method: "window/showMessage".into(), params }, cx));
+        };
+        show("/w", 2, "Failed to discover workspace", cx);
+        show("/w", 1, "Failed to discover workspace", cx);
+        show("/w", 1, "Failed to discover workspace", cx);
+        show("/w", 1, "Failed to load workspaces", cx);
+        show("/other", 1, "Failed to load workspaces", cx);
+        assert_eq!(*messages.borrow(), ["Failed to discover workspace", "Failed to load workspaces", "Failed to load workspaces"]);
+    }
+
+    /// The same error shows again once `MESSAGE_REPEAT` has passed since it
+    /// last showed, however often it came in between.
+    #[test]
+    fn a_server_error_shows_again_after_a_while() {
+        let key = ServerKey { id: "s".into(), root: PathBuf::from("/w") };
+        let mut shown = HashMap::new();
+        let start = Instant::now();
+        let at = |seconds: f32| start + Duration::from_secs_f32(seconds);
+        assert!(!repeats_message(&mut shown, &key, "broken", at(0.)));
+        assert!(repeats_message(&mut shown, &key, "broken", at(0.1)));
+        assert!(repeats_message(&mut shown, &key, "broken", at(9.)));
+        assert!(!repeats_message(&mut shown, &key, "broken", at(10.)));
+        assert!(repeats_message(&mut shown, &key, "broken", at(15.)));
+        // Something else in between: the first one is new again.
+        assert!(!repeats_message(&mut shown, &key, "other", at(16.)));
+        assert!(!repeats_message(&mut shown, &key, "broken", at(17.)));
     }
 
     /// Messages queued up are handled one at a time, with other work let in
