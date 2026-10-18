@@ -61,13 +61,14 @@ impl Workspace {
         }
         if doc.changed_on_disk() {
             let name = doc.file_name();
+            let deleted = doc.path.as_deref().is_some_and(|p| !p.exists());
             if self.auto_save_warned.insert(id) {
-                self.toast(
-                    ToastKind::Error,
-                    format!("{name} changed on disk"),
-                    Some("Auto-save is paused for this file so it doesn't overwrite the other change. Save it manually to keep your version.".into()),
-                    cx,
-                );
+                let (title, detail) = if deleted {
+                    (format!("{name} was deleted"), "Auto-save is paused for this file so it doesn't bring it back. Save it manually to keep your version.")
+                } else {
+                    (format!("{name} changed on disk"), "Auto-save is paused for this file so it doesn't overwrite the other change. Save it manually to keep your version.")
+                };
+                self.toast(ToastKind::Error, title, Some(detail.into()), cx);
             }
             return false;
         }
