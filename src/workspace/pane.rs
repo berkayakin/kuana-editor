@@ -24,6 +24,9 @@ pub(super) enum PaneEvent {
     Overflow { items: Vec<PaneItem>, position: gpui::Point<Pixels> },
     /// A tab was dropped here: before the tab at `before`, else after the others.
     Drop { item: PaneItem, before: Option<usize> },
+    /// A tab was dropped near an edge of the pane: it goes to a new pane on
+    /// that side.
+    DropSplit { item: PaneItem, side: Side },
     /// Files from Finder were dropped on the pane.
     OpenPaths(Vec<PathBuf>),
     /// A file from the tree was dropped on the pane.
@@ -50,6 +53,18 @@ pub(super) struct PaneChrome {
     pub(super) root: Option<PathBuf>,
 }
 
+/// Where a tab dragged over a pane's content would land: in this pane, or
+/// near an edge, in a new pane on that side.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum DropZone {
+    Middle,
+    Side(Side),
+}
+
+/// How near an edge (a part of the content's width or height) a dragged tab
+/// splits the pane rather than joining it.
+const EDGE_ZONE: f32 = 0.25;
+
 pub(super) struct Pane {
     tabs: Vec<PaneItem>,
     active: usize,
@@ -67,6 +82,8 @@ pub(super) struct Pane {
     /// A file from Finder or the tree is over the pane: its island lights up,
     /// and its current tab, which is part of it, too.
     file_drop: bool,
+    /// A tab is dragged over the pane's content, and where it would land.
+    tab_drop: Option<DropZone>,
 }
 
 impl Pane {
@@ -80,6 +97,7 @@ impl Pane {
             chrome: PaneChrome::default(),
             bounds: Default::default(),
             file_drop: false,
+            tab_drop: None,
         }
     }
 
@@ -109,8 +127,20 @@ impl Pane {
         self.pinned.contains(&id)
     }
 
-    pub(super) fn has_file_drop(&self) -> bool {
-        self.file_drop
+    /// The pane's bounds in the last frame (empty before the first).
+    pub(super) fn bounds(&self) -> Bounds<Pixels> {
+        self.bounds.get()
+    }
+
+    /// Something is dragged over it (a file or a tab), which it shows.
+    pub(super) fn has_drop(&self) -> bool {
+        self.file_drop || self.tab_drop.is_some()
+    }
+
+    /// A drag ended (dropped elsewhere, cancelled): nothing is over it.
+    pub(super) fn clear_drop(&mut self, cx: &mut Context<Self>) {
+        self.set_file_drop(false, cx);
+        self.set_tab_drop(None, cx);
     }
 
     /// Where a new tab goes: after the current one, but never among pinned ones.
@@ -188,6 +218,27 @@ impl Pane {
             self.file_drop = over;
             cx.notify();
         }
+    }
+
+    fn set_tab_drop(&mut self, zone: Option<DropZone>, cx: &mut Context<Self>) {
+        if self.tab_drop != zone {
+            self.tab_drop = zone;
+            cx.notify();
+        }
+    }
+
+    /// Where `dragged`, at `at` over content of these `bounds`, would land:
+    /// near an edge, a new pane on that side (when the pane has room for one,
+    /// and the tab isn't the pane's only one); else this pane.
+    fn drop_zone(&self, bounds: Bounds<Pixels>, at: gpui::Point<Pixels>, dragged: &DraggedTab) -> Option<DropZone> {
+        if !bounds.contains(&at) || bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
+            return None;
+        }
+        let alone = self.tabs.len() == 1 && self.position(dragged.item.entity_id()).is_some();
+        let (x, y) = ((at.x - bounds.left()) / bounds.size.width, (at.y - bounds.top()) / bounds.size.height);
+        let (distance, side) =
+            [(x, Side::Left), (1. - x, Side::Right), (y, Side::Up), (1. - y, Side::Down)].into_iter().min_by(|a, b| a.0.total_cmp(&b.0))?;
+        Some(if distance < EDGE_ZONE && !alone && can_split(self.bounds(), side) { DropZone::Side(side) } else { DropZone::Middle })
     }
 
     /// Pinned tabs first, in their order; the current tab stays current.
@@ -524,6 +575,7 @@ impl Render for Pane {
             .children(find_bar)
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
@@ -533,10 +585,24 @@ impl Render for Pane {
                             cx.emit(PaneEvent::Focus);
                         }
                     }))
-                    .on_drop(cx.listener(|_, dragged: &DraggedTab, _, cx| {
-                        cx.emit(PaneEvent::Drop { item: dragged.item.clone(), before: None });
+                    // A tab dropped in the middle joins the pane; near an edge, it
+                    // splits the pane there.
+                    .on_drag_move(cx.listener(|pane, ev: &gpui::DragMoveEvent<DraggedTab>, _, cx| {
+                        let zone = pane.drop_zone(ev.bounds, ev.event.position, ev.drag(cx));
+                        pane.set_tab_drop(zone, cx);
                     }))
-                    .child(content),
+                    .on_drop(cx.listener(|pane, dragged: &DraggedTab, _, cx| {
+                        let item = dragged.item.clone();
+                        match pane.tab_drop.take() {
+                            Some(DropZone::Side(side)) => cx.emit(PaneEvent::DropSplit { item, side }),
+                            _ => cx.emit(PaneEvent::Drop { item, before: None }),
+                        }
+                        cx.notify();
+                    }))
+                    .child(content)
+                    // GPUI refreshes the window on every move of a drag, so this
+                    // follows the pointer though the pane is a cached view.
+                    .children(self.tab_drop.filter(|_| cx.has_active_drag()).map(|zone| drop_zone_overlay(zone, &theme))),
             );
         let bounds = self.bounds.clone();
         let drop_group = SharedString::from(format!("pane-drop-{}", cx.entity_id()));
@@ -583,6 +649,20 @@ impl Render for Pane {
                         cx.emit(PaneEvent::OpenPath(entry.path.clone()));
                     })),
             )
+    }
+}
+
+/// The part of a pane's content a dragged tab would land in: all of it, or
+/// the half a new pane on that side would take.
+fn drop_zone_overlay(zone: DropZone, theme: &Theme) -> Div {
+    let inset = px(4.);
+    let overlay = div().absolute().top(inset).bottom(inset).left(inset).right(inset).rounded(px(8.)).bg(theme.accent_soft);
+    match zone {
+        DropZone::Middle => overlay,
+        DropZone::Side(Side::Left) => overlay.right(relative(0.5)),
+        DropZone::Side(Side::Right) => overlay.left(relative(0.5)),
+        DropZone::Side(Side::Up) => overlay.bottom(relative(0.5)),
+        DropZone::Side(Side::Down) => overlay.top(relative(0.5)),
     }
 }
 

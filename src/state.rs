@@ -320,9 +320,13 @@ pub struct ProjectSession {
     pub tabs: Vec<TabSession>,
     /// Index into `tabs` of the focused tab.
     pub active: usize,
-    /// Split panes; absent for a single pane.
+    /// Split panes as older Kuanas kept them (one row or column); read, no
+    /// longer written (see `panes`).
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "none_if_bad")]
     pub layout: Option<PaneLayout>,
+    /// Split panes, as a tree of rows and columns; absent for a single pane.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "none_if_bad")]
+    pub panes: Option<PaneNode>,
     /// Expanded folders in the file tree, relative to `root`.
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "skip_bad")]
     pub expanded: Vec<PathBuf>,
@@ -396,6 +400,48 @@ pub struct PaneLayout {
     pub active: Vec<usize>,
 }
 
+impl PaneLayout {
+    /// The row or column of panes as a tree.
+    fn to_tree(&self) -> PaneNode {
+        let parts = self
+            .sizes
+            .iter()
+            .enumerate()
+            .map(|(ix, &share)| PaneShare { share, node: PaneNode::Pane { active: self.active.get(ix).copied().unwrap_or(0) } })
+            .collect();
+        if self.column { PaneNode::Column(parts) } else { PaneNode::Row(parts) }
+    }
+}
+
+/// How panes divide the editor area: rows of panes side by side and columns
+/// of stacked ones, nested. Panes are numbered in tree order (depth first, a
+/// split's first member first): the number its tabs have as `pane`.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneNode {
+    /// A pane; `active` is its current tab, counted among its tabs.
+    Pane { active: usize },
+    Row(Vec<PaneShare>),
+    Column(Vec<PaneShare>),
+}
+
+/// A member of a row or column, with its part of the room.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct PaneShare {
+    pub share: f32,
+    #[serde(flatten)]
+    pub node: PaneNode,
+}
+
+impl PaneNode {
+    pub fn pane_count(&self) -> usize {
+        match self {
+            PaneNode::Pane { .. } => 1,
+            PaneNode::Row(parts) | PaneNode::Column(parts) => parts.iter().map(|p| p.node.pane_count()).sum(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
 #[serde(default)]
 pub struct TabSession {
@@ -453,6 +499,11 @@ fn is_false(b: &bool) -> bool {
 }
 
 impl ProjectSession {
+    /// The split panes: the tree, else an older session's row or column.
+    pub fn pane_layout(&self) -> Option<PaneNode> {
+        self.panes.clone().or_else(|| self.layout.as_ref().filter(|l| l.sizes.len() > 1).map(PaneLayout::to_tree))
+    }
+
     /// `sessions/<folder name>-<hash of the full path>.json`: readable, and
     /// unique for same-named folders.
     fn file_name(root: &Path) -> String {
@@ -542,10 +593,27 @@ mod tests {
                 TabSession { kind: TabKind::Editor, path: Some("/work/kuana/a.rs".into()), cursor: 12, top_line: Some(40), unsaved: None, pane: 0, pinned: true, folds: vec![[3, 9]], encoding: Some("windows-1254".into()) },
                 TabSession { kind: TabKind::Editor, path: None, cursor: 0, top_line: None, unsaved: Some("draft".into()), pane: 1, pinned: false, folds: Vec::new(), encoding: None },
                 TabSession { kind: TabKind::MarkdownPreview, path: Some("/work/kuana/README.md".into()), pane: 1, ..TabSession::default() },
-                TabSession { kind: TabKind::Image, path: Some("/work/kuana/logo.png".into()), ..TabSession::default() },
+                TabSession { kind: TabKind::Image, path: Some("/work/kuana/logo.png".into()), pane: 3, ..TabSession::default() },
             ],
             active: 1,
-            layout: Some(PaneLayout { column: false, sizes: vec![0.4, 0.6], active: vec![0, 0] }),
+            layout: None,
+            // A 2x2 grid: two columns side by side.
+            panes: Some(PaneNode::Row(vec![
+                PaneShare {
+                    share: 0.4,
+                    node: PaneNode::Column(vec![
+                        PaneShare { share: 0.5, node: PaneNode::Pane { active: 0 } },
+                        PaneShare { share: 0.5, node: PaneNode::Pane { active: 1 } },
+                    ]),
+                },
+                PaneShare {
+                    share: 0.6,
+                    node: PaneNode::Column(vec![
+                        PaneShare { share: 0.7, node: PaneNode::Pane { active: 0 } },
+                        PaneShare { share: 0.3, node: PaneNode::Pane { active: 0 } },
+                    ]),
+                },
+            ])),
             expanded: vec!["src".into(), "src/lsp".into()],
             python_venv: Some("off".into()),
             terminals: Some(TerminalLayout {
@@ -575,6 +643,9 @@ mod tests {
         assert_eq!(serde_json::from_str::<ProjectSession>(&json).unwrap(), session);
         // Text tabs don't name their kind, as before there were others.
         assert!(json.contains(r#""kind":"markdown_preview""#) && !json.contains(r#""kind":"editor""#));
+        // A member names its kind beside its share.
+        assert!(json.contains(r#""panes":{"row":[{"share":0.4,"column":[{"share":0.5,"pane":{"active":0}}"#), "{json}");
+        assert_eq!(session.pane_layout().map(|p| p.pane_count()), Some(4));
 
         // Every way to debug comes back.
         let go = RunTarget {
@@ -588,6 +659,26 @@ mod tests {
         };
         let json = serde_json::to_string(&go).unwrap();
         assert_eq!(serde_json::from_str::<RunTarget>(&json).unwrap(), go);
+    }
+
+    /// Older sessions kept one row or column of panes as `layout`; it reads
+    /// as a tree, and a single pane needs none.
+    #[test]
+    fn an_older_row_of_panes_reads_as_a_tree() {
+        let text = r#"{
+            "root": "/work/p",
+            "tabs": [{ "path": "/work/p/a.rs", "cursor": 0 }, { "path": "/work/p/b.rs", "cursor": 0, "pane": 1 }],
+            "active": 1,
+            "layout": { "column": true, "sizes": [0.3, 0.7], "active": [0, 0] }
+        }"#;
+        let session: ProjectSession = read_lenient(text).unwrap();
+        let pane = |share, active| PaneShare { share, node: PaneNode::Pane { active } };
+        assert_eq!(session.pane_layout(), Some(PaneNode::Column(vec![pane(0.3, 0), pane(0.7, 0)])));
+        // Written again, it's a tree.
+        let json = serde_json::to_string(&ProjectSession { layout: None, panes: session.pane_layout(), ..session }).unwrap();
+        assert!(json.contains(r#""panes":{"column":"#) && !json.contains("layout"), "{json}");
+        let single = ProjectSession { layout: Some(PaneLayout { column: false, sizes: vec![1.], active: vec![0] }), ..ProjectSession::default() };
+        assert_eq!(single.pane_layout(), None);
     }
 
     /// A session written by another Kuana version still brings back its
@@ -605,12 +696,15 @@ mod tests {
             "active": 1,
             "expanded": "not a list",
             "last_run": { "name": "x", "command": "x", "cwd": "/", "debug": { "Wasm": { "module": "m" } } },
+            "panes": { "grid": [[{ "pane": { "active": 0 } }]] },
             "minimap": { "on": true }
         }"#;
         let session: ProjectSession = read_lenient(text).unwrap();
         let unsaved: Vec<_> = session.tabs.iter().map(|t| t.unsaved.as_deref()).collect();
         assert_eq!(unsaved, [Some("draft"), Some("untitled")]);
         assert!(session.expanded.is_empty() && session.last_run.is_none());
+        // A way to split panes this version doesn't know: the panes are lost, not the tabs.
+        assert_eq!(session.pane_layout(), None);
         assert_eq!(session.other.get("minimap"), Some(&serde_json::json!({ "on": true })));
         assert!(read_lenient::<ProjectSession>("{ truncated").is_err());
         // State with one bad value keeps the rest.

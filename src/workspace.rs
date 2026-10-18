@@ -59,7 +59,7 @@ use crate::{
     project_search::{ProjectSearch, ProjectSearchEvent},
     search::{SearchQuery},
     state::{
-        FileBreakpoints, PaneLayout, ProjectSession, SessionState, TabKind, TabSession, TerminalGroupSession, TerminalLayout, TerminalTabSession,
+        FileBreakpoints, PaneNode, PaneShare, ProjectSession, SessionState, TabKind, TabSession, TerminalGroupSession, TerminalLayout, TerminalTabSession,
         WindowPlacement,
     },
     syntax::Language,
@@ -89,6 +89,7 @@ mod local_history;
 mod menus;
 mod navigation;
 mod pane;
+mod pane_tree;
 mod pane_view;
 mod panes;
 mod problems;
@@ -108,6 +109,7 @@ mod windows;
 use self::{
     file_tree::*,
     pane::{Pane, PaneChrome, PaneEvent, file_drop_overlay},
+    pane_tree::{Axis, Member, PaneTree, Side, SplitId, can_split},
     tab_bar::*,
     terminal_panel::{TerminalPanel, TerminalPanelEvent},
     title_bar::*,
@@ -319,8 +321,8 @@ enum Edge {
     Problems,
     /// The file tree's right edge.
     Sidebar,
-    /// The divider after pane `n`.
-    Pane(usize),
+    /// The boundary after member `ix` of a split of the editor area.
+    Split { split: SplitId, axis: Axis, ix: usize },
 }
 
 #[derive(Clone, Copy)]
@@ -442,14 +444,6 @@ enum TerminalPlace {
     Tab { group: usize, ix: Option<usize> },
     /// A group of its own right after this one (a split).
     GroupAfter(usize),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum PaneAxis {
-    /// Side by side.
-    Row,
-    /// Stacked.
-    Column,
 }
 
 /// A tab being dragged to a new place or pane.
@@ -598,8 +592,11 @@ impl ModalLayer {
     }
 }
 
-/// The most panes the editor area splits into.
-const MAX_PANES: usize = 6;
+/// The least room a pane keeps, splitting and resizing: its current tab, the
+/// overflow button and the strip's ends across; the strip, breadcrumbs and a
+/// few lines down.
+const MIN_PANE_WIDTH: f32 = 240.0;
+const MIN_PANE_HEIGHT: f32 = 140.0;
 /// How long two Shift taps may be apart to count as a double Shift.
 const DOUBLE_SHIFT_WINDOW: Duration = Duration::from_millis(400);
 /// How long Save waits for format on save before saving unformatted.
@@ -652,18 +649,12 @@ pub struct Workspace {
     file_history: crate::file_history::FileHistory,
     root: Option<PathBuf>,
     /// Every open text editor, in any pane (for saving, searching, language
-    /// servers); `panes` hold them and the other kinds of tabs.
+    /// servers); panes hold them and the other kinds of tabs.
     editors: Vec<Entity<Editor>>,
-    panes: Vec<Entity<Pane>>,
+    /// How the editor area is split into panes.
+    center: PaneTree<Entity<Pane>>,
     /// The pane with the keyboard, or the one that had it last.
     active_pane: Entity<Pane>,
-    pane_axis: PaneAxis,
-    /// Each pane's share of the space, summing to 1.
-    pane_sizes: Vec<f32>,
-    /// Bounds of the pane area last frame, for divider drags.
-    panes_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
-    /// The two shares around the divider being dragged.
-    pane_drag_pair: f32,
     /// What each pane reports (see `PaneEvent`), dropped with the pane.
     pane_subscriptions: HashMap<EntityId, Subscription>,
     show_sidebar: bool,
@@ -1062,12 +1053,8 @@ impl Workspace {
             file_history: Default::default(),
             root: None,
             editors: Vec::new(),
-            panes: vec![pane.clone()],
+            center: PaneTree::new(pane.clone()),
             active_pane: pane,
-            pane_axis: PaneAxis::Row,
-            pane_sizes: vec![1.0],
-            panes_bounds: Default::default(),
-            pane_drag_pair: 0.,
             pane_subscriptions,
             // Without a project there's nothing to browse; opening one shows
             // the sidebar as it was left (see `set_root`).
@@ -1425,7 +1412,7 @@ impl Workspace {
     /// Activation reads its tab already; this covers a pane whose current tab
     /// changed otherwise (a tab closed or moved out of it).
     fn load_shown_tabs(&mut self, cx: &mut Context<Self>) {
-        let shown: Vec<PaneItem> = self.panes.iter().filter_map(|pane| pane.read(cx).active_item().cloned()).collect();
+        let shown: Vec<PaneItem> = self.center.panes().iter().filter_map(|pane| pane.read(cx).active_item().cloned()).collect();
         for item in shown {
             self.load_item(&item, cx);
         }
@@ -1484,7 +1471,7 @@ impl Workspace {
 
     /// The pane holding a tab (by its view's id) and its index there.
     fn locate(&self, id: EntityId, cx: &App) -> Option<(Entity<Pane>, usize)> {
-        self.panes.iter().find_map(|pane| pane.read(cx).position(id).map(|ix| (pane.clone(), ix)))
+        self.center.panes().into_iter().find_map(|pane| pane.read(cx).position(id).map(|ix| (pane, ix)))
     }
 
     fn activate_in(&mut self, pane: &Entity<Pane>, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1531,7 +1518,7 @@ impl Workspace {
 
     /// Every tab, in pane order.
     fn items(&self, cx: &App) -> Vec<PaneItem> {
-        self.panes.iter().flat_map(|pane| pane.read(cx).tabs().iter().cloned()).collect()
+        self.center.panes().iter().flat_map(|pane| pane.read(cx).tabs().iter().cloned()).collect()
     }
 
     /// The image tabs.
@@ -1571,6 +1558,7 @@ impl Workspace {
                 self.show_context_menu(entries, actions, *position, None, window, cx);
             }
             PaneEvent::Drop { item, before } => self.move_tab(item, pane, *before, window, cx),
+            PaneEvent::DropSplit { item, side } => self.move_to_new_pane(item, pane, *side, window, cx),
             PaneEvent::OpenPaths(paths) => {
                 self.active_pane = pane.clone();
                 self.open_dropped(paths, window, cx);
@@ -1588,14 +1576,14 @@ impl Workspace {
     /// Runs after every notify of the workspace, outside drawing: a cached
     /// pane told during the workspace's render wouldn't be redrawn.
     fn sync_panes(&mut self, cx: &mut Context<Self>) {
-        let several = self.panes.len() > 1;
+        let panes = self.center.panes();
         let covered = self.diff_view().is_some();
-        for (ix, pane) in self.panes.clone().into_iter().enumerate() {
-            let active = pane == self.active_pane;
+        for pane in &panes {
+            let active = *pane == self.active_pane;
             let chrome = PaneChrome {
                 active,
-                outlined: active && several,
-                at_top: self.pane_axis == PaneAxis::Row || ix == 0,
+                outlined: active && panes.len() > 1,
+                at_top: self.center.at_top(pane),
                 find_bar: (active && self.show_find).then(|| self.find_bar.clone()),
                 covered,
                 root: self.root.clone(),

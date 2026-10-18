@@ -427,7 +427,7 @@ impl Workspace {
         if !event.modifiers.modified() {
             self.tab_switch = None;
         }
-        let shown: Vec<Entity<Editor>> = self.panes.iter().filter_map(|p| p.read(cx).active_item()?.editor().cloned()).collect();
+        let shown: Vec<Entity<Editor>> = self.center.panes().iter().filter_map(|p| p.read(cx).active_item()?.editor().cloned()).collect();
         for editor in shown {
             editor.update(cx, |e, cx| e.secondary_modifier_changed(event.modifiers.secondary(), window, cx));
         }

@@ -451,7 +451,7 @@ impl Workspace {
         self.tab_subscriptions.remove(&id);
         let was_active_pane = pane == self.active_pane;
         pane.update(cx, |p, cx| p.remove(id, cx));
-        if pane.read(cx).is_empty() && self.panes.len() > 1 {
+        if pane.read(cx).is_empty() {
             self.remove_pane(&pane);
         }
         self.schedule_session_save(cx);

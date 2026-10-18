@@ -1,42 +1,54 @@
-//! The editor area: panes side by side or stacked with resize handles
-//! between them, the welcome screen in a lone empty pane, and the Git diff
-//! over them all. Each pane draws itself (`pane.rs`).
+//! The editor area: panes as the tree of splits arranges them (`pane_tree`),
+//! with resize handles between them, the welcome screen in a lone empty
+//! pane, and the Git diff over them all. Each pane draws itself (`pane.rs`).
 
 use super::*;
 
 impl Workspace {
-    /// The editor area: panes side by side or stacked, with dividers.
+    /// The editor area: the panes as split, with the Git diff over them.
     pub(super) fn render_panes(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let bounds = self.panes_bounds.clone();
         // The start screen, or ways to open a file, while there's nothing open.
-        let lone_empty = self.panes.len() == 1 && self.active_pane.read(cx).is_empty();
+        let lone_empty = self.center.len() == 1 && self.active_pane.read(cx).is_empty();
+        div()
+            .relative()
+            .flex()
+            .size_full()
+            .child(self.render_member(self.center.root(), lone_empty, window, cx))
+            .when_some(self.diff_view(), |el, view| el.child(self.render_diff_overlay(view, cx)))
+    }
+
+    /// A pane (cached: it redraws when it changes, not with the workspace),
+    /// or a split's members side by side or stacked, each in a slot as big as
+    /// its share, with a resize handle in the gap after it.
+    fn render_member(&self, member: &Member<Entity<Pane>>, lone_empty: bool, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let split = match member {
+            Member::Pane(_) if lone_empty => return self.render_lone_pane(window, cx),
+            Member::Pane(pane) => return cached(pane).into_any_element(),
+            Member::Split(split) => split,
+        };
+        let bounds = split.bounds.clone();
+        let count = split.members.len();
         div()
             .relative()
             .flex()
             .gap(px(GAP))
             .size_full()
-            .when(self.pane_axis == PaneAxis::Column, |el| el.flex_col())
-            .child(
-                gpui::canvas(move |b, window, _| track_bounds(&bounds, b, window), |_, _, _, _| {})
-                    .absolute()
-                    .size_full(),
-            )
-            .children(self.panes.iter().enumerate().map(|(ix, pane)| {
-                let share = relative(self.pane_sizes.get(ix).copied().unwrap_or(1.));
-                div()
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .min_w_0()
-                    .min_h_0()
-                    .map(|el| match self.pane_axis {
-                        PaneAxis::Row => el.h_full().w(share),
-                        PaneAxis::Column => el.w_full().h(share),
-                    })
-                    .child(if lone_empty { self.render_lone_pane(window, cx) } else { cached(pane).into_any_element() })
-                    .when(ix + 1 < self.panes.len(), |el| el.child(self.resize_handle(Edge::Pane(ix), cx)))
+            .min_w_0()
+            .min_h_0()
+            .when(split.axis == Axis::Column, |el| el.flex_col())
+            // Where it is, for drags of its handles.
+            .child(gpui::canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {}).absolute().size_full())
+            .children(split.members.iter().zip(&split.shares).enumerate().map(|(ix, (member, share))| {
+                let mut slot = div().relative().flex().flex_col().flex_basis(px(0.)).min_w_0().min_h_0();
+                // Grow factors summing to the member count (not to 1, which a
+                // rounding error below would leave room unfilled at).
+                slot.style().flex_grow = Some(share * count as f32);
+                slot.style().flex_shrink = Some(1.);
+                slot.child(self.render_member(member, lone_empty, window, cx)).when(ix + 1 < count, |el| {
+                    el.child(self.resize_handle(Edge::Split { split: split.id, axis: split.axis, ix }, cx))
+                })
             }))
-            .when_some(self.diff_view(), |el, view| el.child(self.render_diff_overlay(view, cx)))
+            .into_any_element()
     }
 
     /// The only pane, without tabs: the start screen when there's no

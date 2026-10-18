@@ -6,25 +6,28 @@ impl Workspace {
     // ---- Panes and tab management ---------------------------------------------------------
 
     pub(super) fn split_right(&mut self, _: &SplitRight, window: &mut Window, cx: &mut Context<Self>) {
-        self.split(PaneAxis::Row, window, cx);
+        self.split(Side::Right, window, cx);
     }
 
     pub(super) fn split_down(&mut self, _: &SplitDown, window: &mut Window, cx: &mut Context<Self>) {
-        self.split(PaneAxis::Column, window, cx);
+        self.split(Side::Down, window, cx);
     }
 
-    /// A new pane after the current one, showing the current tab too (for a
-    /// file, a second editor of the same document, with its own carets and
-    /// scroll; see `PaneItem::split`).
-    pub(super) fn split(&mut self, axis: PaneAxis, window: &mut Window, cx: &mut Context<Self>) {
-        if self.panes.len() >= MAX_PANES {
+    /// A new pane beside the current one, on `side`, showing the current tab
+    /// too (for a file, a second editor of the same document, with its own
+    /// carets and scroll; see `PaneItem::split`). Splitting the other way
+    /// than the pane's neighbors divides the pane itself, so panes make
+    /// grids.
+    pub(super) fn split(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
+        let source = self.active_pane.clone();
+        if !can_split(source.read(cx).bounds(), side) {
+            self.toast(ToastKind::Info, "No room to split this pane", None, cx);
             return;
         }
-        // One direction at a time: splitting the other way re-flows the panes.
-        self.pane_axis = axis;
         let shown = self.active_item(cx);
-        let source = self.active_pane.clone();
-        self.active_pane = self.insert_pane_after(&source, window, cx);
+        let pane = self.new_pane(window, cx);
+        self.center.split(&source, pane.clone(), side);
+        self.active_pane = pane;
         match shown {
             Some(item) => {
                 self.load_item(&item, cx);
@@ -35,18 +38,6 @@ impl Workspace {
         }
         self.schedule_session_save(cx);
         cx.notify();
-    }
-
-    /// An empty pane right after `source`, taking half of its space.
-    fn insert_pane_after(&mut self, source: &Entity<Pane>, window: &mut Window, cx: &mut Context<Self>) -> Entity<Pane> {
-        let source = self.panes.iter().position(|p| p == source).unwrap_or(self.panes.len() - 1);
-        let pane = self.new_pane(window, cx);
-        let at = source + 1;
-        self.panes.insert(at, pane.clone());
-        let half = self.pane_sizes[source] / 2.;
-        self.pane_sizes[source] = half;
-        self.pane_sizes.insert(at, half);
-        pane
     }
 
     /// Moves a tab to `to` (before index `before`, or at the end); its pin
@@ -60,21 +51,46 @@ impl Workspace {
             p.insert(item.clone(), at, pinned, cx);
         });
         // The source pane closes if that was its last tab.
-        if from != *to && from.read(cx).is_empty() && self.panes.len() > 1 {
+        if from != *to && from.read(cx).is_empty() {
             self.remove_pane(&from);
         }
         self.activate_item(item, window, cx);
         self.schedule_session_save(cx);
     }
 
-    pub(super) fn next_pane(&mut self, _: &NextPane, window: &mut Window, cx: &mut Context<Self>) {
-        if self.panes.len() < 2 {
+    /// Moves a tab to a new pane beside `beside`, on `side` (a tab dropped
+    /// near a pane's edge).
+    pub(super) fn move_to_new_pane(&mut self, item: &PaneItem, beside: &Entity<Pane>, side: Side, window: &mut Window, cx: &mut Context<Self>) {
+        let pane = self.new_pane(window, cx);
+        if !self.center.split(beside, pane.clone(), side) {
+            self.pane_subscriptions.remove(&pane.entity_id());
             return;
         }
-        let at = self.panes.iter().position(|p| *p == self.active_pane).unwrap_or(0);
-        let next = self.panes[(at + 1) % self.panes.len()].clone();
-        self.active_pane = next.clone();
-        match next.read(cx).active_item().cloned() {
+        self.move_tab(item, &pane, None, window, cx);
+        cx.notify();
+    }
+
+    pub(super) fn next_pane(&mut self, _: &NextPane, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_pane(true, window, cx);
+    }
+
+    /// The pane after the current one in tree order (left to right, top to
+    /// bottom), or before it; around at the ends.
+    fn step_pane(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let panes = self.center.panes();
+        if panes.len() < 2 {
+            return;
+        }
+        let at = panes.iter().position(|p| *p == self.active_pane).unwrap_or(0);
+        let to = if forward { (at + 1) % panes.len() } else { (at + panes.len() - 1) % panes.len() };
+        self.focus_pane(&panes[to], window, cx);
+    }
+
+    /// Makes `pane` the current one, with the keyboard in its current tab
+    /// (in the workspace when it has none).
+    fn focus_pane(&mut self, pane: &Entity<Pane>, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_pane = pane.clone();
+        match pane.read(cx).active_item().cloned() {
             Some(item) => self.activate_item(&item, window, cx),
             None => window.focus(&self.focus_handle),
         }
@@ -131,8 +147,7 @@ impl Workspace {
             }
             TabAction::SplitRight | TabAction::SplitDown => {
                 self.activate_item(item, window, cx);
-                let axis = if action == TabAction::SplitRight { PaneAxis::Row } else { PaneAxis::Column };
-                self.split(axis, window, cx);
+                self.split(if action == TabAction::SplitRight { Side::Right } else { Side::Down }, window, cx);
                 return;
             }
         };
@@ -199,7 +214,7 @@ impl Workspace {
         }
         let Some((editor_pane, _)) = self.locate(editor.entity_id(), cx) else { return };
         let previews = self.previews_of(&editor.read(cx).doc.clone(), cx);
-        let shown = |ws: &Self, item: &PaneItem, cx: &App| ws.panes.iter().any(|p| p.read(cx).active_item() == Some(item));
+        let shown = |ws: &Self, item: &PaneItem, cx: &App| ws.center.panes().iter().any(|p| p.read(cx).active_item() == Some(item));
         if previews.iter().any(|p| shown(self, p, cx)) {
             for preview in previews {
                 self.remove_item(&preview, window, cx);
@@ -215,16 +230,18 @@ impl Workspace {
         let (pane, ix) = match found {
             Some(found) => found,
             None => {
-                let at = self.panes.iter().position(|p| *p == editor_pane).unwrap_or(0);
-                let pane = if at + 1 < self.panes.len() {
-                    self.panes[at + 1].clone()
-                } else if self.panes.len() < MAX_PANES {
-                    if self.panes.len() == 1 {
-                        self.pane_axis = PaneAxis::Row;
-                    }
-                    self.insert_pane_after(&editor_pane, window, cx)
+                // The pane after the editor's, else a new one to its right,
+                // else the one before (else the editor's own: no room).
+                let panes = self.center.panes();
+                let at = panes.iter().position(|p| *p == editor_pane).unwrap_or(0);
+                let pane = if let Some(next) = panes.get(at + 1) {
+                    next.clone()
+                } else if can_split(editor_pane.read(cx).bounds(), Side::Right) {
+                    let pane = self.new_pane(window, cx);
+                    self.center.split(&editor_pane, pane.clone(), Side::Right);
+                    pane
                 } else {
-                    self.panes[at - 1].clone()
+                    panes[at.saturating_sub(1)].clone()
                 };
                 let doc = editor.read(cx).doc.clone();
                 let preview = cx.new(|cx| MarkdownPreview::new(doc, cx));

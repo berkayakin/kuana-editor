@@ -82,7 +82,7 @@ impl Workspace {
         let id: gpui::SharedString = match edge {
             Edge::Problems => "resize-problems".into(),
             Edge::Sidebar => "resize-sidebar".into(),
-            Edge::Pane(ix) => format!("resize-pane-{ix}").into(),
+            Edge::Split { split, ix, .. } => format!("resize-split-{split:?}-{ix}").into(),
         };
         let handle = div().id(id).absolute();
         let handle = match edge {
@@ -92,15 +92,18 @@ impl Workspace {
                 handle.top_0().bottom_0().left(px(-GAP - 1.)).w(px(GAP)).cursor(CursorStyle::ResizeLeftRight)
             }
             Edge::Sidebar => handle.top_0().bottom_0().right(px(-GAP - 1.)).w(px(GAP)).cursor(CursorStyle::ResizeLeftRight),
-            // In the gap after the pane's slot: beside its island (the strip's
-            // room above stays the window's drag area), or across under it.
-            Edge::Pane(_) if self.pane_axis == PaneAxis::Row => handle
+            // In the gap after a split member's slot: beside it (below the tab
+            // strip's room, which stays the window's drag area along the top),
+            // or across under it.
+            Edge::Split { axis: Axis::Row, .. } => handle
                 .top(px(TAB_STRIP_HEIGHT - 1.))
                 .bottom_0()
                 .right(px(-GAP))
                 .w(px(GAP))
                 .cursor(CursorStyle::ResizeLeftRight),
-            Edge::Pane(_) => handle.left_0().right_0().bottom(px(-GAP)).h(px(GAP)).cursor(CursorStyle::ResizeUpDown),
+            Edge::Split { axis: Axis::Column, .. } => {
+                handle.left_0().right_0().bottom(px(-GAP)).h(px(GAP)).cursor(CursorStyle::ResizeUpDown)
+            }
         };
         handle.on_mouse_down(
             MouseButton::Left,
@@ -109,12 +112,18 @@ impl Workspace {
                 let (start, size) = match edge {
                     Edge::Problems => (e.position.y, ws.problems_height),
                     Edge::Sidebar => (e.position.x, ws.sidebar_width),
-                    Edge::Pane(ix) => {
-                        let bounds = ws.panes_bounds.get();
-                        ws.pane_drag_pair = ws.pane_sizes[ix] + ws.pane_sizes.get(ix + 1).copied().unwrap_or(0.);
-                        match ws.pane_axis {
-                            PaneAxis::Row => (e.position.x, bounds.size.width * ws.pane_sizes[ix]),
-                            PaneAxis::Column => (e.position.y, bounds.size.height * ws.pane_sizes[ix]),
+                    // A double click evens the split out (as VS Code's sashes do).
+                    Edge::Split { split, .. } if e.click_count == 2 => {
+                        ws.center.even_out(split);
+                        ws.schedule_session_save(cx);
+                        cx.notify();
+                        return;
+                    }
+                    Edge::Split { split, axis, ix } => {
+                        let extent = px(ws.center.extent(split, ix).unwrap_or(0.));
+                        match axis {
+                            Axis::Row => (e.position.x, extent),
+                            Axis::Column => (e.position.y, extent),
                         }
                     }
                 };
@@ -172,8 +181,8 @@ impl Workspace {
         let cursor = match resize.edge {
             Edge::Problems => CursorStyle::ResizeUpDown,
             Edge::Sidebar => CursorStyle::ResizeLeftRight,
-            Edge::Pane(_) if self.pane_axis == PaneAxis::Row => CursorStyle::ResizeLeftRight,
-            Edge::Pane(_) => CursorStyle::ResizeUpDown,
+            Edge::Split { axis: Axis::Row, .. } => CursorStyle::ResizeLeftRight,
+            Edge::Split { axis: Axis::Column, .. } => CursorStyle::ResizeUpDown,
         };
         let this = cx.entity().downgrade();
         gpui::canvas(
@@ -213,21 +222,13 @@ impl Workspace {
                 let delta = if self.sidebar_on_right(cx) { -delta } else { delta };
                 self.sidebar_width = (resize.size + delta).clamp(px(SIDEBAR_MIN_WIDTH), max);
             }
-            Edge::Pane(ix) if ix + 1 < self.pane_sizes.len() => {
-                let bounds = self.panes_bounds.get();
-                let (total, delta) = match self.pane_axis {
-                    PaneAxis::Row => (bounds.size.width, event.position.x - resize.start),
-                    PaneAxis::Column => (bounds.size.height, event.position.y - resize.start),
+            Edge::Split { split, axis, ix } => {
+                let delta = match axis {
+                    Axis::Row => event.position.x - resize.start,
+                    Axis::Column => event.position.y - resize.start,
                 };
-                if total > px(0.) {
-                    let pair = self.pane_drag_pair;
-                    // Every pane keeps at least a tenth of the space.
-                    let share = ((resize.size + delta) / total).clamp(0.1, (pair - 0.1).max(0.1));
-                    self.pane_sizes[ix] = share;
-                    self.pane_sizes[ix + 1] = pair - share;
-                }
+                self.center.resize(split, ix, f32::from(resize.size + delta));
             }
-            Edge::Pane(_) => {}
         }
         cx.notify();
     }
@@ -237,15 +238,15 @@ impl Workspace {
     pub(super) fn clear_drag_state(&mut self, cx: &mut Context<Self>) {
         // The drop overlays are drag_over styles: they only need a redraw.
         self.tree.update(cx, |t, cx| t.set_drop_target(None, cx));
-        for pane in &self.panes {
-            pane.update(cx, |p, cx| p.set_file_drop(false, cx));
+        for pane in self.center.panes() {
+            pane.update(cx, |p, cx| p.clear_drop(cx));
         }
         self.tree_root_drop = false;
         cx.notify();
     }
 
     pub(super) fn on_root_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.tree.read(cx).has_drop_target() || self.panes.iter().any(|p| p.read(cx).has_file_drop()) {
+        if self.tree.read(cx).has_drop_target() || self.center.panes().iter().any(|p| p.read(cx).has_drop()) {
             self.clear_drag_state(cx);
         }
         if self.resizing.take().is_some() {

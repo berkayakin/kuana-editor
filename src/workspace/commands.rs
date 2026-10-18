@@ -121,9 +121,8 @@ impl Workspace {
         self.tab_subscriptions.clear();
         self.pane_subscriptions.clear();
         let pane = self.new_pane(window, cx);
-        self.panes = vec![pane.clone()];
+        self.center = PaneTree::new(pane.clone());
         self.active_pane = pane;
-        self.pane_sizes = vec![1.0];
         self.session_task = None;
         self.terminals.update(cx, |p, cx| p.clear(cx));
         self.running.clear();
