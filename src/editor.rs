@@ -146,6 +146,8 @@ actions!(
         GoToImplementation,
         GoToTypeDefinition,
         FindUsages,
+        CallHierarchy,
+        TypeHierarchy,
         RenameSymbol,
         ShowContextActions,
         ReformatCode,
@@ -5305,6 +5307,8 @@ impl Render for Editor {
             .on_action(cx.listener(Self::go_to_implementation))
             .on_action(cx.listener(Self::go_to_type_definition))
             .on_action(cx.listener(Self::find_usages))
+            .on_action(cx.listener(Self::call_hierarchy))
+            .on_action(cx.listener(Self::type_hierarchy))
             .on_action(cx.listener(Self::rename_symbol))
             .on_action(cx.listener(Self::show_context_actions))
             .on_action(cx.listener(Self::reformat_code))

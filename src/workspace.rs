@@ -806,6 +806,17 @@ pub struct Workspace {
     tab_looks: HashMap<gpui::EntityId, TabLook>,
 }
 
+/// A location's file for usage, symbol and hierarchy lists: relative to the
+/// project, or, outside it (a library's sources), just its folder and name.
+fn location_label(root: Option<&Path>, path: &Path) -> String {
+    if let Some(rel) = root.and_then(|r| path.strip_prefix(r).ok()).filter(|r| !r.as_os_str().is_empty()) {
+        return rel.display().to_string();
+    }
+    let mut parts: Vec<_> = path.iter().rev().take(2).map(|p| p.to_string_lossy()).collect();
+    parts.reverse();
+    format!("…/{}", parts.join("/"))
+}
+
 impl Workspace {
     fn shows(&self, panel: BottomPanel) -> bool {
         self.bottom == Some(panel)

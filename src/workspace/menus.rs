@@ -28,6 +28,7 @@ impl Workspace {
             ("Go to Declaration", Box::new(editor::GoToDeclaration) as Box<dyn gpui::Action>),
             ("Go to Implementation", Box::new(editor::GoToImplementation)),
             ("Find Usages", Box::new(editor::FindUsages)),
+            ("Call Hierarchy", Box::new(editor::CallHierarchy)),
             ("Rename…", Box::new(editor::RenameSymbol)),
             ("Show Context Actions", Box::new(editor::ShowContextActions)),
             ("Reformat Code", Box::new(editor::ReformatCode)),
@@ -374,15 +375,9 @@ impl Workspace {
         }
     }
 
-    /// A location's file for usage and symbol lists: relative to the project,
-    /// or, outside it (a library's sources), just its folder and name.
+    /// A location's file for usage and symbol lists (`location_label`).
     pub(super) fn location_label(&self, path: &Path) -> String {
-        if self.root.as_deref().is_some_and(|r| path.starts_with(r)) {
-            return self.display_rel(path);
-        }
-        let mut parts: Vec<_> = path.iter().rev().take(2).map(|p| p.to_string_lossy()).collect();
-        parts.reverse();
-        format!("…/{}", parts.join("/"))
+        location_label(self.root.as_deref(), path)
     }
 
     pub(super) fn vim_command_line(&mut self, _: &VimCommandLine, window: &mut Window, cx: &mut Context<Self>) {

@@ -56,9 +56,7 @@ impl Workspace {
         self.open_path(target.path.clone(), window, cx);
         if let Some(editor) = self.tab_for(&target.path, cx) {
             editor.update(cx, |e, cx| {
-                let doc = e.doc.read(cx);
-                let row = (target.line as usize).min(doc.line_count().saturating_sub(1));
-                let offset = (doc.line_start(row) + target.column as usize).min(doc.line_end(row));
+                let offset = protocol::position_to_offset(e.doc.read(cx).rope(), target.position, target.encoding);
                 e.go_to(offset, window, cx);
             });
         }

@@ -55,6 +55,9 @@ pub enum EditorLspEvent {
     Message(SharedString),
     /// Run a server's command (a code lens's): `workspace/executeCommand`.
     Command { server: Arc<Server>, command: Value },
+    /// Show a call or type hierarchy of these items (what `prepare…`
+    /// returned) in the Find panel.
+    Hierarchy { kind: crate::hierarchy::Kind, server: Arc<Server>, items: Vec<Value> },
 }
 
 impl gpui::EventEmitter<EditorLspEvent> for Editor {}
@@ -1553,6 +1556,39 @@ impl Editor {
     pub(super) fn go_to_type_definition(&mut self, _: &super::GoToTypeDefinition, _: &mut Window, cx: &mut Context<Self>) {
         let head = self.primary_selection().head;
         self.locations_request("textDocument/typeDefinition", head, "Type Definition", "No type definition found", Value::Null, Show::Pick, cx);
+    }
+
+    pub(super) fn call_hierarchy(&mut self, _: &super::CallHierarchy, _: &mut Window, cx: &mut Context<Self>) {
+        self.hierarchy(crate::hierarchy::Kind::Call, cx);
+    }
+
+    pub(super) fn type_hierarchy(&mut self, _: &super::TypeHierarchy, _: &mut Window, cx: &mut Context<Self>) {
+        self.hierarchy(crate::hierarchy::Kind::Type, cx);
+    }
+
+    /// Asks for the hierarchy items at the caret; the workspace shows them.
+    fn hierarchy(&mut self, kind: crate::hierarchy::Kind, cx: &mut Context<Self>) {
+        let Some(server) = self.lsp_server_with(kind.capability(), cx) else {
+            let message = match self.lsp_server(cx) {
+                Some(server) => format!("{} has no {}", server.name, kind.name().to_lowercase()),
+                None => "No language server for this file".into(),
+            };
+            cx.emit(EditorLspEvent::Message(message.into()));
+            return;
+        };
+        let head = self.primary_selection().head;
+        let Some(params) = self.position_params(head, &server, cx) else { return };
+        cx.spawn(async move |this, cx| {
+            let result = server.request(kind.prepare(), params).await;
+            this.update(cx, |_, cx| match result {
+                Ok(Value::Array(items)) if !items.is_empty() => cx.emit(EditorLspEvent::Hierarchy { kind, server, items }),
+                Ok(_) => cx.emit(EditorLspEvent::Message(format!("No {} here", kind.name().to_lowercase()).into())),
+                Err(err) if err.is_cancelled() => {}
+                Err(err) => cx.emit(EditorLspEvent::Message(err.message.into())),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(super) fn find_usages(&mut self, _: &super::FindUsages, _: &mut Window, cx: &mut Context<Self>) {

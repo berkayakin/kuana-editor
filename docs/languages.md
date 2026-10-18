@@ -63,6 +63,14 @@ tabs. **Toggle Find Panel** (⌘3 / Alt+3 in the JetBrains keymap, View → Find
 and the title bar has a toggle once it has results. Go to Declaration on a declaration still lists
 its usages in a quick popup, as in JetBrains.
 
+**Call Hierarchy** (⌃⌥H / Ctrl+Alt+H in the JetBrains keymap, ⇧⌥H in VS Code's, or the editor's
+right-click menu) shows the function at the caret in the Find panel with its **Callers** (open) and
+the functions it **Calls**; each of those opens onto its own callers or calls, asked for only when
+you open it, so you can follow a chain as deep as you like. A caller opens at its call, with the
+number of calls when there are several. **Type Hierarchy** (⌃H / Ctrl+H in the JetBrains keymap)
+does the same for a type's **Supertypes** and **Subtypes**. Both need a server that offers them
+(rust-analyzer and pyright have call hierarchy; gopls and clangd both); otherwise a message says so.
+
 **Code lenses** sit above lines, as the server offers them: rust-analyzer's ▶ Run / Debug (run in a
 Run tab or the debugger, like the gutter ▶), implementations and references (which open the
 usages list), and other servers' commands. A lens's title, which can cost the server a search, is

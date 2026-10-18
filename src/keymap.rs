@@ -236,6 +236,8 @@ fn jetbrains(mac: bool) -> Vec<KeyBinding> {
         KeyBinding::new("secondary-alt-b", GoToImplementation, e),
         KeyBinding::new("ctrl-shift-b", GoToTypeDefinition, e),
         KeyBinding::new("alt-f7", FindUsages, e),
+        KeyBinding::new("ctrl-alt-h", CallHierarchy, e),
+        KeyBinding::new("ctrl-h", TypeHierarchy, e),
         // Debugger (JetBrains): F8 over, F7 into, ⇧F8 out.
         KeyBinding::new("f8", StepOver, None),
         KeyBinding::new("f7", StepInto, None),
@@ -404,6 +406,7 @@ fn vscode(mac: bool) -> Vec<KeyBinding> {
         KeyBinding::new("secondary-k v", ToggleMarkdownPreview, Some("MarkdownPreview")),
         KeyBinding::new("shift-f12", FindUsages, e),
         KeyBinding::new("alt-shift-f12", FindUsages, e),
+        KeyBinding::new("shift-alt-h", CallHierarchy, e),
         // Through the references (or search results) listed.
         KeyBinding::new("f4", NextResult, None),
         KeyBinding::new("shift-f4", PreviousResult, None),
@@ -707,6 +710,8 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Debug Panel", ToggleDebugPanel),
         a("Install 'kuana' Shell Command", InstallShellCommand),
         a("Find Usages", FindUsages),
+        a("Call Hierarchy", CallHierarchy),
+        a("Type Hierarchy", TypeHierarchy),
         a("Rename…", RenameSymbol),
         a("Show Context Actions", ShowContextActions),
         a("Reformat Code", ReformatCode),

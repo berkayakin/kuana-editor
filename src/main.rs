@@ -28,6 +28,7 @@ mod fold;
 mod format;
 mod git;
 mod git_log;
+mod hierarchy;
 mod git_panel;
 mod image_view;
 mod instance;

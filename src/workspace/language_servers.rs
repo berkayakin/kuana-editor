@@ -33,6 +33,13 @@ impl Workspace {
             }
             EditorLspEvent::Message(message) => self.toast(ToastKind::Info, message.clone(), None, cx),
             EditorLspEvent::Command { server, command } => self.execute_command(server.clone(), command.clone(), cx),
+            EditorLspEvent::Hierarchy { kind, server, items } => {
+                let root = self.root.clone();
+                let label: crate::hierarchy::Labeler = std::rc::Rc::new(move |path| location_label(root.as_deref(), path));
+                let name = items[0]["name"].as_str().unwrap_or_default().to_string();
+                let nodes = crate::hierarchy::roots(*kind, server.clone(), items.clone(), label);
+                self.show_results(format!("{} of {name}", kind.name()).into(), nodes, window, cx);
+            }
         }
     }
 

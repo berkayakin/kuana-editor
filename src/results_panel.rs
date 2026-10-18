@@ -1,7 +1,9 @@
 //! The Find panel (JetBrains' Find tool window): results as trees, one tab
 //! per search, in the bottom area. Find Usages fills it with the usages
-//! grouped by file; nodes are generic (`ResultNode`: a label, an optional
-//! place to open, children), so other trees can show here too.
+//! grouped by file, Call / Type Hierarchy with trees that load as they
+//! open (`hierarchy.rs`); nodes are generic (`ResultNode`: a label, an
+//! optional place to open, children or a `Loader` that fetches them the
+//! first time the node opens), so other trees can show here too.
 //!
 //! A new search replaces the current tab unless it's pinned. ↑/↓ move and
 //! show the selected place in its editor (the panel keeps focus), Enter opens
@@ -9,10 +11,10 @@
 //! Result step through the current tab from anywhere. The workspace opens
 //! what's chosen (`ResultsEvent::Open`) and draws the island around it.
 
-use std::{ops::Range, path::PathBuf};
+use std::{ops::Range, path::PathBuf, rc::Rc};
 
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla, Render, ScrollStrategy, SharedString, StyledText,
+    App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla, Render, ScrollStrategy, SharedString, StyledText, Task,
     UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
 };
 
@@ -24,21 +26,50 @@ use crate::{
     ui::{HoverFill, icon_el},
 };
 
-/// A place to open: a 0-based line and a byte column in it.
+/// A place to open, as a language server gave it (its column resolves
+/// against the file's text when opened).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResultTarget {
     pub path: PathBuf,
-    pub line: u32,
-    pub column: u32,
+    pub position: Position,
+    pub encoding: Encoding,
 }
 
 /// What a row shows before its label.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Leading {
-    /// A file: its icon (the label is its name).
+    /// A file: its icon.
     File(PathBuf),
     /// A line in a file, 1-based.
     Line(u32),
+    Icon(Icon),
+    /// Nothing ("Loading…", a message).
+    Blank,
+}
+
+/// What a node's children take to load: the workspace or a hierarchy hands
+/// one over, the panel runs it once, the first time the node opens.
+pub type LoadTask = Task<Result<Vec<ResultNode>, String>>;
+
+#[derive(Clone)]
+pub struct Loader(Rc<dyn Fn(&mut App) -> LoadTask>);
+
+impl Loader {
+    pub fn new(load: impl Fn(&mut App) -> LoadTask + 'static) -> Self {
+        Loader(Rc::new(load))
+    }
+}
+
+impl PartialEq for Loader {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for Loader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Loader")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -51,7 +82,29 @@ pub struct ResultNode {
     pub detail: Option<SharedString>,
     pub target: Option<ResultTarget>,
     pub children: Vec<ResultNode>,
+    /// Fetches the children (until it has run).
+    pub loader: Option<Loader>,
     pub expanded: bool,
+}
+
+impl ResultNode {
+    /// A row without a place or children: "Loading…", "None", an error.
+    pub fn message(text: impl Into<SharedString>) -> Self {
+        ResultNode {
+            leading: Leading::Blank,
+            label: SharedString::default(),
+            highlight: None,
+            detail: Some(text.into()),
+            target: None,
+            children: Vec::new(),
+            loader: None,
+            expanded: false,
+        }
+    }
+
+    fn expandable(&self) -> bool {
+        !self.children.is_empty() || self.loader.is_some()
+    }
 }
 
 /// A row on screen: a node by its index path from the tab's roots.
@@ -62,9 +115,12 @@ struct Row {
 }
 
 struct ResultTab {
+    /// Tells a load's results which tab they're for (tabs get replaced).
+    id: u64,
     title: SharedString,
-    /// Leaves with a place, shown next to the title.
-    count: usize,
+    /// Leaves with a place, shown next to the title; none for a tree that
+    /// loads as it opens.
+    count: Option<usize>,
     nodes: Vec<ResultNode>,
     /// The expanded nodes, depth first.
     rows: Vec<Row>,
@@ -73,11 +129,19 @@ struct ResultTab {
 }
 
 impl ResultTab {
-    fn new(title: SharedString, nodes: Vec<ResultNode>) -> Self {
-        fn leaves(nodes: &[ResultNode]) -> usize {
-            nodes.iter().map(|n| if n.children.is_empty() { n.target.is_some() as usize } else { leaves(&n.children) }).sum()
+    fn new(id: u64, title: SharedString, nodes: Vec<ResultNode>) -> Self {
+        fn leaves(nodes: &[ResultNode]) -> Option<usize> {
+            nodes.iter().try_fold(0, |n, node| {
+                if node.loader.is_some() {
+                    None
+                } else if node.children.is_empty() {
+                    Some(n + node.target.is_some() as usize)
+                } else {
+                    Some(n + leaves(&node.children)?)
+                }
+            })
         }
-        let mut tab = ResultTab { title, count: leaves(&nodes), nodes, rows: Vec::new(), selected: None, pinned: false };
+        let mut tab = ResultTab { id, title, count: leaves(&nodes), nodes, rows: Vec::new(), selected: None, pinned: false };
         tab.relayout();
         tab
     }
@@ -125,16 +189,57 @@ impl ResultTab {
         });
     }
 
-    fn set_expanded(&mut self, row: usize, expanded: bool) {
+    /// Opens or closes a row's node; one opening for the first time with
+    /// children to load gives its loader back (to run) and shows "Loading…".
+    fn set_expanded(&mut self, row: usize, expanded: bool) -> Option<(Vec<usize>, Loader)> {
         let path = self.rows[row].path.clone();
         let node = self.node_mut(&path);
-        if node.children.is_empty() || node.expanded == expanded {
-            return;
+        if !node.expandable() || node.expanded == expanded {
+            return None;
         }
         node.expanded = expanded;
+        let load = expanded.then(|| node.loader.take()).flatten().map(|loader| {
+            node.children = vec![ResultNode::message("Loading…")];
+            (path, loader)
+        });
+        self.relayout();
+        load
+    }
+
+    /// The loaders of nodes that show open without their children yet (a
+    /// hierarchy's first levels), taken to run.
+    fn take_open_loaders(&mut self) -> Vec<(Vec<usize>, Loader)> {
+        fn walk(nodes: &mut [ResultNode], prefix: &mut Vec<usize>, out: &mut Vec<(Vec<usize>, Loader)>) {
+            for (i, node) in nodes.iter_mut().enumerate() {
+                prefix.push(i);
+                if node.expanded {
+                    if let Some(loader) = node.loader.take() {
+                        node.children = vec![ResultNode::message("Loading…")];
+                        out.push((prefix.clone(), loader));
+                    }
+                    walk(&mut node.children, prefix, out);
+                }
+                prefix.pop();
+            }
+        }
+        let mut out = Vec::new();
+        walk(&mut self.nodes, &mut Vec::new(), &mut out);
+        self.relayout();
+        out
+    }
+
+    /// A load finished: its node's children, or what went wrong.
+    fn loaded(&mut self, path: &[usize], result: Result<Vec<ResultNode>, String>) {
+        let node = self.node_mut(path);
+        node.children = match result {
+            Ok(children) if children.is_empty() => vec![ResultNode::message("None")],
+            Ok(children) => children,
+            Err(err) => vec![ResultNode::message(err)],
+        };
         self.relayout();
     }
 
+    /// Expand All opens what's loaded; it doesn't start loads.
     fn set_all_expanded(&mut self, expanded: bool) {
         fn set(nodes: &mut [ResultNode], expanded: bool) {
             for node in nodes {
@@ -201,19 +306,22 @@ const ROW_HEIGHT: f32 = 24.;
 pub struct ResultsPanel {
     tabs: Vec<ResultTab>,
     active: usize,
+    next_id: u64,
     focus: FocusHandle,
     scroll: UniformListScrollHandle,
 }
 
 impl ResultsPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        Self { tabs: Vec::new(), active: 0, focus: cx.focus_handle(), scroll: UniformListScrollHandle::new() }
+        Self { tabs: Vec::new(), active: 0, next_id: 0, focus: cx.focus_handle(), scroll: UniformListScrollHandle::new() }
     }
 
     /// Shows a search's results: in place of the current tab unless that's
     /// pinned.
     pub fn show(&mut self, title: SharedString, nodes: Vec<ResultNode>, cx: &mut Context<Self>) {
-        let tab = ResultTab::new(title, nodes);
+        self.next_id += 1;
+        let mut tab = ResultTab::new(self.next_id, title, nodes);
+        let loads = tab.take_open_loaders();
         match self.tabs.get(self.active) {
             Some(current) if !current.pinned => self.tabs[self.active] = tab,
             _ => {
@@ -227,6 +335,35 @@ impl ResultsPanel {
             }
         }
         self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        for (path, loader) in loads {
+            self.load(self.next_id, path, loader, cx);
+        }
+        cx.notify();
+    }
+
+    /// Runs a node's loader and puts its children in, if its tab is still there.
+    fn load(&mut self, tab: u64, path: Vec<usize>, loader: Loader, cx: &mut Context<Self>) {
+        let task = (loader.0)(cx);
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                if let Some(tab) = this.tabs.iter_mut().find(|t| t.id == tab) {
+                    tab.loaded(&path, result);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Opens or closes a row of the current tab, loading what it needs.
+    fn expand(&mut self, row: usize, expanded: bool, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let id = tab.id;
+        if let Some((path, loader)) = tab.set_expanded(row, expanded) {
+            self.load(id, path, loader, cx);
+        }
         cx.notify();
     }
 
@@ -301,13 +438,13 @@ impl ResultsPanel {
         let Some(row) = tab.selected else { return };
         let path = tab.rows[row].path.clone();
         let node = tab.node(&path);
-        if node.children.is_empty() {
+        if !node.expandable() {
             return;
         }
         if node.expanded {
             tab.selected = Some(row + 1);
         } else {
-            tab.set_expanded(row, true);
+            self.expand(row, true, cx);
         }
         self.reveal_selected();
         cx.notify();
@@ -318,10 +455,9 @@ impl ResultsPanel {
         let Some(row) = tab.selected else { return };
         let path = tab.rows[row].path.clone();
         let node = tab.node(&path);
-        if node.target.is_none() && !node.children.is_empty() {
+        if node.target.is_none() && node.expandable() {
             let expanded = node.expanded;
-            tab.set_expanded(row, !expanded);
-            cx.notify();
+            self.expand(row, !expanded, cx);
         } else {
             self.select(row, Some(true), cx);
         }
@@ -365,7 +501,7 @@ impl ResultsPanel {
                 .text_color(text)
                 .when(tab.pinned, |el| el.child(icon_el(Icon::Pin, px(11.), text.into())))
                 .child(div().max_w(px(260.)).truncate().child(tab.title.clone()))
-                .child(div().text_color(theme.text_dim).child(tab.count.to_string()))
+                .children(tab.count.map(|n| div().text_color(theme.text_dim).child(n.to_string())))
                 .child(
                     div()
                         .id(("results-tab-close", ix))
@@ -394,10 +530,22 @@ impl ResultsPanel {
         let row = &tab.rows[ix];
         let node = tab.node(&row.path);
         let selected = tab.selected == Some(ix);
-        let chevron = if node.children.is_empty() {
-            div().size(px(14.)).flex_shrink_0().into_any_element()
+        let chevron = if node.expandable() {
+            let expanded = node.expanded;
+            div()
+                .id(("results-chevron", ix))
+                .flex_shrink_0()
+                .child(icon_el(if expanded { Icon::ChevronDown } else { Icon::ChevronRight }, px(14.), theme.text_dim.into()))
+                // Opens or closes without going to the node's place.
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    window.focus(&this.focus);
+                    this.select(ix, None, cx);
+                    this.expand(ix, !expanded, cx);
+                }))
+                .into_any_element()
         } else {
-            icon_el(if node.expanded { Icon::ChevronDown } else { Icon::ChevronRight }, px(14.), theme.text_dim.into()).into_any_element()
+            div().size(px(14.)).flex_shrink_0().into_any_element()
         };
         let leading = match &node.leading {
             Leading::File(path) => crate::ui::file_icon(path, px(14.), theme).into_any_element(),
@@ -409,6 +557,8 @@ impl ResultsPanel {
                 .text_color(theme.text_dim)
                 .child(line.to_string())
                 .into_any_element(),
+            Leading::Icon(icon) => icon_el(*icon, px(14.), theme.text_dim.into()).into_any_element(),
+            Leading::Blank => div().into_any_element(),
         };
         let label = match &node.highlight {
             Some(range) if range.end <= node.label.len() => StyledText::new(node.label.clone())
@@ -446,12 +596,15 @@ impl ResultsPanel {
             .children(node.detail.clone().map(|d| div().flex_shrink_0().text_size(px(12.)).text_color(theme.text_dim).child(d)))
             .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                 window.focus(&this.focus);
-                let Some(tab) = this.tab() else { return };
-                let node = tab.node(&tab.rows[ix].path.clone()).clone();
-                if node.target.is_none() || event.click_count() > 1 {
-                    tab.set_expanded(ix, !node.expanded);
+                let Some(tab) = this.tabs.get(this.active) else { return };
+                let (has_target, expanded) = {
+                    let node = tab.node(&tab.rows[ix].path);
+                    (node.target.is_some(), node.expanded)
+                };
+                if !has_target || event.click_count() > 1 {
+                    this.expand(ix, !expanded, cx);
                 }
-                this.select(ix, Some(node.target.is_some()), cx);
+                this.select(ix, Some(has_target), cx);
             }))
             .into_any_element()
     }
@@ -588,8 +741,9 @@ pub fn usages_tree(locations: Vec<Location>, lines: Vec<String>, encoding: Encod
             label: text.into(),
             highlight: Some(highlight),
             detail: None,
-            target: Some(ResultTarget { path: location.path.clone(), line: location.range.start.line, column: start as u32 }),
+            target: Some(ResultTarget { path: location.path.clone(), position: location.range.start, encoding }),
             children: Vec::new(),
+            loader: None,
             expanded: false,
         };
         match files.last_mut() {
@@ -607,6 +761,7 @@ pub fn usages_tree(locations: Vec<Location>, lines: Vec<String>, encoding: Encod
                     detail: folder.map(Into::into),
                     target: None,
                     children: vec![usage],
+                    loader: None,
                     expanded: true,
                 });
             }
@@ -647,7 +802,7 @@ mod tests {
         assert_eq!((first.leading.clone(), first.label.as_ref()), (Leading::Line(2), "foo"));
         let second = &tree[1].children[1];
         assert_eq!((second.label.as_ref(), second.highlight.clone()), ("foo();", Some(0..3)));
-        assert_eq!(second.target, Some(ResultTarget { path: "/p/src/b.rs".into(), line: 9, column: 8 }));
+        assert_eq!(second.target, Some(ResultTarget { path: "/p/src/b.rs".into(), position: Position { line: 9, character: 8 }, encoding: Encoding::Utf8 }));
     }
 
     #[test]
@@ -661,14 +816,39 @@ mod tests {
     }
 
     #[test]
+    fn lazy_nodes_load_once_when_opened() {
+        let lazy = |label: &str, expanded| ResultNode {
+            leading: Leading::Blank,
+            label: label.to_string().into(),
+            loader: Some(Loader::new(|_| Task::ready(Ok(Vec::new())))),
+            expanded,
+            ..ResultNode::message("")
+        };
+        let mut tab = ResultTab::new(1, "t".into(), vec![lazy("open", true), lazy("closed", false)]);
+        // A tree that loads has no count; what shows open loads at once.
+        assert_eq!(tab.count, None);
+        let first = tab.take_open_loaders();
+        assert_eq!(first.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(), [vec![0]]);
+        assert_eq!(tab.rows.len(), 3, "Loading… under the open one");
+        tab.loaded(&[0], Ok(Vec::new()));
+        assert_eq!(tab.node(&[0, 0]).detail.as_ref().map(|d| d.as_ref()), Some("None"));
+        // The closed one loads when it opens, only the first time.
+        assert!(tab.set_expanded(2, true).is_some());
+        tab.loaded(&[1], Err("server error".into()));
+        assert_eq!(tab.node(&[1, 0]).detail.as_ref().map(|d| d.as_ref()), Some("server error"));
+        tab.set_expanded(2, false);
+        assert!(tab.set_expanded(2, true).is_none());
+    }
+
+    #[test]
     fn stepping_goes_through_leaves_and_opens_groups() {
         let lines = vec!["a".into(), "a".into(), "a".into()];
         let mut nodes = usages_tree(vec![at("/x", 0, 0, 1), at("/x", 1, 0, 1), at("/y", 0, 0, 1)], lines, Encoding::Utf8, |p| p.display().to_string());
         nodes[1].expanded = false;
-        let mut tab = ResultTab::new("t".into(), nodes);
-        assert_eq!(tab.count, 3);
+        let mut tab = ResultTab::new(1, "t".into(), nodes);
+        assert_eq!(tab.count, Some(3));
         assert_eq!(tab.rows.len(), 4);
-        let lines_of = |t: Option<ResultTarget>| t.map(|t| (t.path, t.line));
+        let lines_of = |t: Option<ResultTarget>| t.map(|t| (t.path, t.position.line));
         assert_eq!(lines_of(tab.step_leaf(true)), Some(("/x".into(), 0)));
         assert_eq!(lines_of(tab.step_leaf(true)), Some(("/x".into(), 1)));
         // Into the closed group, which opens.

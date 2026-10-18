@@ -1264,6 +1264,8 @@ fn initialize_params(root: &Path, initialization_options: Value) -> Value {
                 },
                 "definition": { "linkSupport": true },
                 "references": {},
+                "callHierarchy": {},
+                "typeHierarchy": {},
                 "rename": { "prepareSupport": false },
                 "codeAction": {
                     "codeActionLiteralSupport": { "codeActionKind": { "valueSet": [
