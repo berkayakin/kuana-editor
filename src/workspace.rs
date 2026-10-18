@@ -720,6 +720,9 @@ pub struct Workspace {
     project_task: Option<Task<()>>,
     /// Changes waiting for the running update.
     project_changes: Vec<PathBuf>,
+    /// The project folder was deleted (or moved) while open: reported once,
+    /// its Git state dropped; detected again if it comes back.
+    root_gone: bool,
     /// Most recently used files, newest first.
     recent: Vec<PathBuf>,
     /// Ctrl+Tab held down, going through the tabs.
@@ -1103,6 +1106,7 @@ impl Workspace {
             project: Arc::default(),
             project_task: None,
             project_changes: Vec::new(),
+            root_gone: false,
             recent: Vec::new(),
             tab_switch: None,
             actions: Arc::new(keymap::action_entries()),

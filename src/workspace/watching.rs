@@ -68,8 +68,15 @@ impl Workspace {
     /// it out): the tree (in folders it has read), Go to File, Git status,
     /// language servers and open files.
     pub(super) fn disk_changed(&mut self, changed: Classified, cx: &mut Context<Self>) {
-        if self.root.is_none() {
-            return;
+        let Some(root) = self.root.clone() else { return };
+        if root.is_dir() == self.root_gone {
+            self.root_gone = !self.root_gone;
+            if self.root_gone {
+                self.toast(ToastKind::Error, "The project folder was deleted", Some(clone_dialog::display_path(&root)), cx);
+            }
+            // Gone: the branch, changes and log go with it (no repository is
+            // found there); back: they're read again.
+            self.detect_repo(root, cx);
         }
         // A venv may have been created or removed.
         self.venv_shown.take();

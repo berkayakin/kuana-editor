@@ -151,6 +151,7 @@ impl Workspace {
         self.project = Arc::default();
         self.project_task = None;
         self.project_changes.clear();
+        self.root_gone = false;
         self.watcher = None;
         self.watch_task = None;
         self.root = None;
