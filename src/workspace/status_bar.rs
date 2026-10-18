@@ -6,7 +6,7 @@ impl Workspace {
     /// The active file's language server: its name, what it's busy with, or
     /// what's wrong (click to copy the install command or to restart).
     pub(super) fn render_lsp_status(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let path = self.active_editor()?.read(cx).doc.read(cx).path.clone()?;
+        let path = self.active_editor(cx)?.read(cx).doc.read(cx).path.clone()?;
         let status = self.lsp.read(cx).status(&path)?;
         let dim: Hsla = theme.text_dim.into();
         let (label, color, tip): (String, Hsla, Option<String>) = match &status {
@@ -52,7 +52,7 @@ impl Workspace {
                 .when_some(tip, |el, tip| el.tooltip(move |_, cx| tooltip_view(tip.clone(), cx)))
                 .on_click(cx.listener(move |ws, _, window, cx| match &status {
                     LspStatus::Missing { installer: Some(_), .. } => {
-                        if let Some(path) = ws.active_editor().and_then(|e| e.read(cx).doc.read(cx).path.clone()) {
+                        if let Some(path) = ws.active_editor(cx).and_then(|e| e.read(cx).doc.read(cx).path.clone()) {
                             ws.lsp.update(cx, |s, cx| s.install_server(&path, cx));
                         }
                     }
@@ -75,8 +75,8 @@ impl Workspace {
     pub(super) fn render_statusbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
         let lsp_item = self.render_lsp_status(&theme, cx);
-        let active_editor = self.active_editor().cloned();
-        let editor = self.active_editor().map(|e| e.read(cx));
+        let active_editor = self.active_editor(cx);
+        let editor = active_editor.as_ref().map(|e| e.read(cx));
         // The file's problems and the last Run's (both counted already).
         let run_counts = self.problems.read(cx).run_counts(editor.map(|e| e.doc.read(cx)));
         let count = |sev: Severity| editor.map_or(0, |e| e.doc.read(cx).severity_count(sev)) + run_counts[sev as usize];

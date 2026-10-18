@@ -92,10 +92,15 @@ impl Workspace {
                 handle.top_0().bottom_0().left(px(-GAP - 1.)).w(px(GAP)).cursor(CursorStyle::ResizeLeftRight)
             }
             Edge::Sidebar => handle.top_0().bottom_0().right(px(-GAP - 1.)).w(px(GAP)).cursor(CursorStyle::ResizeLeftRight),
-            Edge::Pane(_) if self.pane_axis == PaneAxis::Row => {
-                handle.top_0().bottom_0().right(px(-GAP - 1.)).w(px(GAP)).cursor(CursorStyle::ResizeLeftRight)
-            }
-            Edge::Pane(_) => handle.left_0().right_0().bottom(px(-GAP - 1.)).h(px(GAP)).cursor(CursorStyle::ResizeUpDown),
+            // In the gap after the pane's slot: beside its island (the strip's
+            // room above stays the window's drag area), or across under it.
+            Edge::Pane(_) if self.pane_axis == PaneAxis::Row => handle
+                .top(px(TAB_STRIP_HEIGHT - 1.))
+                .bottom_0()
+                .right(px(-GAP))
+                .w(px(GAP))
+                .cursor(CursorStyle::ResizeLeftRight),
+            Edge::Pane(_) => handle.left_0().right_0().bottom(px(-GAP)).h(px(GAP)).cursor(CursorStyle::ResizeUpDown),
         };
         handle.on_mouse_down(
             MouseButton::Left,
@@ -153,7 +158,7 @@ impl Workspace {
     /// only from `render`: the tree is a cached view, and one told during
     /// another view's render isn't drawn again (a new file kept no color).
     pub(super) fn decorate_tree(&mut self, cx: &mut Context<Self>) {
-        let active_path = self.active_item().and_then(|t| t.path(cx));
+        let active_path = self.active_item(cx).and_then(|t| t.path(cx));
         let menu_target = self.context_menu.as_ref().and_then(|m| m.target.clone());
         let (git_paths, git_ignored) = (self.git_paths.clone(), self.git_ignored.clone());
         self.tree.update(cx, |t, cx| t.decorate(git_paths, git_ignored, active_path, menu_target, cx));
@@ -232,13 +237,15 @@ impl Workspace {
     pub(super) fn clear_drag_state(&mut self, cx: &mut Context<Self>) {
         // The drop overlays are drag_over styles: they only need a redraw.
         self.tree.update(cx, |t, cx| t.set_drop_target(None, cx));
-        self.pane_drop = None;
+        for pane in &self.panes {
+            pane.update(cx, |p, cx| p.set_file_drop(false, cx));
+        }
         self.tree_root_drop = false;
         cx.notify();
     }
 
     pub(super) fn on_root_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.tree.read(cx).has_drop_target() || self.pane_drop.is_some() {
+        if self.tree.read(cx).has_drop_target() || self.panes.iter().any(|p| p.read(cx).has_file_drop()) {
             self.clear_drag_state(cx);
         }
         if self.resizing.take().is_some() {
@@ -260,7 +267,7 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The Problems panel lists the active file's diagnostics.
         if self.shows(BottomPanel::Problems) {
-            let active = self.active_editor().cloned();
+            let active = self.active_editor(cx);
             self.problems.update(cx, |p, cx| p.set_editor(active, cx));
         }
         self.load_shown_tabs(cx);
@@ -268,9 +275,6 @@ impl Render for Workspace {
         // A drag that ended without a drop (Escape, left the window) leaves no highlight.
         if !cx.has_active_drag() && self.tree.read(cx).has_drop_target() {
             self.tree.update(cx, |t, cx| t.set_drop_target(None, cx));
-        }
-        if !cx.has_active_drag() {
-            self.pane_drop = None;
         }
         self.decorate_tree(cx);
         let git_target = self.context_menu.as_ref().and_then(|m| m.git_target.clone());

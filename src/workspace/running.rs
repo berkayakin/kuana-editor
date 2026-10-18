@@ -25,7 +25,7 @@ impl Workspace {
         };
         self.last_run = Some(target.clone());
         self.schedule_session_save(cx);
-        let focused = self.active_editor().cloned();
+        let focused = self.active_editor(cx);
         self.open_terminal(target.cwd.clone(), Some(target), place, false, window, cx);
         if let Some(editor) = focused {
             window.focus(&editor.focus_handle(cx));
@@ -203,7 +203,7 @@ impl Workspace {
     }
 
     pub(super) fn edit_breakpoint_at_caret(&mut self, edit: BreakpointEdit, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.active_editor().cloned() else { return };
+        let Some(editor) = self.active_editor(cx) else { return };
         if !editor.read(cx).can_break(cx) {
             self.toast(ToastKind::Info, crate::debugger::launch::NO_DEBUGGER, None, cx);
             return;
@@ -384,12 +384,12 @@ impl Workspace {
         let root = self
             .root
             .clone()
-            .or_else(|| self.active_editor().and_then(|e| e.read(cx).doc.read(cx).path.as_deref()?.parent().map(Path::to_path_buf)));
+            .or_else(|| self.active_editor(cx).and_then(|e| e.read(cx).doc.read(cx).path.as_deref()?.parent().map(Path::to_path_buf)));
         let Some(root) = root else {
             self.toast(ToastKind::Info, "Open a folder or a file to run something", None, cx);
             return None;
         };
-        let current = self.active_editor().and_then(|e| {
+        let current = self.active_editor(cx).and_then(|e| {
             let doc = e.read(cx).doc.read(cx);
             doc.path.clone().map(|p| (p, doc.language))
         });
@@ -412,7 +412,7 @@ impl Workspace {
         }
         targets.extend(run::project_targets(&root, current.as_ref().map(|(p, l)| (p.as_path(), *l))));
         // Then the current file's tests and mains, by name.
-        if let Some(editor) = self.active_editor() {
+        if let Some(editor) = self.active_editor(cx) {
             let file = editor.update(cx, |e, cx| e.run_targets(cx));
             targets.extend(file.iter().filter(|t| !targets.iter().any(|o| o.command == t.command)).cloned().collect::<Vec<_>>());
         }

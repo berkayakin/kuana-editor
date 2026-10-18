@@ -13,7 +13,7 @@ use crate::{
 impl Workspace {
     /// Local History of the current file.
     pub(super) fn show_local_history(&mut self, _: &ShowLocalHistory, window: &mut Window, cx: &mut Context<Self>) {
-        match self.active_editor().and_then(|e| e.read(cx).doc.read(cx).path.clone()) {
+        match self.active_editor(cx).and_then(|e| e.read(cx).doc.read(cx).path.clone()) {
             Some(path) => self.show_local_history_of(path, window, cx),
             None => self.toast(ToastKind::Info, "Open a file to see its Local History", None, cx),
         }

@@ -88,6 +88,7 @@ mod line_endings;
 mod local_history;
 mod menus;
 mod navigation;
+mod pane;
 mod pane_view;
 mod panes;
 mod problems;
@@ -106,6 +107,7 @@ mod welcome;
 mod windows;
 use self::{
     file_tree::*,
+    pane::{Pane, PaneChrome, PaneEvent, file_drop_overlay},
     tab_bar::*,
     terminal_panel::{TerminalPanel, TerminalPanelEvent},
     title_bar::*,
@@ -392,23 +394,11 @@ enum BottomPanel {
     Debug,
 }
 
-/// A group of tabs with its own tab bar; panes sit side by side or stacked.
-struct Pane {
-    tabs: Vec<PaneItem>,
-    active: usize,
-}
-
-impl Pane {
-    fn new() -> Self {
-        Self { tabs: Vec::new(), active: 0 }
-    }
-}
-
 /// Ctrl+Tab going through a pane's tabs in the order they were last used,
 /// while Ctrl (any modifier of the shortcut) is held: each press takes the
 /// next one in the order the first press found.
 struct TabSwitch {
-    pane: usize,
+    pane: EntityId,
     order: Vec<PaneItem>,
     at: usize,
     /// `recent` when it started: only the tab it ends on counts as used.
@@ -664,8 +654,9 @@ pub struct Workspace {
     /// Every open text editor, in any pane (for saving, searching, language
     /// servers); `panes` hold them and the other kinds of tabs.
     editors: Vec<Entity<Editor>>,
-    panes: Vec<Pane>,
-    active_pane: usize,
+    panes: Vec<Entity<Pane>>,
+    /// The pane with the keyboard, or the one that had it last.
+    active_pane: Entity<Pane>,
     pane_axis: PaneAxis,
     /// Each pane's share of the space, summing to 1.
     pane_sizes: Vec<f32>,
@@ -673,8 +664,8 @@ pub struct Workspace {
     panes_bounds: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
     /// The two shares around the divider being dragged.
     pane_drag_pair: f32,
-    /// Pinned tabs stay first and survive Close Others / Close All.
-    pinned: HashSet<EntityId>,
+    /// What each pane reports (see `PaneEvent`), dropped with the pane.
+    pane_subscriptions: HashMap<EntityId, Subscription>,
     show_sidebar: bool,
     /// What the bottom area shows; its height is `problems_height`.
     bottom: Option<BottomPanel>,
@@ -694,9 +685,6 @@ pub struct Workspace {
     debug: Option<(Entity<DebugSession>, Subscription)>,
     last_debug: Option<RunTarget>,
     welcome_scroll: gpui::ScrollHandle,
-    /// The pane a file is being dragged over (from Finder or the tree): its
-    /// current tab lights up with the island (see `ui::drop_lift`).
-    pane_drop: Option<usize>,
     /// A drag over the file tree targets the project folder: the Files tab
     /// lights up with the tree's island.
     tree_root_drop: bool,
@@ -817,8 +805,6 @@ pub struct Workspace {
     _subscriptions: Vec<Subscription>,
     /// Each tab's subscriptions, dropped with the tab (they'd pile up).
     tab_subscriptions: HashMap<gpui::EntityId, Vec<Subscription>>,
-    /// What each tab shows (see `TabLook`), updated when its item changes.
-    tab_looks: HashMap<gpui::EntityId, TabLook>,
 }
 
 /// A location's file for usage, symbol and hierarchy lists: relative to the
@@ -830,6 +816,16 @@ fn location_label(root: Option<&Path>, path: &Path) -> String {
     let mut parts: Vec<_> = path.iter().rev().take(2).map(|p| p.to_string_lossy()).collect();
     parts.reverse();
     format!("…/{}", parts.join("/"))
+}
+
+/// A path as the UI shows it: relative to the project folder `root` (the
+/// folder's own name for the folder itself), else in full.
+fn display_rel(root: Option<&Path>, path: &Path) -> String {
+    match root.and_then(|r| path.strip_prefix(r).ok()) {
+        Some(rel) if rel.as_os_str().is_empty() => root.map(folder_name).unwrap_or_default(),
+        Some(rel) => rel.display().to_string(),
+        None => path.display().to_string(),
+    }
 }
 
 impl Workspace {
@@ -1059,18 +1055,20 @@ impl Workspace {
             }
         })
         .detach();
+        let pane = cx.new(|_| Pane::new());
+        let pane_subscriptions = HashMap::from([(pane.entity_id(), cx.subscribe_in(&pane, window, Self::on_pane_event))]);
         let mut this = Self {
             focus_handle,
             file_history: Default::default(),
             root: None,
             editors: Vec::new(),
-            panes: vec![Pane::new()],
-            active_pane: 0,
+            panes: vec![pane.clone()],
+            active_pane: pane,
             pane_axis: PaneAxis::Row,
             pane_sizes: vec![1.0],
             panes_bounds: Default::default(),
             pane_drag_pair: 0.,
-            pinned: HashSet::new(),
+            pane_subscriptions,
             // Without a project there's nothing to browse; opening one shows
             // the sidebar as it was left (see `set_root`).
             show_sidebar: false,
@@ -1092,7 +1090,6 @@ impl Workspace {
             debug: None,
             last_debug: None,
             welcome_scroll: gpui::ScrollHandle::new(),
-            pane_drop: None,
             tree_root_drop: false,
             debug_location: None,
             breakpoints: HashMap::new(),
@@ -1160,8 +1157,10 @@ impl Workspace {
             lsp,
             documents,
             tab_subscriptions: HashMap::new(),
-            tab_looks: HashMap::new(),
             _subscriptions: vec![
+                // Panes are told what they show of the workspace whenever it
+                // changes (see `sync_panes`).
+                cx.observe_self(|ws, cx| ws.sync_panes(cx)),
                 find_subscription,
                 git_subscription,
                 log_subscription,
@@ -1188,6 +1187,7 @@ impl Workspace {
             cx.set_global(StartupProblems::default());
             this.report_config_problems(problems, cx);
         }
+        this.sync_panes(cx);
         this
     }
 
@@ -1196,7 +1196,7 @@ impl Workspace {
             window.focus(&onboarding.focus_handle(cx));
             return;
         }
-        match self.active_item() {
+        match self.active_item(cx) {
             Some(item) => window.focus(&item.focus_handle(cx)),
             None => window.focus(&self.focus_handle),
         }
@@ -1214,7 +1214,7 @@ impl Workspace {
             return;
         }
         // Open already (a preview of it doesn't count).
-        let open = self.items().find(|t| t.preview().is_none() && t.path(cx).as_deref() == Some(path.as_path())).cloned();
+        let open = self.items(cx).into_iter().find(|t| t.preview().is_none() && t.path(cx).as_deref() == Some(path.as_path()));
         if let Some(item) = open {
             self.activate_item(&item, window, cx);
             return;
@@ -1289,42 +1289,29 @@ impl Workspace {
     }
 
     fn add_tab(&mut self, item: PaneItem, window: &mut Window, cx: &mut Context<Self>) {
-        let at = self.insert_tab(item, window, cx);
-        self.activate_in(self.active_pane, at, window, cx);
+        let at = self.insert_tab(item, false, window, cx);
+        let pane = self.active_pane.clone();
+        self.activate_in(&pane, at, window, cx);
     }
 
-    /// Adds a tab to the active pane without showing it; returns its index.
-    fn insert_tab(&mut self, item: PaneItem, window: &mut Window, cx: &mut Context<Self>) -> usize {
-        // Tabs show titles, dirty dots and errors from what they hold; only
-        // a shown one, or a change to its tab, wakes the window.
-        match &item {
-            PaneItem::Editor(editor) => self.add_editor(editor, window, cx),
-            PaneItem::Image(image) => {
-                let shown = cx.observe(image, |ws, image, cx| ws.tab_changed(PaneItem::Image(image), cx));
-                self.tab_subscriptions.insert(image.entity_id(), vec![shown]);
-            }
-            PaneItem::Preview(preview) => {
-                let shown = cx.observe(preview, |ws, preview, cx| ws.tab_changed(PaneItem::Preview(preview), cx));
-                self.tab_subscriptions.insert(preview.entity_id(), vec![shown]);
-            }
+    /// Adds a tab to the active pane, after its current tab, without showing
+    /// it; returns its index. The pane keeps how its tabs look (titles, dirty
+    /// dots, errors), so only a tab that's shown, or whose look changed,
+    /// redraws anything.
+    fn insert_tab(&mut self, item: PaneItem, pinned: bool, window: &mut Window, cx: &mut Context<Self>) -> usize {
+        if let PaneItem::Editor(editor) = &item {
+            self.add_editor(editor, window, cx);
         }
-        self.tab_looks.insert(item.entity_id(), item.look(cx));
-        let pane = &mut self.panes[self.active_pane];
-        // After the current tab, but never among pinned ones.
-        let pinned = pane.tabs.iter().filter(|t| self.pinned.contains(&t.entity_id())).count();
-        let at = if pane.tabs.is_empty() { 0 } else { (pane.active + 1).max(pinned).min(pane.tabs.len()) };
-        pane.tabs.insert(at, item);
-        at
+        self.active_pane.update(cx, |pane, cx| {
+            let at = pane.next_slot();
+            pane.insert(item, at, pinned, cx)
+        })
     }
 
     /// A new text tab: the workspace hears what it asks for and starts what
     /// its file needs.
     fn add_editor(&mut self, editor: &Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) {
         let mut subscriptions = Vec::new();
-        // What a shown tab draws in the window (its title, the status bar,
-        // breadcrumbs) follows it; a tab out of sight wakes the window only
-        // when its tab changes.
-        subscriptions.push(cx.observe(editor, |ws, editor, cx| ws.tab_changed(PaneItem::Editor(editor), cx)));
         subscriptions.push(cx.subscribe(editor, |ws, editor, _: &EditorEvent, cx| {
             ws.schedule_auto_save(&editor, cx);
             ws.schedule_session_save(cx);
@@ -1367,25 +1354,6 @@ impl Workspace {
         self.editors.push(editor.clone());
         // A preview of its document may be open (a split of the file).
         self.sync_previewed(cx);
-    }
-
-    /// Something in a tab changed: its look is kept (`tab_looks`), and the
-    /// window redraws when that changed or the tab shows.
-    fn tab_changed(&mut self, item: PaneItem, cx: &mut Context<Self>) {
-        let id = item.entity_id();
-        let look = item.look(cx);
-        let changed = self.tab_looks.get(&id) != Some(&look);
-        if changed {
-            self.tab_looks.insert(id, look);
-        }
-        if changed || self.panes.iter().any(|pane| pane.tabs.get(pane.active).is_some_and(|t| t.entity_id() == id)) {
-            cx.notify();
-        }
-    }
-
-    /// What `item`'s tab shows, as kept (read from it if it isn't yet).
-    fn tab_look(&self, item: &PaneItem, cx: &App) -> TabLook {
-        self.tab_looks.get(&item.entity_id()).cloned().unwrap_or_else(|| item.look(cx))
     }
 
     /// The Run tabs still running, from the terminal panel (see `running`).
@@ -1457,7 +1425,7 @@ impl Workspace {
     /// Activation reads its tab already; this covers a pane whose current tab
     /// changed otherwise (a tab closed or moved out of it).
     fn load_shown_tabs(&mut self, cx: &mut Context<Self>) {
-        let shown: Vec<PaneItem> = self.panes.iter().filter_map(|pane| pane.tabs.get(pane.active).cloned()).collect();
+        let shown: Vec<PaneItem> = self.panes.iter().filter_map(|pane| pane.read(cx).active_item().cloned()).collect();
         for item in shown {
             self.load_item(&item, cx);
         }
@@ -1502,26 +1470,26 @@ impl Workspace {
 
     /// Shows an open editor in its pane and focuses it.
     fn activate_editor(&mut self, editor: &Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((pane, ix)) = self.locate(editor.entity_id()) {
-            self.activate_in(pane, ix, window, cx);
+        if let Some((pane, ix)) = self.locate(editor.entity_id(), cx) {
+            self.activate_in(&pane, ix, window, cx);
         }
     }
 
     /// Shows a tab in its pane and focuses it.
     fn activate_item(&mut self, item: &PaneItem, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((pane, ix)) = self.locate(item.entity_id()) {
-            self.activate_in(pane, ix, window, cx);
+        if let Some((pane, ix)) = self.locate(item.entity_id(), cx) {
+            self.activate_in(&pane, ix, window, cx);
         }
     }
 
     /// The pane holding a tab (by its view's id) and its index there.
-    fn locate(&self, id: EntityId) -> Option<(usize, usize)> {
-        self.panes.iter().enumerate().find_map(|(p, pane)| pane.tabs.iter().position(|t| t.entity_id() == id).map(|ix| (p, ix)))
+    fn locate(&self, id: EntityId, cx: &App) -> Option<(Entity<Pane>, usize)> {
+        self.panes.iter().find_map(|pane| pane.read(cx).position(id).map(|ix| (pane.clone(), ix)))
     }
 
-    fn activate_in(&mut self, pane: usize, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(item) = self.panes.get(pane).and_then(|p| p.tabs.get(ix)).cloned() {
-            if let Some(previous) = self.active_editor().cloned()
+    fn activate_in(&mut self, pane: &Entity<Pane>, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(item) = pane.read(cx).tabs().get(ix).cloned() {
+            if let Some(previous) = self.active_editor(cx)
                 && Some(&previous) != item.editor()
                 && matches!(self.auto_save, AutoSave::AfterDelay | AutoSave::OnFocusChange)
             {
@@ -1532,8 +1500,8 @@ impl Workspace {
                 self.modals.take();
                 self.diff_return = None;
             }
-            self.active_pane = pane;
-            self.panes[pane].active = ix;
+            self.active_pane = pane.clone();
+            pane.update(cx, |p, cx| p.set_active(ix, cx));
             // A restored tab reads its file when first shown.
             self.load_item(&item, cx);
             window.focus(&item.focus_handle(cx));
@@ -1552,24 +1520,88 @@ impl Workspace {
     }
 
     /// The current tab of the current pane.
-    fn active_item(&self) -> Option<&PaneItem> {
-        let pane = self.panes.get(self.active_pane)?;
-        pane.tabs.get(pane.active)
+    fn active_item(&self, cx: &App) -> Option<PaneItem> {
+        self.active_pane.read(cx).active_item().cloned()
     }
 
     /// The current tab, if it's a text editor.
-    fn active_editor(&self) -> Option<&Entity<Editor>> {
-        self.active_item()?.editor()
+    fn active_editor(&self, cx: &App) -> Option<Entity<Editor>> {
+        self.active_item(cx)?.editor().cloned()
     }
 
     /// Every tab, in pane order.
-    fn items(&self) -> impl Iterator<Item = &PaneItem> {
-        self.panes.iter().flat_map(|pane| &pane.tabs)
+    fn items(&self, cx: &App) -> Vec<PaneItem> {
+        self.panes.iter().flat_map(|pane| pane.read(cx).tabs().iter().cloned()).collect()
     }
 
     /// The image tabs.
-    fn images(&self) -> Vec<Entity<ImageView>> {
-        self.items().filter_map(|t| t.image().cloned()).collect()
+    fn images(&self, cx: &App) -> Vec<Entity<ImageView>> {
+        self.items(cx).into_iter().filter_map(|t| t.image().cloned()).collect()
+    }
+
+    /// A new pane, without tabs or a place yet; the workspace hears what it
+    /// reports.
+    fn new_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<Pane> {
+        let pane = cx.new(|_| Pane::new());
+        self.pane_subscriptions.insert(pane.entity_id(), cx.subscribe_in(&pane, window, Self::on_pane_event));
+        pane
+    }
+
+    /// What a pane asks for (see `PaneEvent`).
+    fn on_pane_event(&mut self, pane: &Entity<Pane>, event: &PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            PaneEvent::Activate(ix) => self.activate_in(pane, *ix, window, cx),
+            PaneEvent::Focus => {
+                self.active_pane = pane.clone();
+                if pane.read(cx).is_empty() {
+                    // Nothing to focus: the workspace takes the keyboard, so
+                    // it doesn't stay in the pane left.
+                    window.focus(&self.focus_handle);
+                    cx.notify();
+                } else {
+                    let ix = pane.read(cx).active_ix();
+                    self.activate_in(pane, ix, window, cx);
+                }
+            }
+            PaneEvent::Tab(action, item) => self.run_tab_action(*action, item, window, cx),
+            PaneEvent::Menu { item, position } => self.open_tab_menu(item.clone(), *position, window, cx),
+            PaneEvent::Overflow { items, position } => {
+                let entries = items.iter().map(|t| MenuEntry::item(t.tab_title(cx), Icon::File)).collect();
+                let actions = items.iter().map(|t| Some(MenuAction::Tab(TabAction::Activate, t.clone()))).collect();
+                self.show_context_menu(entries, actions, *position, None, window, cx);
+            }
+            PaneEvent::Drop { item, before } => self.move_tab(item, pane, *before, window, cx),
+            PaneEvent::OpenPaths(paths) => {
+                self.active_pane = pane.clone();
+                self.open_dropped(paths, window, cx);
+                cx.notify();
+            }
+            PaneEvent::OpenPath(path) => {
+                self.active_pane = pane.clone();
+                self.open_path(path.clone(), window, cx);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Tells each pane what it shows of the workspace (see `PaneChrome`).
+    /// Runs after every notify of the workspace, outside drawing: a cached
+    /// pane told during the workspace's render wouldn't be redrawn.
+    fn sync_panes(&mut self, cx: &mut Context<Self>) {
+        let several = self.panes.len() > 1;
+        let covered = self.diff_view().is_some();
+        for (ix, pane) in self.panes.clone().into_iter().enumerate() {
+            let active = pane == self.active_pane;
+            let chrome = PaneChrome {
+                active,
+                outlined: active && several,
+                at_top: self.pane_axis == PaneAxis::Row || ix == 0,
+                find_bar: (active && self.show_find).then(|| self.find_bar.clone()),
+                covered,
+                root: self.root.clone(),
+            };
+            pane.update(cx, |p, cx| p.set_chrome(chrome, cx));
+        }
     }
 }
 

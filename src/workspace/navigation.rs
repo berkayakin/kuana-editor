@@ -14,7 +14,7 @@ impl Workspace {
     }
 
     pub(super) fn show_find_bar(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.active_editor().cloned() else { return };
+        let Some(editor) = self.active_editor(cx) else { return };
         self.close_modal(window, cx);
         self.show_find = true;
         self.find_bar.update(cx, |f, cx| f.show(editor, replace, window, cx));
@@ -30,7 +30,7 @@ impl Workspace {
     }
 
     pub(super) fn find_step(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.active_editor().cloned() else { return };
+        let Some(editor) = self.active_editor(cx) else { return };
         if !self.find_bar.read(cx).has_query(cx) {
             self.show_find_bar(false, window, cx);
             return;
@@ -76,7 +76,7 @@ impl Workspace {
         let files = if self.root.is_some() {
             self.project.openable()
         } else {
-            Arc::new(self.items().filter(|t| t.preview().is_none()).filter_map(|t| t.path(cx)).collect())
+            Arc::new(self.items(cx).iter().filter(|t| t.preview().is_none()).filter_map(|t| t.path(cx)).collect())
         };
         let recent = if mode == PickerMode::Projects { self.recent_projects.clone() } else { self.recent.clone() };
         let (root, actions) = (self.root.clone(), self.actions.clone());
@@ -108,7 +108,7 @@ impl Workspace {
             }
             PickerEvent::GoTo(offset) => {
                 ws.close_modal(window, cx);
-                if let Some(editor) = ws.active_editor().cloned() {
+                if let Some(editor) = ws.active_editor(cx) {
                     editor.update(cx, |e, cx| e.go_to(*offset, window, cx));
                 }
             }
@@ -229,7 +229,7 @@ impl Workspace {
     }
 
     pub(super) fn file_structure(&mut self, _: &FileStructure, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.active_editor().cloned() else { return };
+        let Some(editor) = self.active_editor(cx) else { return };
         let (symbols, cursor) = {
             let e = editor.read(cx);
             let symbols: Vec<_> = e
@@ -254,7 +254,7 @@ impl Workspace {
     }
 
     pub(super) fn go_to_line(&mut self, _: &GoToLine, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.active_editor().cloned() else { return };
+        let Some(editor) = self.active_editor(cx) else { return };
         let (line_count, current) = {
             let e = editor.read(cx);
             (e.doc.read(cx).line_count(), e.cursor_position(cx))
@@ -321,12 +321,12 @@ impl Workspace {
         let root = scope
             .or_else(|| self.root.clone())
             .or_else(|| {
-                let path = self.active_editor()?.read(cx).doc.read(cx).path.clone()?;
+                let path = self.active_editor(cx)?.read(cx).doc.read(cx).path.clone()?;
                 path.parent().map(Path::to_path_buf)
             })
             .or_else(|| std::env::current_dir().ok());
         let Some(root) = root else { return };
-        let initial = self.active_editor().and_then(|e| {
+        let initial = self.active_editor(cx).and_then(|e| {
             let e = e.read(cx);
             let s = e.primary_selection();
             let text = e.doc.read(cx).slice(s.range());
@@ -342,7 +342,7 @@ impl Workspace {
                 let range = range.clone();
                 ws.close_modal(window, cx);
                 ws.open_path(path.clone(), window, cx);
-                if let Some(editor) = ws.active_editor() {
+                if let Some(editor) = ws.active_editor(cx) {
                     editor.update(cx, |e, cx| e.select_range(range, cx));
                 }
             }
@@ -427,7 +427,7 @@ impl Workspace {
         if !event.modifiers.modified() {
             self.tab_switch = None;
         }
-        let shown: Vec<Entity<Editor>> = self.panes.iter().filter_map(|p| p.tabs.get(p.active)?.editor().cloned()).collect();
+        let shown: Vec<Entity<Editor>> = self.panes.iter().filter_map(|p| p.read(cx).active_item()?.editor().cloned()).collect();
         for editor in shown {
             editor.update(cx, |e, cx| e.secondary_modifier_changed(event.modifiers.secondary(), window, cx));
         }

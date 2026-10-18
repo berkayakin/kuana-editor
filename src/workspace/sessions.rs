@@ -18,16 +18,17 @@ impl Workspace {
         let mut unsaved = Vec::new();
         let mut active = 0;
         let mut pane_active = Vec::new();
-        for (pane_ix, pane) in self.panes.iter().enumerate() {
+        for (pane_ix, entity) in self.panes.iter().enumerate() {
+            let pane = entity.read(cx);
             let mut active_in_pane = 0;
             let mut count = 0;
-            for (ix, item) in pane.tabs.iter().enumerate() {
+            for (ix, item) in pane.tabs().iter().enumerate() {
                 let Some((mut session, text)) = item.read(cx).session(cx) else { continue };
                 session.pane = pane_ix;
-                session.pinned = self.pinned.contains(&item.entity_id());
-                if ix == pane.active {
+                session.pinned = pane.is_pinned(item.entity_id());
+                if ix == pane.active_ix() {
                     active_in_pane = count;
-                    if pane_ix == self.active_pane {
+                    if *entity == self.active_pane {
                         active = tabs.len();
                     }
                 }
@@ -119,16 +120,15 @@ impl Workspace {
         for (tab, item) in session.tabs.into_iter().zip(items) {
             let Some(item) = item else { continue };
             // Into the pane it was in, creating panes as needed.
-            while self.panes.len() <= tab.pane.min(7) {
-                self.panes.push(Pane::new());
+            let pane_ix = tab.pane.min(MAX_PANES - 1);
+            while self.panes.len() <= pane_ix {
+                let pane = self.new_pane(window, cx);
+                self.panes.push(pane);
                 self.pane_sizes.push(0.);
             }
-            self.active_pane = tab.pane.min(7);
-            if tab.pinned {
-                self.pinned.insert(item.entity_id());
-            }
-            let at = self.insert_tab(item, window, cx);
-            self.panes[self.active_pane].active = at;
+            self.active_pane = self.panes[pane_ix].clone();
+            let at = self.insert_tab(item, tab.pinned, window, cx);
+            self.active_pane.update(cx, |p, cx| p.set_active(at, cx));
             if let Some(path) = tab.path.filter(|_| tab.kind != TabKind::MarkdownPreview) {
                 self.recent.retain(|p| p != &path);
                 self.recent.insert(0, path);
@@ -136,17 +136,17 @@ impl Workspace {
         }
         self.recent.truncate(50);
         // Panes left empty (their files are gone) aren't worth keeping.
-        self.drop_empty_panes();
+        self.drop_empty_panes(cx);
         if let Some(layout) = session.layout.filter(|l| l.sizes.len() == self.panes.len()) {
             self.pane_axis = if layout.column { PaneAxis::Column } else { PaneAxis::Row };
             self.pane_sizes = layout.sizes;
-            for (pane, active) in self.panes.iter_mut().zip(layout.active) {
-                pane.active = active.min(pane.tabs.len().saturating_sub(1));
+            for (pane, active) in self.panes.clone().into_iter().zip(layout.active) {
+                pane.update(cx, |p, cx| p.set_active(active, cx));
             }
         } else {
             self.pane_sizes = vec![1. / self.panes.len() as f32; self.panes.len()];
         }
-        let active = self.items().nth(session.active).cloned();
+        let active = self.items(cx).into_iter().nth(session.active);
         if let Some(item) = active {
             self.activate_item(&item, window, cx);
         }
@@ -202,31 +202,31 @@ impl Workspace {
     }
 
     /// Removes empty panes (keeping at least one) and rebalances sizes.
-    pub(super) fn drop_empty_panes(&mut self) {
-        let mut ix = 0;
-        while ix < self.panes.len() {
-            if self.panes.len() > 1 && self.panes[ix].tabs.is_empty() {
-                self.remove_pane(ix);
-            } else {
-                ix += 1;
+    pub(super) fn drop_empty_panes(&mut self, cx: &App) {
+        for pane in self.panes.clone() {
+            if self.panes.len() > 1 && pane.read(cx).is_empty() {
+                self.remove_pane(&pane);
             }
         }
     }
 
-    pub(super) fn remove_pane(&mut self, ix: usize) {
+    /// Takes a pane out (never the last one); the one before it takes its
+    /// space, and the keyboard if it had it.
+    pub(super) fn remove_pane(&mut self, pane: &Entity<Pane>) {
+        let Some(ix) = self.panes.iter().position(|p| p == pane).filter(|_| self.panes.len() > 1) else { return };
         self.panes.remove(ix);
+        self.pane_subscriptions.remove(&pane.entity_id());
         let freed = if ix < self.pane_sizes.len() { self.pane_sizes.remove(ix) } else { 0. };
         // The neighbor takes the space.
-        if let Some(size) = self.pane_sizes.get_mut(ix.saturating_sub(1).min(self.panes.len().saturating_sub(1))) {
+        if let Some(size) = self.pane_sizes.get_mut(ix.saturating_sub(1).min(self.panes.len() - 1)) {
             *size += freed;
         }
         if self.panes.len() == 1 {
             self.pane_sizes = vec![1.0];
         }
-        if self.active_pane >= ix && self.active_pane > 0 {
-            self.active_pane -= 1;
+        if self.active_pane == *pane {
+            self.active_pane = self.panes[ix.saturating_sub(1).min(self.panes.len() - 1)].clone();
         }
-        self.active_pane = self.active_pane.min(self.panes.len() - 1);
     }
 
     /// Changes the recent projects list shared by all windows.

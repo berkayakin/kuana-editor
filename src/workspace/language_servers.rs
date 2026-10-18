@@ -276,7 +276,7 @@ impl Workspace {
     }
 
     pub(super) fn restart_language_server(&mut self, _: &RestartLanguageServer, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.active_editor().and_then(|e| e.read(cx).doc.read(cx).path.clone()) else { return };
+        let Some(path) = self.active_editor(cx).and_then(|e| e.read(cx).doc.read(cx).path.clone()) else { return };
         self.lsp.update(cx, |s, cx| s.restart(&path, cx));
     }
 

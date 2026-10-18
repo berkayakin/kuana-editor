@@ -57,7 +57,7 @@ impl Workspace {
         }
         let root = self.root.clone();
         self.lsp.update(cx, |s, _| s.set_root(root));
-        if self.items().next().is_none() {
+        if self.items(cx).is_empty() {
             self.restore_session(window, cx);
         }
         self.start_terminal_panel(window, cx);
