@@ -55,13 +55,13 @@ Updates are signed.
 
 | | |
 | --- | --- |
-| **Code intelligence** | Completion, hover docs, Go to Declaration / Implementation, Find Usages, Rename, quick fixes, inlay hints and code lenses through [language servers](docs/languages.md); tree-sitter highlighting for 13 languages built in, any other through extensions |
+| **Code intelligence** | Completion, hover docs, Go to Declaration / Implementation, Find Usages and Call / Type Hierarchy in a Find panel, Rename, quick fixes, inlay hints and code lenses through [language servers](docs/languages.md), imports updated when you move files; tree-sitter highlighting for 13 languages built in, any other through extensions |
 | **Editing** | Multi-cursor, syntax-aware Extend Selection, column selection, folding, sticky scroll, breadcrumbs, snippets (VS Code format), [Vim mode](docs/editing.md#vim-mode), Markdown preview |
 | **Git** | Gutter changes with inline diffs, staging single changes, side-by-side diffs with word highlights, a commit graph with commit actions (cherry-pick, revert, reset, tag), inline blame, branches, stashes, remotes, merge conflicts resolved in the editor; see [Git](docs/git.md) |
-| **Run & debug** | ▶ next to every test and `main` (Rust, Go, Python, JS/TS), a [debugger](docs/run-and-debug.md#debugging) with conditional breakpoints and logpoints, errors from a run's output in Problems |
+| **Run & debug** | ▶ next to every test and `main` (Rust, Go, Python, JS/TS), [test results](docs/run-and-debug.md#test-results) as a tree with ✓ / ✕ in the gutter and Rerun Failed, a [debugger](docs/run-and-debug.md#debugging) with conditional breakpoints and logpoints, errors from a run's output in Problems |
 | **Terminal** | Your login shell in tabs and splits, full colors and mouse support, Find in scrollback, ⌘-click paths to open them |
 | **Linting** | Built-in rules for JavaScript/TypeScript (oxc), HTML and Markdown, syntax errors for the rest, plus your project's ESLint |
-| **Projects** | Multiple windows, hot exit (unsaved edits survive a quit), live file watching, file operations you can undo, image preview, any text encoding |
+| **Projects** | Multiple windows, hot exit (unsaved edits survive a quit), [Local History](docs/editing.md#local-history) of every file, shared [project settings](docs/settings.md#project-settings), live file watching, file operations you can undo, image preview, any text encoding |
 
 There's much more: see the [full feature list](docs/features.md).
 

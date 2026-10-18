@@ -18,7 +18,8 @@ message instead of hanging; use an SSH agent or a credential helper.
 - **Commit panel** (⌘K / ⌘0, or the Commit tab above the sidebar, whose tooltip shows the
   number of changes): the branch with fetch, pull and push at the top, then staged changes,
   unstaged changes and **Unversioned Files** (new files Git doesn't track), with stage, unstage,
-  open and roll back on hover; click a file for its diff. Write a message and press ⌘↩ to commit
+  open and roll back on hover (what a rollback throws away is kept in
+  [Local History](editing.md#local-history)); click a file for its diff. Write a message and press ⌘↩ to commit
   (with nothing staged, **Commit All** takes every change to tracked files), or use **Commit &
   Push**. Unversioned files go into a commit only when you check them, as in JetBrains: each has
   a checkbox, unchecked to start with, and the section's heading checks or clears them all.

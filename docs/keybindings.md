@@ -68,7 +68,8 @@ The table below is the JetBrains keymap.
 | Go to Symbol (project) | Find Action | Ctrl+Alt+Shift+N |
 | Find Usages (in the Find panel) | ⌥F7 | Alt+F7 |
 | Find panel | ⌘3 | Alt+3 |
-| Call Hierarchy / Type Hierarchy | ⌃⌥H / ⌃H | Ctrl+Alt+H / Ctrl+H |
+| Next / previous result in the Find panel (VS Code: F4 / ⇧F4) | Find Action | Find Action |
+| Call Hierarchy / Type Hierarchy (VS Code: ⇧⌥H for Call Hierarchy) | ⌃⌥H / ⌃H | Ctrl+Alt+H / Ctrl+H |
 | Rename | ⇧F6 | Shift+F6 |
 | Show Context Actions | ⌥↩ | Alt+Enter |
 | Quick Documentation | F1 | Ctrl+Q |

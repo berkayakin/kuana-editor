@@ -78,7 +78,9 @@ These keep Kuana consistent; reviews will point back to them.
   `ui::binding_label`, never hard-coded strings.
 - **Settings:** a field in `Settings`/`EditorSettings`, its name in `TOP_LEVEL_KEYS`/`EDITOR_KEYS`,
   a commented line in `SETTINGS_TEMPLATE`, a `Setting` variant in `preferences.rs` and a row in
-  [`docs/settings.md`](docs/settings.md). Editors read per-file options in `apply_settings`.
+  [`docs/settings.md`](docs/settings.md). Editors read per-file options in `apply_settings`. If a
+  project may set it in `.kuana/settings.json`, add it to `project_settings::PROJECT_KEYS` and read
+  it through `Settings::at(path)`.
 - **UI:** use the helpers in `src/ui.rs` (`island`, `popover`, `modal_panel`, `soft_shadow`,
   `focus_ring`, `hover_bg`/`row_hover`…) instead of ad-hoc borders, shadows or hover styles, so the
   islands look and the **Visual effects** setting (Full / Reduced / Minimal) apply everywhere.
@@ -97,7 +99,8 @@ Things we'd love help with:
 - Git: a three-way merge editor, interactive rebase
 - Vim: registers, macros, marks, `:s`
 - Language servers: semantic tokens, choosing and ordering servers per language
-- Extensions: a registry to browse; running Zed extensions' own WebAssembly code
+- Extensions: debug adapters and completion labels from extensions' code, Zed's older extension
+  APIs, more languages in the registry
 - Debugger: hit counts, exception breakpoint options
 - Windows and Linux polish
 

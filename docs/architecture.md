@@ -19,6 +19,9 @@ bindings, colors, icons) are in the [contributing guide](../CONTRIBUTING.md).
 - `src/syntax.rs` — tree-sitter parsing, highlighting, bracket matching and file outlines
 - `src/lsp/` — language server client: JSON-RPC transport, protocol types, server discovery
 - `src/editor/lsp.rs` — completion, hover, signature help and LSP requests in the editor
+- `src/results_panel.rs` — the Find panel: results as trees in tabs (usages, hierarchies, test
+  runs, Local History), with children that can load as they open
+- `src/hierarchy.rs` — Call and Type Hierarchy from the language server, for the Find panel
 - `src/extensions.rs` — extensions in Zed's format: languages, grammars, themes, snippets, servers
 - `src/extensions/wasm.rs` — runs extensions' own code (`extension.wasm`, Zed's extension API
   0.6/0.7) for their language servers, sandboxed; `src/extensions/wit/` is that API's interface
@@ -30,6 +33,10 @@ bindings, colors, icons) are in the [contributing guide](../CONTRIBUTING.md).
   File Structure, Go to Line
 - `src/terminal.rs` — the integrated terminal
 - `src/run.rs`, `src/editor/run.rs` — run and test targets and the gutter ▶
+- `src/test_run.rs` — test results read from a run's output (cargo, go, pytest, Jest, Vitest,
+  node), their tree, the gutter's ✓ / ✕ and Rerun Failed
+- `src/local_history.rs`, `src/workspace/local_history.rs` — Local History: files' earlier
+  versions under `<config>/local_history/`, listed with a diff and Restore
 - `src/keymap.rs` — JetBrains-style key bindings
 - `src/git.rs`, `src/git_panel.rs`, `src/diff_view.rs`, `src/git_log.rs`, `src/push_dialog.rs`,
   `src/branch_picker.rs`, `src/clone_dialog.rs` — Git backend and UI
@@ -39,6 +46,7 @@ bindings, colors, icons) are in the [contributing guide](../CONTRIBUTING.md).
 - `src/markdown_preview.rs`, `src/markdown_preview/view.rs` — the Markdown preview and its tab
 - `src/settings.rs`, `src/editorconfig.rs`, `src/preferences.rs`, `src/preferences/` —
   `settings.json`, `.editorconfig` and the Settings window
+- `src/project_settings.rs` — a project's `.kuana/settings.json`, layered over the user's
 - `src/state.rs` — remembered UI state and per-project sessions
 - `src/theme.rs`, `src/theme_picker.rs`, `assets/themes/` — theme loading, picker and built-in themes
 - `src/updater.rs`, `.github/workflows/release.yml` — auto-update and the release build
