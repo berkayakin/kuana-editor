@@ -170,7 +170,14 @@ impl GitLog {
         if self.repo != repo {
             self.repo = repo;
             self.path = None;
+            // Everything indexing the old repository's commits goes with them:
+            // `visible` left behind would index an empty `entries` when drawn.
             self.entries = Arc::new(Vec::new());
+            self.graph = Arc::new(Vec::new());
+            self.selected = None;
+            self.details = None;
+            self.details_task = None;
+            self.apply_filter(cx);
             self.reload(cx);
         }
     }
@@ -623,6 +630,22 @@ mod tests {
             summary: String::new(),
             refs: Vec::new(),
         }
+    }
+
+    #[gpui::test]
+    fn another_project_leaves_no_rows_of_the_last(cx: &mut gpui::TestAppContext) {
+        let log = cx.new(GitLog::new);
+        log.update(cx, |log, cx| {
+            log.repo = Some("/a".into());
+            log.entries = Arc::new(vec![entry("b", &["a"]), entry("a", &[])]);
+            log.graph = Arc::new(graph(&log.entries));
+            log.apply_filter(cx);
+            log.selected = Some(1);
+            log.set_repo(Some("/b".into()), cx);
+            // Drawing reads `entries[visible[..]]`, so these must agree.
+            assert!(log.visible.iter().all(|&ix| ix < log.entries.len()));
+            assert!(log.visible.is_empty() && log.graph.is_empty() && log.selected.is_none());
+        });
     }
 
     #[test]
