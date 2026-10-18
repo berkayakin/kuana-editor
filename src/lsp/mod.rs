@@ -224,6 +224,9 @@ pub struct LspStore {
     /// Latest diagnostics per file and server, open or not, so a file gets
     /// them when it opens later.
     diagnostics: HashMap<(PathBuf, ServerKey), Value>,
+    /// The real path of each path servers named (`registered_path`): a server
+    /// publishes for the same files again and again, thousands of them.
+    real_paths: HashMap<PathBuf, PathBuf>,
     /// Work-done progress per server, by token.
     progress: HashMap<ServerKey, HashMap<String, Progress>>,
     /// Shows the progress reports `PROGRESS_THROTTLE` held back.
@@ -296,6 +299,7 @@ impl LspStore {
             servers: HashMap::new(),
             documents: HashMap::new(),
             diagnostics: HashMap::new(),
+            real_paths: HashMap::new(),
             progress: HashMap::new(),
             progress_redraw: None,
             configs: HashMap::new(),
@@ -674,6 +678,10 @@ impl LspStore {
                 if handled.is_err() {
                     break;
                 }
+                // Messages queued up (rust-analyzer publishing diagnostics for
+                // thousands of files) would otherwise all be handled in one go,
+                // holding up input and drawing until the last.
+                YieldNow(false).await;
             }
         });
         self._tasks.push(task);
@@ -915,11 +923,26 @@ impl LspStore {
     /// by: servers spell paths their own way (on Windows a lowercase drive
     /// letter and no `\\?\`, which `canonicalize` gives Kuana's; a path
     /// through a symlink). A file that isn't open goes by its real path.
-    fn registered_path(&self, path: PathBuf) -> PathBuf {
+    fn registered_path(&mut self, path: PathBuf) -> PathBuf {
+        /// Past this many paths known, they're found again (a long session).
+        const KEEP: usize = 100_000;
         if self.documents.contains_key(&path) {
             return path;
         }
-        let real = crate::document_store::key(&path);
+        let real = match self.real_paths.get(&path) {
+            Some(real) => real.clone(),
+            None => {
+                // Not there (yet): not kept, it may be made.
+                let Ok(real) = crate::paths::canonicalize(&path) else {
+                    return self.documents.iter().find(|(_, d)| d.real == path).map_or(path, |(registered, _)| registered.clone());
+                };
+                if self.real_paths.len() >= KEEP {
+                    self.real_paths.clear();
+                }
+                self.real_paths.insert(path, real.clone());
+                real
+            }
+        };
         self.documents.iter().find(|(_, d)| d.real == real).map_or(real, |(registered, _)| registered.clone())
     }
 
@@ -1384,6 +1407,9 @@ impl LspStore {
             self.progress.remove(key);
             self.configs.remove(key);
             self.generations.remove(key);
+            // The old process's registrations: its `Closed` is ignored now.
+            self.watchers.remove(key);
+            self.pull_registrations.remove(key);
         }
         self.reregister(|d| keys.iter().any(|key| d.has(key)), cx);
     }
@@ -1441,6 +1467,23 @@ impl LspStore {
         for thread in stopping {
             let _ = thread.join();
         }
+    }
+}
+
+/// Lets the executor run what else is waiting before the task goes on: not
+/// ready the first time it's polled (asking to be polled again), ready the next.
+struct YieldNow(bool);
+
+impl std::future::Future for YieldNow {
+    type Output = ();
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        if self.0 {
+            return std::task::Poll::Ready(());
+        }
+        self.0 = true;
+        cx.waker().wake_by_ref();
+        std::task::Poll::Pending
     }
 }
 
@@ -2179,6 +2222,108 @@ mod tests {
         send("end", 0, cx);
         assert_eq!(shown.get(), after_pause + 1);
         assert!(store.read_with(cx, |s, _| s.progress[&key].is_empty()));
+    }
+
+    /// Messages queued up are handled one at a time, with other work let in
+    /// between: thousands of files' diagnostics don't freeze the window.
+    #[gpui::test]
+    fn a_burst_of_messages_lets_other_work_in(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        const BURST: usize = 50;
+        let store = cx.new(|_| LspStore::new());
+        let key = ServerKey { id: "s".into(), root: PathBuf::from("/w") };
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        for i in 0..BURST {
+            let params = json!({ "uri": format!("file:///nowhere/{i}.rs"), "diagnostics": [] });
+            tx.unbounded_send(Incoming::Notification { method: "textDocument/publishDiagnostics".into(), params }).unwrap();
+        }
+        store.update(cx, |s, cx| {
+            s.generations.insert(key.clone(), 1);
+            s.listen(key.clone(), 1, rx, cx);
+        });
+        // Another task looks how far it got each time it runs.
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let (slot, weak) = (seen.clone(), store.downgrade());
+        cx.spawn(async move |cx| {
+            loop {
+                let handled = weak.read_with(&cx, |s, _| s.diagnostics.len()).unwrap_or(BURST);
+                slot.borrow_mut().push(handled);
+                if handled == BURST {
+                    break;
+                }
+                YieldNow(false).await;
+            }
+        })
+        .detach();
+        cx.run_until_parked();
+        let mut seen = seen.borrow().clone();
+        seen.dedup();
+        assert_eq!(seen.last(), Some(&BURST));
+        assert!(seen.len() > BURST / 2, "it ran in between only at {seen:?}");
+    }
+
+    /// The real path of a path a server names is looked up once.
+    #[cfg(unix)]
+    #[test]
+    fn real_paths_of_what_servers_name_are_found_once() {
+        let dir = std::env::temp_dir().join(format!("kuana-lsp-real-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let (real, link) = (dir.join("real.rs"), dir.join("link.rs"));
+        std::fs::write(&real, "").unwrap();
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut store = LspStore::new();
+        assert_eq!(store.registered_path(link.clone()), real);
+        // Known now: the link isn't looked at again.
+        std::fs::remove_file(&link).unwrap();
+        assert_eq!(store.registered_path(link.clone()), real);
+        // A path that isn't there is its own, and isn't kept: it may be made.
+        let missing = dir.join("missing.rs");
+        assert_eq!(store.registered_path(missing.clone()), missing);
+        assert!(!store.real_paths.contains_key(&missing));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A restart drops what the old process registered: the new one
+    /// registers its own.
+    #[gpui::test]
+    fn a_restarted_server_keeps_none_of_the_old_ones_registrations(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+
+        use crate::document::Document;
+        if servers::which("python3").is_none() {
+            return;
+        }
+        cx.executor().allow_parking();
+        crate::trust::set_trust_all(true);
+        let dir = std::env::temp_dir().join(format!("kuana-lsp-restart-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.rs");
+        std::fs::write(&path, "fn a() {}\n").unwrap();
+        let store = cx.new(|_| {
+            let mut store = LspStore::new();
+            store.test_specs = Some(vec![fake_server("restart", "")]);
+            store
+        });
+        let editor = cx.new(|cx| Editor::new(Document::open(&path).unwrap(), cx));
+        store.update(cx, |s, cx| s.register(&editor, cx));
+        let registrations = |cx: &mut gpui::TestAppContext| store.read_with(cx, |s, _| s.watchers.values().map(Vec::len).sum::<usize>());
+        let wait = |cx: &mut gpui::TestAppContext, what: &str| {
+            let started = std::time::Instant::now();
+            while registrations(cx) == 0 {
+                assert!(started.elapsed() < std::time::Duration::from_secs(10), "timed out waiting for {what}");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                cx.run_until_parked();
+            }
+        };
+        wait(cx, "the server's watchers");
+        assert_eq!(registrations(cx), 1);
+        store.update(cx, |s, cx| s.restart(&path, cx));
+        assert_eq!(registrations(cx), 0);
+        wait(cx, "the new server's watchers");
+        assert_eq!(registrations(cx), 1);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

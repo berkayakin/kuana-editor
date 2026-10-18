@@ -72,7 +72,25 @@ pub const TIMED_OUT: &str = "The language server didn't answer in time";
 /// fails, and the server is told to stop working on it.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
-type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, RpcError>>>>>;
+type Pending = Arc<Mutex<Waiting>>;
+
+/// The requests waiting for their answers, by id.
+#[derive(Default)]
+struct Waiting {
+    requests: HashMap<i64, oneshot::Sender<Result<Value, RpcError>>>,
+    /// No answer can come anymore (the server's output ended, or its input
+    /// broke): a request made from now on fails at once.
+    closed: bool,
+}
+
+/// Fails the requests waiting, and those made from now on, with `STOPPED`.
+fn close(pending: &Pending) {
+    let mut waiting = pending.lock().unwrap();
+    waiting.closed = true;
+    for (_, tx) in waiting.requests.drain() {
+        let _ = tx.send(Err(RpcError::new(STOPPED)));
+    }
+}
 
 /// What the writer thread does: send a frame, or note when a request it
 /// sent times out.
@@ -125,11 +143,15 @@ impl Client {
         let stdout = child.stdout.take().ok_or_else(|| std::io::Error::other("no stdout"))?;
         let stderr = child.stderr.take().ok_or_else(|| std::io::Error::other("no stderr"))?;
 
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending = Pending::default();
         let held = Arc::new(AtomicI64::new(0));
         let (writer, to_write) = mpsc::channel::<Outgoing>();
         let (timeouts, writer_held) = (pending.clone(), held.clone());
-        std::thread::Builder::new().name("lsp-writer".into()).spawn(move || write_loop(stdin, to_write, timeouts, writer_held))?;
+        std::thread::Builder::new().name("lsp-writer".into()).spawn(move || {
+            write_loop(stdin, to_write, timeouts.clone(), writer_held);
+            // The server can't hear requests now, and their deadlines are gone.
+            close(&timeouts);
+        })?;
 
         // Keep the end of stderr to explain a crash.
         let stderr_tail = Arc::new(Mutex::new(String::new()));
@@ -178,7 +200,15 @@ impl Client {
     fn request_held(&self, method: &str, params: Value, wait: Option<Duration>) -> Request {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, tx);
+        {
+            let mut waiting = self.pending.lock().unwrap();
+            // The server stopped: nothing would ever answer it, nor time it out.
+            if waiting.closed {
+                let _ = tx.send(Err(RpcError::new(STOPPED)));
+                return Request { id, rx, pending: self.pending.clone(), writer: self.writer.clone() };
+            }
+            waiting.requests.insert(id, tx);
+        }
         // Before it's sent, so its answer can't come first.
         let held = wait.filter(|_| self.held.compare_exchange(0, id, Ordering::AcqRel, Ordering::Acquire).is_ok());
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
@@ -257,7 +287,7 @@ impl Future for Request {
 impl Drop for Request {
     fn drop(&mut self) {
         // Still pending: no answer came, so the server may still be at it.
-        if self.pending.lock().unwrap().remove(&self.id).is_some() {
+        if self.pending.lock().unwrap().requests.remove(&self.id).is_some() {
             send(&self.writer, cancel(self.id));
         }
     }
@@ -351,7 +381,7 @@ fn write_loop(mut stdin: impl Write, outgoing: mpsc::Receiver<Outgoing>, pending
                 if let Some(&(id, until, _)) = hold.as_ref()
                     && until <= now
                 {
-                    if let Some(tx) = pending.lock().unwrap().remove(&id) {
+                    if let Some(tx) = pending.lock().unwrap().requests.remove(&id) {
                         let _ = tx.send(Err(RpcError::new(TIMED_OUT)));
                         if !write(&frame(&cancel(id))) {
                             return;
@@ -362,7 +392,7 @@ fn write_loop(mut stdin: impl Write, outgoing: mpsc::Receiver<Outgoing>, pending
                 while let Some(&(_, id)) = deadlines.front().filter(|(at, _)| *at <= now) {
                     deadlines.pop_front();
                     // Answered (or dropped) meanwhile: nothing to do.
-                    let Some(tx) = pending.lock().unwrap().remove(&id) else { continue };
+                    let Some(tx) = pending.lock().unwrap().requests.remove(&id) else { continue };
                     let written = send(frame(&cancel(id)), &mut hold, &mut write);
                     let _ = tx.send(Err(RpcError::new(TIMED_OUT)));
                     if !written {
@@ -401,10 +431,8 @@ fn read_loop(stdout: impl Read, answers: Answers, incoming: async_mpsc::Unbounde
             writer.send(Outgoing::Answered(id)).ok();
         }
     }
-    // Whatever is still waiting will never get an answer.
-    for (_, tx) in pending.lock().unwrap().drain() {
-        let _ = tx.send(Err(RpcError::new(STOPPED)));
-    }
+    // Whatever is still waiting, or asked from now on, will never get an answer.
+    close(&pending);
     // Let stderr catch up so the tail explains the exit.
     std::thread::sleep(std::time::Duration::from_millis(50));
     let stderr_tail = stderr_tail.lock().map(|t| t.clone()).unwrap_or_default();
@@ -459,7 +487,7 @@ fn dispatch(mut message: Value, pending: &Pending, incoming: &async_mpsc::Unboun
         }
         (None, Some(id)) => {
             let Some(id) = id.as_i64() else { return };
-            let Some(tx) = pending.lock().unwrap().remove(&id) else { return };
+            let Some(tx) = pending.lock().unwrap().requests.remove(&id) else { return };
             let result = match message.get_mut("error") {
                 Some(error) => Err(RpcError {
                     code: error.get("code").and_then(Value::as_i64),
@@ -479,11 +507,11 @@ mod tests {
 
     #[test]
     fn dropping_an_unanswered_request_cancels_it() {
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Pending = Pending::default();
         let (writer, written) = mpsc::channel();
         let request = |id: i64| {
             let (tx, rx) = oneshot::channel();
-            pending.lock().unwrap().insert(id, tx);
+            pending.lock().unwrap().requests.insert(id, tx);
             Request { id, rx, pending: pending.clone(), writer: writer.clone() }
         };
         let (incoming, _) = async_mpsc::unbounded();
@@ -500,7 +528,7 @@ mod tests {
         let Ok(Outgoing::Frame(frame)) = written.try_recv() else { panic!("a frame") };
         let frame = String::from_utf8(frame).unwrap();
         assert!(frame.ends_with(r#"{"jsonrpc":"2.0","method":"$/cancelRequest","params":{"id":2}}"#), "{frame}");
-        assert!(pending.lock().unwrap().is_empty());
+        assert!(pending.lock().unwrap().requests.is_empty());
         dispatch(json!({ "jsonrpc": "2.0", "id": 2, "result": null }), &pending, &incoming);
     }
 
@@ -520,7 +548,7 @@ mod tests {
 
     #[test]
     fn unanswered_requests_time_out() {
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Pending = Pending::default();
         let (writer, outgoing) = mpsc::channel();
         let written = Written::default();
         let (out, timeouts) = (written.clone(), pending.clone());
@@ -528,7 +556,7 @@ mod tests {
         let (incoming, _) = async_mpsc::unbounded();
         let request = |id: i64| {
             let (tx, rx) = oneshot::channel();
-            pending.lock().unwrap().insert(id, tx);
+            pending.lock().unwrap().requests.insert(id, tx);
             writer.send(Outgoing::Deadline(Instant::now() + Duration::from_millis(30), id)).unwrap();
             Request { id, rx, pending: pending.clone(), writer: writer.clone() }
         };
@@ -551,7 +579,7 @@ mod tests {
     /// server is told to stop working on it, and the rest goes.
     #[test]
     fn what_follows_a_held_request_waits_for_its_answer() {
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Pending = Pending::default();
         let held = Arc::new(AtomicI64::new(0));
         let (writer, outgoing) = mpsc::channel();
         let written = Written::default();
@@ -568,7 +596,7 @@ mod tests {
         // As `Client::request_first` sends one.
         let held_request = |id: i64, wait: Duration| {
             let (tx, rx) = oneshot::channel();
-            pending.lock().unwrap().insert(id, tx);
+            pending.lock().unwrap().requests.insert(id, tx);
             held.store(id, Ordering::Release);
             send(&writer, json!({ "jsonrpc": "2.0", "id": id, "method": "completionItem/resolve", "params": {} }));
             writer.send(Outgoing::Hold(id, Instant::now() + wait)).unwrap();
@@ -598,6 +626,36 @@ mod tests {
         assert!(cancel < text.find("didSave").unwrap(), "{text}");
         drop(writer);
         thread.join().unwrap();
+    }
+
+    /// A request made once the server stopped fails at once: nothing would
+    /// answer it, nor time it out (the writer thread may be gone too).
+    #[cfg(unix)]
+    #[test]
+    fn requests_to_a_stopped_server_fail() {
+        use futures::StreamExt as _;
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let (client, mut incoming) = Client::spawn(Path::new("sh"), &["-c".into(), "exit 0".into()], &std::env::temp_dir(), &path, &[]).unwrap();
+        assert!(matches!(futures::executor::block_on(incoming.next()), Some(Incoming::Closed { .. })));
+        for _ in 0..2 {
+            // The first one's frame breaks the pipe, ending the writer thread.
+            let request = client.request("textDocument/hover", Value::Null);
+            let (answered, answer) = mpsc::channel();
+            std::thread::spawn(move || answered.send(futures::executor::block_on(request)).ok());
+            let err = answer.recv_timeout(Duration::from_secs(5)).expect("an answer").unwrap_err();
+            assert_eq!(err.message, STOPPED);
+        }
+    }
+
+    /// The writer thread ending (the server's input broke) fails what waits.
+    #[test]
+    fn closing_fails_what_waits_and_what_comes() {
+        let pending = Pending::default();
+        let (tx, mut rx) = oneshot::channel();
+        pending.lock().unwrap().requests.insert(1, tx);
+        close(&pending);
+        assert_eq!(rx.try_recv().unwrap().unwrap().unwrap_err().message, STOPPED);
+        assert!(pending.lock().unwrap().closed);
     }
 
     #[test]
@@ -630,16 +688,16 @@ mod tests {
 
     #[test]
     fn routes_responses_and_requests() {
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Pending = Pending::default();
         let (tx, mut rx) = oneshot::channel();
-        pending.lock().unwrap().insert(7, tx);
+        pending.lock().unwrap().requests.insert(7, tx);
         let (incoming_tx, mut incoming) = async_mpsc::unbounded();
         dispatch(json!({"id": 7, "error": {"code": -1, "message": "nope"}}), &pending, &incoming_tx);
         let err = rx.try_recv().unwrap().unwrap().unwrap_err();
         assert_eq!((err.message.as_str(), err.code, err.is_cancelled()), ("nope", Some(-1), false));
         // `ContentModified`: the text changed under the request.
         let (tx, mut rx) = oneshot::channel();
-        pending.lock().unwrap().insert(8, tx);
+        pending.lock().unwrap().requests.insert(8, tx);
         dispatch(json!({"id": 8, "error": {"code": -32801, "message": "content modified"}}), &pending, &incoming_tx);
         assert!(rx.try_recv().unwrap().unwrap().unwrap_err().is_cancelled());
         dispatch(json!({"id": "a", "method": "workspace/configuration", "params": {}}), &pending, &incoming_tx);
