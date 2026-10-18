@@ -366,6 +366,9 @@ pub struct Editor {
     cursor_visible: bool,
     blink_epoch: usize,
     blink_task: Option<Task<()>>,
+    /// Closes popovers when focus leaves (see `focus_lost`); made on the
+    /// first draw, the first time there's a window.
+    blur_subscription: Option<gpui::Subscription>,
     lint_task: Option<Task<()>>,
     linted_version: Option<u64>,
     external: Option<ExternalLinter>,
@@ -522,6 +525,7 @@ impl Editor {
             cursor_visible: true,
             blink_epoch: 0,
             blink_task: None,
+            blur_subscription: None,
             lint_task: None,
             linted_version: None,
             external: None,
@@ -5232,6 +5236,9 @@ impl Focusable for Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.blur_subscription.is_none() {
+            self.blur_subscription = Some(cx.on_blur(&self.focus_handle.clone(), window, |e, _, cx| e.focus_lost(cx)));
+        }
         let popover = self.render_hunk_popover(cx);
         let lsp_popovers = self.render_lsp_popovers(window, cx);
         let preview_toggle = self.is_markdown(cx).then(|| {

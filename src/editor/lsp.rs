@@ -911,6 +911,19 @@ impl Editor {
         }
     }
 
+    /// The editor lost the keyboard: completion and signature help go (a
+    /// request still out for them too, so its answer doesn't reopen them);
+    /// hover follows the pointer, so it stays.
+    pub(super) fn focus_lost(&mut self, cx: &mut Context<Self>) {
+        self.lsp.completion_task = None;
+        renew(&mut self.lsp.completion_cancel);
+        self.close_completion(cx);
+        self.lsp.signature_task = None;
+        if self.lsp.signature.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// Escape: closes completion, signature help or hover. Returns whether
     /// anything was open.
     pub(super) fn dismiss_lsp_popovers(&mut self, cx: &mut Context<Self>) -> bool {
