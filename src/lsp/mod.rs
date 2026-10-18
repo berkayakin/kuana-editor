@@ -243,6 +243,14 @@ pub struct LspStore {
     /// Tests: the servers every document gets, instead of its language's.
     #[cfg(test)]
     pub(crate) test_specs: Option<Vec<&'static servers::ServerSpec>>,
+    /// Pull diagnostics (`textDocument/diagnostic`): the request waiting or
+    /// running per file and server (a newer one replaces it, which cancels
+    /// it), and the id of the last report, so an unchanged one isn't sent again.
+    pulls: HashMap<(PathBuf, ServerKey), Task<()>>,
+    result_ids: HashMap<(PathBuf, ServerKey), String>,
+    /// Pull diagnostics registered later (`client/registerCapability`, as
+    /// pyright and ESLint do), by registration id: their options.
+    pull_registrations: HashMap<ServerKey, Vec<(String, Value)>>,
     /// Every server process started, so the ones still running (shutting
     /// down already or not) are stopped when the app quits.
     started: Vec<std::sync::Weak<Client>>,
@@ -264,6 +272,22 @@ impl Drop for LspStore {
 /// (GPUI itself waits only a moment for quit hooks).
 const QUIT_WAIT: std::time::Duration = std::time::Duration::from_millis(80);
 
+/// Pulled diagnostics are asked for this long after an edit, so typing
+/// doesn't send a request per key; other open files of a server whose
+/// diagnostics span files (`interFileDependencies`), a while later.
+const PULL_DELAY: Duration = Duration::from_millis(200);
+const PULL_OTHERS_DELAY: Duration = Duration::from_millis(800);
+/// How long a rename or move in the file tree waits for servers to say what
+/// else changes with it (`workspace/willRenameFiles`); later, it goes ahead
+/// without them, as VS Code does after its timeout.
+const WILL_RENAME_WAIT: Duration = Duration::from_secs(5);
+
+/// A server's edits for a rename (`LspStore::will_rename`).
+pub struct RenameEdits {
+    pub encoding: Encoding,
+    pub edits: Vec<protocol::FileEdits>,
+}
+
 impl LspStore {
     pub fn new() -> Self {
         Self {
@@ -277,6 +301,9 @@ impl LspStore {
             configs: HashMap::new(),
             generations: HashMap::new(),
             next_generation: 0,
+            pulls: HashMap::new(),
+            result_ids: HashMap::new(),
+            pull_registrations: HashMap::new(),
             #[cfg(test)]
             test_specs: None,
             started: Vec::new(),
@@ -390,7 +417,7 @@ impl LspStore {
 
     /// Sends a document's edits since they were last sent (a document
     /// without a tab; editors send their own, `Editor::edited`).
-    pub fn send_edits(&self, doc: &Entity<Document>, cx: &mut App) {
+    pub fn send_edits(&mut self, doc: &Entity<Document>, cx: &mut Context<Self>) {
         let Some(path) = doc.read(cx).path.clone() else { return };
         let changes = doc.update(cx, |d, _| d.take_lsp_changes());
         if changes.is_empty() {
@@ -400,6 +427,7 @@ impl LspStore {
         doc.update(cx, |d, _| d.note_lsp_version());
         let d = doc.read(cx);
         self.did_change(&path, d.version(), changes, d.rope());
+        self.pull_soon(&path, cx);
     }
 
     /// The servers for `language` at `path`, the main one first (see
@@ -741,7 +769,17 @@ impl LspStore {
                     }
                     "workspace/workspaceFolders" => client.respond(id, workspace_folders(&key.root)),
                     "client/registerCapability" => {
+                        let mut pulls_now = false;
                         for registration in params.get("registrations").and_then(Value::as_array).into_iter().flatten() {
+                            if registration.get("method").and_then(Value::as_str) == Some("textDocument/diagnostic") {
+                                let id = registration.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                                let options = registration.get("registerOptions").cloned().unwrap_or(json!({}));
+                                let list = self.pull_registrations.entry(key.clone()).or_default();
+                                list.retain(|(existing, _)| *existing != id);
+                                list.push((id, options));
+                                pulls_now = true;
+                                continue;
+                            }
                             if registration.get("method").and_then(Value::as_str) != Some("workspace/didChangeWatchedFiles") {
                                 continue;
                             }
@@ -753,12 +791,19 @@ impl LspStore {
                             list.push((id, watchers));
                         }
                         client.respond(id, Value::Null);
+                        // Its documents open already are asked for now.
+                        if pulls_now {
+                            self.pull_all(key, cx);
+                        }
                     }
                     "client/unregisterCapability" => {
                         let gone = params.get("unregisterations").and_then(Value::as_array);
                         for item in gone.into_iter().flatten() {
                             let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
                             if let Some(list) = self.watchers.get_mut(key) {
+                                list.retain(|(existing, _)| existing != id);
+                            }
+                            if let Some(list) = self.pull_registrations.get_mut(key) {
                                 list.retain(|(existing, _)| existing != id);
                             }
                         }
@@ -778,6 +823,12 @@ impl LspStore {
                     // Its hints or lenses changed (it finished loading the
                     // project, another file changed): its documents' are due
                     // again, asked for by the editors that show them.
+                    // What it found may have changed (a dependency, its settings):
+                    // its open documents' diagnostics are asked for again.
+                    "workspace/diagnostic/refresh" => {
+                        client.respond(id, Value::Null);
+                        self.pull_all(key, cx);
+                    }
                     "workspace/inlayHint/refresh" | "workspace/codeLens/refresh" => {
                         client.respond(id, Value::Null);
                         let hints = method == "workspace/inlayHint/refresh";
@@ -798,6 +849,7 @@ impl LspStore {
             }
             Incoming::Closed { stderr_tail } => {
                 self.watchers.remove(key);
+                self.pull_registrations.remove(key);
                 // Stopped on purpose (Restricted Mode, closing): nothing to report.
                 if !self.servers.contains_key(key) {
                     return;
@@ -897,6 +949,8 @@ impl LspStore {
     /// A server stopped (or restarts): its diagnostics go, everywhere.
     fn forget_diagnostics(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
         self.diagnostics.retain(|(_, k), _| k != key);
+        self.pulls.retain(|(_, k), _| k != key);
+        self.result_ids.retain(|(_, k), _| k != key);
         let docs: Vec<Entity<Document>> = self.documents.values().filter(|d| d.has(key)).filter_map(|d| d.doc.upgrade()).collect();
         for doc in docs {
             doc.update(cx, |d, cx| {
@@ -931,10 +985,179 @@ impl LspStore {
         doc.set_opened(key, true);
         let editor = doc.editor.as_ref().and_then(WeakEntity::upgrade);
         self.apply_diagnostics(path, key, cx);
+        self.pull(path, key, Duration::ZERO, cx);
         // What else it knows of the file can be asked for now.
         if let Some(editor) = editor {
             editor.update(cx, |e, cx| e.lsp_opened(cx));
         }
+    }
+
+    /// Asks a server that has pull diagnostics (`diagnosticProvider`) for an
+    /// open document's, `delay` from now. The answer is kept like a publish
+    /// (`diagnostics`, with the version it's for), so everything that reads
+    /// those works the same for either kind of server.
+    fn pull(&mut self, path: &Path, key: &ServerKey, delay: Duration, cx: &mut Context<Self>) {
+        let Some(ServerState::Running(server)) = self.servers.get(key) else { return };
+        let Some(open) = self.documents.get(path).filter(|d| d.opened(key)) else { return };
+        let Some(options) = self.pull_options(key, open.language_id) else { return };
+        let Some(document) = open.doc.upgrade() else { return };
+        let version = document.read(cx).version();
+        let mut params = json!({ "textDocument": { "uri": path_to_uri(path) } });
+        if let Some(identifier) = options.get("identifier").filter(|i| i.is_string()) {
+            params["identifier"] = identifier.clone();
+        }
+        let slot = (path.to_path_buf(), key.clone());
+        if let Some(previous) = self.result_ids.get(&slot) {
+            params["previousResultId"] = previous.clone().into();
+        }
+        let (server, generation) = (server.clone(), self.generations.get(key).copied());
+        let (path, key) = slot.clone();
+        let task = cx.spawn(async move |this, cx| {
+            if !delay.is_zero() {
+                cx.background_executor().timer(delay).await;
+            }
+            // A failed or cancelled pull leaves what's shown; the next edit asks again.
+            let Ok(report) = server.request("textDocument/diagnostic", params).await else { return };
+            this.update(cx, |s, cx| {
+                if s.generations.get(&key).copied() == generation {
+                    s.pulled(&path, &key, Some(version), &report, cx);
+                }
+            })
+            .ok();
+        });
+        self.pulls.insert(slot, task);
+    }
+
+    /// A pull's report: a full one replaces the file's diagnostics from that
+    /// server, an unchanged one keeps them; reports for related files too.
+    fn pulled(&mut self, path: &Path, key: &ServerKey, version: Option<u64>, report: &Value, cx: &mut Context<Self>) {
+        let slot = (path.to_path_buf(), key.clone());
+        match report.get("resultId").and_then(Value::as_str) {
+            Some(id) => self.result_ids.insert(slot.clone(), id.to_string()),
+            None => self.result_ids.remove(&slot),
+        };
+        if report.get("kind").and_then(Value::as_str) == Some("full") {
+            let mut params = json!({ "uri": path_to_uri(path), "diagnostics": report.get("items").cloned().unwrap_or(json!([])) });
+            if let Some(version) = version {
+                params["version"] = version.into();
+            }
+            self.diagnostics.insert(slot, params);
+            self.apply_diagnostics(path, key, cx);
+        }
+        for (uri, related) in report.get("relatedDocuments").and_then(Value::as_object).into_iter().flatten() {
+            let Some(other) = protocol::uri_to_path(uri).map(|p| self.registered_path(p)) else { continue };
+            // Its version isn't known: read in today's text.
+            self.pulled(&other, key, None, related, cx);
+        }
+    }
+
+    /// An edit to `path`: its servers that pull diagnostics are asked again
+    /// a moment later, and those whose diagnostics span files for their other
+    /// open documents too.
+    pub fn pull_soon(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some(doc) = self.documents.get(path) else { return };
+        let keys: Vec<ServerKey> = doc.servers.iter().filter(|(_, opened)| *opened).map(|(k, _)| k.clone()).collect();
+        for key in keys {
+            self.pull(path, &key, PULL_DELAY, cx);
+            let language_id = self.documents.get(path).map_or("", |d| d.language_id);
+            let spans_files = self.pull_options(&key, language_id).is_some_and(|o| o["interFileDependencies"] == Value::Bool(true));
+            if spans_files {
+                for other in self.opened_by(&key).into_iter().filter(|p| p != path) {
+                    self.pull(&other, &key, PULL_OTHERS_DELAY, cx);
+                }
+            }
+        }
+    }
+
+    /// How a server pulls diagnostics for documents of `language_id`: its
+    /// `diagnosticProvider`, else a registration whose document selector
+    /// (when it names languages) has the language. None: it publishes them.
+    fn pull_options(&self, key: &ServerKey, language_id: &str) -> Option<Value> {
+        let Some(ServerState::Running(server)) = self.servers.get(key) else { return None };
+        match server.capability_value("diagnosticProvider") {
+            Value::Null | Value::Bool(false) => {}
+            Value::Bool(true) => return Some(json!({})),
+            options => return Some(options.clone()),
+        }
+        let selects = |options: &Value| match options.get("documentSelector").and_then(Value::as_array) {
+            Some(filters) if filters.iter().any(|f| f.get("language").is_some()) => {
+                filters.iter().any(|f| f.get("language").and_then(Value::as_str) == Some(language_id))
+            }
+            _ => true,
+        };
+        self.pull_registrations.get(key)?.iter().map(|(_, options)| options).find(|o| selects(o)).cloned()
+    }
+
+    /// Pulls every document a server has open (it asked for a refresh).
+    fn pull_all(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
+        for path in self.opened_by(key) {
+            self.pull(&path, key, Duration::ZERO, cx);
+        }
+    }
+
+    fn opened_by(&self, key: &ServerKey) -> Vec<PathBuf> {
+        self.documents.iter().filter(|(_, d)| d.opened(key)).map(|(p, _)| p.clone()).collect()
+    }
+
+    /// Before files are renamed or moved (`(old, new, is a folder)`): the
+    /// running servers whose `workspace.fileOperations.willRename` filters
+    /// cover one of them say what else changes with it (imports, Rust's `mod`
+    /// lines), as edits to apply first. None when no server asks; an error
+    /// when they took longer than `WILL_RENAME_WAIT` (the rename goes ahead).
+    pub fn will_rename(&self, renames: &[(PathBuf, PathBuf, bool)], cx: &App) -> Option<Task<Result<Vec<RenameEdits>, ()>>> {
+        let servers = self.file_operation_servers("willRename", renames);
+        if servers.is_empty() {
+            return None;
+        }
+        let params = rename_params(renames);
+        let requests: Vec<_> = servers
+            .into_iter()
+            .map(|server| {
+                let encoding = server.encoding;
+                let request = server.client.request("workspace/willRenameFiles", params.clone());
+                async move { (encoding, request.await) }
+            })
+            .collect();
+        let timer = cx.background_executor().timer(WILL_RENAME_WAIT);
+        Some(cx.background_executor().spawn(async move {
+            let answers = futures::future::join_all(requests);
+            futures::pin_mut!(answers);
+            match futures::future::select(answers, timer).await {
+                futures::future::Either::Left((answers, _)) => Ok(answers
+                    .into_iter()
+                    .filter_map(|(encoding, answer)| Some(RenameEdits { encoding, edits: protocol::workspace_edit(&answer.ok()?) }))
+                    .filter(|e| !e.edits.is_empty())
+                    .collect()),
+                futures::future::Either::Right(_) => Err(()),
+            }
+        }))
+    }
+
+    /// After files were renamed or moved: the servers that asked hear of it
+    /// (`workspace/didRenameFiles`).
+    pub fn did_rename(&self, renames: &[(PathBuf, PathBuf, bool)]) {
+        let params = rename_params(renames);
+        for server in self.file_operation_servers("didRename", renames) {
+            server.client.notify("workspace/didRenameFiles", params.clone());
+        }
+    }
+
+    /// The running servers of the project a rename is in whose file
+    /// operation filters (`operation`: `willRename`, `didRename`) match one
+    /// of its paths.
+    fn file_operation_servers(&self, operation: &str, renames: &[(PathBuf, PathBuf, bool)]) -> Vec<Arc<Server>> {
+        self.servers
+            .iter()
+            .filter_map(|(key, state)| match state {
+                ServerState::Running(server) if renames.iter().any(|(old, _, _)| old.starts_with(&key.root)) => Some(server),
+                _ => None,
+            })
+            .filter(|server| {
+                let filters = &server.capability_value("workspace")["fileOperations"][operation]["filters"];
+                renames.iter().any(|(old, _, is_dir)| file_operation_matches(filters, old, *is_dir))
+            })
+            .cloned()
+            .collect()
     }
 
     /// The running server for an open document.
@@ -1029,6 +1252,8 @@ impl LspStore {
     }
 
     pub fn did_close(&mut self, path: &Path) {
+        self.pulls.retain(|(p, _), _| p != path);
+        self.result_ids.retain(|(p, _), _| p != path);
         let Some(doc) = self.documents.remove(path) else { return };
         for (key, _) in doc.servers.iter().filter(|(_, opened)| *opened) {
             if let Some(client) = self.client(key) {
@@ -1243,6 +1468,8 @@ fn initialize_params(root: &Path, initialization_options: Value) -> Value {
                 // Hints and lenses are asked for again when it says they changed.
                 "inlayHint": { "refreshSupport": true },
                 "codeLens": { "refreshSupport": true },
+                "diagnostics": { "refreshSupport": true },
+                "fileOperations": { "willRename": true, "didRename": true },
             },
             "window": { "workDoneProgress": true },
             "textDocument": {
@@ -1264,6 +1491,7 @@ fn initialize_params(root: &Path, initialization_options: Value) -> Value {
                 },
                 "definition": { "linkSupport": true },
                 "references": {},
+                "diagnostic": { "dynamicRegistration": true, "relatedDocumentSupport": true },
                 "callHierarchy": {},
                 "typeHierarchy": {},
                 "rename": { "prepareSupport": false },
@@ -1384,6 +1612,33 @@ impl FileWatcher {
     }
 }
 
+fn rename_params(renames: &[(PathBuf, PathBuf, bool)]) -> Value {
+    let files: Vec<Value> = renames.iter().map(|(old, new, _)| json!({ "oldUri": path_to_uri(old), "newUri": path_to_uri(new) })).collect();
+    json!({ "files": files })
+}
+
+/// Whether a server's `FileOperationFilter`s cover `path`: a `file` scheme
+/// (or none), its glob over the whole path, and `matches` (file or folder)
+/// when it says.
+fn file_operation_matches(filters: &Value, path: &Path, is_dir: bool) -> bool {
+    let Some(filters) = filters.as_array() else { return false };
+    let text = path.to_string_lossy().replace('\\', "/");
+    filters.iter().any(|filter| {
+        if filter.get("scheme").and_then(Value::as_str).is_some_and(|s| s != "file") {
+            return false;
+        }
+        let pattern = &filter["pattern"];
+        match pattern.get("matches").and_then(Value::as_str) {
+            Some("file") if is_dir => return false,
+            Some("folder") if !is_dir => return false,
+            _ => {}
+        }
+        let Some(glob) = pattern.get("glob").and_then(Value::as_str) else { return false };
+        let ignore_case = pattern.pointer("/options/ignoreCase").and_then(Value::as_bool).unwrap_or(false);
+        globset::GlobBuilder::new(glob).literal_separator(true).case_insensitive(ignore_case).build().is_ok_and(|g| g.compile_matcher().is_match(&text))
+    })
+}
+
 /// A language server for tests: `python3 -c FAKE_SERVER <name> <trigger chars>`.
 /// It publishes one diagnostic per opened file ("<name> problem", followed
 /// by its initialization option `greeting` and the `mode` in its `fake`
@@ -1401,6 +1656,11 @@ impl FileWatcher {
 /// line, ` // end` at the end of the completion's line) come only on `completionItem/resolve`,
 /// which it answers after a pause. Like rust-analyzer, it gives them only while the text is
 /// the version the item was made for, and when no change came while it worked.
+/// Named "pull", it publishes nothing: asked (`textDocument/diagnostic`), it reports
+/// "pulled v<version> <first line>", and an unchanged report for the version it last
+/// reported. Named "renames", it asks before `.rs` files are renamed and answers with an
+/// edit putting `// moved` at the top of the old file; told of a rename, it publishes
+/// "renames heard <new name>".
 #[cfg(test)]
 pub(crate) const FAKE_SERVER: &str = r#"
 import sys, json, time, queue, threading
@@ -1480,7 +1740,26 @@ while True:
             caps["textDocumentSync"] = {"openClose": True, "change": 1, "save": True}
         if name == "resolve":
             caps["completionProvider"]["resolveProvider"] = True
+        if name == "pull":
+            caps["diagnosticProvider"] = {"identifier": "fake", "interFileDependencies": False, "workspaceDiagnostics": False}
+        if name == "renames":
+            rs = {"filters": [{"scheme": "file", "pattern": {"glob": "**/*.rs", "matches": "file"}}]}
+            caps["workspace"] = {"fileOperations": {"willRename": rs, "didRename": rs}}
         send({"jsonrpc": "2.0", "id": id, "result": {"capabilities": caps}})
+    elif method == "textDocument/diagnostic":
+        if m["params"].get("previousResultId") == str(version):
+            send({"jsonrpc": "2.0", "id": id, "result": {"kind": "unchanged", "resultId": str(version)}})
+        else:
+            problem = {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "severity": 1, "message": "pulled v%d %s" % (version, text.split("\n", 1)[0])}
+            send({"jsonrpc": "2.0", "id": id, "result": {"kind": "full", "resultId": str(version), "items": [problem]}})
+    elif method == "workspace/willRenameFiles":
+        old = m["params"]["files"][0]["oldUri"]
+        top = {"line": 0, "character": 0}
+        send({"jsonrpc": "2.0", "id": id, "result": {"changes": {old: [{"range": {"start": top, "end": top}, "newText": "// moved\n"}]}}})
+    elif method == "workspace/didRenameFiles" and last_uri:
+        heard = m["params"]["files"][0]["newUri"].rsplit("/", 1)[-1]
+        problem = {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "severity": 3, "message": "renames heard " + heard}
+        send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {"uri": last_uri, "diagnostics": [problem]}})
     elif method == "textDocument/didChange":
         text = m["params"]["contentChanges"][-1]["text"]
         version = m["params"]["textDocument"]["version"]
@@ -1517,7 +1796,8 @@ while True:
             extra += [str(answers["odd"].get("error", {}).get("code")), "progress " + ("refused" if "error" in answers["wdp"] else "ok")]
         message = " ".join([name + " problem"] + extra)
         problem = {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "severity": 1, "message": message}
-        send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {"uri": spelled(uri), "diagnostics": [problem]}})
+        if name != "pull":
+            send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {"uri": spelled(uri), "diagnostics": [problem]}})
     elif method == "textDocument/codeLens":
         # Unresolved: the title comes with codeLens/resolve.
         lines = range(0, len(text.split("\n")) - 1, 100) if name == "lenses" else [0]
@@ -1660,6 +1940,134 @@ mod tests {
         cx.update(|_| {});
         cx.run_until_parked();
         assert!(store.read_with(cx, |s, _| !s.documents.contains_key(&hidden) && s.documents.contains_key(&shown)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_operation_filters_match_paths() {
+        let filters = json!([
+            { "scheme": "file", "pattern": { "glob": "**/*.rs", "matches": "file" } },
+            { "pattern": { "glob": "**/src", "matches": "folder" } },
+            { "scheme": "untitled", "pattern": { "glob": "**/*.py" } },
+            { "pattern": { "glob": "**/*.TS", "options": { "ignoreCase": true } } },
+        ]);
+        let matches = |path: &str, dir| file_operation_matches(&filters, Path::new(path), dir);
+        assert!(matches("/work/p/src/util.rs", false));
+        assert!(!matches("/work/p/src/util.rs", true), "a folder named like a file");
+        assert!(matches("/work/p/src", true));
+        assert!(!matches("/work/p/src/x.py", false), "another scheme");
+        assert!(matches("/work/p/app.ts", false));
+        assert!(!matches("/work/p/README.md", false));
+        assert!(!file_operation_matches(&Value::Null, Path::new("/a.rs"), false));
+    }
+
+    /// A server with pull diagnostics is asked for them when a document
+    /// opens and again after an edit; an unchanged report keeps them.
+    #[gpui::test]
+    fn pulled_diagnostics_follow_edits(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+
+        use crate::document::{Document, EditKind};
+        if servers::which("python3").is_none() {
+            return;
+        }
+        cx.executor().allow_parking();
+        crate::trust::set_trust_all(true);
+        let dir = std::env::temp_dir().join(format!("kuana-lsp-pull-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.rs");
+        std::fs::write(&path, "fn a() {}\n").unwrap();
+        let store = cx.new(|_| {
+            let mut store = LspStore::new();
+            store.test_specs = Some(vec![fake_server("pull", "")]);
+            store.set_root(Some(dir.clone()));
+            store
+        });
+        let editor = cx.new(|cx| Editor::new(Document::open(&path).unwrap(), cx));
+        store.update(cx, |s, cx| s.register(&editor, cx));
+        let message = |cx: &mut gpui::TestAppContext| editor.read_with(cx, |e, cx| e.doc.read(cx).diagnostics.first().map(|d| d.message.to_string()));
+        let wait = |cx: &mut gpui::TestAppContext, want: &str| {
+            let started = std::time::Instant::now();
+            while message(cx).as_deref() != Some(want) {
+                assert!(started.elapsed() < std::time::Duration::from_secs(10), "waited for {want:?}, have {:?}", message(cx));
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                cx.executor().advance_clock(PULL_DELAY);
+                cx.run_until_parked();
+            }
+        };
+        let version = |cx: &mut gpui::TestAppContext| editor.read_with(cx, |e, cx| e.doc.read(cx).version());
+        let first = version(cx);
+        wait(cx, &format!("pulled v{first} fn a() {{}}"));
+
+        let doc = editor.read_with(cx, |e, _| e.doc.clone());
+        doc.update(cx, |d, _| d.edit(vec![(3..4, "b".into())], &[], EditKind::Other));
+        store.update(cx, |s, cx| s.send_edits(&doc, cx));
+        let second = version(cx);
+        wait(cx, &format!("pulled v{second} fn b() {{}}"));
+        // Asked again with nothing new, it says unchanged: they stay.
+        store.update(cx, |s, cx| s.pull_soon(&path, cx));
+        cx.executor().advance_clock(PULL_DELAY);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        cx.run_until_parked();
+        assert_eq!(message(cx), Some(format!("pulled v{second} fn b() {{}}")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A server that asks before renames gives its edits, and hears of the
+    /// rename after.
+    #[gpui::test]
+    fn renames_ask_servers_first(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+
+        use crate::document::Document;
+        if servers::which("python3").is_none() {
+            return;
+        }
+        cx.executor().allow_parking();
+        crate::trust::set_trust_all(true);
+        let dir = std::env::temp_dir().join(format!("kuana-lsp-renames-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (old, new) = (dir.join("a.rs"), dir.join("b.rs"));
+        std::fs::write(&old, "fn a() {}\n").unwrap();
+        let store = cx.new(|_| {
+            let mut store = LspStore::new();
+            store.test_specs = Some(vec![fake_server("renames", "")]);
+            store.set_root(Some(dir.clone()));
+            store
+        });
+        let editor = cx.new(|cx| Editor::new(Document::open(&old).unwrap(), cx));
+        store.update(cx, |s, cx| s.register(&editor, cx));
+        let started = std::time::Instant::now();
+        while !store.read_with(cx, |s, _| s.running_servers().len() == 1) {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "the server didn't start");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+        // Markdown isn't in its filters; Rust is.
+        let renames = |old: &Path, new: &Path| [(old.to_path_buf(), new.to_path_buf(), false)];
+        assert!(store.read_with(cx, |s, cx| s.will_rename(&renames(&dir.join("a.md"), &dir.join("b.md")), cx)).is_none());
+        let asking = store.read_with(cx, |s, cx| s.will_rename(&renames(&old, &new), cx)).unwrap();
+        let answer = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let slot = answer.clone();
+        cx.spawn(async move |_| *slot.borrow_mut() = Some(asking.await)).detach();
+        let started = std::time::Instant::now();
+        while answer.borrow().is_none() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "no answer");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+        let edits = answer.borrow_mut().take().unwrap().expect("answered in time");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].edits[0].path, old);
+        assert_eq!(edits[0].edits[0].edits[0].new_text, "// moved\n");
+
+        store.read_with(cx, |s, _| s.did_rename(&renames(&old, &new)));
+        let started = std::time::Instant::now();
+        while !editor.read_with(cx, |e, cx| e.doc.read(cx).diagnostics.iter().any(|d| &*d.message == "renames heard b.rs")) {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "didRenameFiles not heard");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            cx.run_until_parked();
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

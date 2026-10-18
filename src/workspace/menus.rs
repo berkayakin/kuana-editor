@@ -502,24 +502,22 @@ impl Workspace {
                 }
                 // Folders the new name adds go away again on undo.
                 let new_dirs = new.parent().map(crate::file_history::topmost_new).filter(|d| !d.exists());
-                if let Some(parent) = new.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                }
-                std::fs::rename(&old, &new).map_err(|e| e.to_string())?;
-                let old_name = old.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let renamed = crate::file_history::Change::Renamed { from: old.clone(), to: new.clone() };
-                let mut changed = vec![old.clone(), new.clone()];
-                let change = match new_dirs {
-                    Some(dirs) => {
-                        changed.push(dirs.clone());
-                        crate::file_history::Change::Batch(vec![crate::file_history::Change::Created(dirs), renamed])
-                    }
-                    None => renamed,
-                };
-                self.file_history.record(format!("Rename “{old_name}”"), change);
-                self.moved(&old, &new, cx);
-                self.reveal_in_tree(&new, cx);
-                self.after_fs_change(&changed, cx);
+                self.rename_with_servers(old.clone(), new.clone(), cx, move |ws, cx| {
+                    let old_name = old.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let renamed = crate::file_history::Change::Renamed { from: old.clone(), to: new.clone() };
+                    let mut changed = vec![old.clone(), new.clone()];
+                    let change = match new_dirs {
+                        Some(dirs) => {
+                            changed.push(dirs.clone());
+                            crate::file_history::Change::Batch(vec![crate::file_history::Change::Created(dirs), renamed])
+                        }
+                        None => renamed,
+                    };
+                    ws.file_history.record(format!("Rename “{old_name}”"), change);
+                    ws.moved(&old, &new, cx);
+                    ws.reveal_in_tree(&new, cx);
+                    ws.after_fs_change(&changed, cx);
+                });
             }
             // Handled before the name checks above.
             PendingInput::RenameSymbol { .. } | PendingInput::VimCommand | PendingInput::Git(_) => {}
@@ -596,6 +594,7 @@ impl Workspace {
 
     /// Keeps open tabs, expanded folders and recents pointing at moved files.
     pub(super) fn moved(&mut self, old: &Path, new: &Path, cx: &mut Context<Self>) {
+        self.lsp.read(cx).did_rename(&[(old.to_path_buf(), new.to_path_buf(), new.is_dir())]);
         let remap = |p: &Path| p.strip_prefix(old).ok().map(|rest| if rest.as_os_str().is_empty() { new.to_path_buf() } else { new.join(rest) });
         for editor in self.editors.clone() {
             let path = editor.read(cx).doc.read(cx).path.clone();
@@ -647,19 +646,60 @@ impl Workspace {
         } else if to.exists() {
             Some(format!("{} already has {}", folder_name(&dir), name.to_string_lossy()))
         } else {
-            std::fs::rename(&from, &to).err().map(|e| e.to_string())
+            None
         };
         if let Some(problem) = problem {
             self.toast(ToastKind::Error, "Couldn't move", Some(problem), cx);
             return;
         }
         let label = format!("Move “{}”", name.to_string_lossy());
-        self.file_history.record(label, crate::file_history::Change::Renamed { from: from.clone(), to: to.clone() });
-        self.moved(&from, &to, cx);
-        self.tree.update(cx, |t, _| t.expand(dir));
-        self.reveal_in_tree(&to, cx);
-        self.after_fs_change(&[from, to], cx);
-        self.schedule_session_save(cx);
+        self.rename_with_servers(from.clone(), to.clone(), cx, move |ws, cx| {
+            ws.file_history.record(label, crate::file_history::Change::Renamed { from: from.clone(), to: to.clone() });
+            ws.moved(&from, &to, cx);
+            ws.tree.update(cx, |t, _| t.expand(dir));
+            ws.reveal_in_tree(&to, cx);
+            ws.after_fs_change(&[from, to], cx);
+            ws.schedule_session_save(cx);
+        });
+    }
+
+    /// Renames or moves `old` to `new` (making the folders it needs), then
+    /// runs `done`. Language servers that ask (`workspace/willRenameFiles`)
+    /// first say what else changes with it, as Rust's `mod` lines or
+    /// TypeScript's imports, and those edits are made before the rename (they
+    /// name the old paths), as in VS Code; the files they change are saved by
+    /// auto-save or listed like a rename's. A server that takes too long is
+    /// left out.
+    fn rename_with_servers(&mut self, old: PathBuf, new: PathBuf, cx: &mut Context<Self>, done: impl FnOnce(&mut Self, &mut Context<Self>) + 'static) {
+        let asking = self.lsp.read(cx).will_rename(&[(old.clone(), new.clone(), old.is_dir())], cx);
+        let rename = move |ws: &mut Self, cx: &mut Context<Self>| {
+            let result = new.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::rename(&old, &new));
+            match result {
+                Ok(()) => done(ws, cx),
+                Err(err) => ws.toast(ToastKind::Error, "Couldn't rename", Some(err.to_string()), cx),
+            }
+        };
+        let Some(asking) = asking else {
+            rename(self, cx);
+            return;
+        };
+        cx.spawn(async move |ws, cx| {
+            let answers = asking.await;
+            let Ok(applying) = ws.update(cx, |ws, cx| match answers {
+                Ok(answers) => answers.into_iter().map(|a| ws.apply_workspace_edit(a.edits, a.encoding, cx)).collect::<Vec<_>>(),
+                Err(()) => {
+                    ws.toast(ToastKind::Info, "Renamed without updating references", Some("The language server took too long to answer".into()), cx);
+                    Vec::new()
+                }
+            }) else {
+                return;
+            };
+            for edit in applying {
+                edit.await;
+            }
+            ws.update(cx, rename).ok();
+        })
+        .detach();
     }
 
 

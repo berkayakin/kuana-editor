@@ -393,6 +393,12 @@ impl Editor {
             if !changes.is_empty() {
                 // What servers answer for this version is read in this text.
                 self.doc.as_mut(cx).note_lsp_version();
+                // Servers that wait to be asked for diagnostics are asked
+                // (once this edit's effects settle: the store may be busy).
+                let (store, path) = (store.downgrade(), path.clone());
+                cx.defer(move |cx| {
+                    store.update(cx, |s, cx| s.pull_soon(&path, cx)).ok();
+                });
             }
             store.read(cx).did_change(&path, self.doc.read(cx).version(), changes, self.doc.read(cx).rope());
         }

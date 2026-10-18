@@ -103,7 +103,7 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   an open file, carets, the view, breakpoints, folds, problems and inlay hints stay with the lines
   they were on, Undo brings back the text from before, and language servers check the file again
   as after a save
-- File tree with new file/folder, rename, duplicate, copy/paste, Move to Trash, Find in Folder and
+- File tree with new file/folder, rename (language servers update imports and `mod` lines first), duplicate, copy/paste, Move to Trash, Find in Folder and
   Reveal in Finder; drag entries onto a folder to move them (open tabs follow); **Select Opened File**
   (⌥F1 / Alt+F1, or a tab's menu) shows the current file in the tree; ⌘Z / ⇧⌘Z (Ctrl+Z / Ctrl+Shift+Z)
   in the tree, or its right-click menu, undo and redo file operations, deletes included (they come

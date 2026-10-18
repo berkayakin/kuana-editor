@@ -36,6 +36,17 @@ install command.
 | Shell | bash-language-server | `npm install -g bash-language-server` |
 | Markdown | marksman | `brew install marksman` |
 
+Servers report problems either by sending them as they find them or by being asked (pull
+diagnostics, `textDocument/diagnostic`: basedpyright, pyright and ESLint work this way when the
+editor supports it); Kuana does both. It asks when a file opens and a moment after each edit, and,
+for a server whose problems span files, asks again for its other open files too.
+
+Renaming or moving a file or folder in the file tree first asks the servers that want to know
+(`workspace/willRenameFiles`) what else changes with it, and makes those edits before the rename:
+rust-analyzer updates `mod` declarations and paths, TypeScript servers update imports. Edited files
+are saved by auto-save (or listed to save, like a rename's). A server that takes longer than five
+seconds is left out and a notification says so; servers hear of every rename, undo included.
+
 With a server running, its diagnostics replace Kuana's built-in syntax check (the other built-in
 rules and ESLint still run). Hover a symbol for its documentation and any problem there (the
 popover scrolls, and a copy button that appears on hover copies its text); completion opens as you type (Enter inserts, Tab replaces the rest of the word). **Restart
