@@ -576,9 +576,9 @@ impl Editor {
     /// A second editor for the same document (a split): it starts where
     /// this one is, then has carets and scrolling of its own.
     pub fn view_of(other: &Entity<Editor>, cx: &mut Context<Self>) -> Self {
-        let (doc, selections, scroll, folds) = {
+        let (doc, selections, scroll, top_line, folds) = {
             let other = other.read(cx);
-            (other.doc.clone(), other.selections.clone(), other.scroll, other.folds.clone())
+            (other.doc.clone(), other.selections.clone(), other.scroll, other.top_line(cx), other.folds.clone())
         };
         let waiting = doc.read(cx).is_stand_in();
         let mut this = Self::blank_in(doc, cx);
@@ -587,7 +587,11 @@ impl Editor {
         this.detect_external_linter(cx);
         this.selections = selections;
         this.selections_generation += 1;
-        this.scroll = scroll;
+        // It starts at the other view's top line: the other's scroll counts
+        // its display rows, block rows (code lenses) included, which this
+        // one has no map of before its first frame.
+        this.scroll.x = scroll.x;
+        this.scroll_to_line = top_line;
         // It starts folded like the view it splits from, then folds apart.
         this.folds = folds;
         this
@@ -3386,9 +3390,9 @@ impl Editor {
             }
         }
         if let Some(line) = self.scroll_to_line.take().filter(|_| !single) {
-            // A restored tab's view as it was, wherever its caret is.
+            // A view placed by its top line (a restored tab's, a split's),
+            // wherever its caret is.
             self.scroll.y = line_height * self.rows_start(line) as f32;
-            self.scroll.x = px(0.);
             self.center_on_next_frame = false;
             self.autoscroll = false;
         } else if std::mem::take(&mut self.center_on_next_frame) && !single {
@@ -6703,6 +6707,45 @@ mod frame_tests {
     /// 1.6 MB for 100k.
     fn long_line(pieces: usize) -> String {
         (0..pieces).map(|i| format!("{i:06}\t\u{1}ab,")).collect()
+    }
+
+    /// A split starts at its source's top line. The source scrolled a row
+    /// when it found a lens above its first line (keeping that line at the
+    /// top), and a split that copied its scroll read that row as the next
+    /// line before it had block rows of its own: it started rows lower, a row
+    /// more with each split of a split.
+    #[gpui::test]
+    fn a_split_starts_at_its_sources_top_line(cx: &mut TestAppContext) {
+        let (editor, host, cx) = editor("fn main() {\n    println!(\"hello\");\n}\n".into(), cx);
+        editor.update(cx, |e, cx| {
+            e.file_settings.code_lens = true;
+            let lens = crate::document::CodeLens {
+                id: 0,
+                line_start: 0,
+                title: "Run".into(),
+                command: Arc::new(serde_json::Value::Null),
+                server: "s".into(),
+                unresolved: None,
+            };
+            let stamp = e.doc.read(cx).lens_stamp();
+            e.doc.as_mut(cx).set_code_lenses(vec![lens], stamp);
+        });
+        frame(&host, cx);
+        let top = editor.update(cx, |e, cx| e.top_line(cx));
+        assert_eq!(top, Some(0));
+        let mut source = editor;
+        for generation in 1..=2 {
+            let split = cx.new(|cx| {
+                let mut e = Editor::view_of(&source, cx);
+                e.soft_wrap = false;
+                e.file_settings.code_lens = true;
+                e
+            });
+            let host = cx.new(|_| Host { editor: split.clone(), frame: Rc::default() });
+            frame(&host, cx);
+            assert_eq!(split.update(cx, |e, cx| e.top_line(cx)), top, "split {generation}");
+            source = split;
+        }
     }
 
     #[gpui::test]
