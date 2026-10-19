@@ -943,8 +943,15 @@ impl Document {
         self.long_lines += long_lines(&self.rope, row..row + lines.new_rows);
     }
 
-    /// Parses after an edit, within `PARSE_BUDGET`.
+    /// Parses after an edit, within `PARSE_BUDGET`; not while behind: the
+    /// background parse catches up with the edit (`parse_edits`), and one
+    /// tried here would likely run out of time too and be thrown away.
     fn reparse(&mut self) {
+        if self.parse_behind {
+            // The trees took the edit.
+            self.tree_version += 1;
+            return;
+        }
         let parsed = self.syntax.reparse_within(&self.rope, Some(self.parse_budget));
         self.after_parse(parsed);
     }
@@ -2665,6 +2672,30 @@ mod tests {
         assert_eq!(doc.syntax().tree().unwrap().root_node().to_sexp(), fresh.tree().unwrap().root_node().to_sexp());
     }
 
+    /// While a background parse runs, an edit doesn't parse here, however
+    /// long it may: the trees are the old ones, edited, until the background
+    /// parse lands and catches up with it (a fence typed meanwhile too).
+    #[test]
+    fn edits_wait_for_the_background_parse() {
+        let text: String = (0..300).map(|i| format!("Part {i} with `code`.\n\n```rust\nfn f{i}() {{}}\n```\n\n")).collect();
+        let mut doc = Document::with_text(text, Some("a.md".into()), false, Some(Duration::ZERO));
+        doc.parse_budget = Duration::from_secs(10);
+        let (opened, job) = doc.parse_job().expect("behind");
+        let tree_version = doc.tree_version();
+        doc.edit(vec![(0..0, "```js\nlet a = 1;\n```\n\n".into())], &[], EditKind::Typing);
+        assert!(doc.syntax().tree().is_none(), "not parsed here");
+        assert!(doc.tree_version() > tree_version);
+        assert!(doc.finish_parse(opened, job()), "behind the edit");
+        let (version, job) = doc.parse_job().expect("behind");
+        assert!(!doc.finish_parse(version, job()));
+        assert_eq!(doc.syntax().language_at(6), Language::JavaScript);
+        let fresh = Syntax::new(Language::Markdown, doc.rope());
+        assert_eq!(doc.syntax().highlights(doc.rope(), 0..doc.rope().len_bytes()), fresh.highlights(doc.rope(), 0..doc.rope().len_bytes()));
+        // Caught up: the next edit parses here again.
+        doc.edit(vec![(6..6, "x".into())], &[], EditKind::Typing);
+        assert!(doc.parse_job().is_none());
+    }
+
     /// What the syntax check reads: the document's own tree when it's
     /// parsed for the text, else a parse from it of the text as it is.
     #[test]
@@ -3194,5 +3225,72 @@ mod tests {
         doc.save().unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Big files of the kinds whose keystrokes cost most: Markdown under one
+    /// H1 (one top-level node) with many fences and inline code, Rust with
+    /// one big `impl`, generated JSON; and where to type in each.
+    fn keystroke_files() -> [(&'static str, String, usize); 3] {
+        let mut md = String::from("# Notes\n\n");
+        for i in 0..400 {
+            md += &format!("## Part {i}\n\nSome text with `code {i}` and *emphasis*, then `more`.\n\n");
+            md += &format!("```rust\nfn part_{i}() {{\n    let x = {i};\n    println!(\"{{x}}\");\n}}\n```\n\n- item `{i}`\n\n");
+        }
+        let mut rs = String::from("struct Big;\n\nimpl Big {\n");
+        for i in 0..2000 {
+            rs += &format!("    fn method_{i}(&self, x: u32) -> u32 {{\n        let y = x + {i};\n        y * 2\n    }}\n\n");
+        }
+        rs += "}\n";
+        let mut json = String::from("[\n");
+        for i in 0..4000 {
+            json += &format!("  {{\n    \"id\": {i},\n    \"name\": \"item {i}\",\n    \"tags\": [\"a\", \"b\"]\n  }},\n");
+        }
+        json += "  {}\n]\n";
+        let middle = |text: &str, needle: &str| text[text.len() / 2..].find(needle).unwrap() + text.len() / 2 + needle.len();
+        [
+            ("a.md", md.clone(), middle(&md, "Some text")),
+            ("a.rs", rs.clone(), middle(&rs, "let y = ")),
+            ("a.json", json.clone(), middle(&json, "\"item")),
+        ]
+    }
+
+    /// `cargo test bench_keystrokes -- --ignored --nocapture`: what a typed
+    /// character costs on the UI thread in a big file, with the trees parsed
+    /// (a background parse finishing before the next key), and while a
+    /// background parse runs (the file just opened).
+    #[test]
+    #[ignore]
+    fn bench_keystrokes() {
+        const KEYS: usize = 60;
+        let stats = |mut times: Vec<Duration>| {
+            times.sort();
+            format!("median {:?}, max {:?}", times[times.len() / 2], times[times.len() - 1])
+        };
+        for (name, text, at) in keystroke_files() {
+            let lines = text.lines().count();
+            let mut doc = Document::from_text(text.clone(), Some(name.into()));
+            let (mut times, mut behind) = (Vec::new(), 0);
+            for i in 0..KEYS {
+                let start = Instant::now();
+                doc.edit(vec![(at + i..at + i, "x".into())], &[], EditKind::Typing);
+                times.push(start.elapsed());
+                if let Some((version, job)) = doc.parse_job() {
+                    behind += 1;
+                    doc.finish_parse(version, job());
+                }
+            }
+            println!("{name} ({lines} lines), parsed: {}; {behind}/{KEYS} keys left a background parse", stats(times));
+
+            // Just opened: the parse goes on in the background.
+            let mut doc = Document::with_text(text, Some(name.into()), false, Some(Duration::ZERO));
+            let _in_flight = doc.parse_job().expect("behind");
+            let mut times = Vec::new();
+            for i in 0..KEYS {
+                let start = Instant::now();
+                doc.edit(vec![(at + i..at + i, "x".into())], &[], EditKind::Typing);
+                times.push(start.elapsed());
+            }
+            println!("{name}, background parse running: {}", stats(times));
+        }
     }
 }
