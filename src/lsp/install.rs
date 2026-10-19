@@ -74,6 +74,7 @@ const INSTALLERS: &[Installer] = &[
     Installer { command: "marksman", source: Source::GitHub { repo: "artempyanykh/marksman", asset: Asset::Fn(marksman_asset) } },
     Installer { command: "vtsls", source: Source::Npm { package: "@vtsls/language-server" } },
     Installer { command: "basedpyright-langserver", source: Source::Npm { package: "basedpyright" } },
+    Installer { command: "phpactor", source: Source::GitHub { repo: "phpactor/phpactor", asset: Asset::Fn(phpactor_asset) } },
     Installer { command: "intelephense", source: Source::Npm { package: "intelephense" } },
     Installer { command: "vscode-css-language-server", source: Source::Npm { package: "vscode-langservers-extracted" } },
     Installer { command: "vscode-html-language-server", source: Source::Npm { package: "vscode-langservers-extracted" } },
@@ -137,6 +138,12 @@ fn taplo_asset() -> Option<String> {
     Some(format!("taplo-{os}-{}.gz", std::env::consts::ARCH))
 }
 
+/// phpactor's release is a PHP archive, which runs with the PHP on PATH (its
+/// `#!/usr/bin/env php`); Windows can't start it that way.
+fn phpactor_asset() -> Option<String> {
+    (!cfg!(windows)).then(|| "phpactor.phar".into())
+}
+
 fn marksman_asset() -> Option<String> {
     Some(match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", _) => "marksman-macos".into(),
@@ -186,7 +193,10 @@ pub fn servers_dir() -> Option<PathBuf> {
 /// The installer for a server, by the first candidate Kuana can install.
 pub fn for_spec(spec: &ServerSpec) -> Option<&'static Installer> {
     let installers = all();
-    spec.candidates.iter().find_map(|(command, _)| installers.iter().find(|i| i.command == *command).copied())
+    spec.candidates
+        .iter()
+        .filter(|(command, _)| servers::usable(command))
+        .find_map(|(command, _)| installers.iter().find(|i| i.command == *command).copied())
 }
 
 /// Kuana's copy of `command`, if it installed one.
@@ -593,6 +603,7 @@ mod tests {
         std::fs::remove_file(&file).ok();
         assert_eq!(folder_name("v1.2/x"), "v1.2_x");
         assert!(rust_analyzer_asset().is_some() && taplo_asset().is_some());
+        assert_eq!(phpactor_asset().is_some(), !cfg!(windows));
     }
 
     #[test]

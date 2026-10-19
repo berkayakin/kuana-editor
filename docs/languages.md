@@ -14,7 +14,7 @@ server you have installed or downloads one itself (into `~/.config/kuana/extensi
 If none is installed, the status bar offers **Install <server>**: one click puts it in Kuana's own
 folder (`~/.config/kuana/servers/`) and starts it. While Kuana downloads anything (a server, Node.js,
 wasi-sdk, an update), the status bar shows its progress; the tooltip lists each download's size,
-progress and speed. rust-analyzer, taplo and marksman come from their
+progress and speed. rust-analyzer, taplo, marksman and phpactor come from their
 GitHub releases (checked against GitHub's SHA-256); vtsls, basedpyright, intelephense, the
 vscode-langservers (HTML, CSS, JSON), yaml-language-server and bash-language-server are npm
 packages, installed with your Node.js or, without one, a Node.js LTS Kuana downloads once (checked
@@ -28,8 +28,8 @@ install command.
 | Rust | rust-analyzer | `rustup component add rust-analyzer` |
 | Go | gopls | `go install golang.org/x/tools/gopls@latest` |
 | JavaScript, TypeScript | typescript-language-server or vtsls | `npm install -g typescript typescript-language-server` |
-| Python | basedpyright, pyright or pylsp | `pip install basedpyright` |
-| PHP | intelephense or phpactor | `npm install -g intelephense` |
+| Python | basedpyright, pyright or pylsp, with Ruff beside it | `pip install basedpyright ruff` |
+| PHP | phpactor (needs PHP) or intelephense | `npm install -g intelephense` |
 | HTML, CSS, JSON | vscode-langservers-extracted | `npm install -g vscode-langservers-extracted` |
 | YAML | yaml-language-server | `npm install -g yaml-language-server` |
 | TOML | taplo | `cargo install taplo-cli --locked --features lsp` |
@@ -45,6 +45,12 @@ basedpyright checks in pyright's `"standard"` mode, as in Zed (its own default, 
 warns about most untyped code). A project's `pyrightconfig.json` or `[tool.basedpyright]` in
 `pyproject.toml` sets its own; to change it everywhere, set
 `"lsp": { "basedpyright": { "settings": { "basedpyright.analysis": { "typeCheckingMode": "recommended" } } } }`.
+
+As in Zed, Python files also get Ruff's language server (`ruff server`) when Ruff is in the project's
+venv or on PATH: its lint rules (with your `[tool.ruff]` settings) and their fixes, and Organize
+Imports, which basedpyright then leaves to it. Without Ruff installed nothing is shown for it. PHP
+files get phpactor, as in Zed, when PHP is installed to run it (on Windows, and without PHP,
+intelephense, which reports many more missing types and methods).
 
 Renaming or moving a file or folder in the file tree first asks the servers that want to know
 (`workspace/willRenameFiles`) what else changes with it, and makes those edits before the rename:

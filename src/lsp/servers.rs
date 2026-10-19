@@ -53,11 +53,12 @@ pub fn spec(language: Language) -> Option<&'static ServerSpec> {
 /// extension's server that's the same program as an earlier one (a choice
 /// Kuana already makes) isn't started twice.
 pub fn specs(language: Language) -> Vec<&'static ServerSpec> {
-    combine(builtin(language), crate::extensions::servers_for(language.name()))
+    let builtin = builtin(language).into_iter().chain(beside(language)).collect();
+    combine(builtin, crate::extensions::servers_for(language.name()))
 }
 
-fn combine(builtin: Option<&'static ServerSpec>, extensions: Vec<&'static ServerSpec>) -> Vec<&'static ServerSpec> {
-    let mut out: Vec<&'static ServerSpec> = builtin.into_iter().collect();
+fn combine(builtin: Vec<&'static ServerSpec>, extensions: Vec<&'static ServerSpec>) -> Vec<&'static ServerSpec> {
+    let mut out = builtin;
     for spec in extensions {
         let same = |s: &&ServerSpec| s.candidates.iter().any(|(a, _)| spec.candidates.iter().any(|(b, _)| a == b));
         if !out.iter().any(same) {
@@ -101,9 +102,16 @@ fn builtin(language: Language) -> Option<&'static ServerSpec> {
         root_markers: &["pyproject.toml", "setup.py", "requirements.txt"],
         ..SPEC
     };
+    // phpactor first, as in Zed (intelephense reports types it can't find in
+    // most projects), when PHP is there to run it (`usable`); on Windows
+    // intelephense, as in Zed.
     static PHP: ServerSpec = ServerSpec {
         id: "php",
-        candidates: &[("intelephense", &["--stdio"]), ("phpactor", &["language-server"])],
+        candidates: if cfg!(windows) {
+            &[("intelephense", &["--stdio"]), ("phpactor", &["language-server"])]
+        } else {
+            &[("phpactor", &["language-server"]), ("intelephense", &["--stdio"])]
+        },
         install: "npm install -g intelephense",
         root_markers: &["composer.json"],
         ..SPEC
@@ -172,6 +180,30 @@ fn builtin(language: Language) -> Option<&'static ServerSpec> {
         Language::Markdown => &MARKDOWN,
         Language::PlainText | Language::Extension(_) => return None,
     })
+}
+
+/// A server Kuana runs beside a language's own when it's installed (and
+/// says nothing when it isn't), as Zed does: Ruff's beside basedpyright, for
+/// its lint rules (pyflakes' and pycodestyle's errors, by default) and fixes.
+fn beside(language: Language) -> Option<&'static ServerSpec> {
+    static RUFF: ServerSpec = ServerSpec {
+        id: "ruff",
+        candidates: &[("ruff", &["server"])],
+        install: "pip install ruff",
+        root_markers: &["pyproject.toml", "ruff.toml", ".ruff.toml"],
+        ..SPEC
+    };
+    match language {
+        Language::Python => Some(&RUFF),
+        _ => None,
+    }
+}
+
+/// Whether a server program can run here: phpactor needs PHP (Kuana's copy
+/// is its `.phar`). Read where servers are found, off the main thread first.
+pub fn usable(program: &str) -> bool {
+    static PHP: LazyLock<bool> = LazyLock::new(|| which("php").is_some());
+    program != "phpactor" || *PHP
 }
 
 /// The `languageId` for `textDocument/didOpen`.
@@ -311,7 +343,10 @@ pub fn expand_dotted(value: &Value) -> Value {
 /// or `[tool.basedpyright]` still wins over this.
 fn defaults(program: &str) -> (Value, Value) {
     match program {
-        "basedpyright-langserver" => (Value::Null, json!({ "basedpyright": { "analysis": { "typeCheckingMode": "standard" } } })),
+        // Ruff organizes imports beside it, as in Zed.
+        "basedpyright-langserver" => {
+            (Value::Null, json!({ "basedpyright": { "analysis": { "typeCheckingMode": "standard" }, "disableOrganizeImports": true } }))
+        }
         "typescript-language-server" => {
             let hints = json!({
                 "includeInlayParameterNameHints": "all",
@@ -392,7 +427,7 @@ pub struct Command {
 /// venv first (a pinned version), then the search path.
 pub fn find(spec: &ServerSpec, file: &Path, venv: Option<&Path>) -> Option<Command> {
     let command = |program: PathBuf, args: &[&str]| Command { program, args: args.iter().map(|a| a.to_string()).collect(), env: Vec::new() };
-    for (name, args) in spec.candidates {
+    for (name, args) in spec.candidates.iter().filter(|(name, _)| usable(name)) {
         let local = file
             .ancestors()
             .skip(1)
@@ -403,7 +438,7 @@ pub fn find(spec: &ServerSpec, file: &Path, venv: Option<&Path>) -> Option<Comma
         }
     }
     // Only then Kuana's own copies: the user's servers, any of them, come first.
-    spec.candidates.iter().find_map(|(name, args)| Some(command(super::install::installed(name)?, args)))
+    spec.candidates.iter().filter(|(name, _)| usable(name)).find_map(|(name, args)| Some(command(super::install::installed(name)?, args)))
 }
 
 /// rustup's `rust-analyzer` in `~/.cargo/bin` is there without the component
@@ -549,9 +584,34 @@ mod tests {
         let ids = |specs: Vec<&ServerSpec>| specs.iter().map(|s| s.id).collect::<Vec<_>>();
         // ESLint joins TypeScript; an extension's vtsls is one of Kuana's own
         // choices for TypeScript already, so it isn't started a second time.
-        assert_eq!(ids(combine(builtin(Language::TypeScript), vec![&ESLINT, &VTSLS])), ["typescript", "eslint"]);
+        assert_eq!(ids(combine(builtin(Language::TypeScript).into_iter().collect(), vec![&ESLINT, &VTSLS])), ["typescript", "eslint"]);
         // A language Kuana has no server for gets the extensions' alone.
-        assert_eq!(ids(combine(None, vec![&VTSLS, &ESLINT])), ["ext:vtsls", "eslint"]);
+        assert_eq!(ids(combine(Vec::new(), vec![&VTSLS, &ESLINT])), ["ext:vtsls", "eslint"]);
+    }
+
+    #[test]
+    fn servers_as_in_zed() {
+        // Ruff beside basedpyright for Python, nothing beside the others.
+        let python: Vec<&str> = builtin(Language::Python).into_iter().chain(beside(Language::Python)).map(|s| s.id).collect();
+        assert_eq!(python, ["python", "ruff"]);
+        assert!(beside(Language::TypeScript).is_none());
+        // phpactor before intelephense, except on Windows; only phpactor needs PHP.
+        let php = builtin(Language::Php).unwrap();
+        let first = if cfg!(windows) { "intelephense" } else { "phpactor" };
+        assert_eq!(php.candidates[0].0, first);
+        assert!(usable("intelephense") && usable("ruff"));
+        if cfg!(windows) {
+            return;
+        }
+        // Ruff is found in the project's venv, the way the project pins it.
+        let dir = std::env::temp_dir().join(format!("kuana-ruff-{}", std::process::id()));
+        let venv = dir.join(".venv");
+        std::fs::create_dir_all(venv.join("bin")).unwrap();
+        std::fs::write(venv.join("bin/ruff"), "#!/bin/sh\n").unwrap();
+        crate::lsp::install::make_executable(&venv.join("bin/ruff")).unwrap();
+        let found = find(beside(Language::Python).unwrap(), &dir.join("a.py"), Some(&venv)).unwrap();
+        assert_eq!((found.program, found.args), (venv.join("bin/ruff"), vec!["server".to_string()]));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -598,6 +658,9 @@ mod tests {
         )]
         .into();
         assert_eq!(mode(&strict), "recommended");
+        // Ruff organizes imports, so basedpyright doesn't offer it too.
+        let based = config(python, Path::new("/bin/basedpyright-langserver"), &none, &FromCode::default());
+        assert_eq!(based.settings["basedpyright"]["disableOrganizeImports"], true);
 
         // An extension's own values sit between the two.
         static EXT: ServerSpec = ServerSpec { id: "ext:x", ..SPEC };
