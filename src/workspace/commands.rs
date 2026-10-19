@@ -119,11 +119,10 @@ impl Workspace {
         self.find_bar.update(cx, |f, cx| f.set_target(None, cx));
         self.editors.clear();
         self.tab_subscriptions.clear();
-        self.tab_looks.clear();
-        self.panes = vec![Pane::new()];
-        self.active_pane = 0;
-        self.pane_sizes = vec![1.0];
-        self.pinned.clear();
+        self.pane_subscriptions.clear();
+        let pane = self.new_pane(window, cx);
+        self.center = PaneTree::new(pane.clone());
+        self.active_pane = pane;
         self.session_task = None;
         self.terminals.update(cx, |p, cx| p.clear(cx));
         self.running.clear();
@@ -169,7 +168,7 @@ impl Workspace {
     }
 
     pub(super) fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.active_editor().cloned() else { return };
+        let Some(editor) = self.active_editor(cx) else { return };
         if editor.read(cx).doc.read(cx).path.is_none() {
             self.save_as(&SaveAs, window, cx);
             return;

@@ -208,7 +208,7 @@ impl Workspace {
     /// Picks up on-disk changes (checkout, pull, rollback) in unmodified tabs.
     pub(super) fn reload_changed_files(&mut self, cx: &mut Context<Self>) {
         self.reload_documents(|_| true, cx);
-        for image in self.images() {
+        for image in self.images(cx) {
             image.update(cx, |i, cx| i.reload_if_changed(cx));
         }
         // The watcher tells the tree what changed, if there's one.

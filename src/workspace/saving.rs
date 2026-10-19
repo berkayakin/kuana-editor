@@ -297,7 +297,7 @@ impl Workspace {
     }
 
     pub(super) fn save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = self.active_item().cloned() else { return };
+        let Some(item) = self.active_item(cx) else { return };
         let current = item.path(cx);
         let dir = current
             .as_deref()
@@ -356,7 +356,7 @@ impl Workspace {
     }
 
     pub(super) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(item) = self.active_item().cloned() {
+        if let Some(item) = self.active_item(cx) {
             self.close_item(&item, window, cx);
         }
     }
@@ -447,48 +447,45 @@ impl Workspace {
     /// it's the only one) and shows the next one.
     pub(super) fn remove_item(&mut self, item: &PaneItem, window: &mut Window, cx: &mut Context<Self>) {
         let id = item.entity_id();
-        let Some((pane_ix, tab_ix)) = self.locate(id) else { return };
-        self.pinned.remove(&id);
+        let Some((pane, _)) = self.locate(id, cx) else { return };
         self.tab_subscriptions.remove(&id);
-        self.tab_looks.remove(&id);
-        let was_active_pane = pane_ix == self.active_pane;
-        let pane = &mut self.panes[pane_ix];
-        pane.tabs.remove(tab_ix);
-        if tab_ix < pane.active || pane.active >= pane.tabs.len() {
-            pane.active = pane.active.saturating_sub(1);
-        }
-        if pane.tabs.is_empty() && self.panes.len() > 1 {
-            self.remove_pane(pane_ix);
+        let was_active_pane = pane == self.active_pane;
+        pane.update(cx, |p, cx| p.remove(id, cx));
+        if pane.read(cx).is_empty() {
+            self.remove_pane(&pane);
         }
         self.schedule_session_save(cx);
         self.sync_previewed(cx);
-        if self.items().next().is_none() {
+        if self.items(cx).is_empty() {
             self.show_find = false;
             self.find_bar.update(cx, |f, cx| f.set_target(None, cx));
             window.focus(&self.focus_handle);
-        } else if was_active_pane || self.active_item().is_none() {
-            let pane = self.active_pane;
-            match self.panes[pane].tabs.is_empty() {
+        } else if was_active_pane || self.active_item(cx).is_none() {
+            let pane = self.active_pane.clone();
+            match pane.read(cx).is_empty() {
                 true => window.focus(&self.focus_handle),
-                false => self.activate_in(pane, self.panes[pane].active, window, cx),
+                false => {
+                    let ix = pane.read(cx).active_ix();
+                    self.activate_in(&pane, ix, window, cx);
+                }
             }
         }
         cx.notify();
     }
 
     pub(super) fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
-        let pane = &self.panes[self.active_pane];
-        if !pane.tabs.is_empty() {
-            let ix = (pane.active + 1) % pane.tabs.len();
-            self.activate_in(self.active_pane, ix, window, cx);
+        let pane = self.active_pane.clone();
+        let (active, len) = (pane.read(cx).active_ix(), pane.read(cx).tabs().len());
+        if len > 0 {
+            self.activate_in(&pane, (active + 1) % len, window, cx);
         }
     }
 
     pub(super) fn prev_tab(&mut self, _: &PrevTab, window: &mut Window, cx: &mut Context<Self>) {
-        let pane = &self.panes[self.active_pane];
-        if !pane.tabs.is_empty() {
-            let ix = (pane.active + pane.tabs.len() - 1) % pane.tabs.len();
-            self.activate_in(self.active_pane, ix, window, cx);
+        let pane = self.active_pane.clone();
+        let (active, len) = (pane.read(cx).active_ix(), pane.read(cx).tabs().len());
+        if len > 0 {
+            self.activate_in(&pane, (active + len - 1) % len, window, cx);
         }
     }
 
@@ -504,14 +501,15 @@ impl Workspace {
     }
 
     fn step_recent_tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let pane = self.active_pane;
-        let Some(tabs) = self.panes.get(pane).map(|p| &p.tabs) else { return };
+        let pane = self.active_pane.clone();
+        let tabs = pane.read(cx).tabs().to_vec();
         let mut switch = match self.tab_switch.take() {
-            Some(switch) if switch.pane == pane => switch,
+            Some(switch) if switch.pane == pane.entity_id() => switch,
             _ => {
                 let paths: Vec<Option<PathBuf>> = tabs.iter().map(|t| t.path(cx)).collect();
-                let order = tabs_by_use(&paths, self.panes[pane].active, &self.recent);
-                TabSwitch { pane, order: order.into_iter().map(|ix| tabs[ix].clone()).collect(), at: 0, recent: self.recent.clone() }
+                let order = tabs_by_use(&paths, pane.read(cx).active_ix(), &self.recent);
+                let order = order.into_iter().map(|ix| tabs[ix].clone()).collect();
+                TabSwitch { pane: pane.entity_id(), order, at: 0, recent: self.recent.clone() }
             }
         };
         let len = switch.order.len();
@@ -522,7 +520,7 @@ impl Workspace {
         let Some(ix) = tabs.iter().position(|t| *t == switch.order[switch.at]) else { return };
         // The tabs passed on the way keep their places in `recent`.
         self.recent = switch.recent.clone();
-        self.activate_in(pane, ix, window, cx);
+        self.activate_in(&pane, ix, window, cx);
         // Let go of the keys and the next press starts from the tab it ended on.
         if window.modifiers().modified() {
             self.tab_switch = Some(switch);

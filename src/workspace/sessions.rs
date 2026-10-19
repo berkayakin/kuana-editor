@@ -18,16 +18,19 @@ impl Workspace {
         let mut unsaved = Vec::new();
         let mut active = 0;
         let mut pane_active = Vec::new();
-        for (pane_ix, pane) in self.panes.iter().enumerate() {
+        // Panes are numbered in tree order, as `PaneNode` reads them.
+        let panes = self.center.panes();
+        for (pane_ix, entity) in panes.iter().enumerate() {
+            let pane = entity.read(cx);
             let mut active_in_pane = 0;
             let mut count = 0;
-            for (ix, item) in pane.tabs.iter().enumerate() {
+            for (ix, item) in pane.tabs().iter().enumerate() {
                 let Some((mut session, text)) = item.read(cx).session(cx) else { continue };
                 session.pane = pane_ix;
-                session.pinned = self.pinned.contains(&item.entity_id());
-                if ix == pane.active {
+                session.pinned = pane.is_pinned(item.entity_id());
+                if ix == pane.active_ix() {
                     active_in_pane = count;
-                    if pane_ix == self.active_pane {
+                    if *entity == self.active_pane {
                         active = tabs.len();
                     }
                 }
@@ -40,18 +43,15 @@ impl Workspace {
             pane_active.push(active_in_pane);
         }
         // Changed without a tab and not saved: they come back as tabs.
-        let last_pane = self.panes.len().saturating_sub(1);
+        let last_pane = panes.len() - 1;
         for doc in self.documents.read(cx).kept(cx) {
             let d = doc.read(cx);
             let encoding = (d.encoding != TextEncoding::UTF8).then(|| d.encoding.key());
             unsaved.push((tabs.len(), d.rope().clone()));
             tabs.push(TabSession { path: d.path.clone(), pane: last_pane, encoding, ..TabSession::default() });
         }
-        let layout = (self.panes.len() > 1).then(|| PaneLayout {
-            column: self.pane_axis == PaneAxis::Column,
-            sizes: self.pane_sizes.clone(),
-            active: pane_active,
-        });
+        let mut pane_active = pane_active.into_iter();
+        let pane_layout = (panes.len() > 1).then(|| self.center.save(&mut |_| pane_active.next().unwrap_or(0)));
         let mut expanded: Vec<PathBuf> =
             self.tree.read(cx).expanded().iter().filter_map(|p| p.strip_prefix(&root).ok()).filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).collect();
         expanded.sort();
@@ -64,7 +64,19 @@ impl Workspace {
         let python_venv = crate::python::choice(&root).map(|c| c.to_saved());
         let terminals = Some(self.terminal_layout(cx));
         let last_run = self.last_run.clone();
-        let session = ProjectSession { root, tabs, active, layout, expanded, breakpoints, python_venv, terminals, last_run, other: Default::default() };
+        let session = ProjectSession {
+            root,
+            tabs,
+            active,
+            layout: None,
+            panes: pane_layout,
+            expanded,
+            breakpoints,
+            python_venv,
+            terminals,
+            last_run,
+            other: Default::default(),
+        };
         Some(SessionSnapshot { session, unsaved })
     }
 
@@ -116,38 +128,75 @@ impl Workspace {
                 *item = self.restore_preview(tab, &restored, cx);
             }
         }
-        for (tab, item) in session.tabs.into_iter().zip(items) {
-            let Some(item) = item else { continue };
-            // Into the pane it was in, creating panes as needed.
-            while self.panes.len() <= tab.pane.min(7) {
-                self.panes.push(Pane::new());
-                self.pane_sizes.push(0.);
+        // The panes as saved (an older session's row or column reads as a
+        // tree too). Without a tree, the panes the tabs name make a row.
+        let (node, pane_of) = match session.pane_layout().filter(|node| node.pane_count() > 0) {
+            // A tab numbered past the tree's panes goes to the last one.
+            Some(node) => {
+                let last = node.pane_count() - 1;
+                let pane_of: Vec<usize> = session.tabs.iter().map(|t| t.pane.min(last)).collect();
+                (node, pane_of)
             }
-            self.active_pane = tab.pane.min(7);
-            if tab.pinned {
-                self.pinned.insert(item.entity_id());
+            None => {
+                let mut numbers: Vec<usize> = session.tabs.iter().map(|t| t.pane).collect();
+                numbers.sort_unstable();
+                numbers.dedup();
+                let pane_of = session.tabs.iter().map(|t| numbers.binary_search(&t.pane).unwrap_or(0)).collect();
+                // Each pane's last tab is its current one, as they were opened.
+                let pane = |_| PaneShare { share: 1. / numbers.len() as f32, node: PaneNode::Pane { active: usize::MAX } };
+                let node = match numbers.len() {
+                    0 | 1 => PaneNode::Pane { active: usize::MAX },
+                    n => PaneNode::Row((0..n).map(pane).collect()),
+                };
+                (node, pane_of)
             }
-            let at = self.insert_tab(item, window, cx);
-            self.panes[self.active_pane].active = at;
-            if let Some(path) = tab.path.filter(|_| tab.kind != TabKind::MarkdownPreview) {
+        };
+        let focused = items.get(session.active).cloned().flatten();
+        let mut by_pane: Vec<Vec<(Option<PaneItem>, bool)>> = vec![Vec::new(); node.pane_count()];
+        for ((tab, item), pane) in session.tabs.into_iter().zip(items).zip(pane_of) {
+            if let Some(path) = tab.path.filter(|_| item.is_some() && tab.kind != TabKind::MarkdownPreview) {
                 self.recent.retain(|p| p != &path);
                 self.recent.insert(0, path);
             }
+            by_pane[pane].push((item, tab.pinned));
         }
         self.recent.truncate(50);
-        // Panes left empty (their files are gone) aren't worth keeping.
-        self.drop_empty_panes();
-        if let Some(layout) = session.layout.filter(|l| l.sizes.len() == self.panes.len()) {
-            self.pane_axis = if layout.column { PaneAxis::Column } else { PaneAxis::Row };
-            self.pane_sizes = layout.sizes;
-            for (pane, active) in self.panes.iter_mut().zip(layout.active) {
-                pane.active = active.min(pane.tabs.len().saturating_sub(1));
+        // Panes whose tabs didn't come back (their files are gone) are left
+        // out, as closing them would.
+        let before = self.center.panes();
+        let tree = PaneTree::restore(&node, &mut |number, active| {
+            let tabs = std::mem::take(&mut by_pane[number]);
+            if tabs.iter().all(|(item, _)| item.is_none()) {
+                return None;
             }
-        } else {
-            self.pane_sizes = vec![1. / self.panes.len() as f32; self.panes.len()];
+            let pane = self.new_pane(window, cx);
+            self.active_pane = pane.clone();
+            // The current tab, counted among the saved ones; else the closest
+            // one before it that came back.
+            let mut current = None;
+            for (ix, (item, pinned)) in tabs.into_iter().enumerate() {
+                let Some(item) = item else { continue };
+                if ix <= active || current.is_none() {
+                    current = Some(item.entity_id());
+                }
+                let at = self.insert_tab(item, pinned, window, cx);
+                pane.update(cx, |p, cx| p.set_active(at, cx));
+            }
+            pane.update(cx, |p, cx| {
+                if let Some(ix) = current.and_then(|id| p.position(id)) {
+                    p.set_active(ix, cx);
+                }
+            });
+            Some(pane)
+        });
+        if let Some(tree) = tree {
+            for pane in before {
+                self.pane_subscriptions.remove(&pane.entity_id());
+            }
+            self.center = tree;
+            self.active_pane = self.center.panes()[0].clone();
         }
-        let active = self.items().nth(session.active).cloned();
-        if let Some(item) = active {
+        if let Some(item) = focused {
             self.activate_item(&item, window, cx);
         }
         self.sync_previewed(cx);
@@ -201,32 +250,14 @@ impl Workspace {
         Some(cx.new(|cx| MarkdownPreview::new(doc, cx)).into())
     }
 
-    /// Removes empty panes (keeping at least one) and rebalances sizes.
-    pub(super) fn drop_empty_panes(&mut self) {
-        let mut ix = 0;
-        while ix < self.panes.len() {
-            if self.panes.len() > 1 && self.panes[ix].tabs.is_empty() {
-                self.remove_pane(ix);
-            } else {
-                ix += 1;
-            }
+    /// Takes a pane out (never the last one): the pane beside it takes its
+    /// space (see `PaneTree::remove`), and the keyboard if it had it.
+    pub(super) fn remove_pane(&mut self, pane: &Entity<Pane>) {
+        let Some(heir) = self.center.remove(pane) else { return };
+        self.pane_subscriptions.remove(&pane.entity_id());
+        if self.active_pane == *pane {
+            self.active_pane = heir;
         }
-    }
-
-    pub(super) fn remove_pane(&mut self, ix: usize) {
-        self.panes.remove(ix);
-        let freed = if ix < self.pane_sizes.len() { self.pane_sizes.remove(ix) } else { 0. };
-        // The neighbor takes the space.
-        if let Some(size) = self.pane_sizes.get_mut(ix.saturating_sub(1).min(self.panes.len().saturating_sub(1))) {
-            *size += freed;
-        }
-        if self.panes.len() == 1 {
-            self.pane_sizes = vec![1.0];
-        }
-        if self.active_pane >= ix && self.active_pane > 0 {
-            self.active_pane -= 1;
-        }
-        self.active_pane = self.active_pane.min(self.panes.len() - 1);
     }
 
     /// Changes the recent projects list shared by all windows.

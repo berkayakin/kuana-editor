@@ -496,7 +496,7 @@ impl Workspace {
     }
 
     pub(super) fn update_window_title(&mut self, window: &mut Window, cx: &App) {
-        let mut title = match self.active_item() {
+        let mut title = match self.active_item(cx) {
             Some(item) => format!("{}{}", item.tab_title(cx), if item.is_dirty(cx) { " •" } else { "" }),
             None => "Kuana".into(),
         };

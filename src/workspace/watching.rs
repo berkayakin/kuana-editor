@@ -48,7 +48,7 @@ impl Workspace {
     fn watch_state(&self, cx: &App) -> Option<WatchState> {
         let root = self.root.clone()?;
         let mut open: HashSet<PathBuf> = self.editors.iter().filter_map(|e| e.read(cx).doc.read(cx).path.clone()).collect();
-        open.extend(self.images().iter().map(|i| i.read(cx).path().to_path_buf()));
+        open.extend(self.images(cx).iter().map(|i| i.read(cx).path().to_path_buf()));
         if let Some(Modal::Diff(view)) = &self.modals.current
             && let Some(path) = view.read(cx).working_tree_file()
         {
@@ -110,7 +110,7 @@ impl Workspace {
             return;
         }
         self.reload_documents(|path| paths.contains(path), cx);
-        for image in self.images() {
+        for image in self.images(cx) {
             if paths.contains(image.read(cx).path()) {
                 image.update(cx, |i, cx| i.reload_if_changed(cx));
             }

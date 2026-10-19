@@ -371,11 +371,7 @@ impl Workspace {
     }
 
     pub(super) fn display_rel(&self, path: &Path) -> String {
-        match self.root.as_deref().and_then(|r| path.strip_prefix(r).ok()) {
-            Some(rel) if rel.as_os_str().is_empty() => self.root.as_deref().map(folder_name).unwrap_or_default(),
-            Some(rel) => rel.display().to_string(),
-            None => path.display().to_string(),
-        }
+        display_rel(self.root.as_deref(), path)
     }
 
     /// A location's file for usage and symbol lists (`location_label`).
@@ -391,7 +387,7 @@ impl Workspace {
     pub(super) fn run_vim_command(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
         let command = command.trim().trim_start_matches(':');
         if let Ok(line) = command.parse::<usize>() {
-            let editor = self.active_editor().cloned().ok_or("No file is open")?;
+            let editor = self.active_editor(cx).ok_or("No file is open")?;
             editor.update(cx, |e, cx| {
                 let row = line.saturating_sub(1).min(e.doc.read(cx).line_count().saturating_sub(1));
                 let text = e.doc.read(cx).line_text(row);
@@ -624,7 +620,7 @@ impl Workspace {
                 });
             }
         }
-        for image in self.images() {
+        for image in self.images(cx) {
             if let Some(moved) = remap(image.read(cx).path()) {
                 image.update(cx, |i, cx| i.set_path(moved, cx));
             }
@@ -810,7 +806,7 @@ impl Workspace {
 
     /// Shows the active file in the tree: opens its folders and scrolls to it.
     pub(super) fn select_opened_file(&mut self, _: &SelectOpenedFile, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.active_item().and_then(|t| t.path(cx)) else { return };
+        let Some(path) = self.active_item(cx).and_then(|t| t.path(cx)) else { return };
         if !self.root.as_deref().is_some_and(|r| path.starts_with(r)) {
             return;
         }
@@ -897,7 +893,7 @@ impl Workspace {
                 self.remove_tab(&editor, window, cx);
             }
         }
-        for image in self.images() {
+        for image in self.images(cx) {
             if image.read(cx).path().starts_with(path) {
                 self.remove_item(&image.into(), window, cx);
             }

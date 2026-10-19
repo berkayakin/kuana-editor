@@ -48,7 +48,7 @@ impl Workspace {
         let Some(root) = self.root.clone() else { return };
         let current = python::choice(&root);
         let check = |on: bool, label: String| if on { MenuEntry::item(label, Icon::Check) } else { MenuEntry::text(label) };
-        let detected = self.active_editor().and_then(|e| e.read(cx).doc.read(cx).path.as_deref()?.parent().and_then(python::detect));
+        let detected = self.active_editor(cx).and_then(|e| e.read(cx).doc.read(cx).path.as_deref()?.parent().and_then(python::detect));
         let auto = match &detected {
             Some(venv) => format!("Auto-detect ({})", python::label(venv, Some(&root))),
             None => "Auto-detect (none found)".into(),
@@ -83,7 +83,7 @@ impl Workspace {
         crate::python::set_choice(&root, choice);
         self.venv_shown.take();
         self.schedule_session_save(cx);
-        if let Some(path) = self.active_editor().and_then(|e| e.read(cx).doc.read(cx).path.clone()) {
+        if let Some(path) = self.active_editor(cx).and_then(|e| e.read(cx).doc.read(cx).path.clone()) {
             self.lsp.update(cx, |s, cx| s.restart(&path, cx));
         }
         cx.notify();

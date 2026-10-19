@@ -82,7 +82,7 @@ impl Workspace {
         let id: gpui::SharedString = match edge {
             Edge::Problems => "resize-problems".into(),
             Edge::Sidebar => "resize-sidebar".into(),
-            Edge::Pane(ix) => format!("resize-pane-{ix}").into(),
+            Edge::Split { split, ix, .. } => format!("resize-split-{split:?}-{ix}").into(),
         };
         let handle = div().id(id).absolute();
         let handle = match edge {
@@ -92,10 +92,18 @@ impl Workspace {
                 handle.top_0().bottom_0().left(px(-GAP - 1.)).w(px(GAP)).cursor(CursorStyle::ResizeLeftRight)
             }
             Edge::Sidebar => handle.top_0().bottom_0().right(px(-GAP - 1.)).w(px(GAP)).cursor(CursorStyle::ResizeLeftRight),
-            Edge::Pane(_) if self.pane_axis == PaneAxis::Row => {
-                handle.top_0().bottom_0().right(px(-GAP - 1.)).w(px(GAP)).cursor(CursorStyle::ResizeLeftRight)
+            // In the gap after a split member's slot: beside it (below the tab
+            // strip's room, which stays the window's drag area along the top),
+            // or across under it.
+            Edge::Split { axis: Axis::Row, .. } => handle
+                .top(px(TAB_STRIP_HEIGHT - 1.))
+                .bottom_0()
+                .right(px(-GAP))
+                .w(px(GAP))
+                .cursor(CursorStyle::ResizeLeftRight),
+            Edge::Split { axis: Axis::Column, .. } => {
+                handle.left_0().right_0().bottom(px(-GAP)).h(px(GAP)).cursor(CursorStyle::ResizeUpDown)
             }
-            Edge::Pane(_) => handle.left_0().right_0().bottom(px(-GAP - 1.)).h(px(GAP)).cursor(CursorStyle::ResizeUpDown),
         };
         handle.on_mouse_down(
             MouseButton::Left,
@@ -104,12 +112,18 @@ impl Workspace {
                 let (start, size) = match edge {
                     Edge::Problems => (e.position.y, ws.problems_height),
                     Edge::Sidebar => (e.position.x, ws.sidebar_width),
-                    Edge::Pane(ix) => {
-                        let bounds = ws.panes_bounds.get();
-                        ws.pane_drag_pair = ws.pane_sizes[ix] + ws.pane_sizes.get(ix + 1).copied().unwrap_or(0.);
-                        match ws.pane_axis {
-                            PaneAxis::Row => (e.position.x, bounds.size.width * ws.pane_sizes[ix]),
-                            PaneAxis::Column => (e.position.y, bounds.size.height * ws.pane_sizes[ix]),
+                    // A double click evens the split out (as VS Code's sashes do).
+                    Edge::Split { split, .. } if e.click_count == 2 => {
+                        ws.center.even_out(split);
+                        ws.schedule_session_save(cx);
+                        cx.notify();
+                        return;
+                    }
+                    Edge::Split { split, axis, ix } => {
+                        let extent = px(ws.center.extent(split, ix).unwrap_or(0.));
+                        match axis {
+                            Axis::Row => (e.position.x, extent),
+                            Axis::Column => (e.position.y, extent),
                         }
                     }
                 };
@@ -153,7 +167,7 @@ impl Workspace {
     /// only from `render`: the tree is a cached view, and one told during
     /// another view's render isn't drawn again (a new file kept no color).
     pub(super) fn decorate_tree(&mut self, cx: &mut Context<Self>) {
-        let active_path = self.active_item().and_then(|t| t.path(cx));
+        let active_path = self.active_item(cx).and_then(|t| t.path(cx));
         let menu_target = self.context_menu.as_ref().and_then(|m| m.target.clone());
         let (git_paths, git_ignored) = (self.git_paths.clone(), self.git_ignored.clone());
         self.tree.update(cx, |t, cx| t.decorate(git_paths, git_ignored, active_path, menu_target, cx));
@@ -167,8 +181,8 @@ impl Workspace {
         let cursor = match resize.edge {
             Edge::Problems => CursorStyle::ResizeUpDown,
             Edge::Sidebar => CursorStyle::ResizeLeftRight,
-            Edge::Pane(_) if self.pane_axis == PaneAxis::Row => CursorStyle::ResizeLeftRight,
-            Edge::Pane(_) => CursorStyle::ResizeUpDown,
+            Edge::Split { axis: Axis::Row, .. } => CursorStyle::ResizeLeftRight,
+            Edge::Split { axis: Axis::Column, .. } => CursorStyle::ResizeUpDown,
         };
         let this = cx.entity().downgrade();
         gpui::canvas(
@@ -208,21 +222,13 @@ impl Workspace {
                 let delta = if self.sidebar_on_right(cx) { -delta } else { delta };
                 self.sidebar_width = (resize.size + delta).clamp(px(SIDEBAR_MIN_WIDTH), max);
             }
-            Edge::Pane(ix) if ix + 1 < self.pane_sizes.len() => {
-                let bounds = self.panes_bounds.get();
-                let (total, delta) = match self.pane_axis {
-                    PaneAxis::Row => (bounds.size.width, event.position.x - resize.start),
-                    PaneAxis::Column => (bounds.size.height, event.position.y - resize.start),
+            Edge::Split { split, axis, ix } => {
+                let delta = match axis {
+                    Axis::Row => event.position.x - resize.start,
+                    Axis::Column => event.position.y - resize.start,
                 };
-                if total > px(0.) {
-                    let pair = self.pane_drag_pair;
-                    // Every pane keeps at least a tenth of the space.
-                    let share = ((resize.size + delta) / total).clamp(0.1, (pair - 0.1).max(0.1));
-                    self.pane_sizes[ix] = share;
-                    self.pane_sizes[ix + 1] = pair - share;
-                }
+                self.center.resize(split, ix, f32::from(resize.size + delta));
             }
-            Edge::Pane(_) => {}
         }
         cx.notify();
     }
@@ -232,13 +238,15 @@ impl Workspace {
     pub(super) fn clear_drag_state(&mut self, cx: &mut Context<Self>) {
         // The drop overlays are drag_over styles: they only need a redraw.
         self.tree.update(cx, |t, cx| t.set_drop_target(None, cx));
-        self.pane_drop = None;
+        for pane in self.center.panes() {
+            pane.update(cx, |p, cx| p.clear_drop(cx));
+        }
         self.tree_root_drop = false;
         cx.notify();
     }
 
     pub(super) fn on_root_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.tree.read(cx).has_drop_target() || self.pane_drop.is_some() {
+        if self.tree.read(cx).has_drop_target() || self.center.panes().iter().any(|p| p.read(cx).has_drop()) {
             self.clear_drag_state(cx);
         }
         if self.resizing.take().is_some() {
@@ -260,7 +268,7 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The Problems panel lists the active file's diagnostics.
         if self.shows(BottomPanel::Problems) {
-            let active = self.active_editor().cloned();
+            let active = self.active_editor(cx);
             self.problems.update(cx, |p, cx| p.set_editor(active, cx));
         }
         self.load_shown_tabs(cx);
@@ -268,9 +276,6 @@ impl Render for Workspace {
         // A drag that ended without a drop (Escape, left the window) leaves no highlight.
         if !cx.has_active_drag() && self.tree.read(cx).has_drop_target() {
             self.tree.update(cx, |t, cx| t.set_drop_target(None, cx));
-        }
-        if !cx.has_active_drag() {
-            self.pane_drop = None;
         }
         self.decorate_tree(cx);
         let git_target = self.context_menu.as_ref().and_then(|m| m.git_target.clone());
@@ -326,6 +331,11 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::run_configuration))
             .on_action(cx.listener(Self::split_down))
             .on_action(cx.listener(Self::next_pane))
+            .on_action(cx.listener(Self::previous_pane))
+            .on_action(cx.listener(Self::focus_pane_left))
+            .on_action(cx.listener(Self::focus_pane_right))
+            .on_action(cx.listener(Self::focus_pane_up))
+            .on_action(cx.listener(Self::focus_pane_down))
             .on_action(cx.listener(Self::close_other_tabs))
             .on_action(cx.listener(Self::close_all_tabs))
             .on_action(cx.listener(Self::toggle_pin_tab))

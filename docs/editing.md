@@ -3,14 +3,22 @@
 ## Panes and tabs
 
 **Split Right / Down** (View menu, a tab's right-click menu, or ⌘\\ / ⌘⇧\\) opens a new pane
-showing the current file too: both panes edit the same text, each with its own carets and scroll,
-and closing one keeps the file open in the other. Drag a tab to
-reorder it, onto another pane's tab bar or editor to move it there; a pane closes with its last
-tab. Drag the line between panes to resize them.
+beside the current one showing the current file too: both panes edit the same text, each with its
+own carets and scroll, and closing one keeps the file open in the other. Splitting the other way
+than a pane's neighbors divides that pane, so panes make grids: split right, then split each side
+down. Drag a tab to reorder it, onto another pane's tab bar or the middle of its editor to move it
+there, or near a pane's edge to split that pane with the tab in the new half (the half lights up
+while you drag); a pane closes with its last tab. Drag the gap between panes to resize them, or
+double-click it to even them out. Panes keep a minimum size: one too small to halve doesn't split.
+
+**Next Pane** / **Previous Pane** go through the panes left to right, top to bottom, and **Focus
+Pane Left / Right / Above / Below** go to the pane on that side (⌘K ⌘← and so on in the VS Code
+and Zed keymaps, Ctrl+K Ctrl+← off macOS).
 
 Right-click a tab for Close, Close Others, Close All, Close Tabs to the Right, Pin Tab and the
 split commands. Pinned tabs stay first, show a pin (click it to unpin) and are kept by Close
-Others / Close All. The panes, their tabs, sizes and pins come back with the project.
+Others / Close All. The panes, as rows and columns, their tabs, sizes and pins come back with the
+project.
 
 ## Vim mode
 

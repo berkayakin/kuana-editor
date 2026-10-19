@@ -83,11 +83,13 @@ pub(super) fn fit_tabs(naturals: &[f32], active: usize, available: f32) -> Vec<T
 
 /// Remembers an area's bounds for the next frame's layout (tab strips fit
 /// their tabs to them), and asks for that frame when they changed, or a
-/// resize would leave the tabs fitted to the old size.
+/// resize would leave the tabs fitted to the old size. Called while drawing,
+/// where `window.refresh()` is ignored: the next frame redraws the view being
+/// drawn (a cached one wouldn't be drawn again otherwise).
 pub(super) fn track_bounds(cell: &std::cell::Cell<Bounds<Pixels>>, bounds: Bounds<Pixels>, window: &mut Window) {
     if cell.get() != bounds {
         cell.set(bounds);
-        window.refresh();
+        window.request_animation_frame();
     }
 }
 
