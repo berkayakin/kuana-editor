@@ -260,6 +260,7 @@ pub fn diagnostics(value: &Value, rope: &Rope, encoding: Encoding, server: &'sta
                 severity,
                 message: d.get("message")?.as_str()?.into(),
                 rule: rule.into(),
+                unnecessary: d.get("tags").and_then(Value::as_array).is_some_and(|tags| tags.contains(&json!(1))),
             })
         })
         .collect()
@@ -713,8 +714,16 @@ mod tests {
         let params = json!({ "diagnostics": [problem(Some(1)), problem(Some(2)), problem(Some(3)), problem(Some(4)), problem(None)] });
         let severities: Vec<Severity> = diagnostics(&params, &rope, Encoding::Utf16, "s").iter().map(|d| d.severity).collect();
         assert_eq!(severities, [Severity::Error, Severity::Warning, Severity::Info, Severity::Hint, Severity::Error]);
-        // A hint is drawn, but isn't a problem.
-        assert!(Severity::Info.is_problem() && !Severity::Hint.is_problem());
+        // Information and hints are drawn, but aren't problems.
+        assert!(Severity::Warning.is_problem() && !Severity::Info.is_problem() && !Severity::Hint.is_problem());
+        // Unused code comes tagged `Unnecessary` (1); `Deprecated` (2) isn't that.
+        let mut unused = problem(Some(4));
+        unused["tags"] = json!([1]);
+        let mut deprecated = problem(Some(4));
+        deprecated["tags"] = json!([2]);
+        let params = json!({ "diagnostics": [unused, deprecated, problem(Some(4))] });
+        let tagged: Vec<bool> = diagnostics(&params, &rope, Encoding::Utf16, "s").iter().map(|d| d.unnecessary).collect();
+        assert_eq!(tagged, [true, false, false]);
     }
 
     #[test]

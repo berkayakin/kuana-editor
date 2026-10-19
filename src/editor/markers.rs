@@ -223,7 +223,7 @@ fn severity_kind(severity: Severity) -> u8 {
     }
 }
 
-/// Lines with problems (hints aren't), each once with its worst severity.
+/// Lines with problems (information and hints aren't), each once with its worst severity.
 fn problem_rows(doc: &Document) -> Vec<(Range<usize>, u8)> {
     let mut rows: Vec<(Range<usize>, u8)> = Vec::new();
     let mut line = LineCursor::default();
@@ -239,7 +239,7 @@ fn problem_rows(doc: &Document) -> Vec<(Range<usize>, u8)> {
 }
 
 /// Per line where diagnostics start: the line, its worst problem (the first
-/// of the worst severity; hints aren't problems) and how many start on it.
+/// of the worst severity; information and hints aren't problems) and how many start on it.
 /// An empty one at a line's start counts for no line, as drawn.
 pub(super) fn row_problems(doc: &Document) -> Vec<(usize, Option<usize>, usize)> {
     let mut rows: Vec<(usize, Option<usize>, usize)> = Vec::new();

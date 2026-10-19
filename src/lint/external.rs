@@ -93,6 +93,7 @@ fn parse_eslint(json: &Value, rope: &Rope) -> Vec<Diagnostic> {
             severity,
             message: message.get("message").and_then(Value::as_str).unwrap_or_default().into(),
             rule,
+            unnecessary: false,
         });
     }
     out

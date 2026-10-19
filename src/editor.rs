@@ -61,6 +61,9 @@ const FOLD_ZONE_RIGHT: f32 = 14.0;
 const FOLD_ICON: f32 = 12.0;
 /// The ▶ for runnable lines, at the gutter's left edge (where the problem dot goes).
 const RUN_ICON: f32 = 11.0;
+/// How much of its color code a server marks as unused keeps (Zed's
+/// `unnecessary_code_fade` of 0.3).
+const UNNECESSARY_OPACITY: f32 = 0.7;
 
 actions!(
     editor,
@@ -1497,7 +1500,12 @@ impl Editor {
             self.linted_version = Some(version);
             return;
         }
-        let syntax_only = self.external.is_some() && self.external_error.is_none();
+        // Style and correctness rules step aside for ESLint's project config,
+        // and for a TypeScript server, which reports the same mistakes (Zed
+        // shows only the server's).
+        let server_checks = matches!(language, crate::syntax::Language::JavaScript | crate::syntax::Language::TypeScript | crate::syntax::Language::Tsx)
+            && (self.lsp.active || !self.lsp_servers(cx).is_empty());
+        let syntax_only = (self.external.is_some() && self.external_error.is_none()) || server_checks;
         let path = self.doc.read(cx).path.clone();
         self.lint_task = Some(cx.spawn(async move |this, cx| {
             if !delay.is_zero() {
@@ -3727,11 +3735,11 @@ impl Editor {
                 if kind.base() == crate::syntax::Highlight::Comment && theme.italic_comments {
                     run_font.style = FontStyle::Italic;
                 }
-                let severity = row_diags
-                    .iter()
-                    .filter(|d| d.range.start <= abs && abs < d.range.end)
-                    .map(|d| d.severity)
-                    .min();
+                let here = || row_diags.iter().filter(|d| d.range.start <= abs && abs < d.range.end);
+                // Unused code (a server's `Unnecessary` tag) is faded, and
+                // underlined only when it's a problem, as in Zed.
+                let severity = here().filter(|d| !d.unnecessary || d.severity.is_problem()).map(|d| d.severity).min();
+                let faded = here().any(|d| d.unnecessary);
                 let len = dl.to_display(e) - dl.to_display(s);
                 if len == 0 {
                     continue;
@@ -3743,10 +3751,14 @@ impl Editor {
                 } else {
                     severity.map(|sev| UnderlineStyle { thickness: px(1.), color: Some(severity_color(&theme, sev)), wavy: true })
                 };
+                let mut color = theme.highlight_color(kind);
+                if faded {
+                    color.a *= UNNECESSARY_OPACITY;
+                }
                 runs.push(TextRun {
                     len,
                     font: run_font,
-                    color: theme.highlight_color(kind),
+                    color,
                     background_color: None,
                     underline,
                     strikethrough: None,
@@ -6315,6 +6327,24 @@ mod lint_tests {
         cx.run_until_parked();
         assert_eq!(syntax_errors(&editor, cx), 1);
     }
+
+    /// A TypeScript server reports what the built-in JavaScript rules would,
+    /// so with one serving the file only its problems show, as in Zed.
+    #[gpui::test]
+    fn builtin_js_rules_step_aside_for_a_server(cx: &mut TestAppContext) {
+        let doc = Document::from_text("var a = 1;\nif (a == 2) { debugger; }\n".into(), Some("a.js".into()));
+        let editor = cx.new(|cx| Editor::new(doc, cx));
+        cx.run_until_parked();
+        let count = |editor: &Entity<Editor>, cx: &mut TestAppContext| editor.read_with(cx, |e, cx| e.doc.read(cx).diagnostics.len());
+        assert!(count(&editor, cx) >= 3, "no-var, eqeqeq, no-debugger");
+        editor.update(cx, |e, cx| {
+            e.lsp.active = true;
+            e.replace_ranges(vec![(0..0, " ".into())], cx);
+        });
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+        assert_eq!(count(&editor, cx), 0);
+    }
 }
 
 #[cfg(test)]
@@ -6337,6 +6367,7 @@ mod block_tests {
             severity: lint::Severity::Error,
             message: message.into(),
             rule: "e".into(),
+            unnecessary: false,
         };
         editor.update(cx, |e, cx| {
             // 50 columns of text.
@@ -6375,7 +6406,7 @@ mod block_tests {
     #[gpui::test]
     fn next_problem_steps_through_the_files_problems(cx: &mut TestAppContext) {
         let editor = cx.new(|cx| Editor::new(Document::from_text("let a = 1;\nlet b = 2;\nlet c = 3;\n".into(), None), cx));
-        let at = |start: usize, severity: lint::Severity| lint::Diagnostic { range: start..start + 1, severity, message: "m".into(), rule: "r".into() };
+        let at = |start: usize, severity: lint::Severity| lint::Diagnostic { range: start..start + 1, severity, message: "m".into(), rule: "r".into(), unnecessary: false };
         editor.update(cx, |e, cx| {
             // A language server's problem, a built-in one, and a hint, which isn't one.
             e.doc.as_mut(cx).set_lsp_diagnostics(vec![at(15, lint::Severity::Warning), at(26, lint::Severity::Hint)]);
@@ -6783,7 +6814,7 @@ mod frame_tests {
         editor.update(cx, |e, cx| {
             let starts: Vec<usize> = (0..lines).map(|row| row * LINE.len()).collect();
             e.set_selections(starts.iter().map(|&at| Selection::cursor(at + 4)).collect(), 0, cx);
-            let problem = |at: usize| lint::Diagnostic { range: at..at + 3, severity: Severity::Warning, message: "unused".into(), rule: "r".into() };
+            let problem = |at: usize| lint::Diagnostic { range: at..at + 3, severity: Severity::Warning, message: "unused".into(), rule: "r".into(), unnecessary: false };
             e.doc.as_mut(cx).set_lsp_diagnostics(starts.iter().map(|&at| problem(at + 4)).collect());
             let lens = |line_start| crate::document::CodeLens {
                 id: 0,

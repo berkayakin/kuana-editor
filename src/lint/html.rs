@@ -41,6 +41,7 @@ pub fn lint(src: &str) -> Vec<Diagnostic> {
             severity,
             message: message.into(),
             rule: rule.into(),
+            unnecessary: false,
         })
     };
 

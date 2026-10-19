@@ -67,6 +67,7 @@ fn unexpected(node: Node, text: &Rope) -> Diagnostic {
         severity: Severity::Error,
         message: message.into(),
         rule: "syntax".into(),
+        unnecessary: false,
     }
 }
 
@@ -82,6 +83,7 @@ fn missing(node: Node) -> Diagnostic {
         severity: Severity::Error,
         message: message.into(),
         rule: "syntax".into(),
+        unnecessary: false,
     }
 }
 

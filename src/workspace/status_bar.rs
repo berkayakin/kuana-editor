@@ -80,7 +80,7 @@ impl Workspace {
         // The file's problems and the last Run's (both counted already).
         let run_counts = self.problems.read(cx).run_counts(editor.map(|e| e.doc.read(cx)));
         let count = |sev: Severity| editor.map_or(0, |e| e.doc.read(cx).severity_count(sev)) + run_counts[sev as usize];
-        let (errors, warnings, infos) = (count(Severity::Error), count(Severity::Warning), count(Severity::Info));
+        let (errors, warnings) = (count(Severity::Error), count(Severity::Warning));
 
         let item = |child: AnyElement| {
             div()
@@ -244,8 +244,7 @@ impl Workspace {
                     .hover(|s| s.text_color(theme.text_muted))
                     .on_click(cx.listener(|ws, _, window, cx| ws.toggle_problems(&ToggleProblems, window, cx)))
                     .child(counter(Icon::CircleX, errors, theme.error.into()))
-                    .child(counter(Icon::TriangleAlert, warnings, theme.warning.into()))
-                    .when(infos > 0, |el| el.child(counter(Icon::CircleAlert, infos, theme.info.into()))),
+                    .child(counter(Icon::TriangleAlert, warnings, theme.warning.into())),
             )
             .when_some(self.git_busy.label().cloned(), |el, busy| {
                 el.child(

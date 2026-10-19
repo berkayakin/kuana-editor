@@ -52,7 +52,8 @@ rust-analyzer updates `mod` declarations and paths, TypeScript servers update im
 are saved by auto-save (or listed to save, like a rename's). A server that takes longer than five
 seconds is left out and a notification says so; servers hear of every rename, undo included.
 
-With a server running, its diagnostics replace Kuana's built-in syntax check (the other built-in
+With a server running, its diagnostics replace Kuana's built-in syntax check, and for JavaScript and
+TypeScript the built-in rules too, since the server reports the same mistakes (the HTML and Markdown
 rules and ESLint still run). Hover a symbol for its documentation and any problem there (the
 popover scrolls, and a copy button that appears on hover copies its text); completion opens as you type (Enter inserts, Tab replaces the rest of the word). **Restart
 Language Server** (Find Action) restarts it after installing or when it's stuck. To use another
@@ -62,7 +63,10 @@ A problem shows at the end of its line, cut short when it's long. With the caret
 problem that doesn't fit there (or several, or a multi-line message) shows in full in rows under it.
 **Next / Previous Problem** (F2 / ⇧F2 in the JetBrains keymap, F8 / ⇧F8 in VS Code's and Zed's)
 moves the caret through the file's problems, the language servers' and the built-in checks' alike.
-A server's hints are only underlined faintly: they aren't counted, listed in Problems or stepped through.
+As in Zed, only errors and warnings are problems: a server's information is underlined and its hints
+faintly, and both show on hover, but they aren't counted, listed in Problems or stepped through.
+Code a server marks as unused (an unused import or variable) is faded, and underlined only when it's
+reported as a warning or error.
 
 A file can have several servers: Kuana's own and any an extension adds for its language (ESLint or
 Tailwind beside TypeScript). All of them get the file; their problems show together, completion

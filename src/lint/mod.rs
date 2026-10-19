@@ -14,17 +14,19 @@ use crate::syntax::Language;
 pub enum Severity {
     Error,
     Warning,
+    /// Underlined in the text, but not a problem (see `is_problem`).
     Info,
     /// A language server's suggestion (LSP's Hint): drawn faintly in the
-    /// text, but not a problem (see `is_problem`).
+    /// text, but not a problem.
     Hint,
 }
 
 impl Severity {
     /// Counted in the status bar, listed in Problems, marked in the gutter
-    /// and stepped through by Next Problem: all but hints.
+    /// and stepped through by Next Problem: errors and warnings, as in Zed.
+    /// Information and hints show where they are (underlined, on hover).
     pub fn is_problem(self) -> bool {
-        self != Severity::Hint
+        matches!(self, Severity::Error | Severity::Warning)
     }
 }
 
@@ -36,6 +38,9 @@ pub struct Diagnostic {
     pub message: Arc<str>,
     /// Rule name, e.g. `no-unused-vars`.
     pub rule: Cow<'static, str>,
+    /// Code a language server tagged as unused (LSP's `Unnecessary`): faded,
+    /// and underlined only when it's a problem, as in Zed.
+    pub unnecessary: bool,
 }
 
 /// Whether `language`'s built-in lint is only its syntax errors, which

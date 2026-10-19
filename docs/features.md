@@ -11,7 +11,8 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   - **JavaScript** — syntax errors plus `no-unused-vars`, `no-undef`, `no-const-assign`,
     `no-dupe-keys`, `eqeqeq`, `use-isnan`, `no-cond-assign`, `no-debugger`, `no-var` (built on oxc)
   - **TypeScript** — the same rules except `no-undef` (TypeScript checks names itself); type-only
-    uses count as uses; `.d.ts` files get syntax errors only
+    uses count as uses; `.d.ts` files get syntax errors only. With a TypeScript language server
+    running for the file, these rules step aside and only the server's problems show, as in Zed
   - **HTML** — unclosed/stray/void closing tags, duplicate attributes and ids, `img` alt,
     `lang`, doctype, `<title>`, obsolete tags, `target="_blank"` without `rel`; inline scripts are linted as JS
   - **Markdown** — the markdownlint rules (MD001–MD07x: heading structure, list style, code

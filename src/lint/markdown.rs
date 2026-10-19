@@ -46,6 +46,7 @@ pub fn lint(text: &str, path: Option<&Path>) -> Vec<Diagnostic> {
                 },
                 message: w.message.into(),
                 rule: w.rule_name.unwrap_or_else(|| "markdown".into()).into(),
+                unnecessary: false,
             }
         })
         .collect()

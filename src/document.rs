@@ -2278,6 +2278,7 @@ mod tests {
                 severity: crate::lint::Severity::Warning,
                 message: "m".into(),
                 rule: "r".into(),
+                unnecessary: false,
             };
             doc.set_builtin_diagnostics(vec![diagnostic(13..16), diagnostic(31..34), diagnostic(39..39)]);
             doc.set_lsp_diagnostics(vec![diagnostic(3..4), diagnostic(42..46)]);
@@ -2322,7 +2323,7 @@ mod tests {
     /// is read in that text and moved to today's.
     #[test]
     fn results_for_an_older_version_move_to_todays_text() {
-        let problem = |range: Range<usize>| Diagnostic { range, severity: crate::lint::Severity::Error, message: "m".into(), rule: "r".into() };
+        let problem = |range: Range<usize>| Diagnostic { range, severity: crate::lint::Severity::Error, message: "m".into(), rule: "r".into(), unnecessary: false };
         let mut doc = Document::from_text("let a = 1;\nlet b = 2;\n".into(), None);
         doc.note_lsp_version();
         let sent = doc.version();
@@ -2467,7 +2468,7 @@ mod tests {
                 let rows = doc.line_count();
                 doc.set_breakpoints(&(0..rows).filter(|r| r % 2 == 0).map(Breakpoint::at).collect::<Vec<_>>());
                 doc.set_debug_row(Some(rows / 2));
-                let diagnostic = |range: Range<usize>| Diagnostic { range, severity: crate::lint::Severity::Warning, message: "m".into(), rule: "r".into() };
+                let diagnostic = |range: Range<usize>| Diagnostic { range, severity: crate::lint::Severity::Warning, message: "m".into(), rule: "r".into(), unnecessary: false };
                 doc.set_lsp_diagnostics((0..rows).map(|r| doc.line_start(r)..doc.line_end(r)).map(diagnostic).collect());
                 doc.set_inlay_hints((0..rows).map(|r| InlayHint { offset: doc.line_end(r), label: ": T".into(), pad_left: false, pad_right: false }).collect());
                 let lens = |line_start| CodeLens { id: 0, line_start, title: "1 reference".into(), command: Arc::new(serde_json::Value::Null), server: "s".into(), unresolved: None };
@@ -2545,7 +2546,7 @@ mod tests {
             let mut doc = Document::from_text("let value = 1;\n".repeat(carets), Some("a.rs".into()));
             let rows = carets;
             doc.set_breakpoints(&(0..rows).map(Breakpoint::at).collect::<Vec<_>>());
-            let diagnostic = |range: Range<usize>| Diagnostic { range, severity: crate::lint::Severity::Warning, message: "m".into(), rule: "r".into() };
+            let diagnostic = |range: Range<usize>| Diagnostic { range, severity: crate::lint::Severity::Warning, message: "m".into(), rule: "r".into(), unnecessary: false };
             doc.set_lsp_diagnostics((0..rows).map(|r| doc.line_start(r) + 4..doc.line_start(r) + 9).map(diagnostic).collect());
             doc.set_inlay_hints((0..rows).map(|r| InlayHint { offset: doc.line_start(r) + 9, label: ": i32".into(), pad_left: false, pad_right: false }).collect());
             let text = doc.rope().to_string();
@@ -2907,7 +2908,7 @@ mod tests {
         let mut doc = Document::from_text(old.clone(), Some("a.rs".into()));
         doc.set_breakpoints(&[Breakpoint::at(1), Breakpoint::at(4001)]);
         let name = |doc: &Document, row: usize| doc.line_start(row) + 4..doc.line_start(row) + 6;
-        let problem = Diagnostic { range: name(&doc, 3001), severity: crate::lint::Severity::Warning, message: "m".into(), rule: "r".into() };
+        let problem = Diagnostic { range: name(&doc, 3001), severity: crate::lint::Severity::Warning, message: "m".into(), rule: "r".into(), unnecessary: false };
         doc.set_lsp_diagnostics(vec![problem]);
         let version = doc.version();
         assert!(reload_to(&mut doc, &new, &[]));
@@ -3067,6 +3068,7 @@ mod tests {
             severity: crate::lint::Severity::Warning,
             message: "m".into(),
             rule: "r".into(),
+            unnecessary: false,
         };
         // On `one`, on `one`'s `()`, on `gone`, on `two`.
         doc.set_lsp_diagnostics(vec![diagnostic(13..16), diagnostic(16..18), diagnostic(24..28), diagnostic(47..50)]);
@@ -3121,7 +3123,7 @@ mod tests {
     fn a_reload_that_reindents_every_line_keeps_things_on_their_lines() {
         let mut doc = Document::from_text("a();\nb();\nc();\n".into(), None);
         doc.set_breakpoints(&[Breakpoint::at(0), Breakpoint::at(1), Breakpoint::at(2)]);
-        doc.set_lsp_diagnostics(vec![Diagnostic { range: 5..6, severity: crate::lint::Severity::Error, message: "m".into(), rule: "r".into() }]);
+        doc.set_lsp_diagnostics(vec![Diagnostic { range: 5..6, severity: crate::lint::Severity::Error, message: "m".into(), rule: "r".into(), unnecessary: false }]);
         let version = doc.version();
         assert!(reload_to(&mut doc, "    a();\n    b();\n    c();\n", &[]));
         assert_eq!(doc.breakpoints().iter().map(|b| b.row).collect::<Vec<_>>(), [0, 1, 2]);

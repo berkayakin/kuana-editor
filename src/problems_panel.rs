@@ -121,8 +121,8 @@ impl Render for ProblemsPanel {
         let theme = Theme::get(cx).clone();
         let doc = self.editor.as_ref().map(|e| e.read(cx).doc.read(cx));
         let run_count = self.run_counts(doc).iter().sum::<usize>();
-        // Hints aren't problems.
-        let diag_count = doc.map_or(0, |d| d.diagnostics.len() - d.severity_count(Severity::Hint));
+        // Information and hints aren't problems.
+        let diag_count = doc.map_or(0, |d| d.severity_count(Severity::Error) + d.severity_count(Severity::Warning));
 
         let header = crate::ui::panel_header(&theme)
             .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_muted).child("PROBLEMS"))

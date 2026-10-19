@@ -57,6 +57,7 @@ pub fn lint(source: &str, base: usize, context: Context, dialect: Dialect) -> Ve
             severity,
             message: message.into(),
             rule: rule.into(),
+            unnecessary: false,
         });
     };
 
