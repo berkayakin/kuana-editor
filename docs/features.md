@@ -70,7 +70,7 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   highlighted, a log with a branch graph and file history, merge/rebase with conflict resolution in
   the editor, branches, pull and fetch
 - Welcome screen with quick-start tiles, Recent Projects, a Git card for the open repository and quick actions
-- 31 built-in themes (24 dark, 7 light) and JSON user themes with live preview
+- 50 built-in themes (36 dark, 14 light) and JSON user themes with live preview
 - Multiple windows, one project each, with a Recent Projects picker; on macOS the
   Window menu and the Dock icon's menu list them. Recent projects are also in the Dock icon's
   menu (macOS) and the taskbar's jump list (Windows)

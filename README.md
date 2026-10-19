@@ -12,7 +12,7 @@ JetBrains-style comfort, native speed, works with Zed extensions. Free and open 
 [Documentation](docs/README.md) ·
 [Contributing](CONTRIBUTING.md)
 
-![Kuana with the file tree and a Rust file open, in the Ember theme](docs/screenshots/default.png)
+![Kuana: Go to File, find, live theme preview, the terminal and the Markdown preview](docs/screenshots/demo.gif)
 
 ## Why Kuana
 
@@ -71,6 +71,12 @@ There's much more: see the [full feature list](docs/features.md).
 [GitHub Releases](https://github.com/berkayakin/kuana-editor/releases/latest). It updates itself
 from then on.
 
+| Platform | Status |
+| --- | --- |
+| **macOS** (Apple silicon, Intel) | Used every day; the most complete |
+| **Windows** (x64) | **Beta**: works, but has had little daily use so far |
+| **Linux** (x64) | **Beta**: as Windows; a `.tar.gz` only, no packages yet |
+
 **Or build it** (Rust 1.94+ and `cmake`):
 
 ```bash
@@ -79,8 +85,8 @@ cd kuana-editor
 cargo run --release -- path/to/project
 ```
 
-macOS is Kuana's everyday platform; Windows and Linux builds are newer and less tested. See
-[Installing and building](docs/install.md) for details.
+See [Installing and building](docs/install.md) for details. Kuana is young: before switching,
+read what it [doesn't do yet](#known-limitations).
 
 ## Documentation
 
@@ -95,6 +101,30 @@ macOS is Kuana's everyday platform; Windows and Linux builds are newer and less 
 | [Extensions](docs/extensions.md) | Installing and writing extensions |
 | [Themes](docs/themes.md) | Built-in themes and making your own |
 | [Settings](docs/settings.md) | Every option, `.editorconfig`, project trust |
+| [Roadmap](docs/roadmap.md) | What's planned, and what isn't there yet |
+
+## Known limitations
+
+Kuana is at 0.1. What people most often expect that isn't there yet (the [roadmap](docs/roadmap.md)
+says what's planned):
+
+- **Builds aren't signed yet**: macOS asks you to allow the first launch
+  ([how](docs/install.md#first-launch-on-macos)) and Windows SmartScreen warns. Updates are signed.
+- **Windows and Linux are in beta**, see above. No ARM builds for them, no Linux packages.
+- **No remote development**: no SSH, dev containers or WSL folders. One folder per window (no
+  multi-root workspaces).
+- **No built-in AI features** (inline completion, chat).
+- **Languages**: 13 have highlighting built in; others come from [extensions](docs/extensions.md),
+  but there's none yet for C/C++, Kotlin or Swift. Zed extensions run their own code only when
+  built for extension API 0.6 or 0.7; with older ones you install the language server yourself.
+- **Editing**: no semantic highlighting from language servers, no Emmet, no spell checking;
+  ESLint runs on open and save, not as you type.
+- **Git**: no three-way merge editor (conflicts are resolved in the editor), no interactive
+  rebase; the log shows the latest 3,000 commits.
+- **Debugger**: no hit counts or exception breakpoint options. **Vim mode**: no registers other
+  than the clipboard, macros, marks or `:s`.
+- **Accessibility**: screen readers can't read Kuana yet (a limit of the GPUI framework it's built on).
+- No settings sync, no localization (English only).
 
 ## Contributing
 
@@ -105,8 +135,8 @@ support, features. Good places to start:
 - **Make a theme or an extension.** Neither needs any Rust: see [Themes](docs/themes.md) and
   [Extensions](docs/extensions.md).
 - **Pick an open [issue](https://github.com/berkayakin/kuana-editor/issues)**, or take something
-  from the roadmap: a three-way merge editor, Vim registers and macros, semantic tokens, debug
-  adapters from extensions.
+  from the [roadmap](docs/roadmap.md): a three-way merge editor, Vim registers and macros, semantic
+  tokens, a C/C++ extension.
 
 The [contributing guide](CONTRIBUTING.md) covers building, the checks a change has to pass and
 the conventions the code follows; [Architecture](docs/architecture.md) maps the code.

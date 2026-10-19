@@ -10,5 +10,6 @@
 - [Extensions](extensions.md): Zed-format extensions for languages, themes and icons
 - [Themes](themes.md): built-in themes and making your own
 - [Settings and project trust](settings.md): every option, `.editorconfig`, Restricted Mode
+- [Roadmap](roadmap.md): what's planned, and what isn't there yet
 - [Architecture](architecture.md): how the code is laid out
 - [Releasing](releasing.md): for maintainers

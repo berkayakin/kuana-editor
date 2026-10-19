@@ -53,7 +53,10 @@ bindings, colors, icons) are in the [contributing guide](../CONTRIBUTING.md).
 - `src/theme.rs`, `src/theme_picker.rs`, `assets/themes/` — theme loading, picker and built-in themes
 - `src/updater.rs`, `.github/workflows/release.yml` — auto-update and the release build
 - `src/about.rs` — the About Kuana window
-- `src/panic_log.rs` — a crash's message, place and backtrace in `<config>/logs/panic-<time>.log`
+- `src/panic_log.rs` — a crash's message, place and backtrace in `<config>/logs/panic-<time>.log`;
+  the next start offers to report it as a GitHub issue filled in from the log
+- `src/autopilot.rs` — plays a script of keys and actions (`KUANA_AUTOPILOT=<file>`): the README
+  recording (`scripts/record.sh`) and CI's smoke test (`scripts/smoke.sh`, `.github/workflows/smoke.yml`)
 - `src/ui.rs`, `src/context_menu.rs`, `src/input_dialog.rs` — shared widgets, menus and prompts
 - `src/assets.rs`, `assets/icons/` — UI icons ([Material Symbols](https://fonts.google.com/icons), Rounded, filled; Apache 2.0) and the title font embedded into the binary
 - `assets/file-icons/`, `src/file_icons.rs` — file-type icons ([Charmed Icons](https://github.com/jmesrje/zed-charmed-icons)) and their file-name associations

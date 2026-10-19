@@ -16,6 +16,10 @@ The release gets a universal macOS `Kuana.app` (`.dmg` and `.zip`), a Windows in
 [`scripts/kuana.iss`](../scripts/kuana.iss)) and `.zip`, and a Linux `.tar.gz`, plus `latest.json`, which the workflow signs with
 [minisign](https://jedisct1.github.io/minisign/) using the `MINISIGN_SECRET_KEY` repository
 secret. Tags with a hyphen (`v0.3.0-beta.1`) become pre-releases, which the updater skips.
+Once published, the [smoke test](../.github/workflows/smoke.yml) downloads each platform's build
+and drives it through its main areas (`scripts/smoke.autopilot`), Linux under Xvfb with software
+Vulkan; its screenshots are the run's artifacts. Run it by hand for any tag from Actions → Smoke
+test.
 The binaries are built with Cargo.toml's `dist` profile (thin LTO and one codegen unit, as Zed's
 releases), which takes longer than `cargo build --release`; to try one locally,
 `cargo build --profile dist` puts it in `target/dist/`. Its line tables for backtraces go to a file
