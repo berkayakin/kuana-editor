@@ -66,12 +66,12 @@ impl ThemePicker {
     }
 
     fn update_rows(&mut self, cx: &mut Context<Self>) {
-        let query = self.query.read(cx).text(cx).to_lowercase();
+        let query = self.query.read(cx).text(cx);
         let registry = cx.global::<ThemeRegistry>();
         let mut rows: Vec<Row> = registry
             .entries
             .iter()
-            .filter(|e| query.is_empty() || e.theme.name.to_lowercase().contains(&query))
+            .filter(|e| name_matches(&e.theme.name, &query))
             .map(|e| Row {
                 theme: e.theme.clone(),
                 custom: e.path.is_some(),
@@ -142,6 +142,21 @@ impl Focusable for ThemePicker {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.query.focus_handle(cx)
     }
+}
+
+/// Whether `name` contains `query`, ignoring case and accents ("rose" finds
+/// Rosé Pine).
+fn name_matches(name: &str, query: &str) -> bool {
+    use nucleo_matcher::{
+        Config, Matcher, Utf32Str,
+        pattern::{Atom, AtomKind, CaseMatching, Normalization},
+    };
+    if query.trim().is_empty() {
+        return true;
+    }
+    let atom = Atom::new(query, CaseMatching::Ignore, Normalization::Smart, AtomKind::Substring, false);
+    let mut buf = Vec::new();
+    atom.score(Utf32Str::new(name, &mut buf), &mut Matcher::new(Config::DEFAULT)).is_some()
 }
 
 fn swatch(color: Rgba) -> impl IntoElement {
@@ -291,5 +306,18 @@ impl Render for ThemePicker {
             .child(div().px_2p5().pb_2().child(input_box(&self.query, Some(Icon::Search), window, cx)))
             .child(crate::ui::island(&theme).p_0().mx(px(crate::ui::GAP)).mb(px(crate::ui::GAP)).child(list))
             .child(footer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::name_matches;
+
+    #[test]
+    fn theme_names_match_without_case_or_accents() {
+        assert!(name_matches("Rosé Pine", "rose"));
+        assert!(name_matches("Rosé Pine", "ROSÉ p"));
+        assert!(name_matches("Tokyo Night", ""));
+        assert!(!name_matches("Tokyo Night", "dawn"));
     }
 }
