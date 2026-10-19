@@ -5,26 +5,30 @@
 //! the tags READMEs use (emphasis, links, images, line breaks, centered
 //! blocks, headings, tables, details) map onto the same blocks and styles,
 //! comments are hidden, and other tags are dropped with their text kept.
+//! Code blocks have Copy, and shell ones Run (in a Run tab, see `PreviewEvent`).
 
 use std::{
     ops::Range,
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use gpui::{
     AnyElement, App, FontStyle, FontWeight, HighlightStyle, InteractiveText, IntoElement, SharedString, StrikethroughStyle,
-    StyledText, UnderlineStyle, div, font, img, prelude::*, px,
+    StyledText, UnderlineStyle, Window, div, font, img, prelude::*, px,
 };
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ropey::Rope;
 
 use crate::{
+    assets::Icon,
     syntax::{Highlight, Language, Syntax},
     theme::Theme,
+    ui::{HoverFill, icon_el, tooltip_view},
 };
 
 mod view;
-pub use view::MarkdownPreview;
+pub use view::{MarkdownPreview, PreviewEvent};
 
 /// Text with inline styling: byte ranges of `text` and how they look.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -52,7 +56,8 @@ pub enum Block {
     /// `width` an HTML image's width in pixels.
     Image { src: String, alt: String, path: Option<PathBuf>, width: Option<f32> },
     /// A fenced block, highlighted when its language is one Kuana knows.
-    Code { lang: String, text: String, highlights: Vec<(Range<usize>, Highlight)> },
+    /// `command` is what Run runs: a shell block's commands (see `shell_command`).
+    Code { lang: String, text: String, highlights: Vec<(Range<usize>, Highlight)>, command: Option<String> },
     Quote(Vec<Block>),
     /// `start`: the first number of an ordered list.
     List { start: Option<u64>, items: Vec<Item> },
@@ -246,7 +251,8 @@ impl Builder {
                 if let Some((lang, text)) = self.code.take() {
                     let text = text.trim_end_matches('\n').to_string();
                     let highlights = code_highlights(&lang, &text);
-                    self.blocks().push(Block::Code { lang, text, highlights });
+                    let command = shell_command(&lang, &text);
+                    self.blocks().push(Block::Code { lang, text, highlights, command });
                 }
             }
             TagEnd::BlockQuote(_) => {
@@ -627,13 +633,24 @@ fn heading_level(level: HeadingLevel) -> u8 {
 // ---- Drawing -------------------------------------------------------------------------
 
 /// How to draw.
-#[derive(Clone, Copy)]
 pub struct Draw {
     /// 1.0 is the UI font size.
     pub zoom: f32,
+    /// What a code block's buttons do; without it they don't show.
+    pub on_code: Option<Rc<dyn Fn(CodeAction, &mut Window, &mut App)>>,
+    /// The code block whose Copy button shows a check (by its `ix`).
+    pub copied: Option<usize>,
 }
 
-pub fn render(blocks: &[Block], d: Draw, cx: &App) -> AnyElement {
+/// A code block's button was clicked.
+pub enum CodeAction {
+    /// The block (by its `ix`, for `Draw::copied`) and its text.
+    Copy { ix: usize, text: String },
+    /// Its `command`.
+    Run(String),
+}
+
+pub fn render(blocks: &[Block], d: &Draw, cx: &App) -> AnyElement {
     let theme = Theme::get(cx);
     let size = (theme.ui_font_size + 1.) * d.zoom;
     div()
@@ -647,7 +664,7 @@ pub fn render(blocks: &[Block], d: Draw, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-fn render_block(block: &Block, ix: usize, d: Draw, cx: &App) -> AnyElement {
+fn render_block(block: &Block, ix: usize, d: &Draw, cx: &App) -> AnyElement {
     let theme = Theme::get(cx);
     match block {
         Block::Heading(level, inline) => {
@@ -678,18 +695,32 @@ fn render_block(block: &Block, ix: usize, d: Draw, cx: &App) -> AnyElement {
                 None => div().text_color(theme.text_dim).child(format!("[{}]", if alt.is_empty() { src } else { alt })).into_any_element(),
             }
         }
-        Block::Code { text, highlights, .. } => div()
-            .px_3()
-            .py_2()
-            .rounded(px(8.))
-            .bg(theme.panel)
-            .border_1()
-            .border_color(theme.border_subtle)
-            .font(font(theme.mono_font.clone()))
-            .text_size(px((theme.editor_font_size - 1.) * d.zoom))
-            .line_height(px((theme.editor_font_size - 1.) * d.zoom * 1.45))
-            .child(highlighted_code(text, highlights, cx))
-            .into_any_element(),
+        Block::Code { text, highlights, command, .. } => {
+            let group = SharedString::from(format!("md-code-{ix}"));
+            let line = (theme.editor_font_size - 1.) * d.zoom * 1.45;
+            // The buttons sit centered on the first line, so a one-line
+            // block is at least as tall as they are with a margin around them
+            // (its line centered too).
+            let pad_y = if d.on_code.is_some() { ((CODE_BAR + 2. * CODE_BAR_MARGIN - line) / 2.).max(8.) } else { 8. };
+            let bar_top = pad_y + (line - CODE_BAR) / 2.;
+            div()
+                .group(group.clone())
+                .relative()
+                .px_3()
+                .py(px(pad_y))
+                .rounded(px(8.))
+                .bg(theme.panel)
+                .border_1()
+                .border_color(theme.border_subtle)
+                .font(font(theme.mono_font.clone()))
+                .text_size(px((theme.editor_font_size - 1.) * d.zoom))
+                .line_height(px(line))
+                .child(highlighted_code(text, highlights, cx))
+                .when_some(d.on_code.clone(), |el, on_code| {
+                    el.child(code_buttons(ix, text, command.as_deref(), group, on_code, d.copied == Some(ix), cx).top(px(bar_top)).right(px(bar_top)))
+                })
+                .into_any_element()
+        }
         Block::Quote(blocks) => div()
             .pl_3()
             .border_l_2()
@@ -775,6 +806,92 @@ fn render_block(block: &Block, ix: usize, d: Draw, cx: &App) -> AnyElement {
             }))
             .into_any_element(),
     }
+}
+
+/// The height of a code block's buttons (with their frame), and the least
+/// room around them.
+const CODE_BAR: f32 = 24.;
+const CODE_BAR_MARGIN: f32 = 5.;
+
+/// Copy and (for a shell block) Run at a code block's top right (the caller
+/// places them), shown while it's hovered, or while Copy shows that it worked.
+fn code_buttons(
+    ix: usize,
+    text: &str,
+    command: Option<&str>,
+    group: SharedString,
+    on_code: Rc<dyn Fn(CodeAction, &mut Window, &mut App)>,
+    copied: bool,
+    cx: &App,
+) -> gpui::Div {
+    let theme = Theme::get(cx);
+    let button = |id: &'static str, icon: Icon, tip: &'static str| {
+        div()
+            .id((id, ix))
+            // The frame's border is the rest of `CODE_BAR`.
+            .size(px(CODE_BAR - 2.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(5.))
+            .cursor_pointer()
+            .hover_bg(theme.hover)
+            .tooltip(move |_, cx| tooltip_view(tip, cx))
+            .child(icon_el(icon, px(13.), theme.text_muted.into()))
+    };
+    let (text, run) = (text.to_string(), on_code.clone());
+    div()
+        .absolute()
+        .flex()
+        .gap(px(1.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(theme.border)
+        // Over the code's first line, which it covers.
+        .bg(theme.elevated)
+        .when(!copied, |el| el.invisible().group_hover(group, |s| s.visible()))
+        .when_some(command.map(str::to_string), |el, command| {
+            el.child(
+                button("md-code-run", Icon::Play, "Run in Terminal")
+                    .on_click(move |_, window, cx| run(CodeAction::Run(command.clone()), window, cx)),
+            )
+        })
+        .child(
+            button("md-code-copy", if copied { Icon::Check } else { Icon::Copy }, if copied { "Copied" } else { "Copy" })
+                .on_click(move |_, window, cx| on_code(CodeAction::Copy { ix, text: text.clone() }, window, cx)),
+        )
+}
+
+/// What Run runs for a code block: a shell block's text, or only its commands
+/// when it shows them after `$ ` prompts with their output between (a
+/// command's `\` continuation lines kept); none for other languages, or
+/// nothing but comments.
+fn shell_command(lang: &str, text: &str) -> Option<String> {
+    let lang = lang.to_lowercase();
+    let shell = matches!(lang.as_str(), "sh" | "bash" | "shell" | "zsh" | "console" | "shell-session" | "shellsession" | "terminal")
+        // Run tabs on Windows run PowerShell (`terminal::powershell_run_script`).
+        || (cfg!(windows) && matches!(lang.as_str(), "powershell" | "pwsh" | "ps1"));
+    if !shell {
+        return None;
+    }
+    let command = if text.lines().any(|l| l.trim_start().starts_with("$ ")) {
+        let mut lines = Vec::new();
+        let mut continued = false;
+        for line in text.lines() {
+            if let Some(command) = line.trim_start().strip_prefix("$ ") {
+                lines.push(command);
+            } else if !continued {
+                continue;
+            } else {
+                lines.push(line);
+            }
+            continued = line.trim_end().ends_with('\\');
+        }
+        lines.join("\n")
+    } else {
+        text.to_string()
+    };
+    command.lines().any(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#')).then(|| command.trim().to_string())
 }
 
 /// Styled text; links open in the browser when clicked.
@@ -873,7 +990,8 @@ mod tests {
         assert!(matches!(&items[1].blocks[0], Block::Paragraph(i) if i.text == "done"));
         assert!(matches!(&blocks[3], Block::List { start: Some(1), items } if items.len() == 2));
         assert!(matches!(&blocks[4], Block::Quote(inner) if matches!(&inner[0], Block::Paragraph(i) if i.text == "quoted")));
-        let Block::Code { lang, text, highlights } = &blocks[5] else { panic!("{:?}", blocks[5]) };
+        let Block::Code { lang, text, highlights, command } = &blocks[5] else { panic!("{:?}", blocks[5]) };
+        assert_eq!(*command, None);
         assert_eq!((lang.as_str(), text.as_str()), ("rust", "fn main() {}"));
         assert!(highlights.iter().any(|(r, h)| *r == (0..2) && h.base() == Highlight::Keyword), "{highlights:?}");
         let Block::Table { aligns, rows } = &blocks[6] else { panic!("{:?}", blocks[6]) };
@@ -915,5 +1033,16 @@ mod tests {
         assert_eq!(rows.iter().map(|r| r.iter().map(|c| c.text.as_str()).collect::<Vec<_>>()).collect::<Vec<_>>(), vec![vec!["a", "b"], vec!["1", "2"]]);
         assert_eq!(blocks.len(), 7, "{blocks:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn runs_shell_blocks_commands() {
+        assert_eq!(shell_command("bash", "cargo build\ncargo test"), Some("cargo build\ncargo test".into()));
+        assert_eq!(shell_command("rust", "fn main() {}"), None);
+        assert_eq!(shell_command("", "make"), None);
+        assert_eq!(shell_command("sh", "# just a comment\n"), None);
+        // Prompts: only the commands, continuations included, not the output.
+        let console = "$ npm install \\\n    --save-dev x\nadded 1 package\n$ npm test\n> ok";
+        assert_eq!(shell_command("console", console), Some("npm install \\\n    --save-dev x\nnpm test".into()));
     }
 }

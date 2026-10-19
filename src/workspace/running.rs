@@ -32,6 +32,37 @@ impl Workspace {
         }
     }
 
+    /// A Markdown code block's Run: its commands in a Run tab (a rerun of
+    /// them takes its place), from the project folder when the file is in
+    /// it, since READMEs write commands for their project's root, else from
+    /// the file's folder. In Restricted Mode it asks first, showing all of
+    /// it: the preview cuts long lines off.
+    pub(super) fn run_snippet(&mut self, preview: &Entity<MarkdownPreview>, command: String, window: &mut Window, cx: &mut Context<Self>) {
+        let path = preview.read(cx).path(cx);
+        let cwd = match (&self.root, path.as_deref().and_then(Path::parent)) {
+            (Some(root), Some(dir)) if dir.starts_with(root) => root.clone(),
+            (_, Some(dir)) => dir.to_path_buf(),
+            _ => self.terminal_cwd(cx),
+        };
+        let first = command.lines().next().unwrap_or_default();
+        let mut name: String = first.chars().take(40).collect();
+        if name.len() < command.len() {
+            name.push('…');
+        }
+        let target = RunTarget { name: format!("Run '{name}'"), command, cwd, row: None, rows: 0..0, debug: None, test: None };
+        if !self.restricted(cx) {
+            self.run_target(target, window, cx);
+            return;
+        }
+        let confirmed = ask(window, "Run these commands?", &target.command, "Run", false, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if confirmed.await {
+                this.update_in(cx, |ws, window, cx| ws.run_target(target, window, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
     /// Run (⌃R / Shift+F10): the last configuration again, or the list.
     pub(super) fn rerun(&mut self, _: &Rerun, window: &mut Window, cx: &mut Context<Self>) {
         match self.last_run.clone() {

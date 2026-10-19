@@ -6,12 +6,14 @@
 
 use std::{
     path::{Path, PathBuf},
+    rc::Rc,
     sync::Arc,
+    time::Duration,
 };
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, IntoElement, ParentElement, Render, ScrollHandle, ScrollWheelEvent, Styled,
-    Subscription, Window, div, prelude::*, px,
+    App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, ParentElement, Render, ScrollHandle,
+    ScrollWheelEvent, Styled, Subscription, Task, Window, div, prelude::*, px,
 };
 
 use crate::{
@@ -22,7 +24,18 @@ use crate::{
     ui::{HoverFill, icon_el, tooltip_view},
 };
 
-use super::{Block, Draw, parse, render};
+use super::{Block, CodeAction, Draw, parse, render};
+
+/// How long Copy shows its check.
+const COPIED_FOR: Duration = Duration::from_millis(1500);
+
+/// For the workspace.
+pub enum PreviewEvent {
+    /// A code block's Run: its commands, for a Run tab.
+    Run(String),
+}
+
+impl EventEmitter<PreviewEvent> for MarkdownPreview {}
 
 pub struct MarkdownPreview {
     doc: Entity<Document>,
@@ -34,6 +47,8 @@ pub struct MarkdownPreview {
     zoom: f32,
     /// ⌘-scrolling not yet turned into a zoom step (trackpads send small deltas).
     zoom_rest: f32,
+    /// The code block whose Copy shows a check, and the timer that ends it.
+    copied: Option<(usize, Task<()>)>,
     focus_handle: FocusHandle,
     _observe: Subscription,
 }
@@ -47,6 +62,7 @@ impl MarkdownPreview {
             scroll: ScrollHandle::new(),
             zoom: 1.,
             zoom_rest: 0.,
+            copied: None,
             focus_handle: cx.focus_handle(),
             _observe: observe,
         }
@@ -83,6 +99,25 @@ impl MarkdownPreview {
         let base = doc.path.as_deref().and_then(Path::parent).map(Path::to_path_buf);
         self.blocks.schedule(key, move || parse(&rope.to_string(), base.as_deref()), |p| &mut p.blocks, cx);
         self.blocks.last()
+    }
+
+    fn code_action(&mut self, action: CodeAction, cx: &mut Context<Self>) {
+        match action {
+            CodeAction::Copy { ix, text } => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                let reset = cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(COPIED_FOR).await;
+                    this.update(cx, |p, cx| {
+                        p.copied = None;
+                        cx.notify();
+                    })
+                    .ok();
+                });
+                self.copied = Some((ix, reset));
+                cx.notify();
+            }
+            CodeAction::Run(command) => cx.emit(PreviewEvent::Run(command)),
+        }
     }
 
     fn zoom_by(&mut self, delta: f32, cx: &mut Context<Self>) {
@@ -147,7 +182,14 @@ impl Render for MarkdownPreview {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let blocks = self.blocks(cx);
         let theme = Theme::get(cx).clone();
-        let zoom = self.zoom;
+        let this = cx.entity().downgrade();
+        let draw = Draw {
+            zoom: self.zoom,
+            on_code: Some(Rc::new(move |action, _: &mut Window, cx: &mut App| {
+                this.update(cx, |p, cx| p.code_action(action, cx)).ok();
+            })),
+            copied: self.copied.as_ref().map(|(ix, _)| *ix),
+        };
         div()
             .id("markdown-preview-item")
             .key_context("MarkdownPreview")
@@ -176,7 +218,7 @@ impl Render for MarkdownPreview {
                             }
                         }
                     }))
-                    .child(render(&blocks, Draw { zoom }, cx)),
+                    .child(render(&blocks, &draw, cx)),
             )
             .child(crate::ui::scrollbar("markdown-preview-scrollbar", &self.scroll, cx))
             .child(self.zoom_bar(cx))

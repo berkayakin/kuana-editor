@@ -52,7 +52,8 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   ⌘K V / Ctrl+K V in the VS Code and Zed keymaps) opens the rendered document in a tab of its own
   beside the text (a new split, or the next pane), updated as you type; the same button or shortcut
   closes it again. It can be moved, pinned and split like any tab and comes back with the project: headings, emphasis, lists and task lists, quotes, tables, highlighted code
-  blocks, local images; links open in the browser. The HTML READMEs use is drawn too: centered
+  blocks (with Copy on hover, and Run for shell blocks: their commands, without `$ ` prompts and the
+  output between them, in a Run tab from the project folder; in Restricted Mode it asks first), local images; links open in the browser. The HTML READMEs use is drawn too: centered
   blocks (`align="center"`), `<img>` with its width, headings, `<b>`/`<i>`/`<code>`/`<kbd>`, links,
   `<br>`, `<details>` (shown open) and tables; comments are hidden and other tags dropped with their
   text kept. Remote images (badges) show their alt text. Zoom it with the − / + control at its top right

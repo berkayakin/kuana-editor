@@ -40,7 +40,7 @@ use crate::{
         EditorLspEvent, EditorPreviewToggle, EditorRunEvent, GitFile, ToggleMarkdownPreview, Unloaded,
     },
     image_view::ImageView,
-    markdown_preview::MarkdownPreview,
+    markdown_preview::{MarkdownPreview, PreviewEvent},
     pane_item::{PaneItem, Saving, TabIcon, TabLook},
     git::{self, Change, FileStatus, RepoStatus},
     git_panel::{GitOp, GitPanel, GitPanelEvent},
@@ -1297,7 +1297,8 @@ impl Workspace {
         match &item {
             PaneItem::Editor(editor) => self.add_editor(editor, window, cx),
             PaneItem::Diff(diff) => self.add_diff(diff, window, cx),
-            PaneItem::Image(_) | PaneItem::Preview(_) => {}
+            PaneItem::Preview(preview) => self.add_preview(preview, window, cx),
+            PaneItem::Image(_) => {}
         }
         self.active_pane.update(cx, |pane, cx| {
             let at = pane.next_slot();

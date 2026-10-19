@@ -295,6 +295,15 @@ impl Workspace {
         self.activate_editor(editor, window, cx);
     }
 
+    /// A new preview tab: its code blocks' Run comes here.
+    pub(super) fn add_preview(&mut self, preview: &Entity<MarkdownPreview>, window: &mut Window, cx: &mut Context<Self>) {
+        let subscription = cx.subscribe_in(preview, window, |ws, preview, event: &PreviewEvent, window, cx| match event {
+            PreviewEvent::Run(command) => ws.run_snippet(preview, command.clone(), window, cx),
+        });
+        // Dropped with the tab (see `remove_item`).
+        self.tab_subscriptions.insert(preview.entity_id(), vec![subscription]);
+    }
+
     /// The Markdown previews of a document, in pane order.
     pub(super) fn previews_of(&self, doc: &Entity<Document>, cx: &App) -> Vec<PaneItem> {
         self.items(cx).into_iter().filter(|t| t.preview().is_some_and(|p| p.read(cx).document() == doc)).collect()
