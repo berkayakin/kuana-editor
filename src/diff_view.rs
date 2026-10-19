@@ -13,25 +13,42 @@ use std::{
 
 use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla, IntoElement, ListAlignment,
-    ListOffset, ListState, Pixels, Render, SharedString, StyledText, Window, canvas, div, list, prelude::*, px,
+    ListOffset, ListState, Pixels, Render, Rgba, SharedString, StyledText, Window, canvas, div, list, pattern_slash, prelude::*,
+    px,
 };
 use ropey::Rope;
 
 use crate::{
     assets::Icon,
+    contrast,
     editor::{Cancel, NextChange, PreviousChange},
     git::{self, Change, CommitFile, DiffDocument, DiffLineKind, FileStatus},
     preview::{self, ImageInfo},
     git_panel::{GitOp, change_color},
     syntax::{Highlight, Language, Syntax},
-    theme::Theme,
+    theme::{Appearance, Theme},
+    transition::mix,
     ui::{HoverFill, icon_el, text_button, tooltip_view},
 };
 
-/// A line's height: a row is one line, more when its text wraps.
-const ROW_HEIGHT: f32 = 20.;
+/// A line's height, the editor's: a row is one line, more when its text wraps.
+fn row_height(theme: &Theme) -> f32 {
+    theme.editor_line_height
+}
+
+/// Stripes for the side that has no line, about 10px apart. Each row draws
+/// them from its own corner, so their period (in device pixels, which the
+/// shader counts in) divides the row's height: they run on from row to row.
+fn stripes(theme: &Theme, scale: f32) -> gpui::Background {
+    let row = (row_height(theme) * scale).round();
+    let periods = (row / (10. * scale)).round().max(1.);
+    let width = scale.round().max(1.);
+    pattern_slash(theme.border.into(), width, row / periods - width)
+}
 /// Room on the right of a change's first row for its Stage / Unstage button.
 const CHANGE_BUTTON_ROOM: f32 = 84.;
+/// The bar at the left of a changed line.
+const BAR_WIDTH: f32 = 3.;
 /// Narrower than this, two halves are too narrow to read: the diff shows
 /// unified (as VS Code's does) and drops the switch, keeping the choice.
 const SIDE_BY_SIDE_MIN_WIDTH: f32 = 720.;
@@ -388,8 +405,44 @@ fn expanded_offset(line: &str, offset: usize) -> usize {
     offset + 3 * line.as_bytes()[..offset.min(line.len())].iter().filter(|b| **b == b'\t').count()
 }
 
-/// A line with syntax colors and changed words on a stronger background.
-fn styled_line(text: &str, spans: Option<&Vec<(Range<usize>, Highlight)>>, emphasis: &[Range<usize>], emphasis_bg: Hsla, theme: &Theme) -> StyledText {
+/// How one side of a change is drawn, from the theme's Git color (as Zed
+/// does): the color itself for line numbers and the bar, a light fill for its
+/// rows and a stronger one for changed words. Fills are opaque (blended onto
+/// the background), so text contrast on them can be measured.
+#[derive(Clone, Copy)]
+struct Tint {
+    color: Hsla,
+    row: Hsla,
+    word: Hsla,
+}
+
+#[derive(Clone, Copy)]
+struct Palette {
+    /// The rows' background.
+    base: Hsla,
+    added: Tint,
+    removed: Tint,
+}
+
+impl Palette {
+    fn new(theme: &Theme) -> Self {
+        let base = Hsla { a: 1., ..theme.background.into() };
+        let dark = theme.appearance == Appearance::Dark;
+        let tint = |color: Rgba| {
+            let color = Hsla::from(color);
+            // Git colors on dark themes are light (they color text): mixed in
+            // strongly, they'd lift the fill toward the text's own lightness.
+            // A deep shade of the hue keeps changed words dark, the text on them readable.
+            let word = if dark { mix(base, Hsla { s: color.s.min(0.75), l: 0.4, ..color }, 0.45) } else { mix(base, color, 0.38) };
+            Tint { color, row: mix(base, color, if dark { 0.12 } else { 0.16 }), word }
+        };
+        Palette { base, added: tint(theme.git_added), removed: tint(theme.git_deleted) }
+    }
+}
+
+/// A line with syntax colors; on a changed line (`tint`), changed words on a
+/// stronger fill and colors made readable on the fills (`contrast::keep_legible`).
+fn styled_line(text: &str, spans: Option<&Vec<(Range<usize>, Highlight)>>, emphasis: &[Range<usize>], tint: Option<Tint>, base: Hsla, theme: &Theme) -> StyledText {
     let mut cuts = vec![0, text.len()];
     let spans: &[(Range<usize>, Highlight)] = spans.map_or(&[], |s| s.as_slice());
     for (r, _) in spans {
@@ -402,15 +455,15 @@ fn styled_line(text: &str, spans: Option<&Vec<(Range<usize>, Highlight)>>, empha
     cuts.dedup();
     let highlights = cuts.windows(2).filter(|w| w[0] < w[1] && text.is_char_boundary(w[0]) && text.is_char_boundary(w[1])).map(|w| {
         let kind = spans.iter().find(|(r, _)| r.start <= w[0] && w[0] < r.end).map_or(Highlight::None, |(_, k)| *k);
-        let emphasized = emphasis.iter().any(|r| r.start <= w[0] && w[0] < r.end);
-        (
-            w[0]..w[1],
-            HighlightStyle {
-                color: Some(theme.highlight_color(kind)),
-                background_color: emphasized.then_some(emphasis_bg),
-                ..Default::default()
-            },
-        )
+        let color = theme.highlight_color(kind);
+        let (color, background_color) = match tint {
+            Some(tint) if emphasis.iter().any(|r| r.start <= w[0] && w[0] < r.end) => {
+                (contrast::keep_legible(color, tint.word, base), Some(tint.word))
+            }
+            Some(tint) => (contrast::keep_legible(color, tint.row, base), None),
+            None => (color, None),
+        };
+        (w[0]..w[1], HighlightStyle { color: Some(color), background_color, ..Default::default() })
     });
     StyledText::new(SharedString::from(text.to_string())).with_highlights(highlights.collect::<Vec<_>>())
 }
@@ -561,17 +614,15 @@ impl Render for DiffView {
                 let row_theme = theme.clone();
                 let rows = list(
                     self.list.clone(),
-                    cx.processor(move |this, ix: usize, _window, cx| this.render_row(&loaded, ix, side_by_side, current_change, &row_theme, cx)),
+                    cx.processor(move |this, ix: usize, window, cx| {
+                        this.render_row(&loaded, ix, side_by_side, current_change, &row_theme, window.scale_factor(), cx)
+                    }),
                 )
                 .flex_1()
                 .w_full()
                 .pt_1()
                 .pb(px(10.))
-                .bg(theme.background)
-                .font_family(theme.mono_font.clone())
-                .text_size(px(theme.editor_font_size - 1.))
-                // Wrapped lines stack at the rows' height.
-                .line_height(px(ROW_HEIGHT));
+                .bg(theme.background);
                 div()
                     .relative()
                     .flex()
@@ -667,22 +718,42 @@ impl DiffView {
             .child(side("After", &sides.after, "Deleted"))
     }
 
-    fn render_row(&self, loaded: &Loaded, ix: usize, side_by_side: bool, current_change: Option<usize>, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let added_bg = Hsla::from(theme.git_added).alpha(0.1);
-        let removed_bg = Hsla::from(theme.git_deleted).alpha(0.1);
-        let added_em = Hsla::from(theme.git_added).alpha(0.3);
-        let removed_em = Hsla::from(theme.git_deleted).alpha(0.3);
-        let number = |n: Option<usize>| {
+    #[allow(clippy::too_many_arguments)]
+    fn render_row(
+        &self,
+        loaded: &Loaded,
+        ix: usize,
+        side_by_side: bool,
+        current_change: Option<usize>,
+        theme: &Theme,
+        scale: f32,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let palette = Palette::new(theme);
+        // A changed line's number takes its side's color, as in Zed.
+        let number = |n: Option<usize>, tint: Option<Tint>| {
             div()
                 .w(px(44.))
                 .pr_2()
                 .flex_shrink_0()
                 .flex()
                 .justify_end()
-                .text_color(theme.line_number)
+                .text_color(tint.map_or(theme.line_number.into(), |t| t.color))
                 .child(n.map(|n| n.to_string()).unwrap_or_default())
         };
-        let row = div().id(ix).relative().w_full().flex().min_h(px(ROW_HEIGHT));
+        let bar = |tint: Tint| div().absolute().left_0().top_0().bottom_0().w(px(BAR_WIDTH)).bg(tint.color);
+        // The editor's font, set on each row: a `list`'s rows don't get the
+        // list's text style. Wrapped lines stack at the row's height, so a
+        // row is a whole number of lines (the stripes rely on it).
+        let row = div()
+            .id(ix)
+            .relative()
+            .w_full()
+            .flex()
+            .min_h(px(row_height(theme)))
+            .font_family(theme.mono_font.clone())
+            .text_size(px(theme.editor_font_size))
+            .line_height(px(row_height(theme)));
 
         let (kind, label, change) = if side_by_side {
             let r = &loaded.doc.split[ix];
@@ -693,7 +764,7 @@ impl DiffView {
         };
         if kind == DiffLineKind::Skipped {
             return row
-                .h(px(ROW_HEIGHT))
+                .h(px(row_height(theme)))
                 .justify_center()
                 .items_center()
                 .bg(theme.panel)
@@ -719,33 +790,33 @@ impl DiffView {
         let text = |line: StyledText, room: bool| div().flex_1().min_w_0().when(room, |el| el.pr(px(CHANGE_BUTTON_ROOM))).child(line);
         let row = if side_by_side {
             let r = &loaded.doc.split[ix];
-            let half = |side: Option<&git::DiffSide>, spans: &LineSpans, bg: Hsla, em: Hsla, changed: bool, room: bool| {
-                let cell = div().flex_1().min_w_0().flex().overflow_hidden();
+            let half = |side: Option<&git::DiffSide>, spans: &LineSpans, tint: Option<Tint>, room: bool| {
+                let cell = div().relative().flex_1().min_w_0().flex().overflow_hidden();
                 match side {
                     Some(s) => cell
-                        .when(changed, |el| el.bg(bg))
-                        .child(number(Some(s.no)))
-                        .child(text(styled_line(&s.text, spans.get(s.no - 1), &s.emphasis, em, theme), room)),
-                    // The other side has no line here.
-                    None => cell.bg(theme.panel),
+                        .when_some(tint, |el, t| el.bg(t.row).child(bar(t)))
+                        .child(number(Some(s.no), tint))
+                        .child(text(styled_line(&s.text, spans.get(s.no - 1), &s.emphasis, tint, palette.base, theme), room)),
+                    // The other side has no line here: stripes, as in Zed.
+                    None => cell.bg(stripes(theme, scale)),
                 }
             };
             let changed = r.kind != DiffLineKind::Context;
-            row.child(half(r.left.as_ref(), &loaded.old_spans, removed_bg, removed_em, changed, false))
+            row.child(half(r.left.as_ref(), &loaded.old_spans, changed.then_some(palette.removed), false))
                 .child(div().w(px(1.)).h_full().flex_shrink_0().bg(theme.border))
-                .child(half(r.right.as_ref(), &loaded.new_spans, added_bg, added_em, changed, button.is_some()))
+                .child(half(r.right.as_ref(), &loaded.new_spans, changed.then_some(palette.added), button.is_some()))
         } else {
             let l = &loaded.doc.unified[ix];
-            let (bg, sign, sign_color, em, spans): (Option<Hsla>, &str, Hsla, Hsla, Option<&Vec<_>>) = match l.kind {
-                DiffLineKind::Added => (Some(added_bg), "+", theme.git_added.into(), added_em, l.new_no.and_then(|n| loaded.new_spans.get(n - 1))),
-                DiffLineKind::Removed => (Some(removed_bg), "−", theme.git_deleted.into(), removed_em, l.old_no.and_then(|n| loaded.old_spans.get(n - 1))),
-                _ => (None, " ", theme.text_dim.into(), added_em, l.new_no.and_then(|n| loaded.new_spans.get(n - 1))),
+            let (tint, sign, spans): (Option<Tint>, &str, Option<&Vec<_>>) = match l.kind {
+                DiffLineKind::Added => (Some(palette.added), "+", l.new_no.and_then(|n| loaded.new_spans.get(n - 1))),
+                DiffLineKind::Removed => (Some(palette.removed), "−", l.old_no.and_then(|n| loaded.old_spans.get(n - 1))),
+                _ => (None, " ", l.new_no.and_then(|n| loaded.new_spans.get(n - 1))),
             };
-            row.when_some(bg, |el, bg| el.bg(bg))
-                .child(number(l.old_no))
-                .child(number(l.new_no))
-                .child(div().w(px(16.)).flex_shrink_0().text_color(sign_color).child(sign.to_string()))
-                .child(text(styled_line(&l.text, spans, &l.emphasis, em, theme), button.is_some()))
+            row.when_some(tint, |el, t| el.bg(t.row).child(bar(t)))
+                .child(number(l.old_no, tint))
+                .child(number(l.new_no, tint))
+                .child(div().w(px(16.)).flex_shrink_0().text_color(tint.map_or(theme.text_dim.into(), |t| t.color)).child(sign.to_string()))
+                .child(text(styled_line(&l.text, spans, &l.emphasis, tint, palette.base, theme), button.is_some()))
         };
 
         // The first row of a change: a marker for F7, and Stage / Unstage.

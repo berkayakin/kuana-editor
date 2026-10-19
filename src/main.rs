@@ -9,6 +9,7 @@ mod busy;
 mod cli;
 mod clone_dialog;
 mod conflict;
+mod contrast;
 mod context_menu;
 mod dap;
 mod debugger;
