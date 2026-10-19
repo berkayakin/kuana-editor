@@ -41,6 +41,8 @@ bindings, colors, icons) are in the [contributing guide](../CONTRIBUTING.md).
 - `src/git.rs`, `src/git_panel.rs`, `src/diff_view.rs`, `src/git_log.rs`, `src/push_dialog.rs`,
   `src/branch_picker.rs`, `src/clone_dialog.rs` — Git backend and UI
 - `src/conflict.rs`, `src/editor/conflict.rs` — merge conflict markers and their resolution
+- `src/workspace/pane.rs`, `src/workspace/pane_tree.rs` — a pane (its tabs and their strip) and
+  the tree of rows and columns the panes divide the editor area into
 - `src/pane_item.rs` — what a pane's tab can show: an editor, an image or a Markdown preview
 - `src/preview.rs`, `src/image_view.rs` — image files and their tab
 - `src/markdown_preview.rs`, `src/markdown_preview/view.rs` — the Markdown preview and its tab

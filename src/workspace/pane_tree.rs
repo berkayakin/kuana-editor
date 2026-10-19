@@ -10,7 +10,7 @@
 
 use std::{cell::Cell, rc::Rc};
 
-use gpui::{Bounds, Pixels};
+use gpui::{Bounds, Pixels, point, px};
 
 use super::{GAP, MIN_PANE_HEIGHT, MIN_PANE_WIDTH};
 use crate::state::{PaneNode, PaneShare};
@@ -352,6 +352,19 @@ pub(super) fn can_split(bounds: Bounds<Pixels>, side: Side) -> bool {
     }
 }
 
+/// The pane past `from`'s edge on `side`, of `panes` and their bounds: the
+/// one under a point just across the gap, level with the middle of `from`.
+pub(super) fn pane_toward<P: Clone>(from: Bounds<Pixels>, side: Side, panes: &[(P, Bounds<Pixels>)]) -> Option<P> {
+    let (middle, step) = (from.center(), px(GAP + 1.));
+    let probe = match side {
+        Side::Left => point(from.left() - step, middle.y),
+        Side::Right => point(from.right() + step, middle.y),
+        Side::Up => point(middle.x, from.top() - step),
+        Side::Down => point(middle.x, from.bottom() + step),
+    };
+    panes.iter().find(|(_, bounds)| bounds.contains(&probe)).map(|(pane, _)| pane.clone())
+}
+
 /// Puts a split's members back in order after one changed: a member split
 /// with one member gives way to it, and a member split along the same axis
 /// joins, its members taking their part of its share.
@@ -572,6 +585,22 @@ mod tests {
         // A row in a row joins it, keeping its part.
         let inner = PaneShare { share: 0.5, node: PaneNode::Row(vec![pane(0.5, 2), pane(0.5, 3)]) };
         assert_eq!(restore(PaneNode::Row(vec![pane(0.5, 1), inner])), "row(1:50 2:25 3:25)");
+    }
+
+    #[test]
+    fn the_pane_beside_is_the_one_across_the_gap() {
+        let at = |x: f32, y: f32, w: f32, h: f32| Bounds { origin: point(px(x), px(y)), size: size(px(w), px(h)) };
+        // A tall pane on the left; two stacked on the right, the upper one short.
+        let (left, upper, lower) = (at(0., 0., 400., 800.), at(406., 0., 600., 200.), at(406., 206., 600., 594.));
+        let panes = [(1, left), (2, upper), (3, lower)];
+        // Level with the left pane's middle: the lower one.
+        assert_eq!(pane_toward(left, Side::Right, &panes), Some(3));
+        assert_eq!(pane_toward(upper, Side::Down, &panes), Some(3));
+        assert_eq!(pane_toward(lower, Side::Up, &panes), Some(2));
+        assert_eq!(pane_toward(upper, Side::Left, &panes), Some(1));
+        // At the area's edge there's none.
+        assert_eq!(pane_toward(left, Side::Left, &panes), None);
+        assert_eq!(pane_toward(lower, Side::Down, &panes), None);
     }
 
     #[test]

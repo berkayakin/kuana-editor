@@ -74,6 +74,45 @@ impl Workspace {
         self.step_pane(true, window, cx);
     }
 
+    pub(super) fn previous_pane(&mut self, _: &PreviousPane, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_pane(false, window, cx);
+    }
+
+    pub(super) fn focus_pane_left(&mut self, _: &FocusPaneLeft, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_toward(Side::Left, window, cx);
+    }
+
+    pub(super) fn focus_pane_right(&mut self, _: &FocusPaneRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_toward(Side::Right, window, cx);
+    }
+
+    pub(super) fn focus_pane_up(&mut self, _: &FocusPaneUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_toward(Side::Up, window, cx);
+    }
+
+    pub(super) fn focus_pane_down(&mut self, _: &FocusPaneDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_toward(Side::Down, window, cx);
+    }
+
+    /// Goes to the pane on `side` of the current one, by where the panes
+    /// were drawn last (see `pane_toward`); none there, nothing happens.
+    fn focus_toward(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
+        let from = self.active_pane.read(cx).bounds();
+        let others: Vec<(Entity<Pane>, Bounds<Pixels>)> = self
+            .center
+            .panes()
+            .into_iter()
+            .filter(|p| *p != self.active_pane)
+            .map(|p| {
+                let bounds = p.read(cx).bounds();
+                (p, bounds)
+            })
+            .collect();
+        if let Some(pane) = pane_toward(from, side, &others) {
+            self.focus_pane(&pane, window, cx);
+        }
+    }
+
     /// The pane after the current one in tree order (left to right, top to
     /// bottom), or before it; around at the ends.
     fn step_pane(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {

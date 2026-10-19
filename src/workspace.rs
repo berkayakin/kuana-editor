@@ -109,7 +109,7 @@ mod windows;
 use self::{
     file_tree::*,
     pane::{Pane, PaneChrome, PaneEvent, file_drop_overlay},
-    pane_tree::{Axis, Member, PaneTree, Side, SplitId, can_split},
+    pane_tree::{Axis, Member, PaneTree, Side, SplitId, can_split, pane_toward},
     tab_bar::*,
     terminal_panel::{TerminalPanel, TerminalPanelEvent},
     title_bar::*,
@@ -154,6 +154,12 @@ actions!(
         SplitRight,
         SplitDown,
         NextPane,
+        PreviousPane,
+        /// The pane on that side of the current one.
+        FocusPaneLeft,
+        FocusPaneRight,
+        FocusPaneUp,
+        FocusPaneDown,
         RunConfiguration,
         Rerun,
         RerunFailedTests,
