@@ -14,7 +14,9 @@ Making what's there dependable on every platform before adding more.
 - **Windows and Linux out of beta**: daily use on both, fixes for what it finds. Every release is
   already started and driven through its main areas on all three platforms by CI (`smoke.yml`).
 - **Signed builds**: a Developer ID-signed and notarized macOS app, a signed Windows installer.
-- **Linux packages**: AppImage and `.deb` beside the `.tar.gz`; ARM64 builds for Linux and Windows.
+- **Linux packages** beside the `.tar.gz` (x64 and Arm64 builds exist for Windows and Linux): an
+  AppImage that updates itself, then a package repository or Flatpak, since a `.deb` installed
+  system-wide can't take Kuana's own updates.
 - **Crash reports**: after a crash, Kuana offers to open a GitHub issue filled in from its log
   (done); fixing what comes in comes first.
 - **More languages in the [registry](https://github.com/berkayakin/kuana-extensions)**: C/C++

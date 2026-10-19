@@ -13,7 +13,9 @@ git push origin v0.2.0
 
 The release gets a universal macOS `Kuana.app` (`.dmg` and `.zip`), a Windows installer
 (`-setup.exe`, per user, no admin rights; made with Inno Setup from
-[`scripts/kuana.iss`](../scripts/kuana.iss)) and `.zip`, and a Linux `.tar.gz`, plus `latest.json`, which the workflow signs with
+[`scripts/kuana.iss`](../scripts/kuana.iss)) and `.zip`, and a Linux `.tar.gz`, each for x86_64 and
+aarch64 (built on GitHub's Arm runners, `windows-11-arm` and `ubuntu-22.04-arm`), plus `latest.json`
+(one archive per platform key, the keys `platform()` in `src/updater.rs` asks for), which the workflow signs with
 [minisign](https://jedisct1.github.io/minisign/) using the `MINISIGN_SECRET_KEY` repository
 secret. Tags with a hyphen (`v0.3.0-beta.1`) become pre-releases, which the updater skips.
 Once published, the [smoke test](../.github/workflows/smoke.yml) downloads each platform's build

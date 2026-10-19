@@ -170,7 +170,20 @@ jobs:
 
   windows:
     needs: create
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            installer: x64compatible
+          # GitHub's Arm runner, so the smoke test can start the build too.
+          - arch: aarch64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            installer: arm64
+    runs-on: ${{ matrix.runner }}
     defaults:
       run:
         shell: bash
@@ -181,24 +194,42 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94"
-      - run: cargo build --profile dist --locked
+          targets: ${{ matrix.target }}
+      # The target is named, so the build is for this architecture even if the
+      # toolchain itself runs emulated.
+      - run: cargo build --profile dist --locked --target ${{ matrix.target }}
       - name: Package
         run: |
           mkdir -p dist pkg
-          cp target/dist/kuana.exe LICENSE-MIT LICENSE-APACHE pkg/
-          (cd pkg && 7z a -tzip "../dist/kuana-$VERSION-windows-x86_64.zip" .)
+          cp "target/${{ matrix.target }}/dist/kuana.exe" LICENSE-MIT LICENSE-APACHE pkg/
+          (cd pkg && 7z a -tzip "../dist/kuana-$VERSION-windows-${{ matrix.arch }}.zip" .)
       - name: Installer
         shell: pwsh
         run: |
-          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup --no-progress -y }
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DVersion=$env:VERSION" scripts\kuana.iss
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+          if (-not (Test-Path $iscc)) {
+            # No Chocolatey on this image: the installer from Inno Setup's site.
+            Invoke-WebRequest https://jrsoftware.org/download.php/is.exe -OutFile "$env:RUNNER_TEMP\is.exe"
+            Start-Process "$env:RUNNER_TEMP\is.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
+          }
+          & $iscc "/DVersion=$env:VERSION" "/DArch=${{ matrix.arch }}" "/DArchitectures=${{ matrix.installer }}" `
+            "/DSource=..\target\${{ matrix.target }}\dist" scripts\kuana.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: gh release upload "$TAG" dist/* --clobber
 
   linux:
     needs: create
-    # The oldest supported runner, so the binary runs on older glibc versions too.
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest supported runners, so the binary runs on older glibc versions too.
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
     env:
       VERSION: ${{ needs.create.outputs.version }}
     steps:
@@ -217,7 +248,7 @@ jobs:
         run: |
           mkdir -p dist pkg
           cp target/dist/kuana LICENSE-MIT LICENSE-APACHE pkg/
-          tar -czf "dist/kuana-$VERSION-linux-x86_64.tar.gz" -C pkg .
+          tar -czf "dist/kuana-$VERSION-linux-${{ matrix.arch }}.tar.gz" -C pkg .
       - run: gh release upload "$TAG" dist/* --clobber
 
   publish:
@@ -240,7 +271,9 @@ jobs:
           names = {
               "macos": f"Kuana-{version}-macos.zip",
               "windows-x86_64": f"kuana-{version}-windows-x86_64.zip",
+              "windows-aarch64": f"kuana-{version}-windows-aarch64.zip",
               "linux-x86_64": f"kuana-{version}-linux-x86_64.tar.gz",
+              "linux-aarch64": f"kuana-{version}-linux-aarch64.tar.gz",
           }
           def sha256(name):
               with open(name, "rb") as f:

@@ -5,8 +5,9 @@
 Get the latest build from [GitHub Releases](https://github.com/berkayakin/kuana-editor/releases/latest):
 
 - **macOS** (Apple silicon and Intel): `Kuana-<version>-macos.dmg`, or the `.zip`
-- **Windows**: the `-setup.exe` installer (per user, no admin rights needed), or the `.zip`
-- **Linux**: the `.tar.gz`
+- **Windows** (x64 or Arm64: `x86_64` or `aarch64` in the file name): the `-setup.exe` installer
+  (per user, no admin rights needed), or the `.zip`
+- **Linux** (x64 or Arm64): the `.tar.gz`
 
 macOS is where Kuana is used every day. Windows and Linux builds work but have had much less
 testing, so [bug reports](https://github.com/berkayakin/kuana-editor/issues) are very welcome.

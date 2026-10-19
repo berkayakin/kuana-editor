@@ -74,8 +74,8 @@ from then on.
 | Platform | Status |
 | --- | --- |
 | **macOS** (Apple silicon, Intel) | Used every day; the most complete |
-| **Windows** (x64) | **Beta**: works, but has had little daily use so far |
-| **Linux** (x64) | **Beta**: as Windows; a `.tar.gz` only, no packages yet |
+| **Windows** (x64, Arm64) | **Beta**: works, but has had little daily use so far |
+| **Linux** (x64, Arm64) | **Beta**: as Windows; a `.tar.gz` only, no packages yet |
 
 **Or build it** (Rust 1.94+ and `cmake`):
 
@@ -110,7 +110,7 @@ says what's planned):
 
 - **Builds aren't signed yet**: macOS asks you to allow the first launch
   ([how](docs/install.md#first-launch-on-macos)) and Windows SmartScreen warns. Updates are signed.
-- **Windows and Linux are in beta**, see above. No ARM builds for them, no Linux packages.
+- **Windows and Linux are in beta**, see above. No Linux packages (AppImage, `.deb`, Flatpak) yet.
 - **No remote development**: no SSH, dev containers or WSL folders. One folder per window (no
   multi-root workspaces).
 - **No built-in AI features** (inline completion, chat).

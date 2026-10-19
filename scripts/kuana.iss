@@ -1,13 +1,23 @@
 ; Windows installer (Inno Setup 6), built by .github/workflows/release.yml:
 ;   ISCC.exe /DVersion=<version> scripts\kuana.iss
 ; Installs per user (no admin prompt) so the updater can replace kuana.exe in place.
-; It takes the `dist` build; /DProfile=release takes `cargo build --release`'s.
+; It takes the `dist` build; /DProfile=release takes `cargo build --release`'s. For Arm:
+; /DArch=aarch64 /DArchitectures=arm64 /DSource=..\target\aarch64-pc-windows-msvc\dist
 
 #ifndef Version
   #define Version "0.0.0"
 #endif
 #ifndef Profile
   #define Profile "dist"
+#endif
+#ifndef Source
+  #define Source "..\target\" + Profile
+#endif
+#ifndef Arch
+  #define Arch "x86_64"
+#endif
+#ifndef Architectures
+  #define Architectures "x64compatible"
 #endif
 
 [Setup]
@@ -21,12 +31,12 @@ DefaultDirName={autopf}\Kuana
 DefaultGroupName=Kuana
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed={#Architectures}
+ArchitecturesInstallIn64BitMode={#Architectures}
 SetupIconFile=..\assets\app-icon\windows\kuana.ico
 UninstallDisplayIcon={app}\kuana.exe
 OutputDir=..\dist
-OutputBaseFilename=Kuana-{#Version}-windows-x86_64-setup
+OutputBaseFilename=Kuana-{#Version}-windows-{#Arch}-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -36,7 +46,7 @@ CloseApplications=yes
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "..\target\{#Profile}\kuana.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Source}\kuana.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE-MIT"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE-APACHE"; DestDir: "{app}"; Flags: ignoreversion
 

@@ -46,6 +46,12 @@ jobs:
           - os: ubuntu-24.04
             asset: "kuana-*-linux-x86_64.tar.gz"
             binary: kuana
+          - os: windows-11-arm
+            asset: "kuana-*-windows-aarch64.zip"
+            binary: kuana.exe
+          - os: ubuntu-22.04-arm
+            asset: "kuana-*-linux-aarch64.tar.gz"
+            binary: kuana
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     defaults:

@@ -70,14 +70,18 @@ pub fn supported() -> bool {
 
 /// The `latest.json` asset key for this build.
 fn platform() -> Option<&'static str> {
-    if cfg!(target_os = "macos") {
-        Some("macos")
-    } else if cfg!(all(windows, target_arch = "x86_64")) {
-        Some("windows-x86_64")
-    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        Some("linux-x86_64")
-    } else {
-        None
+    platform_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// The key for `os`/`arch` (as Rust names them); macOS's app is universal.
+fn platform_for(os: &str, arch: &str) -> Option<&'static str> {
+    match (os, arch) {
+        ("macos", _) => Some("macos"),
+        ("windows", "x86_64") => Some("windows-x86_64"),
+        ("windows", "aarch64") => Some("windows-aarch64"),
+        ("linux", "x86_64") => Some("linux-x86_64"),
+        ("linux", "aarch64") => Some("linux-aarch64"),
+        _ => None,
     }
 }
 
@@ -497,6 +501,17 @@ fn relaunch() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_released_build_has_a_platform_key() {
+        // The keys release.yml's publish job writes into latest.json.
+        let release = include_str!("../.github/workflows/release.yml");
+        for (os, arch) in [("macos", "aarch64"), ("macos", "x86_64"), ("windows", "x86_64"), ("windows", "aarch64"), ("linux", "x86_64"), ("linux", "aarch64")] {
+            let key = platform_for(os, arch).unwrap();
+            assert!(release.contains(&format!("\"{key}\": f\"")), "{key} isn't in release.yml's latest.json");
+        }
+        assert_eq!(platform_for("freebsd", "x86_64"), None);
+    }
 
     #[test]
     fn compares_versions() {
