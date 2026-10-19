@@ -12,7 +12,7 @@ JetBrains-style comfort, native speed, works with Zed extensions. Free and open 
 [Documentation](docs/README.md) ·
 [Contributing](CONTRIBUTING.md)
 
-![Kuana: Go to File, find, live theme preview, the terminal and the Markdown preview](docs/screenshots/demo.gif)
+![Kuana: Go to File, find, live theme preview, the terminal and the Markdown preview](docs/screenshots/demo.webp)
 
 ## Why Kuana
 
