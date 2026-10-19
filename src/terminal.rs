@@ -104,11 +104,8 @@ pub struct TerminalView {
     title: SharedString,
     /// A name the user gave the tab, shown instead of the shell's title.
     custom_title: Option<SharedString>,
-    /// The shell's process, to find the folder it's in now.
-    pid: Option<u32>,
-    /// A copy of the pty's master end, to ask which process group is in the
-    /// foreground (Unix only).
-    master: Option<std::fs::File>,
+    /// The shell's process, to find the folder it's in now and what it runs.
+    process: Option<ShellProcess>,
     focus_handle: FocusHandle,
     /// Columns, rows and cell size last sent to the shell.
     size: Option<(u16, u16, Pixels, Pixels)>,
@@ -145,8 +142,45 @@ enum Pty {
 /// A started pty, from the background.
 struct Started {
     notifier: Notifier,
-    pid: Option<u32>,
+    process: Option<ShellProcess>,
+}
+
+/// A terminal's processes, to tell its shell at the prompt from a command
+/// the shell runs.
+#[cfg_attr(not(unix), allow(dead_code))]
+struct ShellProcess {
+    /// The pty's process: the shell, or `login` running it (`login`).
+    pid: u32,
+    /// On macOS a shell that isn't configured starts through `/usr/bin/login`
+    /// (alacritty's default, so it's a tty session), which runs the shell as
+    /// its child: the shell is that child (`shell`, found once it's there).
+    login: bool,
+    shell: std::cell::OnceCell<u32>,
+    /// A copy of the pty's master end, to ask which process group is in the
+    /// foreground.
     master: Option<std::fs::File>,
+}
+
+impl ShellProcess {
+    /// The shell's process (see `login`).
+    fn shell(&self) -> Option<u32> {
+        if !self.login {
+            return Some(self.pid);
+        }
+        if let Some(&shell) = self.shell.get() {
+            return Some(shell);
+        }
+        let shell = first_child(self.pid)?;
+        Some(*self.shell.get_or_init(|| shell))
+    }
+
+    /// The command in the pty's foreground, by name, unless that's the shell
+    /// (or `login`, until the shell takes the foreground).
+    fn foreground_command(&self) -> Option<String> {
+        let group = foreground_group(self.master.as_ref()?)?;
+        let shell = self.shell()?;
+        (group != shell && group != self.pid).then(|| process_name(group).unwrap_or_else(|| "A process".into()))
+    }
 }
 
 /// Text an input method is composing (Chinese, Japanese, Korean, dead
@@ -211,10 +245,9 @@ impl TerminalView {
     /// size the view has by now.
     fn pty_started(&mut self, started: std::io::Result<Started>, cx: &mut Context<Self>) {
         match started {
-            Ok(Started { notifier, pid, master }) => {
+            Ok(Started { notifier, process }) => {
                 let Pty::Starting(typed) = std::mem::replace(&mut self.pty, Pty::Running(notifier)) else { return };
-                self.pid = pid;
-                self.master = master;
+                self.process = process;
                 if let (Pty::Running(notifier), Some(size)) = (&mut self.pty, self.size) {
                     notifier.on_resize(window_size(size));
                 }
@@ -275,8 +308,7 @@ impl TerminalView {
             pty: Pty::Starting(Vec::new()),
             title: shell_name.into(),
             custom_title: None,
-            pid: None,
-            master: None,
+            process: None,
             focus_handle: cx.focus_handle(),
             size: None,
             origin: Point::default(),
@@ -317,14 +349,12 @@ impl TerminalView {
         if let Some((target, state)) = &self.run {
             return (*state == RunState::Running).then(|| target.name.clone());
         }
-        let shell = self.pid?;
-        let group = foreground_group(self.master.as_ref()?)?;
-        (group != shell).then(|| process_name(group).unwrap_or_else(|| "A process".into()))
+        self.process.as_ref()?.foreground_command()
     }
 
     /// The folder the shell is in now (after any `cd`), else where it started.
     pub fn current_dir(&self) -> PathBuf {
-        self.pid.and_then(process_cwd).unwrap_or_else(|| self.cwd.clone())
+        self.process.as_ref().and_then(ShellProcess::shell).and_then(process_cwd).unwrap_or_else(|| self.cwd.clone())
     }
 
     fn handle_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
@@ -1041,6 +1071,21 @@ fn process_name(_pid: u32) -> Option<String> {
     None
 }
 
+/// A child of a process (`login` has one: the shell it runs).
+#[cfg(target_os = "macos")]
+fn first_child(pid: u32) -> Option<u32> {
+    let mut children = [0 as libc::pid_t; 8];
+    let size = std::mem::size_of_val(&children) as libc::c_int;
+    // SAFETY: `children` has room for the `size` bytes it may write.
+    unsafe { libc::proc_listchildpids(pid as libc::pid_t, children.as_mut_ptr().cast(), size) };
+    children.iter().find(|&&child| child > 0).map(|&child| child as u32)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn first_child(_pid: u32) -> Option<u32> {
+    None
+}
+
 /// A shell's title with a program's path in it shortened to the program's
 /// name. The Windows console titles itself with its program's path:
 /// `C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe`, and
@@ -1196,6 +1241,8 @@ fn start_pty(
         let (program, args) = command.split_first()?;
         Some(tty::Shell::new(program.clone(), args.to_vec()))
     });
+    // Without a shell, alacritty starts the user's through `login` on macOS.
+    let login = cfg!(target_os = "macos") && shell.is_none();
     // A Run tab must show everything the program printed before it exited.
     let drain_on_exit = run.is_some();
     // Windows has more options.
@@ -1208,9 +1255,14 @@ fn start_pty(
         tty::new(&options, window_size, 0)?
     };
     #[cfg(unix)]
-    let (pid, master) = (Some(pty.child().id()), pty.file().try_clone().ok());
+    let process = Some(ShellProcess {
+        pid: pty.child().id(),
+        login,
+        shell: std::cell::OnceCell::new(),
+        master: pty.file().try_clone().ok(),
+    });
     #[cfg(not(unix))]
-    let (pid, master) = (None, None);
+    let process = None;
     let event_loop = EventLoop::new(term, listener, pty, false, false)?;
     let notifier = Notifier(event_loop.channel());
     event_loop.spawn();
@@ -1218,7 +1270,7 @@ fn start_pty(
         // The shell reads it once it's ready.
         notifier.notify((line + "\r").into_bytes());
     }
-    Ok(Started { notifier, pid, master })
+    Ok(Started { notifier, process })
 }
 
 /// No signals blocked on this thread while it lives. A process inherits its
@@ -2333,7 +2385,7 @@ mod tests {
         .join()
         .unwrap();
         // SAFETY: a signal to the child this test started.
-        unsafe { libc::kill(started.pid.unwrap() as i32, libc::SIGTERM) };
+        unsafe { libc::kill(started.process.as_ref().unwrap().pid as i32, libc::SIGTERM) };
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             match events.try_recv() {
@@ -2353,20 +2405,40 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn finds_the_command_a_shell_runs() {
+        command_in_foreground(Some(vec!["/bin/sh".into(), "-i".into()]));
+    }
+
+    /// The same for the user's own shell, which macOS starts through `login`
+    /// (an idle shell isn't a command `login` runs).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn finds_the_command_a_login_shell_runs() {
+        command_in_foreground(None);
+    }
+
+    #[cfg(unix)]
+    fn command_in_foreground(shell: Option<Vec<String>>) {
         let (tx, _events) = mpsc::unbounded();
         let term = Arc::new(FairMutex::new(Term::new(Config::default(), &TermSize::new(80, 24), Listener(tx.clone()))));
-        let shell = Some(vec!["/bin/sh".into(), "-i".into()]);
         let started = start_pty(shell, &std::env::temp_dir(), None, term, Listener(tx)).unwrap();
-        let (shell, master) = (started.pid.unwrap(), started.master.as_ref().unwrap());
-        let running = || foreground_group(master).filter(|&g| g != shell).and_then(process_name);
-        assert_eq!(running(), None);
+        let process = started.process.as_ref().unwrap();
+        let wait_for = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while !done() {
+                assert!(std::time::Instant::now() < deadline, "{what}");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        // Typed while the shell starts, it runs after the profile (whose own
+        // commands may have the foreground meanwhile).
         started.notifier.notify(&b"sleep 30\r"[..]);
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while running().is_none() {
-            assert!(std::time::Instant::now() < deadline, "the command never got the foreground");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert_eq!(running().as_deref(), Some("sleep"));
+        wait_for("the command never got the foreground", &|| process.foreground_command().as_deref() == Some("sleep"));
+        // Back at the prompt, the shell is idle.
+        started.notifier.notify(&b"\x03"[..]);
+        wait_for("the shell never got the foreground back", &|| process.foreground_command().is_none());
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(process.foreground_command(), None);
+        assert_eq!(foreground_group(process.master.as_ref().unwrap()), process.shell());
         let _ = started.notifier.0.send(Msg::Shutdown);
     }
 }
