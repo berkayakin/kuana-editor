@@ -1,0 +1,53 @@
+# The README's demo: scripts/record.sh plays it on this repository (see src/autopilot.rs).
+
+size 1400 875
+# The project opens, its tree and Git status read.
+wait 4000
+mark start
+wait 1000
+
+# Go to File, then find in it.
+action workspace::GoToFile
+pace 90
+type wrap.rs
+wait 700
+keys enter
+wait 1500
+keys secondary-f
+type display_row
+wait 1500
+keys escape
+wait 800
+
+# Themes preview live as you move through them; Escape keeps the one before.
+action workspace::SelectTheme
+type rose
+wait 1600
+keys down
+wait 1400
+keys down
+wait 1400
+keys escape
+wait 800
+
+# The terminal.
+action workspace::ToggleTerminal
+# Until the shell is ready, or it echoes the keys early.
+wait 2500
+type git log --oneline -6
+keys enter
+wait 2000
+action workspace::ToggleTerminal
+wait 600
+
+# Markdown with its preview beside it.
+action workspace::GoToFile
+type README.md
+wait 700
+keys enter
+wait 1000
+action editor::ToggleMarkdownPreview
+wait 3000
+
+mark stop
+quit

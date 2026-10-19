@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 
 use crate::settings::Settings;
 
-const REPO: &str = "berkayakin/kuana-editor";
+pub(crate) const REPO: &str = "berkayakin/kuana-editor";
 /// Release signing key (`~/.minisign/kin-release.pub` on the maintainer's
 /// machine); the secret half is the repository secret `MINISIGN_SECRET_KEY`.
 const PUBLIC_KEY: &str = "RWR5QO9LE08wWLXENZBBui1DNd0r9UFw0h8OV/EB2bWiFgHtIlRP0K70";

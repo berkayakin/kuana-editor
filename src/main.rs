@@ -2,6 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod about;
+mod autopilot;
 mod python;
 mod assets;
 mod branch_picker;
@@ -404,6 +405,7 @@ fn main() {
         std::process::exit(cli::extension_command(&raw[1..]));
     }
     let args: Vec<PathBuf> = raw.into_iter().map(PathBuf::from).collect();
+    let autopilot = autopilot::from_env();
     // A Kuana already running takes the paths; this launch is done.
     let Ok(instance) = instance::claim(&args) else { return };
     // Git, language servers and debug adapters run with the login shell's
@@ -520,11 +522,21 @@ fn main() {
                 workspace.show_onboarding(window, cx);
             }
         });
+        let first = last;
         for dir in dirs {
             let near = last.and_then(|w| w.update(cx, |_, window, _| window.bounds()).ok());
             last = workspace::open_window(near, cx, move |workspace, window, cx| workspace.set_root(dir, window, cx)).or(last);
         }
         cx.activate(true);
+        match autopilot {
+            Some(steps) => autopilot::run(steps, cx),
+            // A scripted run has no one to ask.
+            None => {
+                if let (Some(window), Some(config)) = (first, theme::config_dir()) {
+                    window.update(cx, |_, window, cx| panic_log::offer_report(&config.join("logs"), window, cx)).ok();
+                }
+            }
+        }
         // The About window alone doesn't keep Kuana running.
         cx.on_window_closed(|cx| {
             if cx.windows().iter().all(|w| w.downcast::<workspace::Workspace>().is_none()) {

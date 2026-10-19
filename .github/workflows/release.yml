@@ -272,3 +272,10 @@ jobs:
           cd dist
           gh release upload "$TAG" latest.json latest.json.minisig SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
           gh release edit "$TAG" --draft=false --repo "$GITHUB_REPOSITORY"
+
+  # Starts each published build and drives it through its main areas; see smoke.yml.
+  smoke:
+    needs: publish
+    uses: ./.github/workflows/smoke.yml
+    with:
+      tag: ${{ github.ref_name }}

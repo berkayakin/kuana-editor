@@ -1,0 +1,90 @@
+# Starts each platform's released build and drives it through scripts/smoke.autopilot
+# (scripts/smoke.sh): catches a build that doesn't start, draw or get through the main areas,
+# which unit tests can't. release.yml runs it once a release is published; run it by hand for
+# any tag from Actions → Smoke test → Run workflow. The screenshots are uploaded to look at.
+# Tags from before 0.1.16 can't be tested: their builds have no autopilot.
+#
+# The machines have no GPU: Linux draws with Mesa's software Vulkan (lavapipe) under Xvfb (X11
+# only), Windows with WARP, so this is about starting and working, not speed.
+
+name: Smoke test
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to test (default the latest)
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  TAG: ${{ inputs.tag }}
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            asset: "Kuana-*-macos.zip"
+            binary: Kuana.app/Contents/MacOS/kuana
+          - os: windows-latest
+            asset: "kuana-*-windows-x86_64.zip"
+            binary: kuana.exe
+          - os: ubuntu-22.04
+            asset: "kuana-*-linux-x86_64.tar.gz"
+            binary: kuana
+          - os: ubuntu-24.04
+            asset: "kuana-*-linux-x86_64.tar.gz"
+            binary: kuana
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - name: Download the build
+        run: |
+          mkdir -p build
+          gh release download ${TAG:+"$TAG"} --repo "$GITHUB_REPOSITORY" --pattern "${{ matrix.asset }}" --dir build
+          cd build
+          case "${{ matrix.asset }}" in
+            *.zip) unzip -q ./*.zip || 7z x -y ./*.zip ;;
+            *.tar.gz) tar -xzf ./*.tar.gz ;;
+          esac
+      - name: Install what the Linux build needs at runtime
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb imagemagick mesa-vulkan-drivers libvulkan1 libxkbcommon-x11-0 \
+            libxcb-xkb1 libfontconfig1 libfreetype6 libwayland-client0 libasound2t64 || \
+          sudo apt-get install -y xvfb imagemagick mesa-vulkan-drivers libvulkan1 libxkbcommon-x11-0 \
+            libxcb-xkb1 libfontconfig1 libfreetype6 libwayland-client0 libasound2
+      - name: Smoke test
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a -s "-screen 0 1600x1000x24" scripts/smoke.sh "build/${{ matrix.binary }}" . smoke
+          else
+            scripts/smoke.sh "build/${{ matrix.binary }}" . smoke
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-${{ matrix.os }}
+          path: |
+            smoke/*.png
+            smoke/kuana-output.log
+            smoke/config/kuana/logs/
+          if-no-files-found: ignore

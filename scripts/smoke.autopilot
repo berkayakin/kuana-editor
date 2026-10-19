@@ -1,0 +1,40 @@
+# CI's smoke test (scripts/smoke.sh): goes through the main areas once on a real build. Any
+# step that fails, or a panic, fails the run; the screenshots show what it drew.
+
+size 1280 800
+# The project opens, its tree and Git status read.
+wait 6000
+action workspace::GoToFile
+type main.rs
+wait 1000
+keys enter
+wait 2000
+keys secondary-f
+type fn main
+wait 1000
+keys escape
+action workspace::SearchEverywhere
+type settings
+wait 1500
+keys escape
+action workspace::SplitRight
+wait 1000
+action workspace::ToggleCommit
+wait 2000
+action workspace::ToggleTerminal
+wait 3000
+type echo kuana-smoke
+keys enter
+wait 2000
+mark shot
+wait 3000
+action workspace::SelectTheme
+type light
+wait 1500
+keys escape
+action workspace::ToggleGitLog
+wait 3000
+mark shot
+wait 3000
+mark done
+quit
