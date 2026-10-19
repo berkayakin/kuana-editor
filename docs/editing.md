@@ -58,7 +58,7 @@ replaces an open file (a checkout, a formatter, another editor), before a Git ro
 Restore. **Local History** (Find Action, the editor's right-click menu, or a file's right-click
 menu in the tree) lists a file's versions in the Find panel by day, each with its time, why it was
 kept and how long ago. ↑/↓ show each one's differences from the file as it is (unsaved edits
-included) over the editor; **Restore** in the diff puts that version back as one edit, which Undo
+included) in a diff tab; **Restore** in the diff puts that version back as one edit, which Undo
 takes back.
 
 Versions live in `~/.config/kuana/local_history/`, outside your projects. A version the same as

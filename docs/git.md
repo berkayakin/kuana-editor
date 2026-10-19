@@ -19,14 +19,16 @@ message instead of hanging; use an SSH agent or a credential helper.
   number of changes): the branch with fetch, pull and push at the top, then staged changes,
   unstaged changes and **Unversioned Files** (new files Git doesn't track), with stage, unstage,
   open and roll back on hover (what a rollback throws away is kept in
-  [Local History](editing.md#local-history)); click a file for its diff. Write a message and press ⌘↩ to commit
+  [Local History](editing.md#local-history)); click a file for its diff, which opens in a tab of the current pane like the file itself. Write a message and press ⌘↩ to commit
   (with nothing staged, **Commit All** takes every change to tracked files), or use **Commit &
   Push**. Unversioned files go into a commit only when you check them, as in JetBrains: each has
   a checkbox, unchecked to start with, and the section's heading checks or clears them all.
   **Amend** starts from the previous message. In a folder that isn't a repository it offers
   **Initialize Repository**.
-- **Diffs** show side by side or unified (the choice is remembered), with syntax colors and the
-  changed words within a line highlighted. Each change has **Stage** / **Unstage**; F7 / ⇧F7 step
+- **Diffs** open as tabs (split, move and close them like any other) and show side by side or
+  unified (the choice is remembered), with syntax colors and the changed words within a line
+  highlighted. A diff of unsaved edits follows them as you type; once a file has nothing left to
+  stage, its diff tab closes. Each change has **Stage** / **Unstage**; F7 / ⇧F7 step
   through changes; collapsed unchanged lines expand on click. Images show the previous and new
   version side by side; other binary files say there's no text diff.
 - **Branches:** the title bar shows the current branch next to the project name; the Commit
@@ -76,7 +78,7 @@ message instead of hanging; use an SSH agent or a credential helper.
   `origin`, else the first remote; with several, the Push dialog lets you pick.
 - **Push** (⌘⇧K / Ctrl+Shift+K) first opens a dialog with the branch and where it goes (a new
   branch is marked, with a choice of remote when there are several), and the commits to push. Click a commit for its message and files, and a
-  file for its diff (closing it returns to the dialog). It warns when the remote has commits you
+  file for its diff (closing that tab returns to the dialog). It warns when the remote has commits you
   don't have; **Force push** replaces them only if the remote hasn't moved since your last fetch
   (`--force-with-lease`). Enter pushes, Esc cancels.
 

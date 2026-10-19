@@ -1,4 +1,5 @@
-//! What a pane's tab shows: a text editor, an image, or a Markdown preview.
+//! What a pane's tab shows: a text editor, an image, a Markdown preview or a
+//! Git / Local History diff.
 //! Each kind is its own view implementing
 //! [`Item`], the surface the workspace needs to draw its tab, save, close
 //! and keep it in the session; [`PaneItem`] is the handle panes hold.
@@ -18,6 +19,7 @@ use ropey::Rope;
 
 use crate::{
     assets::Icon,
+    diff_view::DiffView,
     editor::Editor,
     encoding::TextEncoding,
     image_view::ImageView,
@@ -172,6 +174,30 @@ impl Item for MarkdownPreview {
     }
 }
 
+impl Item for DiffView {
+    fn tab_title(&self, _: &App) -> String {
+        let path = self.file();
+        path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
+    }
+
+    fn path(&self, _: &App) -> Option<PathBuf> {
+        Some(self.file())
+    }
+
+    fn tab_icon(&self, _: &App) -> TabIcon {
+        TabIcon::Ui(Icon::GitCompare)
+    }
+
+    fn saving(&self) -> Saving {
+        Saving::Nothing
+    }
+
+    fn session(&self, _: &App) -> Option<(TabSession, Option<Rope>)> {
+        // What it compared (a status, a Local History version) may be gone by then.
+        None
+    }
+}
+
 /// What a tab bar shows of an item. The workspace keeps it and updates it
 /// when the item changes, so drawing the tab bars reads no item: one that
 /// changes (diagnostics arriving for a tab out of sight) would redraw the
@@ -192,6 +218,7 @@ pub enum PaneItem {
     Editor(Entity<Editor>),
     Image(Entity<ImageView>),
     Preview(Entity<MarkdownPreview>),
+    Diff(Entity<DiffView>),
 }
 
 impl From<Entity<Editor>> for PaneItem {
@@ -212,6 +239,12 @@ impl From<Entity<MarkdownPreview>> for PaneItem {
     }
 }
 
+impl From<Entity<DiffView>> for PaneItem {
+    fn from(diff: Entity<DiffView>) -> Self {
+        PaneItem::Diff(diff)
+    }
+}
+
 impl PaneItem {
     /// The view, as an [`Item`].
     pub fn read<'a>(&self, cx: &'a App) -> &'a dyn Item {
@@ -219,6 +252,7 @@ impl PaneItem {
             PaneItem::Editor(e) => e.read(cx),
             PaneItem::Image(i) => i.read(cx),
             PaneItem::Preview(p) => p.read(cx),
+            PaneItem::Diff(d) => d.read(cx),
         }
     }
 
@@ -227,6 +261,7 @@ impl PaneItem {
             PaneItem::Editor(e) => e.entity_id(),
             PaneItem::Image(i) => i.entity_id(),
             PaneItem::Preview(p) => p.entity_id(),
+            PaneItem::Diff(d) => d.entity_id(),
         }
     }
 
@@ -244,6 +279,19 @@ impl PaneItem {
         }
     }
 
+    pub fn diff(&self) -> Option<&Entity<DiffView>> {
+        match self {
+            PaneItem::Diff(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// The file itself (a text editor, an image), not a view of it (a
+    /// preview, a diff): opening the file finds it, Recent Files lists it.
+    pub fn is_file(&self) -> bool {
+        matches!(self, PaneItem::Editor(_) | PaneItem::Image(_))
+    }
+
     pub fn image(&self) -> Option<&Entity<ImageView>> {
         match self {
             PaneItem::Image(i) => Some(i),
@@ -256,6 +304,7 @@ impl PaneItem {
             PaneItem::Editor(e) => e.clone().into(),
             PaneItem::Image(i) => i.clone().into(),
             PaneItem::Preview(p) => p.clone().into(),
+            PaneItem::Diff(d) => d.clone().into(),
         }
     }
 
@@ -298,6 +347,7 @@ impl PaneItem {
                 PaneItem::Image(cx.new(|cx| ImageView::new(path, cx)))
             }
             PaneItem::Preview(p) => PaneItem::Preview(cx.new(|cx| MarkdownPreview::split_of(p, cx))),
+            PaneItem::Diff(d) => PaneItem::Diff(cx.new(|cx| DiffView::split_of(d, cx))),
         }
     }
 }

@@ -49,11 +49,7 @@ impl Workspace {
         let root = self.root.clone()?;
         let mut open: HashSet<PathBuf> = self.editors.iter().filter_map(|e| e.read(cx).doc.read(cx).path.clone()).collect();
         open.extend(self.images(cx).iter().map(|i| i.read(cx).path().to_path_buf()));
-        if let Some(Modal::Diff(view)) = &self.modals.current
-            && let Some(path) = view.read(cx).working_tree_file()
-        {
-            open.insert(path.to_path_buf());
-        }
+        open.extend(self.diff_views(cx).iter().filter_map(|d| d.read(cx).working_tree_file().map(Path::to_path_buf)));
         Some(WatchState {
             root,
             ignore: self.ignore.clone(),
@@ -117,10 +113,10 @@ impl Workspace {
         }
         // An edit from outside (a formatter in the terminal, another editor)
         // that leaves Git's status as it was: the diff of the file shows it.
-        if let Some(Modal::Diff(view)) = &self.modals.current
-            && view.read(cx).working_tree_file().is_some_and(|p| paths.contains(p))
-        {
-            view.update(cx, |v, cx| v.reload(cx));
+        for diff in self.diff_views(cx) {
+            if diff.read(cx).working_tree_file().is_some_and(|p| paths.contains(p)) {
+                diff.update(cx, |v, cx| v.reload(cx));
+            }
         }
     }
 

@@ -1,7 +1,7 @@
-//! The diff of one file: a working-tree change (from the Commit panel), a
-//! file in a commit (from the Git log) or a Local History version against
-//! the file as it is. Side by side or unified, with syntax
-//! colors, changed words emphasized, and Stage / Unstage per change.
+//! The diff of one file, shown in a pane's tab: a working-tree change (from
+//! the Commit panel), a file in a commit (from the Git log) or a Local
+//! History version against the file as it is. Side by side or unified, with
+//! syntax colors, changed words emphasized, and Stage / Unstage per change.
 
 use std::{
     cell::Cell,
@@ -12,16 +12,17 @@ use std::{
 };
 
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla, IntoElement, ListAlignment,
-    ListOffset, ListState, Pixels, Render, Rgba, SharedString, StyledText, Window, canvas, div, list, pattern_slash, prelude::*,
-    px,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla, IntoElement, ListAlignment,
+    ListOffset, ListState, Pixels, Render, Rgba, SharedString, StyledText, Subscription, Task, Window, canvas, div, list,
+    pattern_slash, prelude::*, px,
 };
 use ropey::Rope;
 
 use crate::{
     assets::Icon,
     contrast,
-    editor::{Cancel, NextChange, PreviousChange},
+    document::Document,
+    editor::{NextChange, PreviousChange},
     git::{self, Change, CommitFile, DiffDocument, DiffLineKind, FileStatus},
     preview::{self, ImageInfo},
     git_panel::{GitOp, change_color},
@@ -59,6 +60,7 @@ fn fits_side_by_side(width: Pixels) -> bool {
 }
 
 pub enum DiffViewEvent {
+    /// Nothing left to show (a working tree change staged or discarded): its tab closes.
     Close,
     OpenFile(PathBuf),
     Run(GitOp),
@@ -72,14 +74,41 @@ pub enum DiffViewEvent {
 #[derive(Clone)]
 pub enum DiffSource {
     /// Staged: HEAD → index. Unstaged: index → working tree (or the open
-    /// editor's text, so unsaved edits show).
-    Working { file: FileStatus, staged: bool, buffer: Option<String> },
+    /// document's text, so unsaved edits show).
+    Working { file: FileStatus, staged: bool },
     /// A commit's change to a file: first parent → commit.
     Commit { sha: String, summary: String, file: CommitFile },
     /// A Local History version (`label`: when and why it was kept) → the
-    /// file as it is (the open editor's text, so unsaved edits show).
-    History { path: PathBuf, label: String, text: Arc<str>, buffer: Option<String> },
+    /// file as it is (the open document's text, so unsaved edits show).
+    History { path: PathBuf, label: String, text: Arc<str> },
 }
+
+impl DiffSource {
+    /// Whether two sources show the same diff, so one tab serves both.
+    /// Local History versions of a file share a tab (stepping through them
+    /// replaces it); the rest go by file and side.
+    pub fn same_tab(&self, other: &DiffSource) -> bool {
+        match (self, other) {
+            (DiffSource::Working { file: a, staged: x }, DiffSource::Working { file: b, staged: y }) => a.rel == b.rel && x == y,
+            (DiffSource::Commit { sha: a, file: f, .. }, DiffSource::Commit { sha: b, file: g, .. }) => a == b && f.rel == g.rel,
+            (DiffSource::History { path: a, .. }, DiffSource::History { path: b, .. }) => a == b,
+            _ => false,
+        }
+    }
+
+    /// The file whose open document is the "after" side: the working tree
+    /// file of an unstaged change or a Local History version.
+    pub fn live_file(&self) -> Option<&Path> {
+        match self {
+            DiffSource::Working { file, staged: false } => Some(&file.path),
+            DiffSource::History { path, .. } => Some(path),
+            _ => None,
+        }
+    }
+}
+
+/// How long typing in the file's document waits before the diff follows.
+const FOLLOW_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// Syntax spans per line, in tab-expanded byte offsets.
 type LineSpans = Vec<Vec<(Range<usize>, Highlight)>>;
@@ -119,14 +148,22 @@ pub struct DiffView {
     focus_handle: FocusHandle,
     /// The rows, which wrap long lines and so differ in height.
     list: ListState,
+    /// The open document of the "after" side (`DiffSource::live_file`), whose
+    /// text (unsaved edits included) the diff shows and follows.
+    document: Option<(Entity<Document>, Subscription)>,
+    /// The document version last diffed.
+    seen_version: u64,
+    /// The diff being computed; a newer one replaces (cancels) it.
+    loading: Option<Task<()>>,
+    /// The pause after an edit of `document` before the diff follows it.
+    follow: Option<Task<()>>,
 }
 
 impl EventEmitter<DiffViewEvent> for DiffView {}
 
 impl DiffView {
-    pub fn new(repo: PathBuf, source: DiffSource, side_by_side: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let focus_handle = cx.focus_handle();
-        window.focus(&focus_handle);
+    /// `document`: the open document of `source.live_file()`, if any.
+    pub fn new(repo: PathBuf, source: DiffSource, document: Option<Entity<Document>>, side_by_side: bool, cx: &mut Context<Self>) -> Self {
         let mut view = Self {
             repo,
             source,
@@ -136,18 +173,64 @@ impl DiffView {
             expanded: false,
             loaded: None,
             current_change: None,
-            focus_handle,
+            focus_handle: cx.focus_handle(),
             list: ListState::new(0, ListAlignment::Top, px(400.)).measure_all(),
+            document: None,
+            seen_version: 0,
+            loading: None,
+            follow: None,
         };
+        view.set_document(document, cx);
         view.reload(cx);
         view
+    }
+
+    /// The same diff in another view, for a split.
+    pub fn split_of(other: &Entity<DiffView>, cx: &mut Context<Self>) -> Self {
+        let o = other.read(cx);
+        let (repo, source, side_by_side) = (o.repo.clone(), o.source.clone(), o.side_by_side);
+        let document = o.document.as_ref().map(|(doc, _)| doc.clone());
+        Self::new(repo, source, document, side_by_side, cx)
+    }
+
+    pub fn source(&self) -> &DiffSource {
+        &self.source
+    }
+
+    /// Shows another diff in this view (a Local History version of the same file).
+    pub fn set_source(&mut self, source: DiffSource, document: Option<Entity<Document>>, cx: &mut Context<Self>) {
+        self.source = source;
+        self.current_change = None;
+        self.set_document(document, cx);
+        self.reload(cx);
+    }
+
+    /// Follows edits of the "after" side's open document, a moment after typing.
+    fn set_document(&mut self, document: Option<Entity<Document>>, cx: &mut Context<Self>) {
+        self.document = document.map(|doc| {
+            self.seen_version = doc.read(cx).version();
+            let subscription = cx.observe(&doc, |this, doc, cx| {
+                if doc.read(cx).version() == this.seen_version {
+                    return;
+                }
+                this.seen_version = doc.read(cx).version();
+                this.follow = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(FOLLOW_DELAY).await;
+                    this.update(cx, |this, cx| this.reload(cx)).ok();
+                }));
+            });
+            (doc, subscription)
+        });
     }
 
     /// Recomputes the diff (after staging, or to expand unchanged lines).
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         let (repo, source) = (self.repo.clone(), self.source.clone());
         let context = if self.expanded { usize::MAX } else { 3 };
-        cx.spawn(async move |this, cx| {
+        // The open document's text, unless it's a restored tab's stand-in
+        // that hasn't read its file yet.
+        let buffer = self.document.as_ref().map(|(doc, _)| doc.read(cx)).filter(|doc| !doc.is_stand_in()).map(|doc| doc.rope().to_string());
+        self.loading = Some(cx.spawn(async move |this, cx| {
             let loaded = cx
                 .background_executor()
                 .spawn(async move {
@@ -167,7 +250,7 @@ impl DiffView {
                             git::index_text(&repo, &file.rel).unwrap_or_default(),
                             file.path.clone(),
                         ),
-                        DiffSource::Working { file, staged: false, buffer } => {
+                        DiffSource::Working { file, staged: false } => {
                             let base = if file.unstaged == Some(Change::Untracked) {
                                 String::new()
                             } else {
@@ -182,7 +265,7 @@ impl DiffView {
                             let (base, current) = git::commit_file_texts(&repo, sha, file);
                             (base, current, repo.join(&file.rel))
                         }
-                        DiffSource::History { path, text, buffer, .. } => {
+                        DiffSource::History { path, text, .. } => {
                             let read = || std::fs::read(path).ok().map(|b| String::from_utf8_lossy(&b).into_owned());
                             (text.to_string(), buffer.clone().or_else(read).unwrap_or_default(), path.clone())
                         }
@@ -217,8 +300,7 @@ impl DiffView {
                 cx.notify();
             })
             .ok();
-        })
-        .detach();
+        }));
     }
 
     /// The repository's status changed (a commit, staging, maybe outside
@@ -244,15 +326,9 @@ impl DiffView {
         }
     }
 
-    /// The file this diff is of, for its tab: the path and the path shown.
-    pub fn tab_file(&self) -> (PathBuf, String) {
-        let (path, rel, _) = self.file_label();
-        (path, rel)
-    }
-
-    /// Closes the diff the way its own × does (back to where it came from).
-    pub fn close(&mut self, cx: &mut Context<Self>) {
-        cx.emit(DiffViewEvent::Close);
+    /// The file this diff is of, for its tab.
+    pub fn file(&self) -> PathBuf {
+        self.file_label().0
     }
 
     fn file_label(&self) -> (PathBuf, String, Change) {
@@ -318,10 +394,6 @@ impl DiffView {
 
     fn on_previous(&mut self, _: &PreviousChange, _: &mut Window, cx: &mut Context<Self>) {
         self.jump(false, cx);
-    }
-
-    fn on_escape(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(DiffViewEvent::Close);
     }
 
     fn set_side_by_side(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -593,8 +665,7 @@ impl Render for DiffView {
             .when(!deleted, |el| {
                 let path = path.clone();
                 el.child(icon_button("diff-open", Icon::File, "Open File").on_click(cx.listener(move |_, _, _, cx| cx.emit(DiffViewEvent::OpenFile(path.clone())))))
-            })
-            .child(icon_button("diff-close", Icon::X, "Close (Esc)").on_click(cx.listener(|_, _, _, cx| cx.emit(DiffViewEvent::Close))));
+            });
 
         let body = match self.loaded.clone() {
             None => div().flex_1().p_4().text_color(theme.text_dim).child("Loading diff…").into_any_element(),
@@ -642,15 +713,13 @@ impl Render for DiffView {
             .flex()
             .flex_col()
             .bg(theme.elevated)
-            // It sits in an island (see `Workspace::render_diff_overlay`): follow
-            // the island's rounded corners inside its inset.
+            // It sits in a pane's island: follow the island's rounded corners
+            // inside its inset.
             .rounded(px(crate::ui::ISLAND_RADIUS - crate::ui::ISLAND_INSET))
             .key_context("DiffView")
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(Self::on_escape))
             .on_action(cx.listener(Self::on_next))
             .on_action(cx.listener(Self::on_previous))
-            // Fills the editor area (the workspace places it there).
             .size_full()
             .child(header)
             .child(body)

@@ -148,8 +148,8 @@ impl Workspace {
                 .collect()
         };
         self.load_diff_bases(stale, cx);
-        if let Some(Modal::Diff(view)) = &self.modals.current {
-            view.update(cx, |v, cx| v.status_changed(&new, cx));
+        for diff in self.diff_views(cx) {
+            diff.update(cx, |v, cx| v.status_changed(&new, cx));
         }
         self.git_panel.update(cx, |p, cx| p.set_status(new, cx));
         cx.notify();
@@ -499,10 +499,11 @@ impl Workspace {
                 if matches!(op, GitOp::StageLines { .. } | GitOp::UnstageLines { .. }) {
                     ws.load_diff_bases(ws.editors.clone(), cx);
                 }
-                match &ws.modals.current {
-                    Some(Modal::Diff(view)) => view.update(cx, |v, cx| v.reload(cx)),
-                    Some(Modal::Remotes(dialog)) => dialog.update(cx, |d, cx| d.reload(cx)),
-                    _ => {}
+                for diff in ws.diff_views(cx) {
+                    diff.update(cx, |v, cx| v.reload(cx));
+                }
+                if let Some(Modal::Remotes(dialog)) = &ws.modals.current {
+                    dialog.update(cx, |d, cx| d.reload(cx));
                 }
                 if op.changes_remotes()
                     && let Some(repo) = &ws.repo
@@ -720,12 +721,7 @@ impl Workspace {
     }
 
     pub(super) fn open_diff(&mut self, file: FileStatus, staged: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let buffer = self
-            .editors
-            .iter()
-            .find(|t| t.read(cx).doc.read(cx).path.as_deref() == Some(file.path.as_path()))
-            .map(|t| t.read(cx).text(cx));
-        self.show_diff(DiffSource::Working { file, staged, buffer }, window, cx);
+        self.show_diff(DiffSource::Working { file, staged }, window, cx);
     }
 
     pub(super) fn show_push(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -746,8 +742,10 @@ impl Workspace {
                 ws.run_git(GitOp::PushNow { force: *force, remote: remote.clone() }, window, cx);
             }
             PushDialogEvent::OpenDiff(source) => {
-                ws.diff_return = Some(dialog.clone());
-                ws.show_diff(source.clone(), window, cx);
+                ws.close_modal(window, cx);
+                if let Some(diff) = ws.show_diff(source.clone(), window, cx) {
+                    ws.diff_return = Some((diff.entity_id(), dialog.clone()));
+                }
             }
             PushDialogEvent::ManageRemotes => ws.manage_remotes(&ManageRemotes, window, cx),
             PushDialogEvent::Dismissed => ws.close_modal(window, cx),
@@ -757,42 +755,46 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn show_diff(&mut self, source: DiffSource, window: &mut Window, cx: &mut Context<Self>) {
+    /// Shows a diff in a tab of the current pane, as opening a file does:
+    /// the tab already showing it (a Local History version replaces the
+    /// version its file's tab shows), else a new one.
+    pub(super) fn show_diff(&mut self, source: DiffSource, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<DiffView>> {
         // A Local History version needs no repository: paths show from the project.
         let repo = match &source {
             DiffSource::History { path, .. } => self.root.clone().or_else(|| path.parent().map(Path::to_path_buf)),
             _ => self.repo.clone(),
         };
-        let Some(repo) = repo else { return };
-        self.close_modal(window, cx);
+        let repo = repo?;
+        let document = source.live_file().and_then(|path| self.documents.read(cx).get(path, cx));
+        if let Some(diff) = self.diff_views(cx).into_iter().find(|d| d.read(cx).source().same_tab(&source)) {
+            diff.update(cx, |d, cx| d.set_source(source, document, cx));
+            self.activate_item(&PaneItem::Diff(diff.clone()), window, cx);
+            return Some(diff);
+        }
         let side_by_side = SessionState::load().diff_side_by_side.unwrap_or(true);
-        let view = cx.new(|cx| DiffView::new(repo, source, side_by_side, window, cx));
-        let subscription = cx.subscribe_in(&view, window, |ws, _, event: &DiffViewEvent, window, cx| match event {
-            DiffViewEvent::Close => {
-                ws.close_modal(window, cx);
-                // Back to the Push dialog the diff came from.
-                if let Some(dialog) = ws.diff_return.take() {
-                    ws.open_push_modal(dialog, window, cx);
-                }
-            }
-            DiffViewEvent::OpenFile(path) => {
-                ws.diff_return = None;
-                ws.close_modal(window, cx);
-                ws.open_path(path.clone(), window, cx);
-            }
+        let diff = cx.new(|cx| DiffView::new(repo, source, document, side_by_side, cx));
+        self.add_tab(PaneItem::Diff(diff.clone()), window, cx);
+        Some(diff)
+    }
+
+    /// Every diff tab, in pane order.
+    pub(super) fn diff_views(&self, cx: &App) -> Vec<Entity<DiffView>> {
+        self.items(cx).into_iter().filter_map(|t| t.diff().cloned()).collect()
+    }
+
+    /// A new diff tab: the workspace runs what it asks for.
+    pub(super) fn add_diff(&mut self, diff: &Entity<DiffView>, window: &mut Window, cx: &mut Context<Self>) {
+        let subscription = cx.subscribe_in(diff, window, |ws, diff, event: &DiffViewEvent, window, cx| match event {
+            DiffViewEvent::Close => ws.close_diff(diff, window, cx),
+            DiffViewEvent::OpenFile(path) => ws.open_path(path.clone(), window, cx),
             DiffViewEvent::Restore { path, text } => {
-                ws.diff_return = None;
-                ws.close_modal(window, cx);
+                // The version becomes the file: nothing left to compare.
+                ws.remove_item(&PaneItem::Diff(diff.clone()), window, cx);
                 ws.restore_version(path.clone(), text.clone(), window, cx);
             }
-            DiffViewEvent::Run(op) => {
-                ws.diff_return = None;
-                // Staging a change keeps the diff open (it reloads afterwards).
-                if !matches!(op, GitOp::StageLines { .. } | GitOp::UnstageLines { .. }) {
-                    ws.close_modal(window, cx);
-                }
-                ws.run_git(op.clone(), window, cx);
-            }
+            // A change staged or discarded reloads the diff, or closes it
+            // once nothing is left (`DiffView::status_changed`).
+            DiffViewEvent::Run(op) => ws.run_git(op.clone(), window, cx),
             DiffViewEvent::Layout { side_by_side } => {
                 // App-wide, like the font zoom.
                 let side_by_side = *side_by_side;
@@ -800,8 +802,17 @@ impl Workspace {
                 ws.state_task = Some(crate::state::write_soon(cx));
             }
         });
-        self.modals.open(Modal::Diff(view), subscription);
-        cx.notify();
+        // Dropped with the tab (see `remove_item`).
+        self.tab_subscriptions.insert(diff.entity_id(), vec![subscription]);
+    }
+
+    /// Closes a diff's tab; one opened from the Push dialog goes back to it.
+    pub(super) fn close_diff(&mut self, diff: &Entity<DiffView>, window: &mut Window, cx: &mut Context<Self>) {
+        let back = self.diff_return.take_if(|(id, _)| *id == diff.entity_id());
+        self.remove_item(&PaneItem::Diff(diff.clone()), window, cx);
+        if let Some((_, dialog)) = back {
+            self.open_push_modal(dialog, window, cx);
+        }
     }
 
     pub(super) fn toggle_problems(&mut self, _: &ToggleProblems, window: &mut Window, cx: &mut Context<Self>) {

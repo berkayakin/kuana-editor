@@ -48,18 +48,18 @@ impl Workspace {
         .detach();
     }
 
-    /// A version against the file as it is (its open editor's text), over
-    /// the editor area; `focus`: the diff takes the keyboard.
+    /// A version against the file as it is (its open document's text), in
+    /// the file's Local History diff tab; `focus`: the diff takes the keyboard.
     fn show_history_diff(&mut self, path: PathBuf, version: &Version, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = version.read() else {
             self.toast(ToastKind::Error, "Couldn't read that version", None, cx);
             return;
         };
-        let buffer = self.tab_for(&path, cx).map(|e| e.read(cx).doc.read(cx).rope().to_string());
         let label = format!("{} · {}", when(version.time), version.kind.label());
-        self.show_diff(crate::diff_view::DiffSource::History { path, label, text: text.into(), buffer }, window, cx);
-        if !focus {
-            window.focus(&self.results.focus_handle(cx));
+        let diff = self.show_diff(crate::diff_view::DiffSource::History { path, label, text: text.into() }, window, cx);
+        match diff {
+            Some(diff) if focus => window.focus(&diff.focus_handle(cx)),
+            _ => window.focus(&self.results.focus_handle(cx)),
         }
     }
 

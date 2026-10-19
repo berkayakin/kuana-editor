@@ -46,9 +46,6 @@ pub(super) struct PaneChrome {
     pub(super) at_top: bool,
     /// The find bar, shown above a text tab: Find is open and this is the current pane.
     pub(super) find_bar: Option<Entity<FindBar>>,
-    /// The Git diff covers the editor area with a tab of its own: the strip hides,
-    /// so it doesn't seem to control the diff.
-    pub(super) covered: bool,
     /// The project folder, where breadcrumbs start.
     pub(super) root: Option<PathBuf>,
 }
@@ -158,6 +155,7 @@ impl Pane {
             PaneItem::Editor(editor) => cx.observe(editor, |pane, editor, cx| pane.look_changed(&PaneItem::Editor(editor), cx)),
             PaneItem::Image(image) => cx.observe(image, |pane, image, cx| pane.look_changed(&PaneItem::Image(image), cx)),
             PaneItem::Preview(preview) => cx.observe(preview, |pane, preview, cx| pane.look_changed(&PaneItem::Preview(preview), cx)),
+            PaneItem::Diff(diff) => cx.observe(diff, |pane, diff, cx| pane.look_changed(&PaneItem::Diff(diff), cx)),
         };
         self.observers.insert(id, observer);
         let current = self.tabs.get(self.active).cloned();
@@ -471,9 +469,10 @@ impl Pane {
     }
 
     /// Under the tabs: the file's folders and name, then (in text) the
-    /// definitions around the caret; clicking one goes to it.
+    /// definitions around the caret; clicking one goes to it. A diff's own
+    /// header names its file.
     fn render_breadcrumbs(&self, item: &PaneItem, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let path = item.path(cx)?;
+        let path = item.path(cx).filter(|_| item.diff().is_none())?;
         let symbols = item.editor().map(|editor| editor.update(cx, |e, cx| e.breadcrumbs(cx)));
         let theme = Theme::get(cx).clone();
         let root = self.chrome.root.as_deref();
@@ -625,7 +624,7 @@ impl Render for Pane {
             })
             .child(island)
             // After the island, so the current tab paints over its top border.
-            .when(!self.tabs.is_empty() && !self.chrome.covered, |el| el.child(self.render_strip(edge, window, cx)))
+            .when(!self.tabs.is_empty(), |el| el.child(self.render_strip(edge, window, cx)))
             // Finder files, and files dragged from the file tree, dropped anywhere
             // over the pane (tabs included) open in it.
             .group(drop_group.clone())

@@ -76,7 +76,7 @@ impl Workspace {
         let files = if self.root.is_some() {
             self.project.openable()
         } else {
-            Arc::new(self.items(cx).iter().filter(|t| t.preview().is_none()).filter_map(|t| t.path(cx)).collect())
+            Arc::new(self.items(cx).iter().filter(|t| t.is_file()).filter_map(|t| t.path(cx)).collect())
         };
         let recent = if mode == PickerMode::Projects { self.recent_projects.clone() } else { self.recent.clone() };
         let (root, actions) = (self.root.clone(), self.actions.clone());

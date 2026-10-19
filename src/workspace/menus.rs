@@ -971,8 +971,6 @@ impl Workspace {
             Modal::GoToLine(g) => g.clone().into_any_element(),
             Modal::ProjectSearch(s) => s.clone().into_any_element(),
             Modal::Theme(t) => t.clone().into_any_element(),
-            // Drawn over the editor area by `render_panes`.
-            Modal::Diff(_) => return None,
             Modal::Branches(b) => b.clone().into_any_element(),
             Modal::Input(i) => i.clone().into_any_element(),
             Modal::Clone(c) => c.clone().into_any_element(),

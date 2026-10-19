@@ -567,7 +567,6 @@ enum Modal {
     GoToLine(Entity<GoToLineModal>),
     ProjectSearch(Entity<ProjectSearch>),
     Theme(Entity<ThemePicker>),
-    Diff(Entity<DiffView>),
     Branches(Entity<BranchPicker>),
     Input(Entity<InputDialog>),
     Clone(Entity<CloneDialog>),
@@ -733,8 +732,9 @@ pub struct Workspace {
     test_statuses: Arc<crate::test_run::Statuses>,
     last_tests: Option<(RunTarget, crate::test_run::TestRun)>,
     git_log: Entity<GitLog>,
-    /// The Push dialog a diff was opened from; it comes back when the diff closes.
-    diff_return: Option<Entity<PushDialog>>,
+    /// The diff tab opened from the Push dialog, and the dialog: it comes back
+    /// when that tab closes while still the current one.
+    diff_return: Option<(gpui::EntityId, Entity<PushDialog>)>,
     /// Working-tree root of the project's Git repository.
     repo: Option<PathBuf>,
     git_status: Arc<RepoStatus>,
@@ -923,7 +923,9 @@ impl Workspace {
         });
         let git_log = cx.new(GitLog::new);
         let log_subscription = cx.subscribe_in(&git_log, window, |ws, _, event: &GitLogEvent, window, cx| match event {
-            GitLogEvent::OpenDiff(source) => ws.show_diff(source.clone(), window, cx),
+            GitLogEvent::OpenDiff(source) => {
+                ws.show_diff(source.clone(), window, cx);
+            }
             GitLogEvent::Menu { entry, position } => ws.open_commit_menu(entry.clone(), *position, window, cx),
             GitLogEvent::Close => {
                 ws.hide_bottom(BottomPanel::GitLog);
@@ -1206,8 +1208,8 @@ impl Workspace {
             self.set_root(path, window, cx);
             return;
         }
-        // Open already (a preview of it doesn't count).
-        let open = self.items(cx).into_iter().find(|t| t.preview().is_none() && t.path(cx).as_deref() == Some(path.as_path()));
+        // Open already (a preview or diff of it doesn't count).
+        let open = self.items(cx).into_iter().find(|t| t.is_file() && t.path(cx).as_deref() == Some(path.as_path()));
         if let Some(item) = open {
             self.activate_item(&item, window, cx);
             return;
@@ -1292,8 +1294,10 @@ impl Workspace {
     /// dots, errors), so only a tab that's shown, or whose look changed,
     /// redraws anything.
     fn insert_tab(&mut self, item: PaneItem, pinned: bool, window: &mut Window, cx: &mut Context<Self>) -> usize {
-        if let PaneItem::Editor(editor) = &item {
-            self.add_editor(editor, window, cx);
+        match &item {
+            PaneItem::Editor(editor) => self.add_editor(editor, window, cx),
+            PaneItem::Diff(diff) => self.add_diff(diff, window, cx),
+            PaneItem::Image(_) | PaneItem::Preview(_) => {}
         }
         self.active_pane.update(cx, |pane, cx| {
             let at = pane.next_slot();
@@ -1435,7 +1439,7 @@ impl Workspace {
                     self.load_tab(&editor, cx);
                 }
             }
-            PaneItem::Image(_) => {}
+            PaneItem::Image(_) | PaneItem::Diff(_) => {}
         }
     }
 
@@ -1488,9 +1492,8 @@ impl Workspace {
             {
                 self.auto_save(&previous, cx);
             }
-            // A diff over the editor area would hide the file being shown.
-            if matches!(self.modals.current, Some(Modal::Diff(_))) {
-                self.modals.take();
+            // Another tab: the diff opened from the Push dialog no longer goes back to it.
+            if self.diff_return.as_ref().is_some_and(|(id, _)| *id != item.entity_id()) {
                 self.diff_return = None;
             }
             self.active_pane = pane.clone();
@@ -1498,8 +1501,8 @@ impl Workspace {
             // A restored tab reads its file when first shown.
             self.load_item(&item, cx);
             window.focus(&item.focus_handle(cx));
-            // A preview is of a file opened already.
-            if let Some(path) = item.path(cx).filter(|_| item.preview().is_none()) {
+            // A preview or diff is of a file (opened already for a preview).
+            if let Some(path) = item.path(cx).filter(|_| item.is_file()) {
                 self.recent.retain(|p| p != &path);
                 self.recent.insert(0, path);
                 self.recent.truncate(50);
@@ -1583,7 +1586,6 @@ impl Workspace {
     /// pane told during the workspace's render wouldn't be redrawn.
     fn sync_panes(&mut self, cx: &mut Context<Self>) {
         let panes = self.center.panes();
-        let covered = self.diff_view().is_some();
         for pane in &panes {
             let active = *pane == self.active_pane;
             let chrome = PaneChrome {
@@ -1591,7 +1593,6 @@ impl Workspace {
                 outlined: active && panes.len() > 1,
                 at_top: self.center.at_top(pane),
                 find_bar: (active && self.show_find).then(|| self.find_bar.clone()),
-                covered,
                 root: self.root.clone(),
             };
             pane.update(cx, |p, cx| p.set_chrome(chrome, cx));

@@ -99,7 +99,6 @@ fn common(mac: bool) -> Vec<KeyBinding> {
         KeyBinding::new("secondary-\\", SplitRight, None),
         KeyBinding::new("ctrl-space", ShowCompletions, e),
         // Dialogs and panels.
-        KeyBinding::new("escape", Cancel, Some("DiffView")),
         KeyBinding::new("escape", Cancel, Some("PushDialog")),
         KeyBinding::new("escape", Cancel, Some("TrustDialog")),
         KeyBinding::new("escape", Cancel, Some("About")),

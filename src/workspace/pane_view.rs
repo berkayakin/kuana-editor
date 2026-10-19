@@ -1,11 +1,11 @@
 //! The editor area: panes as the tree of splits arranges them (`pane_tree`),
-//! with resize handles between them, the welcome screen in a lone empty
-//! pane, and the Git diff over them all. Each pane draws itself (`pane.rs`).
+//! with resize handles between them, and the welcome screen in a lone empty
+//! pane. Each pane draws itself (`pane.rs`).
 
 use super::*;
 
 impl Workspace {
-    /// The editor area: the panes as split, with the Git diff over them.
+    /// The editor area: the panes as split.
     pub(super) fn render_panes(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The start screen, or ways to open a file, while there's nothing open.
         let lone_empty = self.center.len() == 1 && self.active_pane.read(cx).is_empty();
@@ -14,7 +14,6 @@ impl Workspace {
             .flex()
             .size_full()
             .child(self.render_member(self.center.root(), lone_empty, window, cx))
-            .when_some(self.diff_view(), |el, view| el.child(self.render_diff_overlay(view, cx)))
     }
 
     /// A pane (cached: it redraws when it changes, not with the workspace),
@@ -83,89 +82,5 @@ impl Workspace {
                     })),
             )
             .into_any_element()
-    }
-
-    pub(super) fn diff_view(&self) -> Option<Entity<DiffView>> {
-        match &self.modals.current {
-            Some(Modal::Diff(view)) => Some(view.clone()),
-            _ => None,
-        }
-    }
-
-    /// The Git diff covers only the editor area, so the sidebar (Commit view)
-    /// and the bottom panels (Git log) stay usable beside it.
-    /// The Git diff over the editor area, with a tab of its own in place of
-    /// the file tabs (hidden meanwhile, so they don't seem to control it).
-    pub(super) fn render_diff_overlay(&self, view: Entity<DiffView>, cx: &App) -> impl IntoElement {
-        let theme = Theme::get(cx).clone();
-        let (path, rel) = view.read(cx).tab_file();
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| rel.clone());
-        let edge = crate::ui::island_edge(&theme);
-        let close_view = view.clone();
-        let tab = div()
-            .id("diff-tab")
-            .relative()
-            .flex()
-            .flex_shrink_0()
-            .items_center()
-            .gap_1p5()
-            .h_full()
-            .pl_3()
-            .pr_1p5()
-            .max_w(px(360.))
-            .text_color(theme.text)
-            .font_weight(FontWeight::MEDIUM);
-        let tab = tab_shape(tab, true, false, false, "diff-tab".into(), edge, &theme)
-            .tooltip(move |_, cx| tooltip_view(format!("Changes in {rel}"), cx))
-            .child(icon_el(Icon::GitCompare, px(14.), theme.accent.into()))
-            .child(div().min_w_0().truncate().child(name))
-            .child(
-                div()
-                    .id("close-diff-tab")
-                    .flex_shrink_0()
-                    .size(px(18.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(5.))
-                    .cursor_pointer()
-                    .hover_bg(theme.active)
-                    .on_click(move |_, _, cx| close_view.update(cx, |v, cx| v.close(cx)))
-                    .child(icon_el(Icon::X, px(13.), theme.text_muted.into())),
-            );
-        gpui::deferred(
-            div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .flex_col()
-                .child(div().flex_shrink_0().h(px(TAB_STRIP_HEIGHT - 1.)))
-                .child(
-                    island(&theme)
-                        .id("diff-layer")
-                        .flex_1()
-                        .min_h_0()
-                        .occlude()
-                        .child(div().size_full().overflow_hidden().child(view)),
-                )
-                // After the island, so the tab paints over its top border.
-                .child(
-                    div()
-                        .id("diff-tab-strip")
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .right_0()
-                        .h(px(TAB_STRIP_HEIGHT))
-                        .flex()
-                        .items_end()
-                        .pt(px(TAB_STRIP_TOP))
-                        .pl(px(TAB_STRIP_INSET))
-                        .occlude()
-                        .child(tab)
-                        .child(super::title_bar::window_drag_area("diff-tabs-free").flex_1().min_w_0()),
-                ),
-        )
-        .with_priority(1)
     }
 }
