@@ -1242,7 +1242,8 @@ fn start_pty(
         Some(tty::Shell::new(program.clone(), args.to_vec()))
     });
     // Without a shell, alacritty starts the user's through `login` on macOS.
-    let login = cfg!(target_os = "macos") && shell.is_none();
+    #[cfg(unix)]
+    let login =cfg!(target_os = "macos") && shell.is_none();
     // A Run tab must show everything the program printed before it exited.
     let drain_on_exit = run.is_some();
     // Windows has more options.
