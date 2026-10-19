@@ -41,6 +41,11 @@ diagnostics, `textDocument/diagnostic`: basedpyright, pyright and ESLint work th
 editor supports it); Kuana does both. It asks when a file opens and a moment after each edit, and,
 for a server whose problems span files, asks again for its other open files too.
 
+basedpyright checks in pyright's `"standard"` mode, as in Zed (its own default, `"recommended"`,
+warns about most untyped code). A project's `pyrightconfig.json` or `[tool.basedpyright]` in
+`pyproject.toml` sets its own; to change it everywhere, set
+`"lsp": { "basedpyright": { "settings": { "basedpyright.analysis": { "typeCheckingMode": "recommended" } } } }`.
+
 Renaming or moving a file or folder in the file tree first asks the servers that want to know
 (`workspace/willRenameFiles`) what else changes with it, and makes those edits before the rename:
 rust-analyzer updates `mod` declarations and paths, TypeScript servers update imports. Edited files

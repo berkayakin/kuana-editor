@@ -304,9 +304,14 @@ pub fn expand_dotted(value: &Value) -> Value {
 /// What Kuana passes a server program unless told otherwise:
 /// (initialization options, settings). Inlay hints are off in TypeScript's
 /// and Go's servers until asked for, and formatting in the JSON, CSS and
-/// HTML servers (which VS Code's own extensions turn on).
+/// HTML servers (which VS Code's own extensions turn on). basedpyright
+/// checks in its "recommended" mode unless told otherwise, which warns on
+/// nearly every line of untyped code; Zed tones it down to "standard" (what
+/// pyright itself uses), and so does Kuana. A project's `pyrightconfig.json`
+/// or `[tool.basedpyright]` still wins over this.
 fn defaults(program: &str) -> (Value, Value) {
     match program {
+        "basedpyright-langserver" => (Value::Null, json!({ "basedpyright": { "analysis": { "typeCheckingMode": "standard" } } })),
         "typescript-language-server" => {
             let hints = json!({
                 "includeInlayParameterNameHints": "all",
@@ -580,6 +585,19 @@ mod tests {
         let user: HashMap<String, LspSettings> =
             [("basedpyright".to_string(), LspSettings { initialization_options: Some(json!({ "a": 1 })), ..Default::default() })].into();
         assert_eq!(config(python, Path::new("/bin/basedpyright-langserver"), &user, &FromCode::default()).initialization_options, json!({ "a": 1 }));
+        // basedpyright checks in pyright's "standard" mode unless the user picks another.
+        let mode = |user: &HashMap<String, LspSettings>| {
+            config(python, Path::new("/bin/basedpyright-langserver"), user, &FromCode::default()).settings["basedpyright"]["analysis"]
+                ["typeCheckingMode"]
+                .clone()
+        };
+        assert_eq!(mode(&none), "standard");
+        let strict: HashMap<String, LspSettings> = [(
+            "basedpyright".to_string(),
+            LspSettings { settings: Some(json!({ "basedpyright.analysis": { "typeCheckingMode": "recommended" } })), ..Default::default() },
+        )]
+        .into();
+        assert_eq!(mode(&strict), "recommended");
 
         // An extension's own values sit between the two.
         static EXT: ServerSpec = ServerSpec { id: "ext:x", ..SPEC };
