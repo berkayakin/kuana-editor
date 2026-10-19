@@ -6,6 +6,8 @@
 //   screenshot-helper activate <pid>        bring the app to the front
 //   screenshot-helper record <pid> <windowid> <folder> <fps>
 //                                           write the window's frames as PNGs until a line on stdin
+//   screenshot-helper compose <frames> <out> <width>
+//                                           frame them with a margin and a drop shadow
 
 import AppKit
 import ApplicationServices
@@ -47,33 +49,27 @@ func resize(pid: pid_t, width: CGFloat, height: CGFloat) {
     AXUIElementSetAttributeValue(window as! AXUIElement, kAXSizeAttribute as CFString, axSize)
 }
 
-/// Receives the window's frames from ScreenCaptureKit, keeping the newest. It only sends one
-/// when something changed, so a timer writes the newest at a steady rate instead.
-final class Frames: NSObject, SCStreamOutput {
+/// Set once, from any thread.
+final class Flag: @unchecked Sendable {
     private let lock = NSLock()
-    private var newest: CGImage?
-    private let context = CIContext()
-
-    func stream(_ stream: SCStream, didOutputSampleBuffer buffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, let pixels = buffer.imageBuffer,
-              let attachments = CMSampleBufferGetSampleAttachmentsArray(buffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
-              let raw = attachments.first?[.status] as? Int, SCFrameStatus(rawValue: raw) == .complete,
-              let image = context.createCGImage(CIImage(cvPixelBuffer: pixels), from: CIImage(cvPixelBuffer: pixels).extent)
-        else { return }
-        lock.lock(); newest = image; lock.unlock()
-    }
-
-    func take() -> CGImage? {
-        lock.lock(); defer { lock.unlock() }
-        return newest
-    }
+    private var value = false
+    func set() { lock.lock(); value = true; lock.unlock() }
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
 }
 
-/// Writes the window's frames as `frame-00001.png`… into `folder`, `fps` a second, until a
-/// line (or the end) arrives on stdin. Captures only that window, at the display's resolution,
-/// without the pointer, whatever is in front of it.
+/// Writes the window's frames as `frame-00001.png`… into `folder`, about `fps` a second, until a
+/// line (or the end) arrives on stdin, and each frame's time in milliseconds to `times.txt`.
+/// Captures only that window, with its rounded corners on a transparent background, at the
+/// display's resolution, without the pointer, whatever is in front of it (`compose` adds the
+/// margin and shadow). Takes a screenshot per frame instead of streaming: while a stream records a
+/// window, macOS draws its sharing badge over the window's buttons.
 func record(window id: CGWindowID, to folder: URL, fps: Int32) {
-    let frames = Frames()
+    _ = NSApplication.shared  // connects to the window server, which screenshots need
+    let stop = Flag()
+    DispatchQueue.global().async {
+        _ = readLine()
+        stop.set()
+    }
     let writer = DispatchQueue(label: "frames", qos: .userInitiated, attributes: .concurrent)
     Task {
         do {
@@ -82,44 +78,71 @@ func record(window id: CGWindowID, to folder: URL, fps: Int32) {
             let filter = SCContentFilter(desktopIndependentWindow: window)
             let config = SCStreamConfiguration()
             let scale = CGFloat(filter.pointPixelScale)
-            config.width = Int(window.frame.width * scale)
-            config.height = Int(window.frame.height * scale)
-            config.minimumFrameInterval = CMTime(value: 1, timescale: fps * 2)
+            config.width = Int(filter.contentRect.width * scale)
+            config.height = Int(filter.contentRect.height * scale)
             config.showsCursor = false
             config.ignoreShadowsSingleWindow = true
-            let stream = SCStream(filter: filter, configuration: config, delegate: nil)
-            try stream.addStreamOutput(frames, type: .screen, sampleHandlerQueue: DispatchQueue(label: "stream"))
-            try await stream.startCapture()
-            var count = 0
-            let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "timer"))
-            timer.schedule(deadline: .now(), repeating: 1.0 / Double(fps))
-            timer.setEventHandler {
-                guard let image = frames.take() else { return }
-                count += 1
-                let url = folder.appendingPathComponent(String(format: "frame-%05d.png", count))
+            config.shouldBeOpaque = false
+            let interval = 1.0 / Double(fps)
+            let start = Date()
+            var times: [Int] = []
+            print("recording")
+            fflush(stdout)
+            while !stop.isSet {
+                let began = Date()
+                let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+                times.append(Int(began.timeIntervalSince(start) * 1000))
+                let url = folder.appendingPathComponent(String(format: "frame-%05d.png", times.count))
                 writer.async {
                     guard let out = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else { return }
                     CGImageDestinationAddImage(out, image, nil)
                     CGImageDestinationFinalize(out)
                 }
+                let rest = interval - Date().timeIntervalSince(began)
+                if rest > 0 { try await Task.sleep(nanoseconds: UInt64(rest * 1e9)) }
             }
-            timer.resume()
-            print("recording")
-            fflush(stdout)
-            DispatchQueue.global().async {
-                _ = readLine()
-                timer.cancel()
-                Task {
-                    try? await stream.stopCapture()
-                    writer.sync(flags: .barrier) {}
-                    exit(0)
-                }
-            }
+            writer.sync(flags: .barrier) {}
+            try times.map(String.init).joined(separator: "\n").write(to: folder.appendingPathComponent("times.txt"), atomically: true, encoding: .utf8)
+            exit(0)
         } catch {
             fail("can't record: \(error.localizedDescription). The app running this script needs Screen Recording access.")
         }
     }
     dispatchMain()
+}
+
+
+/// Puts each `frame-*.png` of `input` on a transparent canvas with a margin and a soft drop
+/// shadow, as `screencapture -l` frames a window, scaled so the window is `width` pixels wide;
+/// writes them under the same names into `output`.
+func compose(_ input: URL, into output: URL, width: CGFloat) {
+    let names = ((try? FileManager.default.contentsOfDirectory(atPath: input.path)) ?? [])
+        .filter { $0.hasPrefix("frame-") && $0.hasSuffix(".png") }
+        .sorted()
+    DispatchQueue.concurrentPerform(iterations: names.count) { ix in
+        let name = names[ix]
+        guard let source = CGImageSourceCreateWithURL(input.appendingPathComponent(name) as CFURL, nil),
+              let frame = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        else { return }
+        let scale = width / CGFloat(frame.width)
+        let window = CGSize(width: width, height: (CGFloat(frame.height) * scale).rounded())
+        // Room for the shadow, which falls a little downward.
+        let margin = (width * 0.045).rounded()
+        let size = CGSize(width: window.width + 2 * margin, height: window.height + 2 * margin)
+        guard let context = CGContext(
+            data: nil, width: Int(size.width), height: Int(size.height), bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return }
+        context.interpolationQuality = .high
+        context.setShadow(offset: CGSize(width: 0, height: -margin * 0.3), blur: margin * 0.8,
+                          color: CGColor(gray: 0, alpha: 0.45))
+        context.draw(frame, in: CGRect(origin: CGPoint(x: margin, y: margin), size: window))
+        guard let image = context.makeImage(),
+              let out = CGImageDestinationCreateWithURL(output.appendingPathComponent(name) as CFURL, "public.png" as CFString, 1, nil)
+        else { return }
+        CGImageDestinationAddImage(out, image, nil)
+        CGImageDestinationFinalize(out)
+    }
 }
 
 let args = CommandLine.arguments
@@ -140,6 +163,9 @@ case "record":
         fail("usage: record <pid> <windowid> <frames folder> <fps>")
     }
     record(window: id, to: URL(fileURLWithPath: args[4]), fps: fps)
+case "compose":
+    guard args.count == 5, let width = Double(args[4]) else { fail("usage: compose <frames folder> <output folder> <width>") }
+    compose(URL(fileURLWithPath: args[2]), into: URL(fileURLWithPath: args[3]), width: CGFloat(width))
 case "activate":
     let pid = pidArg()
     // Since macOS 14, NSRunningApplication.activate is only a request that the frontmost app

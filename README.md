@@ -115,8 +115,7 @@ says what's planned):
   multi-root workspaces).
 - **No built-in AI features** (inline completion, chat).
 - **Languages**: 13 have highlighting built in; others come from [extensions](docs/extensions.md),
-  but there's none yet for C/C++, Kotlin or Swift. Zed extensions run their own code only when
-  built for extension API 0.6 or 0.7; with older ones you install the language server yourself.
+  but there's none yet for C/C++, Kotlin or Swift.
 - **Editing**: no semantic highlighting from language servers, no Emmet, no spell checking;
   ESLint runs on open and save, not as you type.
 - **Git**: no three-way merge editor (conflicts are resolved in the editor), no interactive

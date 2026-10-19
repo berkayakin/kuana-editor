@@ -28,9 +28,8 @@ Making what's there dependable on every platform before adding more.
   instead of the latest 3,000 commits.
 - **Debugger**: hit counts, exception breakpoint options, attaching to a debugpy or Node inspector
   port, debug adapters from extensions.
-- **Vim mode**: registers, macros, marks, `:s`, `gu`/`gU`.
-- **Extensions**: Zed extension API 0.1–0.5 and 0.8 (their own code, not only grammars and
-  themes), completion labels from extensions' code.
+- **More of Vim** in the existing [Vim mode](editing.md#vim-mode): registers other than the
+  clipboard, macros, marks, `:s`, `gu`/`gU`.
 
 ## Later, being considered
 

@@ -1,32 +1,32 @@
 #!/usr/bin/env bash
-# Records Kuana playing an autopilot script (see src/autopilot.rs) and turns it into a GIF (macOS).
+# Records Kuana playing an autopilot script (see src/autopilot.rs) as an animated WebP (macOS).
 #
 #   scripts/record.sh [options] [<script> [<folder> [<file>…]]]
 #
-# Defaults to scripts/readme.autopilot on this repository, saved as docs/screenshots/demo.gif.
+# Defaults to scripts/readme.autopilot on this repository, saved as docs/screenshots/demo.webp.
 # Launches target/release/kuana with a fresh config of its own (target/record-config: Welcome
 # Setup done, the folder trusted, so nothing of your ~/.config/kuana shows; terminals run zsh with
 # a plain prompt instead of your own), runs the script and
 # records the window from its `mark start` to its `mark stop`. Kuana gets its key presses from the
 # script, not from macOS, so nothing types into other apps and the window may be covered; only
-# that window is captured, without the pointer.
+# that window is captured, without the pointer, then framed like a screenshot (rounded corners, a
+# margin and a soft shadow on transparency, which is why it's WebP: GIF has no soft transparency).
 #
 # Options:
-#   -o FILE   output GIF (default docs/screenshots/demo.gif)
-#   -r FPS    frames per second (default 12)
-#   -w PX     GIF width in pixels (default 1200)
-#   -q N      gifski quality, 1–100 (default 80)
+#   -o FILE   output (default docs/screenshots/demo.webp)
+#   -r FPS    frames per second at most (default 14)
+#   -w PX     the window's width in the output, in pixels (default 1280)
+#   -q N      WebP quality, 1–100 (default 80)
 #   -k        keep the PNG frames (in target/record-frames)
 #
-# The terminal needs Screen Recording access. Needs gifski (`brew install gifski` or
-# `cargo install gifski`).
+# The terminal needs Screen Recording access. Needs img2webp (`brew install webp`).
 
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-out="$root/docs/screenshots/demo.gif"
-fps=12
-width=1200
+out="$root/docs/screenshots/demo.webp"
+fps=14
+width=1280
 quality=80
 keep=0
 
@@ -37,7 +37,7 @@ while getopts "o:r:w:q:kh" opt; do
         w) width=$OPTARG ;;
         q) quality=$OPTARG ;;
         k) keep=1 ;;
-        *) sed -n '2,22s/^# \{0,1\}//p' "$0"; exit 0 ;;
+        *) sed -n '2,24s/^# \{0,1\}//p' "$0"; exit 0 ;;
     esac
 done
 shift $((OPTIND - 1))
@@ -48,7 +48,7 @@ script="$(cd "$(dirname "$script")" && pwd)/$(basename "$script")"
 (( $# > 0 )) || set -- "$root"
 folder="$(cd "$1" && pwd)"
 
-command -v gifski >/dev/null || { echo "Needs gifski: brew install gifski (or cargo install gifski)" >&2; exit 1; }
+command -v img2webp >/dev/null || { echo "Needs img2webp: brew install webp" >&2; exit 1; }
 kuana="$root/target/release/kuana"
 [[ -x $kuana ]] || { echo "No $kuana; run cargo build --release first" >&2; exit 1; }
 
@@ -114,8 +114,25 @@ wait "$pid" || true
 
 count=$(find "$frames" -name 'frame-*.png' | wc -l | tr -d ' ')
 (( count > 0 )) || { echo "No frames were recorded" >&2; exit 1; }
-echo "$count frames ($(( count / fps )) s); making the GIF…"
+echo "$count frames ($(( $(tail -1 "$frames/times.txt") / 1000 )) s); framing them…"
+framed="$frames/framed"
+mkdir -p "$framed"
+"$helper" compose "$frames" "$framed" "$width"
+echo "Making the WebP…"
+# Each frame lasts until the next was taken (times.txt: milliseconds from the start).
+args=()
+stamps=()
+while read -r t || [[ -n $t ]]; do stamps+=("$t"); done <"$frames/times.txt"
+for (( i = 0; i < ${#stamps[@]}; i++ )); do
+    if (( i + 1 < ${#stamps[@]} )); then
+        duration=$(( stamps[i + 1] - stamps[i] ))
+    else
+        # A pause on the last frame before it starts over.
+        duration=2000
+    fi
+    args+=(-d "$duration" "$framed/$(printf 'frame-%05d.png' $((i + 1)))")
+done
 mkdir -p "$(dirname "$out")"
-gifski --quiet --fps "$fps" --width "$width" --quality "$quality" -o "$out" "$frames"/frame-*.png
+img2webp -loop 0 -lossy -q "$quality" -m 6 "${args[@]}" -o "$out" >/dev/null
 [[ $keep == 1 ]] || rm -rf "$frames"
 echo "Saved ${out#"$root"/} ($(du -h "$out" | cut -f1 | tr -d ' '))"
