@@ -14,12 +14,12 @@ use std::{
     ops::Range,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
 use gpui::{Font, LineFragment, LineWrapperHandle, Pixels, SharedString, TextSystem};
-use ropey::Rope;
+use ropey::{Rope, RopeSlice};
 
 use crate::{
     document::{InlayHint, LineEdit},
@@ -85,9 +85,14 @@ pub struct WrapMap {
     inlays: Vec<u64>,
     /// The `Inlays::generation` the breaks are for.
     inlay_generation: u64,
+    /// Display rows of each line: its block rows and its text's, none when
+    /// a fold hides it.
+    rows: Vec<u32>,
     /// First display row of each line (its block rows, then its text),
-    /// plus the total at the end.
+    /// plus the total at the end (the blocks after the last line included).
     row_starts: Vec<usize>,
+    /// The lines folds hide, as disjoint sorted ranges (first and last).
+    hidden: Vec<(usize, usize)>,
 }
 
 /// A line longer than this (in bytes) always breaks into rows, soft wrap or
@@ -180,16 +185,19 @@ impl<'a> Measure<'a> {
     /// Line `row`'s breaks and the `fingerprint` of the hints they're for.
     fn line(&mut self, rope: &Rope, row: usize) -> (Vec<Break>, u64) {
         let (start, hints) = self.inlays.of_line(rope, row);
-        (self.breaks(rope, row, start, hints), fingerprint(start, hints))
+        (self.breaks(rope.line(row), start, hints), fingerprint(start, hints))
     }
 
-    fn breaks(&mut self, rope: &Rope, row: usize, start: usize, hints: &[InlayHint]) -> Vec<Break> {
-        let line = rope.line(row);
+    /// The breaks of `line` (newline included), which starts at `start`
+    /// and has `hints`.
+    fn breaks(&mut self, line: RopeSlice, start: usize, hints: &[InlayHint]) -> Vec<Break> {
         let long = line.len_bytes() > LONG_LINE;
         if !self.wrap && !long {
             return Vec::new();
         }
-        let hint_cols: usize = hints.iter().map(|h| display_columns(h.label.chars(), 1) + h.pad_left as usize + h.pad_right as usize).sum();
+        // A hint can also push a tab after it to the next stop.
+        let hint_cols: usize =
+            hints.iter().map(|h| display_columns(h.label.chars(), 1) + h.pad_left as usize + h.pad_right as usize + self.tab_size.saturating_sub(1)).sum();
         // No character takes more columns than a tab or a control character's name (NEL).
         if self.wrap
             && ((hint_cols == 0 && line.len_chars() <= self.max_cols / self.tab_size.max(3))
@@ -242,11 +250,16 @@ fn resumes(text: &str, dl: &DisplayLine, tab_size: usize, ixs: &[usize]) -> Vec<
     let mut out = Vec::with_capacity(ixs.len());
     let mut next = ixs.iter().peekable();
     let mut col = 0;
+    // Hints take columns too (see `DisplayLine::window`).
+    let mut hints = dl.inlays.iter().peekable();
     for (i, ch) in text.char_indices() {
         // The next character's hints start where this one's display ends.
         let end = dl.to_display(i + ch.len_utf8());
         while next.next_if(|&&ix| ix < end).is_some() {
             out.push(Resume { byte: i as u32, ix: dl.to_display(i) as u32, col: col as u32 });
+        }
+        while let Some(hint) = hints.next_if(|s| s.column <= i) {
+            col += dl.text[hint.whole.clone()].chars().count();
         }
         col += match ch {
             '\t' => tab_size - col % tab_size,
@@ -271,8 +284,44 @@ impl WrapMap {
         font: Font,
         char_width: Pixels,
     ) -> Self {
+        Self::measure(key, version, folds, inlays, rope, text_system, font, char_width, &AtomicBool::new(false)).expect("not cancelled")
+    }
+
+    /// `new`, given up (None) once `cancelled` is set: it runs in the
+    /// background for a big file, and a newer width makes it moot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn measure(
+        key: WrapKey,
+        version: u64,
+        folds: &[Range<usize>],
+        inlays: Inlays,
+        rope: &Rope,
+        text_system: &std::sync::Arc<TextSystem>,
+        font: Font,
+        char_width: Pixels,
+        cancelled: &AtomicBool,
+    ) -> Option<Self> {
         let mut measure = Measure::new(&key, inlays, text_system, font, char_width);
-        let (breaks, fingerprints) = (0..rope.len_lines()).map(|row| measure.line(rope, row)).unzip();
+        let lines = rope.len_lines();
+        let mut breaks = Vec::with_capacity(lines);
+        let mut fingerprints = Vec::with_capacity(lines);
+        // Walking the lines (rather than looking each up) and the hints
+        // alongside them; most lines can't break.
+        let (mut start, mut hint) = (0, 0);
+        for (row, line) in rope.lines().enumerate().take(lines) {
+            if row % 1024 == 0 && cancelled.load(Ordering::Relaxed) {
+                return None;
+            }
+            let next = start + line.len_bytes();
+            // As `Inlays::of_line`: up to the line's end, the newline excluded.
+            let end = if row + 1 >= lines { rope.len_bytes() } else { next - 1 };
+            hint += inlays.hints[hint..].partition_point(|h| h.offset < start);
+            let hints = &inlays.hints[hint..hint + inlays.hints[hint..].partition_point(|h| h.offset <= end)];
+            breaks.push(measure.breaks(line, start, hints));
+            fingerprints.push(fingerprint(start, hints));
+            start = next;
+        }
+        debug_assert_eq!(breaks.len(), lines);
         let mut map = WrapMap {
             key,
             version,
@@ -282,17 +331,20 @@ impl WrapMap {
             breaks,
             inlays: fingerprints,
             inlay_generation: inlays.generation,
+            rows: Vec::new(),
             row_starts: Vec::new(),
+            hidden: hidden_lines(folds, rope),
         };
-        map.count_rows(rope, 0);
-        map
+        map.count_rows();
+        Some(map)
     }
 
     /// Catches up with `edits` (from `self.version` to `version`, see
     /// `Document::line_edits_since`), `folds` and `inlays`: only the lines
-    /// the edits touched or whose hints changed are measured again, and rows
-    /// are counted from the first of them. False when the edits don't fit
-    /// this map; then build a new one.
+    /// the edits touched, whose hints changed or that folds hid or showed
+    /// are measured and counted again, and the rows of the lines after them
+    /// move by as many. False when the edits don't fit this map; then build
+    /// a new one.
     #[allow(clippy::too_many_arguments)]
     pub fn update<'e>(
         &mut self,
@@ -309,8 +361,8 @@ impl WrapMap {
         if version == self.version && self.folds == folds && inlays.generation == self.inlay_generation {
             return true;
         }
-        let mut dirty = vec![false; self.breaks.len()];
-        let mut first = self.breaks.len();
+        let mut dirty = Dirty::new(self.breaks.len());
+        let mut blocks = None;
         for edit in edits {
             let old = edit.row..edit.row + edit.old_rows;
             if old.end > self.breaks.len() {
@@ -318,54 +370,78 @@ impl WrapMap {
             }
             self.breaks.splice(old.clone(), std::iter::repeat_with(Vec::new).take(edit.new_rows));
             self.inlays.splice(old.clone(), std::iter::repeat_n(0, edit.new_rows));
-            dirty.splice(old, std::iter::repeat_n(true, edit.new_rows));
-            first = first.min(edit.row);
+            self.rows.splice(old.clone(), std::iter::repeat_n(0, edit.new_rows));
+            // The edited lines' starts; the next line's (or the total) stays
+            // as it was, for `recount` to move the rest from.
+            self.row_starts.splice(old.clone(), std::iter::repeat_n(0, edit.new_rows));
+            dirty.splice(edit);
+            // Hidden lines and blocks move with their lines, so that only
+            // the ones that changed count again.
+            for range in &mut self.hidden {
+                *range = shift_range(*range, edit);
+            }
+            if !self.blocks.is_empty() {
+                let moved = blocks.get_or_insert_with(|| self.blocks.to_vec());
+                for (line, _) in moved.iter_mut() {
+                    *line = shift_line(*line, edit);
+                }
+            }
         }
         if self.breaks.len() != rope.len_lines() {
             return false;
+        }
+        if let Some(blocks) = blocks {
+            self.blocks = Arc::new(blocks);
         }
         // New hints: the lines whose hints aren't the ones they were measured
         // with (edited lines are already due).
         if inlays.generation != self.inlay_generation {
             for (row, now) in inlays.fingerprints(rope).into_iter().enumerate() {
-                if self.inlays[row] != now && !dirty[row] {
-                    dirty[row] = true;
-                    first = first.min(row);
+                if self.inlays[row] != now {
+                    dirty.mark(row..row + 1);
                 }
             }
             self.inlay_generation = inlays.generation;
         }
-        if first < dirty.len() {
+        if dirty.span.is_some() {
             let mut measure = Measure::new(&self.key, inlays, text_system, font, char_width);
-            for row in (first..dirty.len()).filter(|&row| dirty[row]) {
+            for row in dirty.rows() {
                 (self.breaks[row], self.inlays[row]) = measure.line(rope, row);
             }
         }
         self.version = version;
-        // Folds that moved or opened can hide rows above the first edit.
+        // Folds that opened or closed show or hide lines, maybe above the
+        // first edit; ones that only moved with the text change nothing.
         if self.folds != folds {
             self.folds = folds.to_vec();
-            first = 0;
+            let hidden = hidden_lines(folds, rope);
+            for &(first, last) in symmetric_difference(&self.hidden, &hidden) {
+                dirty.mark(first..last + 1);
+            }
+            self.hidden = hidden;
         }
-        self.count_rows(rope, first);
+        self.recount(&dirty);
         true
     }
 
-    /// Sets the block rows (see `blocks`); rows are counted again from the
-    /// first line whose blocks changed. The same list again (asked every
-    /// frame) costs nothing.
-    pub fn set_blocks(&mut self, blocks: &Arc<Vec<(usize, usize)>>, rope: &Rope) {
+    /// Sets the block rows (see `blocks`); only the lines whose blocks
+    /// changed count again. The same list again (asked every frame) costs
+    /// nothing, and so do blocks that moved with their lines.
+    pub fn set_blocks(&mut self, blocks: &Arc<Vec<(usize, usize)>>) {
         if Arc::ptr_eq(&self.blocks, blocks) {
             return;
         }
-        if self.blocks == *blocks {
-            self.blocks = blocks.clone();
+        let changed = changed_lines(&self.blocks, blocks);
+        self.blocks = blocks.clone();
+        if changed.is_empty() {
             return;
         }
-        let first = self.blocks.iter().zip(blocks.iter()).position(|(a, b)| a != b).unwrap_or(self.blocks.len().min(blocks.len()));
-        let from = [self.blocks.get(first), blocks.get(first)].into_iter().flatten().map(|(line, _)| *line).min().unwrap_or(0);
-        self.blocks = blocks.clone();
-        self.count_rows(rope, from);
+        // One past the last line: the blocks after it.
+        let mut dirty = Dirty::new(self.breaks.len() + 1);
+        for line in changed {
+            dirty.mark(line..line + 1);
+        }
+        self.recount(&dirty);
     }
 
     /// Changes whenever display rows may have (an edit, folds, blocks): what's
@@ -409,41 +485,57 @@ impl WrapMap {
         (drow < start + self.blocks_above(line)).then(|| (line, drow - start))
     }
 
-    /// Display rows from buffer line `from` on (the ones before it stand).
-    fn count_rows(&mut self, rope: &Rope, from: usize) {
+    /// Display rows of every line.
+    fn count_rows(&mut self) {
+        let lines = self.breaks.len();
+        self.rows = vec![0; lines];
+        self.row_starts = vec![0; lines + 1];
+        let mut dirty = Dirty::new(lines + 1);
+        dirty.mark(0..lines + 1);
+        self.recount(&dirty);
+    }
+
+    /// Counts the rows of the `dirty` lines again (one past the last: the
+    /// blocks after it) and their starts; the lines after the last of them
+    /// move by the difference.
+    fn recount(&mut self, dirty: &Dirty) {
         self.generation = GENERATIONS.fetch_add(1, Ordering::Relaxed);
         let lines = self.breaks.len();
-        let last_line = lines.saturating_sub(1);
-        // Rows hidden by folds take no display rows: (first, last) per fold.
-        let mut hidden: Vec<(usize, usize)> = self
-            .folds
-            .iter()
-            .map(|f| (rope.byte_to_line(f.start.min(rope.len_bytes())), rope.byte_to_line(f.end.min(rope.len_bytes())).min(last_line)))
-            .collect();
-        hidden.sort_unstable();
-        let from = from.min(self.row_starts.len().saturating_sub(1));
-        let mut rows = self.row_starts.get(from).copied().unwrap_or(0);
-        self.row_starts.truncate(from);
-        let (mut next, mut hidden_to) = (0, None);
-        // Blocks are sorted by line: walk them alongside the lines.
-        let mut block = self.blocks.partition_point(|&(line, _)| line < from);
-        for row in from..lines {
-            while let Some(&(_, last)) = hidden.get(next).filter(|(first, _)| *first <= row) {
-                hidden_to = hidden_to.max(Some(last));
-                next += 1;
-            }
+        let Some((first, last)) = dirty.span else {
+            return;
+        };
+        let (mut hidden, mut block) = (self.hidden.partition_point(|&(_, end)| end < first), self.blocks.partition_point(|&(line, _)| line < first));
+        let mut at = if first == 0 { 0 } else { self.row_starts[first - 1] + self.rows[first - 1] as usize };
+        for row in first..lines.min(last + 1) {
+            // Blocks are sorted by line, and so are hidden ranges: walk them
+            // alongside the lines.
             let mut above = 0;
-            while let Some(&(_, n)) = self.blocks.get(block).filter(|&&(line, _)| line == row) {
-                above += n;
+            while let Some(&(line, n)) = self.blocks.get(block).filter(|&&(line, _)| line <= row) {
+                above += if line == row { n } else { 0 };
                 block += 1;
             }
-            self.row_starts.push(rows);
-            if hidden_to.is_none_or(|to| row > to) {
-                rows += above + 1 + self.breaks[row].len();
+            while self.hidden.get(hidden).is_some_and(|&(_, end)| end < row) {
+                hidden += 1;
+            }
+            if dirty.lines[row] {
+                let shown = self.hidden.get(hidden).is_none_or(|&(start, _)| row < start);
+                self.rows[row] = if shown { (above + 1 + self.breaks[row].len()) as u32 } else { 0 };
+            }
+            self.row_starts[row] = at;
+            at += self.rows[row] as usize;
+        }
+        if last >= lines {
+            // Blocks after the last line count in the total.
+            self.row_starts[lines] = at + self.blocks_above(lines);
+        } else {
+            let next = last + 1;
+            let delta = at as isize - self.row_starts[next] as isize;
+            if delta != 0 {
+                for start in &mut self.row_starts[next..] {
+                    *start = start.wrapping_add_signed(delta);
+                }
             }
         }
-        // Blocks after the last line count in the total.
-        self.row_starts.push(rows + self.blocks_above(lines));
     }
 
     pub fn row_count(&self) -> usize {
@@ -504,6 +596,113 @@ impl WrapMap {
         }
         (row, (drow - text).min(self.breaks(row).len()))
     }
+}
+
+/// Which lines to measure or count again, and the span they're in (so
+/// that a keystroke doesn't walk every line).
+struct Dirty {
+    lines: Vec<bool>,
+    /// The first and last dirty line.
+    span: Option<(usize, usize)>,
+}
+
+impl Dirty {
+    fn new(lines: usize) -> Self {
+        Dirty { lines: vec![false; lines], span: None }
+    }
+
+    fn mark(&mut self, rows: Range<usize>) {
+        let rows = rows.start..rows.end.min(self.lines.len());
+        if rows.is_empty() {
+            return;
+        }
+        self.lines[rows.clone()].fill(true);
+        let (first, last) = self.span.unwrap_or((rows.start, rows.end - 1));
+        self.span = Some((first.min(rows.start), last.max(rows.end - 1)));
+    }
+
+    /// The lines `edit` replaces are dirty; the others move with the text.
+    fn splice(&mut self, edit: &LineEdit) {
+        self.lines.splice(edit.row..edit.row + edit.old_rows, std::iter::repeat_n(false, edit.new_rows));
+        let end = self.lines.len();
+        self.span = self.span.map(|span| shift_range(span, edit)).and_then(|(first, last)| (first < end).then(|| (first, last.min(end - 1))));
+        self.mark(edit.row..edit.row + edit.new_rows);
+    }
+
+    fn rows(&self) -> impl Iterator<Item = usize> + '_ {
+        let span = self.span.map_or(0..0, |(first, last)| first..last + 1);
+        span.filter(|&row| self.lines[row])
+    }
+}
+
+/// The lines `folds` hide (from the line a fold starts on to the one it
+/// ends on), as disjoint sorted ranges.
+fn hidden_lines(folds: &[Range<usize>], rope: &Rope) -> Vec<(usize, usize)> {
+    let last_line = rope.len_lines().saturating_sub(1);
+    let mut lines: Vec<(usize, usize)> = folds
+        .iter()
+        .map(|f| (rope.byte_to_line(f.start.min(rope.len_bytes())), rope.byte_to_line(f.end.min(rope.len_bytes())).min(last_line)))
+        .collect();
+    lines.sort_unstable();
+    let mut out: Vec<(usize, usize)> = Vec::with_capacity(lines.len());
+    for (first, last) in lines {
+        match out.last_mut() {
+            Some(prev) if first <= prev.1 + 1 => prev.1 = prev.1.max(last),
+            _ => out.push((first, last)),
+        }
+    }
+    out
+}
+
+/// Line `line` after `edit` (a line in the edited ones goes to its first).
+fn shift_line(line: usize, edit: &LineEdit) -> usize {
+    if line >= edit.row + edit.old_rows {
+        line + edit.new_rows - edit.old_rows
+    } else {
+        line.min(edit.row)
+    }
+}
+
+/// Lines `first..=last` after `edit`, covering the edited ones when it
+/// touches them.
+fn shift_range((first, last): (usize, usize), edit: &LineEdit) -> (usize, usize) {
+    let shifted = (shift_line(first, edit), shift_line(last, edit));
+    if last < edit.row || first >= edit.row + edit.old_rows {
+        return shifted;
+    }
+    (shifted.0, shifted.1.max(edit.row + edit.new_rows.saturating_sub(1)))
+}
+
+/// The ranges in one list and not the other.
+fn symmetric_difference<'a>(a: &'a [(usize, usize)], b: &'a [(usize, usize)]) -> impl Iterator<Item = &'a (usize, usize)> {
+    let a_only = a.iter().filter(|r| b.binary_search(r).is_err());
+    a_only.chain(b.iter().filter(|r| a.binary_search(r).is_err()))
+}
+
+/// The lines whose block rows differ between `old` and `new` (sorted by
+/// line).
+fn changed_lines(old: &[(usize, usize)], new: &[(usize, usize)]) -> Vec<usize> {
+    let total = |list: &[(usize, usize)], from: &mut usize, line: usize| {
+        let mut n = 0;
+        while let Some(&(_, rows)) = list.get(*from).filter(|(l, _)| *l == line) {
+            n += rows;
+            *from += 1;
+        }
+        n
+    };
+    let (mut i, mut j, mut out) = (0, 0, Vec::new());
+    while i < old.len() || j < new.len() {
+        let line = match (old.get(i), new.get(j)) {
+            (Some(a), Some(b)) => a.0.min(b.0),
+            (Some(a), None) => a.0,
+            (None, Some(b)) => b.0,
+            (None, None) => break,
+        };
+        if total(old, &mut i, line) != total(new, &mut j, line) {
+            out.push(line);
+        }
+    }
+    out
 }
 
 /// Display columns of a line's characters (tabs expanded, wide characters
@@ -592,7 +791,10 @@ mod tests {
                 }),
                 Box::new(|d| d.set_inlay_hints(Vec::new())),
             ];
-            for step in steps {
+            // Block rows: above the first line, a folded one, the middle one
+            // (changing), and after the last.
+            let blocks = |d: &Document, n: usize| Arc::new(vec![(0, 1), (11, 2), (d.line_count() / 2, 1 + n % 3), (d.line_count(), 1)]);
+            for (n, step) in steps.into_iter().enumerate() {
                 // Two versions at a time, as when frames are skipped.
                 let before = doc.version();
                 step(&mut doc);
@@ -600,16 +802,20 @@ mod tests {
                 folds.follow(&doc, before);
                 let edits = doc.line_edits_since(map.version).expect("kept");
                 assert!(map.update(edits, doc.version(), folds.ranges(), inlays(&doc), doc.rope(), &text_system, font.clone(), gpui::px(7.)));
-                let fresh = WrapMap::new(key(wrap), doc.version(), folds.ranges(), inlays(&doc), doc.rope(), &text_system, font.clone(), gpui::px(7.));
-                assert_eq!((&map.breaks, &map.inlays, &map.row_starts), (&fresh.breaks, &fresh.inlays, &fresh.row_starts));
+                map.set_blocks(&blocks(&doc, n));
+                let mut fresh = WrapMap::new(key(wrap), doc.version(), folds.ranges(), inlays(&doc), doc.rope(), &text_system, font.clone(), gpui::px(7.));
+                fresh.set_blocks(&blocks(&doc, n));
+                assert_eq!((&map.breaks, &map.inlays, &map.rows, &map.row_starts), (&fresh.breaks, &fresh.inlays, &fresh.rows, &fresh.row_starts), "step {n}");
+                assert_eq!(map.hidden, fresh.hidden, "step {n}");
             }
             // Hints switched off and on again.
             doc.set_inlay_hints(hints(&doc, &[(4, 2, &long)]));
             for shown in [Inlays::NONE, inlays(&doc)] {
                 let edits = doc.line_edits_since(map.version).expect("kept");
                 assert!(map.update(edits, doc.version(), folds.ranges(), shown, doc.rope(), &text_system, font.clone(), gpui::px(7.)));
+                map.set_blocks(&Arc::default());
                 let fresh = WrapMap::new(key(wrap), doc.version(), folds.ranges(), shown, doc.rope(), &text_system, font.clone(), gpui::px(7.));
-                assert_eq!((&map.breaks, &map.inlays, &map.row_starts), (&fresh.breaks, &fresh.inlays, &fresh.row_starts));
+                assert_eq!((&map.breaks, &map.inlays, &map.rows, &map.row_starts), (&fresh.breaks, &fresh.inlays, &fresh.rows, &fresh.row_starts));
             }
         }
     }
@@ -772,7 +978,9 @@ mod tests {
             breaks: vec![vec![], vec![Break { ix: 5, byte: 5, ..Break::default() }, Break { ix: 9, byte: 9, ..Break::default() }], vec![]],
             inlays: vec![0; 3],
             inlay_generation: 0,
+            rows: vec![1, 3, 1],
             row_starts: vec![0, 1, 4, 5],
+            hidden: Vec::new(),
         };
         assert_eq!(map.row_count(), 5);
         assert_eq!(map.line_of(0), (0, 0));
@@ -789,7 +997,7 @@ mod tests {
         let key = WrapKey { width: gpui::px(400.), font_family: "Menlo".into(), font_size: gpui::px(13.), tab_size: 4, wrap: false };
         let mut map = cx.update(|cx| WrapMap::new(key, 0, &[], Inlays::NONE, &rope, cx.text_system(), gpui::font("Menlo"), gpui::px(8.)));
         // Two rows above line 1 ("b"), one after the last line.
-        map.set_blocks(&Arc::new(vec![(1, 2), (4, 1)]), &rope);
+        map.set_blocks(&Arc::new(vec![(1, 2), (4, 1)]));
         assert_eq!(map.row_count(), 4 + 3);
         assert_eq!(map.first_display_row(1), 3);
         assert_eq!((map.block_at(1), map.block_at(2), map.block_at(3)), (Some((1, 0)), Some((1, 1)), None));
@@ -797,7 +1005,7 @@ mod tests {
         // A block row maps to the line above it, for clicks and carets.
         assert_eq!(map.line_of(2), (0, 0));
         assert_eq!(map.line_of(3), (1, 0));
-        map.set_blocks(&Arc::default(), &rope);
+        map.set_blocks(&Arc::default());
         assert_eq!((map.row_count(), map.first_display_row(1)), (4, 1));
     }
 
@@ -812,7 +1020,7 @@ mod tests {
         let fold = rope.line_to_byte(5)..rope.line_to_byte(7) - 1;
         let mut map = cx.update(|cx| WrapMap::new(key, 0, std::slice::from_ref(&fold), Inlays::NONE, &rope, cx.text_system(), gpui::font("Menlo"), gpui::px(8.)));
         let blocks = [(0, 1), (2, 2), (2, 1), (5, 3), (9, 1), (13, 2)];
-        map.set_blocks(&Arc::new(blocks.to_vec()), &rope);
+        map.set_blocks(&Arc::new(blocks.to_vec()));
         // Every display row by hand: (line, Some(block row)) or (line, None)
         // for its text; one past the last line holds the blocks after it.
         let lines = rope.len_lines();
@@ -846,7 +1054,9 @@ mod tests {
             breaks: vec![vec![], vec![], vec![], vec![]],
             inlays: vec![0; 4],
             inlay_generation: 0,
+            rows: vec![1, 0, 0, 1],
             row_starts: vec![0, 1, 1, 1, 2],
+            hidden: vec![(1, 2)],
         };
         assert_eq!(map.row_count(), 2);
         assert!(map.hidden(1) && map.hidden(2) && !map.hidden(0) && !map.hidden(3));
