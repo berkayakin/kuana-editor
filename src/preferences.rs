@@ -1771,12 +1771,24 @@ impl Preferences {
             let appearance = t.appearance;
             let selected = t.name == theme.name;
             let name = t.name.clone();
-            let bar = |w: f32, color: gpui::Rgba| div().h(px(4.)).w(px(w)).rounded_full().bg(color);
-            let line = |indent: f32| div().flex().items_center().gap(px(4.)).pl(px(indent));
+            // A few lines of "code" in the theme's own colors, painted rather
+            // than laid out: a page of cards made of divs took most of a
+            // frame to lay out while scrolling.
+            let s = &t.syntax;
+            let code: [(f32, Vec<(f32, gpui::Rgba)>); 4] = [
+                (0., vec![(16., s.keyword), (30., s.function), (8., s.punctuation)]),
+                (10., vec![(12., s.keyword), (22., s.variable_builtin), (34., s.string)]),
+                (10., vec![(44., s.comment)]),
+                (0., vec![(8., s.punctuation), (18., s.type_), (10., s.number)]),
+            ];
+            let background = t.background;
             let card = div()
                 .id(("pref-theme", ix))
                 .flex()
                 .flex_col()
+                .flex_1()
+                .flex_basis(px(0.))
+                .min_w_0()
                 .rounded(px(10.))
                 .overflow_hidden()
                 .border_1()
@@ -1787,21 +1799,22 @@ impl Preferences {
                 .cursor_pointer()
                 .hover(|s| s.border_color(Hsla::from(theme.accent).alpha(0.6)))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.choose_theme(name.clone(), cx)))
-                // A few lines of "code" in the theme's own colors.
                 .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(5.))
-                        .h(px(52.))
-                        .px_2p5()
-                        .py(px(8.))
-                        .rounded_t(px(9.))
-                        .bg(t.background)
-                        .child(line(0.).child(bar(16., t.syntax.keyword)).child(bar(30., t.syntax.function)).child(bar(8., t.syntax.punctuation)))
-                        .child(line(10.).child(bar(12., t.syntax.keyword)).child(bar(22., t.syntax.variable_builtin)).child(bar(34., t.syntax.string)))
-                        .child(line(10.).child(bar(44., t.syntax.comment)))
-                        .child(line(0.).child(bar(8., t.syntax.punctuation)).child(bar(18., t.syntax.type_)).child(bar(10., t.syntax.number))),
+                    canvas(|_, _, _| {}, move |bounds, _, window, _| {
+                        let top = gpui::Corners { top_left: px(9.), top_right: px(9.), ..Default::default() };
+                        window.paint_quad(gpui::fill(bounds, background).corner_radii(top));
+                        for (row, (indent, bars)) in code.iter().enumerate() {
+                            let mut x = bounds.left() + px(10. + indent);
+                            let y = bounds.top() + px(8. + row as f32 * 9.);
+                            for &(width, color) in bars {
+                                let bar = Bounds::new(point(x, y), gpui::size(px(width), px(4.)));
+                                window.paint_quad(gpui::fill(bar, color).corner_radii(px(2.)));
+                                x += px(width + 4.);
+                            }
+                        }
+                    })
+                    .w_full()
+                    .h(px(52.)),
                 )
                 .child(
                     div()
@@ -1833,13 +1846,14 @@ impl Preferences {
             }
             let mut cards: Vec<AnyElement> = cards.into_iter().map(|(_, c)| c).collect();
             while !cards.len().is_multiple_of(PER_ROW) {
-                cards.push(div().into_any_element());
+                cards.push(div().flex_1().flex_basis(px(0.)).into_any_element());
             }
             let mut rows = Vec::new();
             while !cards.is_empty() {
                 let rest = cards.split_off(PER_ROW);
                 let row = std::mem::replace(&mut cards, rest);
-                rows.push(div().flex().gap_3().children(row.into_iter().map(|c| div().flex_1().flex_basis(px(0.)).min_w_0().child(c))));
+                // A card's height (border, code, name), so a row needn't measure them.
+                rows.push(div().flex().h(px(82.)).gap_3().children(row));
             }
             groups.push(
                 div()
