@@ -2302,19 +2302,22 @@ mod tests {
         let store = cx.new(|_| LspStore::new());
         let key = ServerKey { id: "s".into(), root: PathBuf::from("/w") };
         let (tx, rx) = futures::channel::mpsc::unbounded();
+        // An absolute path on every platform: Windows has no path for `file:///nowhere`.
+        let dir = std::env::temp_dir().join("kuana-lsp-burst");
         for i in 0..BURST {
-            let params = json!({ "uri": format!("file:///nowhere/{i}.rs"), "diagnostics": [] });
+            let params = json!({ "uri": path_to_uri(&dir.join(format!("{i}.rs"))), "diagnostics": [] });
             tx.unbounded_send(Incoming::Notification { method: "textDocument/publishDiagnostics".into(), params }).unwrap();
         }
         store.update(cx, |s, cx| {
             s.generations.insert(key.clone(), 1);
             s.listen(key.clone(), 1, rx, cx);
         });
-        // Another task looks how far it got each time it runs.
+        // Another task looks how far it got each time it runs, a bounded number
+        // of times: messages that are never handled fail the test, not the run.
         let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let (slot, weak) = (seen.clone(), store.downgrade());
         cx.spawn(async move |cx| {
-            loop {
+            for _ in 0..BURST * 100 {
                 let handled = weak.read_with(&cx, |s, _| s.diagnostics.len()).unwrap_or(BURST);
                 slot.borrow_mut().push(handled);
                 if handled == BURST {

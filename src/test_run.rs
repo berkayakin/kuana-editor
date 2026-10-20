@@ -816,7 +816,9 @@ Tests:       1 failed, 1 skipped, 1 passed, 3 total
         let go = rerun_failed(&target("go test -v -run '^TestX$' ./pkg"), &failed(Framework::Go, &["TestX", "TestX/sub", "TestY"], None)).unwrap();
         assert_eq!(go.command, "go test -v -run '^(TestX|TestY)$' ./pkg");
         let py = rerun_failed(&target("python3 -m pytest -v"), &failed(Framework::Pytest, &["tests/t.py::test_a"], Some("/root"))).unwrap();
-        assert_eq!(py.command, "python3 -m pytest -v /root/tests/t.py::test_a");
+        // Joined like the code does: Windows puts a `\` after the root.
+        let id = shell_quote(&Path::new("/root").join("tests/t.py::test_a").to_string_lossy());
+        assert_eq!(py.command, format!("python3 -m pytest -v {id}"));
         let jest = rerun_failed(&target("npx jest /p/a.test.js -t old"), &failed(Framework::Js, &["adds 1+1"], None)).unwrap();
         assert_eq!(jest.command, "npx jest /p/a.test.js -t 'adds 1\\+1'");
         let node = rerun_failed(&target("node --test --test-name-pattern=old /p/a.test.js"), &failed(Framework::Js, &["adds"], None)).unwrap();
