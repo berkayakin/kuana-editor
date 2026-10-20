@@ -274,10 +274,18 @@ fn target(on: bool) -> f32 {
 }
 
 /// `a` blended toward `b` by `t` (0–1), in RGB so grays don't pick up a hue.
+/// Premultiplied, like CSS: drawn over anything, it's a crossfade between the
+/// two. (Blending the channels apart, an opaque light fill fading to a faint
+/// dark one passes through a half-opaque dark: darker midway than either end.)
 pub fn mix(a: impl Into<Hsla>, b: impl Into<Hsla>, t: f32) -> Hsla {
     let (a, b) = (Rgba::from(a.into()), Rgba::from(b.into()));
     let lerp = |x: f32, y: f32| x + (y - x) * t.clamp(0., 1.);
-    Rgba { r: lerp(a.r, b.r), g: lerp(a.g, b.g), b: lerp(a.b, b.b), a: lerp(a.a, b.a) }.into()
+    let alpha = lerp(a.a, b.a);
+    if alpha <= f32::EPSILON {
+        return Rgba { r: lerp(a.r, b.r), g: lerp(a.g, b.g), b: lerp(a.b, b.b), a: 0. }.into();
+    }
+    let channel = |x: f32, y: f32| (lerp(x * a.a, y * b.a) / alpha).clamp(0., 1.);
+    Rgba { r: channel(a.r, b.r), g: channel(a.g, b.g), b: channel(a.b, b.b), a: alpha }.into()
 }
 
 #[cfg(test)]
@@ -324,5 +332,22 @@ mod tests {
         assert!((mid.r - 0.5).abs() < 1e-3 && (mid.g - 0.5).abs() < 1e-3 && (mid.b - 0.5).abs() < 1e-3);
         let faded = mix(black, black.alpha(0.), 0.25);
         assert!((faded.a - 0.75).abs() < 1e-6);
+        assert!(Rgba::from(faded).r.abs() < 1e-6);
+    }
+
+    #[test]
+    fn mix_to_a_faint_fill_never_overshoots() {
+        // A light opaque fill easing to a faint dark one (a light theme's
+        // `hover`), over the same light backdrop: every step lies between.
+        let light = Rgba { r: 0.98, g: 0.976, b: 0.96, a: 1. };
+        let faint = Rgba { r: 0.12, g: 0.118, b: 0.114, a: 0.043 };
+        let over = |c: Rgba| c.r * c.a + light.r * (1. - c.a);
+        let (start, end) = (over(light), over(faint));
+        let mut last = start;
+        for i in 0..=10 {
+            let shown = over(Rgba::from(mix(light, faint, i as f32 / 10.)));
+            assert!(shown <= last + 1e-4 && shown >= end - 1e-4, "step {i}: {shown}");
+            last = shown;
+        }
     }
 }
