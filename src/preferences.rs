@@ -1617,7 +1617,7 @@ impl Preferences {
                     .text_color(theme.text)
                     .row_hover(theme.accent_soft)
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| on_pick(this, ix, window, cx)))
-                    .child(div().flex_1().child(text))
+                    .child(div().flex_1().min_w_0().truncate().child(text))
                     .when(selected, |el| el.child(icon_el(Icon::Check, px(13.), theme.accent.into())))
             });
             let anchor = self.menu_anchors[menu as usize].clone();
@@ -1630,6 +1630,10 @@ impl Preferences {
                     popover(&theme)
                         .w(width)
                         .p_1()
+                        // Drawn outside the panel (see `render`), so it doesn't
+                        // inherit the panel's text style.
+                        .text_size(px(13.))
+                        .font_family(theme.ui_font.clone())
                         .occlude()
                         .on_mouse_down_out(cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                             // The trigger's own click toggles it closed.
