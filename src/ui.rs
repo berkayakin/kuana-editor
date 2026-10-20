@@ -352,6 +352,26 @@ pub fn layout_gap(theme: &Theme) -> f32 {
     if theme.classic { 1. } else { GAP }
 }
 
+/// The theme as the window chrome's controls draw with it (the title bar and
+/// the status bar): their dim and muted text and icons lean a little toward
+/// the accent's hue at their own lightness, so contrast stays as the theme set
+/// it and an open panel's icon (the full accent) still stands apart,
+/// and their fills are the accent, faint, instead of the text color. A gray
+/// accent (Clay Black's white) leaves them neutral.
+pub fn chrome_theme(theme: &Theme) -> Theme {
+    let accent = Hsla::from(theme.accent);
+    let toward_accent = |color: gpui::Rgba, amount: f32| {
+        let color = Hsla::from(color);
+        gpui::Rgba::from(mix(color, Hsla { l: color.l, a: color.a, ..accent }, amount))
+    };
+    let mut chrome = theme.clone();
+    chrome.text_dim = toward_accent(theme.text_dim, 0.12);
+    chrome.text_muted = toward_accent(theme.text_muted, 0.08);
+    chrome.hover = accent.alpha(0.08).into();
+    chrome.active = accent.alpha(0.14).into();
+    chrome
+}
+
 /// An area's corner radius (`area`): an island's, or square.
 pub fn area_radius(theme: &Theme) -> f32 {
     if theme.classic { 0. } else { ISLAND_RADIUS }
@@ -1106,6 +1126,19 @@ pub fn modal_panel(cx: &App) -> Div {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chrome_text_leans_toward_the_accent_at_its_own_lightness() {
+        let mut theme = Theme::blank_for_tests();
+        theme.text_dim = gpui::rgba(0x7f7d80ff);
+        theme.accent = gpui::rgba(0xf7d26eff);
+        let (dim, tinted) = (Hsla::from(theme.text_dim), Hsla::from(chrome_theme(&theme).text_dim));
+        assert!(tinted.s > dim.s + 0.05);
+        assert!((tinted.l - dim.l).abs() < 0.03);
+        // A white accent leaves it gray.
+        theme.accent = gpui::rgba(0xffffffff);
+        assert!(Hsla::from(chrome_theme(&theme).text_dim).s <= dim.s + 0.01);
+    }
 
     #[test]
     fn visual_effect_levels_drop_gradients_then_shadows_and_glows() {

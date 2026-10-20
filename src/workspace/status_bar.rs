@@ -73,7 +73,7 @@ impl Workspace {
     }
 
     pub(super) fn render_statusbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::get(cx).clone();
+        let theme = crate::ui::chrome_theme(Theme::get(cx));
         let lsp_item = self.render_lsp_status(&theme, cx);
         let active_editor = self.active_editor(cx);
         let editor = active_editor.as_ref().map(|e| e.read(cx));

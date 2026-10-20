@@ -47,7 +47,7 @@ impl Workspace {
 
     /// The ☰, and the menus' names while one is open, with that menu under its name.
     pub(super) fn render_app_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::get(cx).clone();
+        let theme = crate::ui::chrome_theme(Theme::get(cx));
         let open = self.context_menu.as_ref().and_then(|m| Some((m.app_menu?, m.menu.clone())));
         let names: Vec<SharedString> = match open {
             Some(_) => cx.get_menus().unwrap_or_default().into_iter().map(|m| m.name).collect(),

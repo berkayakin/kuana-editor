@@ -52,7 +52,7 @@ fn drag_window() {
 impl Workspace {
     pub(super) fn render_titlebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mac = cfg!(target_os = "macos");
-        let theme = Theme::get(cx).clone();
+        let theme = crate::ui::chrome_theme(Theme::get(cx));
         let fit = BarFit::for_width(f32::from(window.viewport_size().width));
         div()
             .id("titlebar")
@@ -115,7 +115,7 @@ impl Workspace {
     /// debugged) with Run, Debug and, while something runs, Stop; like
     /// JetBrains' run widget.
     pub(super) fn render_run_widget(&self, fit: BarFit, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::get(cx).clone();
+        let theme = crate::ui::chrome_theme(Theme::get(cx));
         let selected = self.last_run.clone();
         // From fields kept by events: reading terminals here would redraw the
         // window whenever one prints.
@@ -201,7 +201,7 @@ impl Workspace {
     /// one's icon takes the accent color. In narrow windows the less used ones
     /// show only while their panel is open (so it can be closed from here).
     pub(super) fn render_panel_dock(&self, fit: BarFit, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::get(cx).clone();
+        let theme = crate::ui::chrome_theme(Theme::get(cx));
         let toggle = |id, icon, on: bool, cx: &mut Context<Self>, f: fn(&mut Self, &mut Window, &mut Context<Self>)| {
             let (rest, hover) = if on { (theme.accent, None) } else { (theme.text_dim, Some(theme.text.into())) };
             self.bar_button(id, icon, rest.into(), hover, cx, move |ws, _, window, cx| f(ws, window, cx))
@@ -252,7 +252,7 @@ impl Workspace {
 
     /// Opens Search Everywhere, like JetBrains' magnifier.
     pub(super) fn render_search_button(&self, _: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::get(cx).clone();
+        let theme = crate::ui::chrome_theme(Theme::get(cx));
         self.bar_button("search-everywhere", Icon::Search, theme.text_dim.into(), Some(theme.text.into()), cx, |ws, _, window, cx| {
             ws.search_everywhere(&SearchEverywhere, window, cx)
         })
@@ -261,7 +261,7 @@ impl Workspace {
 
     /// Opens Settings' Extensions page; lit while it shows.
     pub(super) fn render_extensions_button(&self, _: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::get(cx).clone();
+        let theme = crate::ui::chrome_theme(Theme::get(cx));
         let on = self.preferences_shown(cx) == Some(true);
         let (rest, hover) = if on { (theme.accent, None) } else { (theme.text_dim, Some(theme.text.into())) };
         self.bar_button("open-extensions", Icon::Puzzle, rest.into(), hover, cx, |ws, _, window, cx| ws.open_extensions(&OpenExtensions, window, cx))
@@ -276,7 +276,7 @@ impl Workspace {
 
     /// Windows and Linux have no app menu, so Settings needs a way in.
     pub(super) fn render_settings_button(&self, _: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::get(cx).clone();
+        let theme = crate::ui::chrome_theme(Theme::get(cx));
         // The Extensions button stands for its own page.
         let on = self.preferences_shown(cx) == Some(false);
         let (rest, hover) = if on { (theme.accent, None) } else { (theme.text_dim, Some(theme.text.into())) };
@@ -321,7 +321,7 @@ impl Workspace {
     /// tinted monogram (unless `project_avatar` is off) and the folder name.
     /// Clicking lists recent projects.
     pub(super) fn render_project_chip(&self, fit: BarFit, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::get(cx).clone();
+        let theme = crate::ui::chrome_theme(Theme::get(cx));
         let name = self.root.as_deref().map(folder_name).unwrap_or_default();
         let initial = name.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().to_string()).unwrap_or_default();
         let tint = monogram_color(&name, &theme);
@@ -373,7 +373,7 @@ impl Workspace {
 
     /// The current branch beside the project name. Clicking opens Branches….
     pub(super) fn render_branch_chip(&self, fit: BarFit, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::get(cx).clone();
+        let theme = crate::ui::chrome_theme(Theme::get(cx));
         let branch = self.branch_label();
         // Just the icon in the narrowest windows; the tooltip names the branch.
         let tip = if fit.branch_chars.is_some() { "Branches…".to_string() } else { format!("{branch} · Branches…") };
@@ -409,7 +409,7 @@ impl Workspace {
         if self.repo.is_none() || (ahead == 0 && behind == 0) {
             return None;
         }
-        let theme = Theme::get(cx).clone();
+        let theme = crate::ui::chrome_theme(Theme::get(cx));
         let commits = |n: u32| if n == 1 { "1 commit".to_string() } else { format!("{n} commits") };
         let tip = match (ahead, behind) {
             (0, b) => format!("{} to pull", commits(b)),
@@ -461,7 +461,7 @@ impl Workspace {
 
     /// Shown while the project isn't trusted; opens the trust dialog.
     pub(super) fn render_restricted_chip(&self, fit: BarFit, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::get(cx).clone();
+        let theme = crate::ui::chrome_theme(Theme::get(cx));
         div()
             .id("restricted-chip")
             .flex()
