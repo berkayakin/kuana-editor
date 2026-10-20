@@ -33,7 +33,7 @@ pub enum OnboardingEvent {
 
 /// The themes offered first; the rest are a click away in the theme picker.
 const FEATURED_THEMES: [&str; 8] =
-    ["Ember", "Onyx", "Clay Black", "One Dark", "Tokyo Night", "Catppuccin Mocha", "One Light", "Clay Light"];
+    ["Ember", "Clay Black", "Lighthouse Night", "Dracula", "Sunset Fig", "Campfire", "One Light", "Camellia Light"];
 
 pub struct Onboarding {
     focus_handle: FocusHandle,
