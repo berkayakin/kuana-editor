@@ -365,7 +365,7 @@ impl Workspace {
                     })
                     .text_size(px(11.))
                     .font_weight(FontWeight::BOLD)
-                    .text_color(gpui::hsla(0., 0., 0., 0.78))
+                    .text_color(monogram_letter(tint, &theme))
                     .child(initial),
             ))
             .child(div().min_w_0().truncate().child(ellipsize(&name, fit.project_chars)))
@@ -565,6 +565,19 @@ fn separator(theme: &Theme) -> Div {
     div().w(px(1.)).h(px(18.)).flex_shrink_0().bg(theme.border)
 }
 
+/// The monogram's letter: dark or light, whichever reads better on its tint
+/// (light themes' tints are often dark). With gradients, the tint fades toward
+/// the chrome, so it's judged partway along.
+pub(super) fn monogram_letter(tint: Hsla, theme: &Theme) -> Hsla {
+    let behind = if theme.gradients { transition::mix(theme.panel, tint, 0.8) } else { tint };
+    let (dark, light) = (gpui::hsla(0., 0., 0., 1.), gpui::hsla(0., 0., 1., 1.));
+    if crate::contrast::lc(dark, behind).abs() >= crate::contrast::lc(light, behind).abs() {
+        dark.alpha(0.78)
+    } else {
+        light.alpha(0.92)
+    }
+}
+
 /// A stable tint per project name for its monogram.
 pub(super) fn monogram_color(name: &str, theme: &Theme) -> Hsla {
     let palette = [theme.accent, theme.success, theme.info, theme.warning, theme.syntax.function, theme.syntax.keyword, theme.git_added, theme.git_modified];
@@ -604,7 +617,18 @@ pub fn window_controls(window: &Window, cx: &App) -> impl IntoElement + use<> {
 
 #[cfg(test)]
 mod tests {
-    use super::BarFit;
+    use super::{BarFit, monogram_letter};
+    use crate::theme::Theme;
+
+    /// Dark on a light tint, light on a dark one.
+    #[test]
+    fn monogram_letters_read_on_their_tint() {
+        let mut theme = Theme::blank_for_tests();
+        theme.gradients = false;
+        assert!(monogram_letter(gpui::rgba(0xf7d26eff).into(), &theme).l < 0.5);
+        assert!(monogram_letter(gpui::rgba(0x4078f2ff).into(), &theme).l > 0.5);
+        assert!(monogram_letter(gpui::rgba(0xa626a4ff).into(), &theme).l > 0.5);
+    }
 
     /// Narrowing the window only ever takes things away.
     #[test]
