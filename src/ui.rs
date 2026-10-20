@@ -352,6 +352,33 @@ pub fn layout_gap(theme: &Theme) -> f32 {
     if theme.classic { 1. } else { GAP }
 }
 
+/// How far, in perceived lightness (CIE L*), a Classic separator line is at
+/// least from the areas and the chrome it divides.
+pub const MIN_SEPARATOR_STEP: f32 = 4.;
+
+/// The Classic layout's separator lines: the islands' outline as it shows on
+/// the chrome, opaque, moved toward the text color when it's too close to the
+/// areas' or the chrome's color to see (Onyx's outline on its near-black
+/// chrome comes out almost its editor's color).
+pub fn separator(theme: &Theme) -> Hsla {
+    use crate::theme::lightness;
+    let base = mix(theme.panel, theme.border, island_edge(theme).a);
+    let step = |c: Hsla| {
+        let l = lightness(c.into());
+        (l - lightness(theme.background)).abs().min((l - lightness(theme.panel)).abs())
+    };
+    if step(base) >= MIN_SEPARATOR_STEP {
+        return base;
+    }
+    // The step grows toward the text color: find where it's enough.
+    let (mut near, mut far) = (0f32, 1f32);
+    for _ in 0..16 {
+        let t = (near + far) / 2.;
+        if step(mix(base, theme.text, t)) < MIN_SEPARATOR_STEP { near = t } else { far = t }
+    }
+    mix(base, theme.text, far)
+}
+
 /// The theme as the window chrome's controls draw with it (the title bar and
 /// the status bar): their dim and muted text and icons lean a little toward
 /// the accent's hue at their own lightness, so contrast stays as the theme set

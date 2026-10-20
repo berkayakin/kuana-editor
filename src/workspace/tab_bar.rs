@@ -184,7 +184,7 @@ pub(super) fn strip_button_margin(theme: &Theme) -> f32 {
 /// focus (the current tab's name shows it).
 pub(super) fn tab_room<E: Styled>(el: E, theme: &Theme) -> E {
     if theme.classic {
-        el.flex_shrink_0().h(px(TAB_STRIP_HEIGHT)).bg(theme.panel).border_b_1().border_color(crate::ui::island_edge(theme))
+        el.flex_shrink_0().h(px(TAB_STRIP_HEIGHT)).bg(theme.panel).border_b_1().border_color(crate::ui::separator(theme))
     } else {
         el.flex_shrink_0().h(px(TAB_STRIP_HEIGHT - 1.))
     }
@@ -320,7 +320,7 @@ fn classic_tab_shape(el: Stateful<gpui::Div>, active: bool, theme: &Theme) -> St
         // Above the strip's bottom line.
         el.child(fill.bottom(px(1.)).bg(hover_fill).with_hover_transition("tab-hover", transition::FOCUS, |el, t| el.opacity(t)))
     };
-    el.child(div().absolute().top_0().bottom_0().right_0().w(px(1.)).bg(crate::ui::island_edge(theme)))
+    el.child(div().absolute().top_0().bottom_0().right_0().w(px(1.)).bg(crate::ui::separator(theme)))
 }
 
 

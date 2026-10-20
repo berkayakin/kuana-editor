@@ -430,7 +430,7 @@ impl Render for Workspace {
                     // them and lines above and below, the separators.
                     .map(|el| {
                         if theme.classic {
-                            el.py(px(1.)).bg(crate::ui::island_edge(&theme))
+                            el.py(px(1.)).bg(crate::ui::separator(&theme))
                         } else {
                             el.px(px(GAP))
                         }

@@ -1130,6 +1130,21 @@ mod tests {
     }
 
     #[test]
+    fn classic_separators_show_in_every_theme() {
+        let all = builtins();
+        for file in all.values() {
+            let theme = resolve(file, &all, &mut Vec::new(), &mut Vec::new()).unwrap();
+            let l = lightness(crate::ui::separator(&theme).into());
+            let step = (l - lightness(theme.background)).abs().min((l - lightness(theme.panel)).abs());
+            assert!(step >= crate::ui::MIN_SEPARATOR_STEP - 0.05, "{}: {step}", file.name);
+        }
+        // Where the outline shows already, it stays as it is.
+        let ember = resolve(&all["Ember"], &all, &mut Vec::new(), &mut Vec::new()).unwrap();
+        let outline = crate::transition::mix(ember.panel, ember.border, crate::ui::island_edge(&ember).a);
+        assert_eq!(crate::ui::separator(&ember), outline);
+    }
+
+    #[test]
     fn partial_themes_inherit() {
         let mut all = builtins();
         let custom: ThemeFile = serde_json::from_str(EXAMPLE_THEME).unwrap();
