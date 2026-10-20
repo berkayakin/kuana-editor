@@ -76,33 +76,38 @@ impl Workspace {
         )
     }
 
-    /// An invisible grab area filling the gap after an island; only the
-    /// cursor shows it.
+    /// An invisible grab area over the gap after an island; only the cursor
+    /// shows it. It's `GAP` wide, centered on the gap, so a Classic layout's
+    /// 1px line is as easy to grab.
     pub(super) fn resize_handle(&self, edge: Edge, cx: &mut Context<Self>) -> impl IntoElement {
         let id: gpui::SharedString = match edge {
             Edge::Problems => "resize-problems".into(),
             Edge::Sidebar => "resize-sidebar".into(),
             Edge::Split { split, ix, .. } => format!("resize-split-{split:?}-{ix}").into(),
         };
+        let theme = Theme::get(cx);
+        // From the edge of a split member's slot, or from inside an area's outline.
+        let beyond_slot = px(-(layout_gap(theme) + GAP) / 2.);
+        let beyond_area = beyond_slot - px(crate::ui::area_border(theme));
         let handle = div().id(id).absolute();
         let handle = match edge {
-            Edge::Problems => handle.top(px(-GAP - 1.)).left_0().right_0().h(px(GAP)).cursor(CursorStyle::ResizeUpDown),
+            Edge::Problems => handle.top(beyond_area).left_0().right_0().h(px(GAP)).cursor(CursorStyle::ResizeUpDown),
             // In the gap between the sidebar and the editor, whichever side it's on.
             Edge::Sidebar if self.sidebar_on_right(cx) => {
-                handle.top_0().bottom_0().left(px(-GAP - 1.)).w(px(GAP)).cursor(CursorStyle::ResizeLeftRight)
+                handle.top_0().bottom_0().left(beyond_area).w(px(GAP)).cursor(CursorStyle::ResizeLeftRight)
             }
-            Edge::Sidebar => handle.top_0().bottom_0().right(px(-GAP - 1.)).w(px(GAP)).cursor(CursorStyle::ResizeLeftRight),
+            Edge::Sidebar => handle.top_0().bottom_0().right(beyond_area).w(px(GAP)).cursor(CursorStyle::ResizeLeftRight),
             // In the gap after a split member's slot: beside it (below the tab
             // strip's room, which stays the window's drag area along the top),
             // or across under it.
             Edge::Split { axis: Axis::Row, .. } => handle
                 .top(px(TAB_STRIP_HEIGHT - 1.))
                 .bottom_0()
-                .right(px(-GAP))
+                .right(beyond_slot)
                 .w(px(GAP))
                 .cursor(CursorStyle::ResizeLeftRight),
             Edge::Split { axis: Axis::Column, .. } => {
-                handle.left_0().right_0().bottom(px(-GAP)).h(px(GAP)).cursor(CursorStyle::ResizeUpDown)
+                handle.left_0().right_0().bottom(beyond_slot).h(px(GAP)).cursor(CursorStyle::ResizeUpDown)
             }
         };
         handle.on_mouse_down(
@@ -120,7 +125,7 @@ impl Workspace {
                         return;
                     }
                     Edge::Split { split, axis, ix } => {
-                        let extent = px(ws.center.extent(split, ix).unwrap_or(0.));
+                        let extent = px(ws.center.extent(split, ix, layout_gap(Theme::get(cx))).unwrap_or(0.));
                         match axis {
                             Axis::Row => (e.position.x, extent),
                             Axis::Column => (e.position.y, extent),
@@ -227,7 +232,7 @@ impl Workspace {
                     Axis::Row => event.position.x - resize.start,
                     Axis::Column => event.position.y - resize.start,
                 };
-                self.center.resize(split, ix, f32::from(resize.size + delta));
+                self.center.resize(split, ix, f32::from(resize.size + delta), layout_gap(Theme::get(cx)));
             }
         }
         cx.notify();
@@ -421,8 +426,16 @@ impl Render for Workspace {
                     .flex_row()
                     .flex_1()
                     .min_h_0()
-                    .px(px(GAP))
-                    .gap(px(GAP))
+                    // Classic: the areas cover this but for 1px gaps between
+                    // them and lines above and below, the separators.
+                    .map(|el| {
+                        if theme.classic {
+                            el.py(px(1.)).bg(crate::ui::island_edge(&theme))
+                        } else {
+                            el.px(px(GAP))
+                        }
+                    })
+                    .gap(px(layout_gap(&theme)))
                     // The sidebar keeps its full height on either side; the
                     // bottom panels stay under the editor area.
                     .when(self.show_sidebar && !self.sidebar_on_right(cx), |el| el.child(self.render_sidebar(window, cx)))
@@ -432,7 +445,7 @@ impl Render for Workspace {
                             .flex_col()
                             .flex_1()
                             .min_w_0()
-                            .gap(px(GAP))
+                            .gap(px(layout_gap(&theme)))
                             .child(div().flex_1().min_h_0().child(panes))
                             .when(self.shows(BottomPanel::Problems), |el| el.child(self.render_problems(cx)))
                             .when(self.shows(BottomPanel::Results), |el| el.child(self.render_results(cx)))

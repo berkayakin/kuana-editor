@@ -335,6 +335,40 @@ pub fn island(theme: &Theme) -> Div {
         .when(theme.gradients, |el| el.child(edge_sheen(theme)))
 }
 
+/// One of the main window's areas (the sidebar, a pane, a bottom panel): an
+/// island in the Modern style. In the Classic one it's a plain square, and
+/// the lines between areas are the 1px gaps the layout leaves (`layout_gap`)
+/// over the window's separator-colored background.
+pub fn area(theme: &Theme) -> Div {
+    if !theme.classic {
+        return island(theme);
+    }
+    div().relative().flex().flex_col().bg(theme.background)
+}
+
+/// The space between the window's areas: the islands' gap, or a Classic
+/// separator line.
+pub fn layout_gap(theme: &Theme) -> f32 {
+    if theme.classic { 1. } else { GAP }
+}
+
+/// An area's corner radius (`area`): an island's, or square.
+pub fn area_radius(theme: &Theme) -> f32 {
+    if theme.classic { 0. } else { ISLAND_RADIUS }
+}
+
+/// An area's outline width: an island's, or none (the lines around a
+/// Classic area are the layout's).
+pub fn area_border(theme: &Theme) -> f32 {
+    if theme.classic { 0. } else { 1. }
+}
+
+/// How far inside an area content that paints its own background is kept:
+/// clear of an island's rounded corners, or nothing when it's square.
+pub fn area_inset(theme: &Theme) -> f32 {
+    if theme.classic { 0. } else { ISLAND_INSET }
+}
+
 /// Light catching islands' edges: a 1px line over the outline that brightens
 /// and fades back, like a glossy rim, on the sides and the bottom (the top is
 /// where the tabs join the island). One light for the window, above and to the

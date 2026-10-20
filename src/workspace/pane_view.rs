@@ -30,7 +30,7 @@ impl Workspace {
         div()
             .relative()
             .flex()
-            .gap(px(GAP))
+            .gap(px(layout_gap(Theme::get(cx))))
             .size_full()
             .min_w_0()
             .min_h_0()
@@ -67,8 +67,8 @@ impl Workspace {
             .size_full()
             // The tab strip's room on the chrome, so the island lines up with
             // the sidebar's; along the window's top, it moves the window.
-            .child(window_drag_area("tabs-room").flex_shrink_0().h(px(TAB_STRIP_HEIGHT - 1.)))
-            .child(island(&theme).flex_1().min_w_0().min_h_0().child(div().flex_1().min_h_0().overflow_hidden().child(content)))
+            .child(tab_room(window_drag_area("tabs-room"), &theme))
+            .child(area(&theme).flex_1().min_w_0().min_h_0().child(div().flex_1().min_h_0().overflow_hidden().child(content)))
             .group(drop_group.clone())
             .child(
                 file_drop_overlay(drop_group, &theme)

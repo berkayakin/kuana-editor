@@ -159,6 +159,37 @@ pub(super) fn shared_limit(widths: &[f32], available: f32) -> f32 {
 }
 
 
+/// Room above a strip's tabs: Classic tabs are as tall as their strip.
+pub(super) fn tab_strip_top(theme: &Theme) -> f32 {
+    if theme.classic { 0. } else { TAB_STRIP_TOP }
+}
+
+/// A strip's padding at each end: clear of an island's rounded corners, or
+/// none, Classic tabs starting at their area's edge.
+pub(super) fn tab_strip_inset(theme: &Theme) -> f32 {
+    if theme.classic { 0. } else { TAB_STRIP_INSET }
+}
+
+/// The bottom margin that centers a strip's buttons (24–26pt) on its tabs.
+pub(super) fn strip_button_margin(theme: &Theme) -> f32 {
+    4. + (TAB_STRIP_TOP - tab_strip_top(theme)) / 2.
+}
+
+/// The tab strip's room above an area, `el` (kept without tabs too, so areas
+/// line up), with the strip laid over it. Modern: on the chrome, 1px short of
+/// the strip, so the current tab covers the island's top border. Classic: as
+/// tall as the strip, chrome-colored over the separator background, with a
+/// bottom line that the current tab covers. The line is the separators' color
+/// in a focused split too: one tinted line reads as a heavier border, not as
+/// focus (the current tab's name shows it).
+pub(super) fn tab_room<E: Styled>(el: E, theme: &Theme) -> E {
+    if theme.classic {
+        el.flex_shrink_0().h(px(TAB_STRIP_HEIGHT)).bg(theme.panel).border_b_1().border_color(crate::ui::island_edge(theme))
+    } else {
+        el.flex_shrink_0().h(px(TAB_STRIP_HEIGHT - 1.))
+    }
+}
+
 /// A browser-like tab's shape, around a tab of `TAB_STRIP_HEIGHT - TAB_STRIP_TOP`
 /// on the chrome: the current one island-colored, rounded on top, outlined in
 /// the island's border color `edge` down to its feet, which join it to the
@@ -171,6 +202,8 @@ pub(super) fn shared_limit(widths: &[f32], available: f32) -> f32 {
 /// Tabs paint left to right, so the hover shape of the tab right after the
 /// current one would cover the current tab's right foot: it repaints that
 /// foot on top (`after_active`).
+///
+/// In the Classic style a tab is a rectangle instead (`classic_tab_shape`).
 pub(super) fn tab_shape(
     el: Stateful<gpui::Div>,
     active: bool,
@@ -180,6 +213,9 @@ pub(super) fn tab_shape(
     edge: Hsla,
     theme: &Theme,
 ) -> Stateful<gpui::Div> {
+    if theme.classic {
+        return classic_tab_shape(el, active, theme);
+    }
     let island: Hsla = theme.background.into();
     if active {
         // Painted, not laid out: every edge comes from the same pixel-snapped
@@ -269,6 +305,22 @@ pub(super) fn tab_shape(
                 .group_hover(group, |s| s.invisible()),
         )
     })
+}
+
+
+/// A Classic tab: as tall as its strip, a line after it; the current one
+/// island-colored down over the strip's bottom line (`tab_room`), so it opens
+/// onto its area; the others on the chrome, filled on hover.
+fn classic_tab_shape(el: Stateful<gpui::Div>, active: bool, theme: &Theme) -> Stateful<gpui::Div> {
+    let fill = div().absolute().top_0().left_0().right_0();
+    let el = if active {
+        el.child(fill.bottom_0().bg(theme.background))
+    } else {
+        let hover_fill = Hsla::from(theme.panel).blend(Hsla::from(theme.text).alpha(0.07));
+        // Above the strip's bottom line.
+        el.child(fill.bottom(px(1.)).bg(hover_fill).with_hover_transition("tab-hover", transition::FOCUS, |el, t| el.opacity(t)))
+    };
+    el.child(div().absolute().top_0().bottom_0().right_0().w(px(1.)).bg(crate::ui::island_edge(theme)))
 }
 
 

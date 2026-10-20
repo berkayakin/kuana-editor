@@ -515,7 +515,7 @@ impl Render for ProjectTree {
             // through the island's inset to just inside its outline (which, at
             // the top, the Files tab covers in the same color).
             .when(drop_on_root, |el| {
-                let inset = px(crate::ui::ISLAND_INSET);
+                let inset = px(crate::ui::area_inset(&theme));
                 el.child(
                     div()
                         .absolute()
@@ -523,7 +523,7 @@ impl Render for ProjectTree {
                         .left(-inset)
                         .right(-inset)
                         .bottom(-inset)
-                        .rounded(px(crate::ui::ISLAND_RADIUS - 1.))
+                        .rounded(px((crate::ui::area_radius(&theme) - 1.).max(0.)))
                         .bg(crate::ui::drop_lift(&theme).0),
                 )
             })

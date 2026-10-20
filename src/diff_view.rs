@@ -715,7 +715,7 @@ impl Render for DiffView {
             .bg(theme.elevated)
             // It sits in a pane's island: follow the island's rounded corners
             // inside its inset.
-            .rounded(px(crate::ui::ISLAND_RADIUS - crate::ui::ISLAND_INSET))
+            .rounded(px(crate::ui::area_radius(&theme) - crate::ui::area_inset(&theme)))
             .key_context("DiffView")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_next))

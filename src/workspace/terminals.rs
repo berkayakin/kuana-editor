@@ -77,7 +77,7 @@ impl Workspace {
 
     pub(super) fn render_git_log_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
-        island(&theme)
+        area(&theme)
             .h(self.problems_height)
             .flex_shrink_0()
             .child(cached(&self.git_log))

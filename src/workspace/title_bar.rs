@@ -318,19 +318,21 @@ impl Workspace {
     }
 
     /// The open project: a pill like the branch chip beside it, with a round
-    /// tinted monogram and the folder name. Clicking lists recent projects.
+    /// tinted monogram (unless `project_avatar` is off) and the folder name.
+    /// Clicking lists recent projects.
     pub(super) fn render_project_chip(&self, fit: BarFit, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
         let name = self.root.as_deref().map(folder_name).unwrap_or_default();
         let initial = name.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().to_string()).unwrap_or_default();
         let tint = monogram_color(&name, &theme);
+        let avatar = Settings::get(cx).project_avatar();
         div()
             .id("project-chip")
             .flex()
             .items_center()
             .gap_2()
             .h(px(CHIP_HEIGHT))
-            .pl(px(4.))
+            .pl(px(if avatar { 4. } else { 12. }))
             .pr(px(12.))
             .rounded_full()
             .cursor_pointer()
@@ -341,8 +343,8 @@ impl Workspace {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|ws, _, window, cx| ws.recent_projects(&RecentProjects, window, cx)))
             .tooltip(|window, cx| status_tooltip("Recent Projects…", &RecentProjects, window, cx))
-            .max_w(px(fit.project_chars as f32 * 9. + 40.))
-            .child(
+            .max_w(px(fit.project_chars as f32 * 9. + if avatar { 40. } else { 24. }))
+            .when(avatar, |el| el.child(
                 div()
                     .size(px(CHIP_HEIGHT - 8.))
                     .flex()
@@ -365,7 +367,7 @@ impl Workspace {
                     .font_weight(FontWeight::BOLD)
                     .text_color(gpui::hsla(0., 0., 0., 0.78))
                     .child(initial),
-            )
+            ))
             .child(div().min_w_0().truncate().child(ellipsize(&name, fit.project_chars)))
     }
 

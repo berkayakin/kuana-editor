@@ -93,31 +93,32 @@ impl<P: Clone + PartialEq> Member<P> {
     }
 
     /// The least room it needs along `axis`: a pane's minimum; a split's
-    /// members' together with the gaps between them along its own axis, the
-    /// largest of them across it.
-    pub(super) fn min_extent(&self, axis: Axis) -> f32 {
+    /// members' together with the gaps between them (`gap` wide) along its
+    /// own axis, the largest of them across it.
+    pub(super) fn min_extent(&self, axis: Axis, gap: f32) -> f32 {
         match self {
             Member::Pane(_) => match axis {
                 Axis::Row => MIN_PANE_WIDTH,
                 Axis::Column => MIN_PANE_HEIGHT,
             },
             Member::Split(split) if split.axis == axis => {
-                split.members.iter().map(|m| m.min_extent(axis)).sum::<f32>() + GAP * (split.members.len() - 1) as f32
+                split.members.iter().map(|m| m.min_extent(axis, gap)).sum::<f32>() + gap * (split.members.len() - 1) as f32
             }
-            Member::Split(split) => split.members.iter().map(|m| m.min_extent(axis)).fold(0., f32::max),
+            Member::Split(split) => split.members.iter().map(|m| m.min_extent(axis, gap)).fold(0., f32::max),
         }
     }
 }
 
 impl<P> Split<P> {
-    /// The room its members share along its axis: its length less the gaps between them.
-    pub(super) fn room(&self) -> f32 {
+    /// The room its members share along its axis: its length less the gaps
+    /// (`gap` wide) between them.
+    pub(super) fn room(&self, gap: f32) -> f32 {
         let size = self.bounds.get().size;
         let length = match self.axis {
             Axis::Row => size.width,
             Axis::Column => size.height,
         };
-        f32::from(length) - GAP * (self.members.len() - 1) as f32
+        f32::from(length) - gap * (self.members.len() - 1) as f32
     }
 }
 
@@ -237,24 +238,24 @@ impl<P: Clone + PartialEq> PaneTree<P> {
     }
 
     /// How long member `ix` of split `id` is along the split's axis, in points
-    /// (from last frame's bounds).
-    pub(super) fn extent(&mut self, id: SplitId, ix: usize) -> Option<f32> {
+    /// (from last frame's bounds, with gaps `gap` wide between members).
+    pub(super) fn extent(&mut self, id: SplitId, ix: usize, gap: f32) -> Option<f32> {
         let split = self.find_split(id)?;
-        Some(split.room() * *split.shares.get(ix)?)
+        Some(split.room(gap) * *split.shares.get(ix)?)
     }
 
     /// Moves the boundary after member `ix` of split `id` so that member is
     /// `extent` points long, taking the room from the member after it or
     /// giving it back; both keep their least room when there's enough for
     /// that (else each keeps a tenth of what they share).
-    pub(super) fn resize(&mut self, id: SplitId, ix: usize, extent: f32) {
+    pub(super) fn resize(&mut self, id: SplitId, ix: usize, extent: f32, gap: f32) {
         let Some(split) = self.find_split(id) else { return };
-        let room = split.room();
+        let room = split.room(gap);
         if ix + 1 >= split.members.len() || room <= 0. {
             return;
         }
         let pair = split.shares[ix] + split.shares[ix + 1];
-        let least = |m: &Member<P>| m.min_extent(split.axis) / room;
+        let least = |m: &Member<P>| m.min_extent(split.axis, gap) / room;
         let (before, after) = (least(&split.members[ix]), least(&split.members[ix + 1]));
         let (lo, hi) = if before + after <= pair { (before, pair - after) } else { (pair * 0.1, pair * 0.9) };
         let share = (extent / room).clamp(lo, hi);
@@ -340,20 +341,21 @@ impl<P: Clone + PartialEq> PaneTree<P> {
 
 /// Whether a pane of these bounds (last frame's; empty before the first,
 /// when it may) has room to be split on `side`: two least panes and the gap
-/// between them.
-pub(super) fn can_split(bounds: Bounds<Pixels>, side: Side) -> bool {
+/// (`gap` wide) between them.
+pub(super) fn can_split(bounds: Bounds<Pixels>, side: Side, gap: f32) -> bool {
     let (width, height) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
     if width <= 0. {
         return true;
     }
     match side.axis() {
-        Axis::Row => width >= 2. * MIN_PANE_WIDTH + GAP,
-        Axis::Column => height >= 2. * MIN_PANE_HEIGHT + GAP,
+        Axis::Row => width >= 2. * MIN_PANE_WIDTH + gap,
+        Axis::Column => height >= 2. * MIN_PANE_HEIGHT + gap,
     }
 }
 
 /// The pane past `from`'s edge on `side`, of `panes` and their bounds: the
-/// one under a point just across the gap, level with the middle of `from`.
+/// one under a point just across the gap (the widest, a Modern one), level
+/// with the middle of `from`.
 pub(super) fn pane_toward<P: Clone>(from: Bounds<Pixels>, side: Side, panes: &[(P, Bounds<Pixels>)]) -> Option<P> {
     let (middle, step) = (from.center(), px(GAP + 1.));
     let probe = match side {
@@ -514,18 +516,18 @@ mod tests {
         let id = row.id;
         // 1000 points wide: 994 to share.
         row.bounds.set(Bounds { origin: point(px(0.), px(0.)), size: size(px(1000.), px(800.)) });
-        assert_eq!(tree.extent(id, 0), Some(497.));
-        tree.resize(id, 0, 300.);
-        assert!((tree.extent(id, 0).unwrap() - 300.).abs() < 0.01);
+        assert_eq!(tree.extent(id, 0, GAP), Some(497.));
+        tree.resize(id, 0, 300., GAP);
+        assert!((tree.extent(id, 0, GAP).unwrap() - 300.).abs() < 0.01);
         // Not narrower than a pane, nor leaving less than one on the other side.
-        tree.resize(id, 0, 10.);
-        assert!((tree.extent(id, 0).unwrap() - MIN_PANE_WIDTH).abs() < 0.01);
-        tree.resize(id, 0, 990.);
-        assert!((tree.extent(id, 0).unwrap() - (994. - MIN_PANE_WIDTH)).abs() < 0.01);
+        tree.resize(id, 0, 10., GAP);
+        assert!((tree.extent(id, 0, GAP).unwrap() - MIN_PANE_WIDTH).abs() < 0.01);
+        tree.resize(id, 0, 990., GAP);
+        assert!((tree.extent(id, 0, GAP).unwrap() - (994. - MIN_PANE_WIDTH)).abs() < 0.01);
         // A column needs the widest of its members.
         let Member::Split(row) = tree.root() else { panic!() };
-        assert_eq!(row.members[1].min_extent(Axis::Row), MIN_PANE_WIDTH);
-        assert_eq!(row.members[1].min_extent(Axis::Column), 2. * MIN_PANE_HEIGHT + GAP);
+        assert_eq!(row.members[1].min_extent(Axis::Row, GAP), MIN_PANE_WIDTH);
+        assert_eq!(row.members[1].min_extent(Axis::Column, GAP), 2. * MIN_PANE_HEIGHT + GAP);
         tree.even_out(id);
         assert_eq!(shape(&tree), "row(1:50 column(2:50 3:50):50)");
         check(&tree);
@@ -537,7 +539,7 @@ mod tests {
         let Member::Split(row) = tree.root() else { panic!() };
         let id = row.id;
         row.bounds.set(Bounds { origin: point(px(0.), px(0.)), size: size(px(1006.), px(800.)) });
-        tree.resize(id, 0, 400.);
+        tree.resize(id, 0, 400., GAP);
         // Each pane's current tab: its number times ten, to see them come back.
         let saved = tree.save(&mut |p| *p as usize * 10);
         let mut asked = Vec::new();
@@ -606,10 +608,10 @@ mod tests {
     #[test]
     fn small_panes_dont_split() {
         let bounds = |w: f32, h: f32| Bounds { origin: point(px(0.), px(0.)), size: size(px(w), px(h)) };
-        assert!(can_split(bounds(2. * MIN_PANE_WIDTH + GAP, 100.), Side::Right));
-        assert!(!can_split(bounds(2. * MIN_PANE_WIDTH, 100.), Side::Left));
-        assert!(!can_split(bounds(1000., MIN_PANE_HEIGHT), Side::Down));
+        assert!(can_split(bounds(2. * MIN_PANE_WIDTH + GAP, 100.), Side::Right, GAP));
+        assert!(!can_split(bounds(2. * MIN_PANE_WIDTH, 100.), Side::Left, GAP));
+        assert!(!can_split(bounds(1000., MIN_PANE_HEIGHT), Side::Down, GAP));
         // Before the first frame nothing is known: it may.
-        assert!(can_split(Bounds::default(), Side::Down));
+        assert!(can_split(Bounds::default(), Side::Down, GAP));
     }
 }

@@ -57,6 +57,9 @@ pub struct Theme {
     /// From the `visual_effects` setting: no shadows, glows or animations
     /// (Minimal).
     pub reduce_effects: bool,
+    /// From the `ui_style` setting: the Classic layout (square areas between
+    /// separator lines, rectangular tabs) instead of islands.
+    pub classic: bool,
 
     pub ui_font: SharedString,
     pub mono_font: SharedString,
@@ -248,6 +251,7 @@ impl Theme {
             deep_chrome: false,
             gradients: true,
             reduce_effects: false,
+            classic: false,
             ui_font: ".SystemUIFont".into(),
             mono_font: "Menlo".into(),
             ui_font_size: 13.0,
@@ -992,6 +996,7 @@ pub fn apply_fonts(cx: &mut App) {
     let effects = settings.visual_effects();
     theme.gradients = effects.gradients();
     theme.reduce_effects = effects.minimal();
+    theme.classic = settings.ui_style() == crate::settings::UiStyle::Classic;
     cx.set_global(theme);
     cx.refresh_windows();
 }

@@ -242,7 +242,8 @@ impl TerminalPanel {
         // strip's insets and its buttons (+, split, and hide on the last group).
         let buttons = TERMINAL_BUTTON * if last { 3. } else { 2. } + 8.;
         let total = f32::from(self.bounds.get().size.width);
-        let available = (total > 0.).then(|| (total - GAP * (count - 1) as f32) / count as f32 - 2. * TAB_STRIP_INSET - buttons);
+        let (gap, inset) = (layout_gap(&theme), tab_strip_inset(&theme));
+        let available = (total > 0.).then(|| (total - gap * (count - 1) as f32) / count as f32 - 2. * inset - buttons);
         let names: Vec<String> = tabs.iter().map(|t| t.read(cx).title().to_string()).collect();
         let name_widths = measure_tab_names(&names, window, &theme);
         let naturals: Vec<f32> = name_widths.iter().map(|(w, _)| (TAB_CHROME + w).ceil()).collect();
@@ -333,7 +334,7 @@ impl TerminalPanel {
                 .into_any_element()
         });
         // Buttons on the chrome, centered on the tabs.
-        let button = |button: Button| button.flex_shrink_0().size(px(TERMINAL_BUTTON - 2.)).mb(px(4.)).mr(px(2.));
+        let button = |button: Button| button.flex_shrink_0().size(px(TERMINAL_BUTTON - 2.)).mb(px(strip_button_margin(&theme))).mr(px(2.));
         let strip = div()
             .id(("terminal-tabs", g))
             .absolute()
@@ -343,9 +344,10 @@ impl TerminalPanel {
             .h(px(TAB_STRIP_HEIGHT))
             .flex()
             .items_end()
-            .pt(px(TAB_STRIP_TOP))
-            .pl(px(TAB_STRIP_INSET))
-            .pr(px(TAB_STRIP_INSET - 6.))
+            .pt(px(tab_strip_top(&theme)))
+            .pl(px(inset))
+            // The buttons' own margins make up the rest.
+            .pr(px((inset - 6.).max(2.)))
             .overflow_hidden()
             .children(tab_elements)
             // The tabs that don't fit, in a menu.
@@ -362,7 +364,7 @@ impl TerminalPanel {
                         .w(px(TAB_OVERFLOW_WIDTH - 8.))
                         .h(px(24.))
                         .ml_1()
-                        .mb(px(4.))
+                        .mb(px(strip_button_margin(&theme)))
                         .rounded(px(8.))
                         .cursor_pointer()
                         .text_size(px(12.))
@@ -410,9 +412,9 @@ impl TerminalPanel {
                     cx.notify();
                 }
             }))
-            .child(div().flex_shrink_0().h(px(TAB_STRIP_HEIGHT - 1.)))
+            .child(tab_room(div(), &theme))
             .child(
-                island(&theme)
+                area(&theme)
                     .flex_1()
                     .min_h_0()
                     .border_color(edge)
@@ -439,7 +441,7 @@ impl Render for TerminalPanel {
         div()
             .relative()
             .flex()
-            .gap(px(GAP))
+            .gap(px(layout_gap(Theme::get(cx))))
             .size_full()
             .child(gpui::canvas(move |b, window, _| track_bounds(&bounds, b, window), |_, _, _, _| {}).absolute().size_full())
             .children((0..count).map(|g| self.render_group(g, count, window, cx)))

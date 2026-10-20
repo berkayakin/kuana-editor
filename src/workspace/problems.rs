@@ -8,7 +8,7 @@ impl Workspace {
     /// The panel on an island, as tall as the bottom area, with its grab edge.
     pub(super) fn render_problems(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
-        island(&theme)
+        area(&theme)
             .h(self.problems_height)
             .flex_shrink_0()
             .child(cached(&self.problems))
@@ -18,7 +18,7 @@ impl Workspace {
     /// The Find panel, the same way.
     pub(super) fn render_results(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
-        island(&theme)
+        area(&theme)
             .h(self.problems_height)
             .flex_shrink_0()
             .child(cached(&self.results))

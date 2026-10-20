@@ -20,7 +20,7 @@ impl Workspace {
     /// grids.
     pub(super) fn split(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
         let source = self.active_pane.clone();
-        if !can_split(source.read(cx).bounds(), side) {
+        if !can_split(source.read(cx).bounds(), side, layout_gap(Theme::get(cx))) {
             self.toast(ToastKind::Info, "No room to split this pane", None, cx);
             return;
         }
@@ -275,7 +275,7 @@ impl Workspace {
                 let at = panes.iter().position(|p| *p == editor_pane).unwrap_or(0);
                 let pane = if let Some(next) = panes.get(at + 1) {
                     next.clone()
-                } else if can_split(editor_pane.read(cx).bounds(), Side::Right) {
+                } else if can_split(editor_pane.read(cx).bounds(), Side::Right, layout_gap(Theme::get(cx))) {
                     let pane = self.new_pane(window, cx);
                     self.center.split(&editor_pane, pane.clone(), Side::Right);
                     pane

@@ -81,6 +81,12 @@ pub struct Settings {
     pub reduce_visual_effects: Option<bool>,
     /// Which side of the editor the sidebar (Files, Commit) sits on.
     pub sidebar_dock: Option<SidebarDock>,
+    /// The window's layout: islands and browser-like tabs, or plain areas
+    /// between separator lines (`UiStyle`).
+    pub ui_style: Option<UiStyle>,
+    /// The round initial before the project's name in the title bar (shown
+    /// unless `false`).
+    pub project_avatar: Option<bool>,
     /// How Update Project (pull) combines incoming commits with local ones
     /// when both branches have new commits. Unset: as the Git config says,
     /// else asked the first time it happens.
@@ -215,6 +221,29 @@ impl SidebarDock {
         match self {
             SidebarDock::Left => SidebarDock::Right,
             SidebarDock::Right => SidebarDock::Left,
+        }
+    }
+}
+
+/// How the main window lays out its areas (sidebar, panes, bottom panels).
+#[derive(Deserialize, JsonSchema, Default, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum UiStyle {
+    /// Rounded islands floating on the chrome, with gaps between them and
+    /// browser-like tabs joined to them.
+    #[default]
+    Modern,
+    /// Square areas side by side, separated by lines, with rectangular tabs.
+    Classic,
+}
+
+impl UiStyle {
+    pub const ALL: [UiStyle; 2] = [UiStyle::Modern, UiStyle::Classic];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            UiStyle::Modern => "modern",
+            UiStyle::Classic => "classic",
         }
     }
 }
@@ -381,6 +410,8 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "visual_effects",
     "reduce_visual_effects",
     "sidebar_dock",
+    "ui_style",
+    "project_avatar",
     "pull_strategy",
     "minimap_width",
 ];
@@ -528,6 +559,25 @@ impl Settings {
         }
     }
 
+    /// The window's layout style (Modern unless set).
+    pub fn ui_style(&self) -> UiStyle {
+        self.ui_style.unwrap_or_default()
+    }
+
+    /// Whether the title bar's project chip shows its round initial.
+    pub fn project_avatar(&self) -> bool {
+        self.project_avatar.unwrap_or(true)
+    }
+
+    /// Writes the layout style; the default (Modern) removes the key.
+    pub fn set_ui_style(style: UiStyle) -> std::io::Result<()> {
+        if style == UiStyle::default() {
+            Self::remove("ui_style")
+        } else {
+            Self::set("ui_style", style.key().into())
+        }
+    }
+
     /// Saves a visual effects level (Full, the default, by removing the key)
     /// and drops the older `reduce_visual_effects` switch, which would
     /// otherwise speak for it once `visual_effects` is gone.
@@ -595,6 +645,8 @@ impl Settings {
             "icon_theme" => self.icon_theme.is_some(),
             "visual_effects" => self.visual_effects.is_some() || self.reduce_visual_effects.is_some(),
             "sidebar_dock" => self.sidebar_dock.is_some(),
+            "ui_style" => self.ui_style.is_some(),
+            "project_avatar" => self.project_avatar.is_some(),
             "terminal_shell" => self.terminal_shell.is_some(),
             "run_configurations" => !self.run_configurations.is_empty(),
             "auto_update" => self.auto_update.is_some(),
@@ -954,6 +1006,12 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // Which side of the editor the sidebar (Files, Commit) sits on: "left" or
   // "right".
   // "sidebar_dock": "left",
+  // The window's layout: "modern" (rounded islands with gaps between them,
+  // browser-like tabs) or "classic" (square areas separated by lines,
+  // rectangular tabs).
+  // "ui_style": "modern",
+  // The round initial before the project's name in the title bar.
+  // "project_avatar": true,
 
   // Per-language overrides, by the name shown in the status bar.
   // "languages": {
@@ -1352,6 +1410,23 @@ mod tests {
         assert_eq!(dock(r#"{"sidebar_dock": "left"}"#), SidebarDock::Left);
         assert!(Settings::unknown_keys(r#"{"sidebar_dock": "right"}"#).is_empty());
         assert_eq!(SidebarDock::Left.other(), SidebarDock::Right);
+    }
+
+    #[test]
+    fn reads_the_ui_style() {
+        let style = |json: &str| Settings::parse(json).unwrap().ui_style();
+        assert_eq!(style("{}"), UiStyle::Modern);
+        assert_eq!(style(r#"{"ui_style": "classic"}"#), UiStyle::Classic);
+        assert_eq!(style(r#"{"ui_style": "modern"}"#), UiStyle::Modern);
+        assert!(Settings::unknown_keys(r#"{"ui_style": "classic"}"#).is_empty());
+    }
+
+    #[test]
+    fn shows_the_project_avatar_unless_turned_off() {
+        let avatar = |json: &str| Settings::parse(json).unwrap().project_avatar();
+        assert!(avatar("{}"));
+        assert!(!avatar(r#"{"project_avatar": false}"#));
+        assert!(Settings::unknown_keys(r#"{"project_avatar": false}"#).is_empty());
     }
 
     #[test]

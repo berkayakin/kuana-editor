@@ -102,9 +102,9 @@ impl Workspace {
             .w(self.sidebar_width)
             .flex_shrink_0()
             .h_full()
-            .child(div().flex_shrink_0().h(px(TAB_STRIP_HEIGHT - 1.)))
+            .child(tab_room(div(), &theme))
             .child(
-                island(&theme)
+                area(&theme)
                     .flex_1()
                     .min_h_0()
                     .children(header)
@@ -160,7 +160,7 @@ impl Workspace {
         let measured = measure_tab_names(&["Files".to_string(), "Commit".to_string(), count.clone().unwrap_or_default()], window, &theme);
         let files_width = SIDEBAR_TAB_CHROME + measured[0].0;
         let commit_width = SIDEBAR_TAB_CHROME + measured[1].0 + if count.is_some() { 6. + measured[2].0 } else { 0. };
-        let available = f32::from(self.sidebar_width) - 2. * TAB_STRIP_INSET;
+        let available = f32::from(self.sidebar_width) - 2. * tab_strip_inset(&theme);
         let (active_width, other_width) = if files_on { (files_width, commit_width) } else { (commit_width, files_width) };
         let (active_named, other_named) = if active_width + other_width <= available {
             (true, true)
@@ -195,10 +195,10 @@ impl Workspace {
             .h(px(TAB_STRIP_HEIGHT))
             .flex()
             .items_end()
-            .pt(px(TAB_STRIP_TOP))
+            .pt(px(tab_strip_top(&theme)))
             // Clear of the island's rounded corners, like the editor's tabs.
-            .pl(px(TAB_STRIP_INSET))
-            .pr(px(TAB_STRIP_INSET))
+            .pl(px(tab_strip_inset(&theme)))
+            .pr(px(tab_strip_inset(&theme)))
             .overflow_hidden()
             .on_mouse_down(MouseButton::Right, cx.listener(|ws, e: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();

@@ -336,7 +336,7 @@ impl Workspace {
         let (session, _) = self.debug.as_ref()?;
         let theme = Theme::get(cx).clone();
         Some(
-            island(&theme)
+            area(&theme)
                 .h(self.problems_height)
                 .flex_shrink_0()
                 .child(cached(session))

@@ -75,7 +75,7 @@ use crate::{
 };
 
 use crate::ui::{
-    GAP, chrome_bg, soft_shadow, file_icon, island,
+    GAP, area, chrome_bg, soft_shadow, file_icon, island, layout_gap,
 };
 
 mod app_menu;

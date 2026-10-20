@@ -228,7 +228,7 @@ impl Pane {
     /// Where `dragged`, at `at` over content of these `bounds`, would land:
     /// near an edge, a new pane on that side (when the pane has room for one,
     /// and the tab isn't the pane's only one); else this pane.
-    fn drop_zone(&self, bounds: Bounds<Pixels>, at: gpui::Point<Pixels>, dragged: &DraggedTab) -> Option<DropZone> {
+    fn drop_zone(&self, bounds: Bounds<Pixels>, at: gpui::Point<Pixels>, dragged: &DraggedTab, gap: f32) -> Option<DropZone> {
         if !bounds.contains(&at) || bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
             return None;
         }
@@ -236,7 +236,7 @@ impl Pane {
         let (x, y) = ((at.x - bounds.left()) / bounds.size.width, (at.y - bounds.top()) / bounds.size.height);
         let (distance, side) =
             [(x, Side::Left), (1. - x, Side::Right), (y, Side::Up), (1. - y, Side::Down)].into_iter().min_by(|a, b| a.0.total_cmp(&b.0))?;
-        Some(if distance < EDGE_ZONE && !alone && can_split(self.bounds(), side) { DropZone::Side(side) } else { DropZone::Middle })
+        Some(if distance < EDGE_ZONE && !alone && can_split(self.bounds(), side, gap) { DropZone::Side(side) } else { DropZone::Middle })
     }
 
     /// Pinned tabs first, in their order; the current tab stays current.
@@ -279,7 +279,7 @@ impl Pane {
             .collect();
         // The room for tabs: the pane less the strip's insets (unknown before the first frame).
         let width = f32::from(self.bounds.get().size.width);
-        let available = if width > 0. { width - 2. * TAB_STRIP_INSET } else { f32::INFINITY };
+        let available = if width > 0. { width - 2. * tab_strip_inset(&theme) } else { f32::INFINITY };
         let slots = fit_tabs(&naturals, self.active, available);
         let visible: Vec<usize> = (0..slots.len()).filter(|&i| slots[i] != TabSlot::Hidden).collect();
         let hidden: Vec<PaneItem> = (0..slots.len()).filter(|&i| slots[i] == TabSlot::Hidden).map(|i| self.tabs[i].clone()).collect();
@@ -294,11 +294,11 @@ impl Pane {
             .flex()
             .flex_row()
             .items_end()
-            .pt(px(TAB_STRIP_TOP))
+            .pt(px(tab_strip_top(&theme)))
             // Clear of the island's rounded corners on both sides, so the first
             // and last tabs' feet sit on its straight top edge.
-            .pl(px(TAB_STRIP_INSET))
-            .pr(px(TAB_STRIP_INSET))
+            .pl(px(tab_strip_inset(&theme)))
+            .pr(px(tab_strip_inset(&theme)))
             // No scrolling, which would cut the current tab's shape at the edge:
             // like a browser, tabs shrink to fit, down to their icon.
             .overflow_hidden()
@@ -443,7 +443,7 @@ impl Pane {
                         .w(px(TAB_OVERFLOW_WIDTH - 8.))
                         .h(px(24.))
                         .ml_1()
-                        .mb(px(4.))
+                        .mb(px(strip_button_margin(&theme)))
                         .rounded(px(8.))
                         .cursor_pointer()
                         .text_size(px(12.))
@@ -565,7 +565,7 @@ impl Render for Pane {
         let edge: Hsla = if self.chrome.outlined { crate::ui::focused_edge(&theme) } else { crate::ui::island_edge(&theme) };
         // Find works in text.
         let find_bar = self.chrome.find_bar.clone().filter(|_| item.as_ref().is_some_and(|t| t.editor().is_some()));
-        let island = island(&theme)
+        let island = area(&theme)
             .flex_1()
             .min_w_0()
             .min_h_0()
@@ -587,7 +587,7 @@ impl Render for Pane {
                     // A tab dropped in the middle joins the pane; near an edge, it
                     // splits the pane there.
                     .on_drag_move(cx.listener(|pane, ev: &gpui::DragMoveEvent<DraggedTab>, _, cx| {
-                        let zone = pane.drop_zone(ev.bounds, ev.event.position, ev.drag(cx));
+                        let zone = pane.drop_zone(ev.bounds, ev.event.position, ev.drag(cx), layout_gap(Theme::get(cx)));
                         pane.set_tab_drop(zone, cx);
                     }))
                     .on_drop(cx.listener(|pane, dragged: &DraggedTab, _, cx| {
@@ -615,11 +615,10 @@ impl Render for Pane {
             // island lines up with the sidebar's). Empty along the window's top,
             // it moves the window; with tabs, their strip's free space does.
             .map(|el| {
-                let room = px(TAB_STRIP_HEIGHT - 1.);
                 if self.tabs.is_empty() && self.chrome.at_top {
-                    el.child(window_drag_area("tabs-room").flex_shrink_0().h(room))
+                    el.child(tab_room(window_drag_area("tabs-room"), &theme))
                 } else {
-                    el.child(div().flex_shrink_0().h(room))
+                    el.child(tab_room(div(), &theme))
                 }
             })
             .child(island)
@@ -685,13 +684,13 @@ pub(super) fn file_drop_overlay(group: SharedString, theme: &Theme) -> Div {
             div()
                 .absolute()
                 .top(px(TAB_STRIP_HEIGHT))
-                .left(px(1.))
-                .right(px(1.))
-                .bottom(px(1.))
+                .left(px(crate::ui::area_border(theme)))
+                .right(px(crate::ui::area_border(theme)))
+                .bottom(px(crate::ui::area_border(theme)))
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(crate::ui::ISLAND_RADIUS - 1.))
+                .rounded(px((crate::ui::area_radius(theme) - 1.).max(0.)))
                 .bg(crate::ui::drop_lift(theme).0)
                 .child(
                     div()
