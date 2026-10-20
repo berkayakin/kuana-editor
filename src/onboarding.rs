@@ -1,7 +1,9 @@
 //! Welcome Setup: the first thing a fresh install shows (and Find Action's
-//! "Welcome Setup" later). It picks a theme, a base keymap and a few editor
-//! basics. Like Preferences, every choice is written to `settings.json` and
-//! applied right away, so the page itself restyles as themes are tried.
+//! "Welcome Setup" later). It goes through a few steps (`Step`: a theme, the
+//! layout, a base keymap, editor basics) under a stepper, with its actions in
+//! a bar along the bottom. Like Preferences, every choice is written to
+//! `settings.json` and applied right away, so the page itself restyles as
+//! themes are tried, and finishing at any step keeps what was picked.
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, IntoElement,
@@ -35,16 +37,82 @@ pub enum OnboardingEvent {
 const FEATURED_THEMES: [&str; 8] =
     ["Ember", "Clay Black", "Lighthouse Night", "Dracula", "Sunset Fig", "Campfire", "One Light", "Camellia Light"];
 
+/// Welcome Setup's steps, in order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Step {
+    Theme,
+    Layout,
+    Shortcuts,
+    Editor,
+}
+
+impl Step {
+    const ALL: [Step; 4] = [Step::Theme, Step::Layout, Step::Shortcuts, Step::Editor];
+
+    /// Its name in the stepper.
+    fn label(self) -> &'static str {
+        match self {
+            Step::Theme => "Theme",
+            Step::Layout => "Layout",
+            Step::Shortcuts => "Shortcuts",
+            Step::Editor => "Editor",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Step::Theme => "Choose a theme",
+            Step::Layout => "Choose a layout",
+            Step::Shortcuts => "Pick your shortcuts",
+            Step::Editor => "Editor basics",
+        }
+    }
+
+    fn detail(self) -> &'static str {
+        match self {
+            Step::Theme => "Applied as you click; the page follows along.",
+            Step::Layout => "How the sidebar, editors and panels sit together.",
+            Step::Shortcuts => "Start from the editor your hands already know. Your own changes always go on top.",
+            Step::Editor => "The settings people change first.",
+        }
+    }
+}
+
 pub struct Onboarding {
     focus_handle: FocusHandle,
     scroll: gpui::ScrollHandle,
+    /// The step shown, an index into `Step::ALL`.
+    step: usize,
+    /// Which way the last step change went (1 forward, -1 back): the new
+    /// step slides in from that side.
+    direction: f32,
 }
 
 impl EventEmitter<OnboardingEvent> for Onboarding {}
 
 impl Onboarding {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        Self { focus_handle: cx.focus_handle(), scroll: gpui::ScrollHandle::new() }
+        Self { focus_handle: cx.focus_handle(), scroll: gpui::ScrollHandle::new(), step: 0, direction: 1. }
+    }
+
+    /// Shows step `ix`, from its top.
+    fn go_to(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let ix = ix.min(Step::ALL.len() - 1);
+        if ix != self.step {
+            self.direction = if ix > self.step { 1. } else { -1. };
+            self.step = ix;
+            self.scroll.set_offset(gpui::point(px(0.), px(0.)));
+            cx.notify();
+        }
+    }
+
+    /// Continue: the next step, or done after the last.
+    fn next(&mut self, cx: &mut Context<Self>) {
+        if self.step + 1 < Step::ALL.len() {
+            self.go_to(self.step + 1, cx);
+        } else {
+            cx.emit(OnboardingEvent::Done);
+        }
     }
 
     /// Applies what was just written, reporting anything that went wrong.
@@ -71,10 +139,15 @@ impl Onboarding {
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
-        if k.modifiers.number_of_modifiers() == 0 && matches!(k.key.as_str(), "escape" | "enter") {
-            cx.stop_propagation();
-            cx.emit(OnboardingEvent::Done);
+        if k.modifiers.number_of_modifiers() > 0 {
+            return;
         }
+        match k.key.as_str() {
+            "escape" => cx.emit(OnboardingEvent::Done),
+            "enter" => self.next(cx),
+            _ => return,
+        }
+        cx.stop_propagation();
     }
 
     // ---- Sections -----------------------------------------------------------------------
@@ -392,64 +465,133 @@ impl Focusable for Onboarding {
     }
 }
 
-impl Render for Onboarding {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::get(cx).clone();
-        let width = window.viewport_size().width;
-        let wide = width > px(860.);
-        let settings_keys = crate::ui::binding_label(&OpenSettings, window);
-        let header = div()
-            .flex()
-            .items_center()
-            .gap_5()
-            .child(img(assets::LOGO).size(px(72.)).rounded(px(18.)).flex_shrink_0())
-            .child(
+impl Onboarding {
+    /// The steps in a row, joined by lines that fill in as they're passed:
+    /// the current one lit, the ones before it checked. Any step can be
+    /// clicked; in a narrow window only the current one keeps its name.
+    fn render_stepper(&self, wide: bool, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let accent: Hsla = theme.accent.into();
+        let mut row = div().flex().items_center().gap_3();
+        for (ix, step) in Step::ALL.iter().enumerate() {
+            let (current, done) = (ix == self.step, ix < self.step);
+            if ix > 0 {
+                let passed = ix <= self.step;
+                row = row.child(
+                    div()
+                        .flex_1()
+                        .min_w(px(12.))
+                        .h(px(2.))
+                        .rounded_full()
+                        .bg(if passed { accent.alpha(0.55) } else { Hsla::from(theme.border_subtle) }),
+                );
+            }
+            let badge = div()
+                .size(px(26.))
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .text_size(px(12.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .map(|el| {
+                    if current {
+                        el.bg(accent).text_color(theme.background).shadow(crate::ui::glow(theme, accent.alpha(0.35), 10., 0.))
+                    } else if done {
+                        el.bg(theme.accent_soft).child(icon_el(Icon::Check, px(14.), accent))
+                    } else {
+                        el.border_1().border_color(theme.border).text_color(theme.text_dim)
+                    }
+                })
+                .when(!done, |el| el.child((ix + 1).to_string()));
+            let group = SharedString::from(format!("welcome-step-{ix}"));
+            row = row.child(
                 div()
+                    .id(("welcome-step", ix))
+                    .group(group.clone())
                     .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .font_family(assets::TITLE_FONT)
-                            .text_size(px(38.))
-                            .line_height(px(44.))
-                            .text_color(theme.text)
-                            .child("Welcome to Kuana"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(14.))
-                            .text_color(theme.text_muted)
-                            .child("A few choices to make it feel like home. You can change all of them later in Settings."),
-                    ),
-            );
-        let footer = div()
-            .flex()
-            .items_center()
-            .gap_3()
-            .pt_2()
-            .child(
-                // Wraps in a narrow window instead of pushing the buttons out
-                // of view (GPUI measures text's minimum as one line, so it
-                // shrinks only with `min_w_0`).
-                div()
-                    .flex_auto()
-                    .min_w_0()
-                    .flex()
+                    .flex_shrink_0()
                     .items_center()
-                    .gap_1p5()
-                    .text_size(px(12.))
-                    .text_color(theme.text_dim)
-                    .child(div().min_w_0().child("Everything else is in Settings"))
-                    .when_some(settings_keys, |el, keys| el.child(kbd(keys, cx))),
-            )
+                    .gap_2()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go_to(ix, cx)))
+                    .child(badge)
+                    .when(wide || current, |el| {
+                        el.child(
+                            div()
+                                .text_size(px(13.))
+                                .when(current, |el| el.font_weight(FontWeight::SEMIBOLD).text_color(theme.text))
+                                .when(!current, |el| {
+                                    el.text_color(if done { theme.text_muted } else { theme.text_dim })
+                                        .group_hover(group.clone(), |s| s.text_color(theme.text))
+                                })
+                                .child(step.label()),
+                        )
+                    }),
+            );
+        }
+        row
+    }
+
+    /// The bar along the bottom: All Settings at the left; Skip, Back and
+    /// Continue (Get Started on the last step) at the right.
+    fn render_actions(&self, window: &Window, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let last = self.step + 1 == Step::ALL.len();
+        let settings_keys = crate::ui::binding_label(&OpenSettings, window);
+        let primary_text: Hsla = theme.background.into();
+        let actions = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .h(px(72.))
             .child(
-                link_button("welcome-settings", "All Settings…", &theme)
+                link_button("welcome-settings", "All Settings…", theme)
                     .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(OnboardingEvent::OpenSettings))),
             )
+            .when_some(settings_keys.filter(|_| window.viewport_size().width > px(640.)), |el, keys| el.child(kbd(keys, cx)))
+            .child(div().flex_1())
+            // Every choice is saved already: finishing early keeps them.
+            .when(!last, |el| {
+                el.child(
+                    div()
+                        .id("welcome-skip")
+                        .flex()
+                        .items_center()
+                        .h(px(36.))
+                        .px_3()
+                        .rounded_full()
+                        .text_size(px(13.))
+                        .text_color(theme.text_dim)
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.text))
+                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(OnboardingEvent::Done)))
+                        .child("Skip"),
+                )
+            })
+            .when(self.step > 0, |el| {
+                el.child(
+                    div()
+                        .id("welcome-back")
+                        .flex()
+                        .items_center()
+                        .h(px(36.))
+                        .px_4()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_muted)
+                        .cursor_pointer()
+                        .hover_bg(theme.hover)
+                        .hover(|s| s.text_color(theme.text))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.go_to(this.step.saturating_sub(1), cx)))
+                        .child("Back"),
+                )
+            })
             .child(
                 div()
-                    .id("welcome-done")
+                    .id("welcome-next")
                     .flex()
                     .items_center()
                     .gap_2()
@@ -458,97 +600,106 @@ impl Render for Onboarding {
                     // Text buttons are pills.
                     .rounded_full()
                     .bg(theme.accent)
-                    .text_color(theme.background)
+                    .text_color(primary_text)
+                    .text_size(px(13.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.88))
                     .active(|s| s.opacity(0.75))
-                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(OnboardingEvent::Done)))
-                    .child("Get Started")
-                    .child(icon_el(Icon::ArrowRight, px(14.), theme.background.into())),
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.next(cx)))
+                    .child(if last { "Get Started" } else { "Continue" })
+                    .child(icon_el(Icon::ArrowRight, px(14.), primary_text)),
             );
+        div().flex_shrink_0().border_t_1().border_color(theme.border_subtle).child(column(actions))
+    }
+}
 
-        let page = div()
+impl Render for Onboarding {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::get(cx).clone();
+        let wide = window.viewport_size().width > px(860.);
+        let step = Step::ALL[self.step];
+        let header = div()
+            .flex()
+            .items_center()
+            .gap_4()
+            .child(img(assets::LOGO).size(px(52.)).rounded(px(13.)).flex_shrink_0())
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .font_family(assets::TITLE_FONT)
+                            .text_size(px(30.))
+                            .line_height(px(36.))
+                            .text_color(theme.text)
+                            .child("Welcome to Kuana"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.5))
+                            .text_color(theme.text_muted)
+                            .child("A few choices to make it feel like home. You can change all of them later in Settings."),
+                    ),
+            );
+        let top = div().flex().flex_col().gap(px(26.)).pt(px(32.)).pb(px(6.)).child(header).child(self.render_stepper(wide, &theme, cx));
+
+        let content = match step {
+            Step::Theme => self.render_themes(if wide { 4 } else { 2 }, cx),
+            Step::Layout => self.render_layouts(cx),
+            Step::Shortcuts => self.render_keymaps(if wide { 4 } else { 2 }, cx),
+            Step::Editor => self.render_editor(cx),
+        };
+        let from = self.direction * 24.;
+        // The step slides in from the side it was reached from.
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap_5()
+            .py(px(24.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(step.title()))
+                    .child(div().text_size(px(13.)).text_color(theme.text_dim).child(step.detail())),
+            )
+            .child(content)
+            .with_transition(gpui::ElementId::NamedInteger("welcome-step-body".into(), self.step as u64), true, transition::FOCUS, move |el, t| {
+                el.opacity(t).relative().left(px((1. - t) * from))
+            })
+            .appear();
+        let middle = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(div().id("onboarding-step").size_full().overflow_y_scroll().track_scroll(&self.scroll).child(column(body)))
+            .child(crate::ui::scrollbar("onboarding-scrollbar", &self.scroll, cx));
+
+        div()
             .id("onboarding")
             .key_context("Onboarding")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
             .size_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
+            .flex()
+            .flex_col()
             .bg(theme.background)
-            .child(
-                div().flex().justify_center().px_6().py(px(44.)).child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(36.))
-                        .w_full()
-                        .max_w(px(900.))
-                        .child(header)
-                        .child(section(1, "Choose a theme", "Applied as you click; the page follows along.", self.render_themes(if wide { 4 } else { 2 }, cx), &theme))
-                        .child(section(
-                            2,
-                            "Choose a layout",
-                            "How the sidebar, editors and panels sit together.",
-                            self.render_layouts(cx),
-                            &theme,
-                        ))
-                        .child(section(
-                            3,
-                            "Pick your shortcuts",
-                            "Start from the editor your hands already know. Your own changes always go on top.",
-                            self.render_keymaps(if wide { 4 } else { 2 }, cx),
-                            &theme,
-                        ))
-                        .child(section(4, "Editor basics", "The settings people change first.", self.render_editor(cx), &theme))
-                        .child(div().h(px(1.)).bg(theme.border_subtle))
-                        .child(footer),
-                ),
-            );
-        div().relative().size_full().child(page).child(crate::ui::scrollbar("onboarding-scrollbar", &self.scroll, cx))
+            .child(column(top))
+            .child(middle)
+            .child(self.render_actions(window, &theme, cx))
     }
 }
 
-/// A numbered step: title and a line of explanation over its content.
-fn section(number: usize, title: &str, detail: &str, content: AnyElement, theme: &Theme) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_4()
-        .child(
-            div()
-                .flex()
-                .items_start()
-                .gap_3()
-                .child(
-                    div()
-                        .mt(px(1.))
-                        .size(px(24.))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_full()
-                        .bg(theme.accent_soft)
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.accent)
-                        .child(number.to_string()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_0p5()
-                        .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(title.to_string()))
-                        .child(div().text_size(px(13.)).text_color(theme.text_dim).child(detail.to_string())),
-                ),
-        )
-        .child(content)
+/// The page's centered column, at most 900 wide.
+fn column(content: impl IntoElement) -> gpui::Div {
+    div().flex().justify_center().px_6().child(div().w_full().max_w(px(900.)).child(content))
 }
 
-/// Rows of equal-width cells (GPUI's grid doesn't size these cards).
 /// Settings as rows in a card: label and detail on the left, the control on the right.
 fn option_rows(rows: Vec<(&str, &str, AnyElement)>, theme: &Theme) -> AnyElement {
     let count = rows.len();
@@ -696,6 +847,7 @@ fn layout_sketch(style: UiStyle, theme: &Theme) -> gpui::Div {
         )
 }
 
+/// Rows of equal-width cells (GPUI's grid doesn't size these cards).
 fn grid(mut cells: Vec<AnyElement>, columns: usize, gap: gpui::Pixels) -> gpui::Div {
     while !cells.len().is_multiple_of(columns) {
         cells.push(div().into_any_element());
