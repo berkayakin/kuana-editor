@@ -412,11 +412,17 @@ impl Render for Workspace {
             .child(self.render_titlebar(window, cx))
             .when_some(self.onboarding.as_ref().map(|(o, _)| o.clone()), |el, onboarding| {
                 el.child(
-                    island(&theme)
+                    area(&theme)
                         .flex_1()
                         .min_h_0()
-                        .mx(px(GAP))
-                        .mb(px(GAP))
+                        // Classic: flush with the window's edges, a line under the title bar.
+                        .map(|el| {
+                            if theme.classic {
+                                el.border_t_1().border_color(crate::ui::separator(&theme))
+                            } else {
+                                el.mx(px(GAP)).mb(px(GAP))
+                            }
+                        })
                         .child(div().size_full().overflow_hidden().child(onboarding)),
                 )
             })

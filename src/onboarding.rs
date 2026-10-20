@@ -13,7 +13,7 @@ use std::{cell::Cell, rc::Rc};
 use crate::{
     assets::{self, Icon},
     keymap,
-    settings::{self, AutoSave, BaseKeymap, Settings, VisualEffects},
+    settings::{self, AutoSave, BaseKeymap, Settings, UiStyle, VisualEffects},
     theme::{self, Appearance, Theme, ThemeRegistry},
     transition::{self, TransitionExt, mix},
     ui::{Button, HoverFill, faded, field_glow, icon_el, kbd, switch},
@@ -169,6 +169,58 @@ impl Onboarding {
             .into_any_element()
     }
 
+    /// Modern and Classic as cards, each with a sketch of the window.
+    fn render_layouts(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::get(cx).clone();
+        let current = Settings::get(cx).ui_style();
+        let cards: Vec<AnyElement> = UiStyle::ALL
+            .iter()
+            .map(|&style| {
+                let selected = style == current;
+                let (name, blurb) = match style {
+                    UiStyle::Modern => ("Modern", "Rounded islands with gaps between them, browser-like tabs"),
+                    UiStyle::Classic => ("Classic", "Square areas side by side, separated by lines"),
+                };
+                let card = div()
+                    .id(SharedString::from(format!("welcome-layout-{}", style.key())))
+                    .flex()
+                    .flex_col()
+                    .rounded(px(12.))
+                    .bg(theme.panel)
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.write(Settings::set_ui_style(style), cx)))
+                    .child(layout_sketch(style, &theme))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .px(px(14.))
+                            .py(px(12.))
+                            .border_t_1()
+                            .border_color(theme.border_subtle)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(name))
+                                    .child(radio(selected, &theme)),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(12.))
+                                    .text_color(if selected { theme.text_muted } else { theme.text_dim })
+                                    .child(blurb),
+                            ),
+                    );
+                choice_card(card, format!("welcome-layout-{}", style.key()), selected, &theme).into_any_element()
+            })
+            .collect();
+        grid(cards, 2, px(12.)).into_any_element()
+    }
+
     fn render_keymaps(&self, columns: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::get(cx).clone();
         let current = keymap::current(cx);
@@ -207,17 +259,7 @@ impl Onboarding {
                             .items_center()
                             .gap_2()
                             .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(base.label()))
-                            .child(
-                                div()
-                                    .size(px(16.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    .border_1()
-                                    .border_color(if selected { Hsla::from(theme.accent) } else { Hsla::from(theme.border) })
-                                    .when(selected, |el| el.child(div().size(px(8.)).rounded_full().bg(theme.accent))),
-                            ),
+                            .child(radio(selected, &theme)),
                     )
                     .child(
                         div()
@@ -447,12 +489,19 @@ impl Render for Onboarding {
                         .child(section(1, "Choose a theme", "Applied as you click; the page follows along.", self.render_themes(if wide { 4 } else { 2 }, cx), &theme))
                         .child(section(
                             2,
+                            "Choose a layout",
+                            "How the sidebar, editors and panels sit together.",
+                            self.render_layouts(cx),
+                            &theme,
+                        ))
+                        .child(section(
+                            3,
                             "Pick your shortcuts",
                             "Start from the editor your hands already know. Your own changes always go on top.",
                             self.render_keymaps(if wide { 4 } else { 2 }, cx),
                             &theme,
                         ))
-                        .child(section(3, "Editor basics", "The settings people change first.", self.render_editor(cx), &theme))
+                        .child(section(4, "Editor basics", "The settings people change first.", self.render_editor(cx), &theme))
                         .child(div().h(px(1.)).bg(theme.border_subtle))
                         .child(footer),
                 ),
@@ -555,6 +604,96 @@ fn choice_card(card: gpui::Stateful<gpui::Div>, id: String, selected: bool, them
             set_chosen.set(t);
             el
         })
+}
+
+/// A choice card's radio button.
+fn radio(selected: bool, theme: &Theme) -> gpui::Div {
+    div()
+        .size(px(16.))
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_1()
+        .border_color(if selected { Hsla::from(theme.accent) } else { Hsla::from(theme.border) })
+        .when(selected, |el| el.child(div().size(px(8.)).rounded_full().bg(theme.accent)))
+}
+
+/// A small picture of the window laid out in `style`, in the theme's colors:
+/// the title bar, the sidebar, an editor with its tab and a bottom panel, as
+/// islands with gaps (Modern) or square areas between lines (Classic).
+fn layout_sketch(style: UiStyle, theme: &Theme) -> gpui::Div {
+    let classic = style == UiStyle::Classic;
+    let gap = px(if classic { 1. } else { 5. });
+    let line = crate::ui::separator(theme);
+    let area = || {
+        let el = div().flex().flex_col().gap(px(4.)).p(px(7.)).bg(theme.background);
+        if classic { el } else { el.rounded(px(5.)).border_1().border_color(crate::ui::island_edge(theme)) }
+    };
+    let code = |w: f32, color: gpui::Rgba| div().h(px(3.)).w(px(w)).rounded_full().bg(Hsla::from(color).alpha(0.7));
+    // The room above an area, with a tab joined to it.
+    let tab_room = |tab: bool| {
+        let room = div().flex().flex_shrink_0().items_end().h(px(12.));
+        let room = if classic { room.bg(theme.panel) } else { room.pl(px(7.)) };
+        room.when(tab, |el| {
+            el.child(
+                div()
+                    .w(px(34.))
+                    .bg(theme.background)
+                    .map(|el| if classic { el.h_full().border_r_1().border_color(line) } else { el.h(px(9.)).rounded_t(px(3.)) }),
+            )
+        })
+    };
+    let sidebar = div()
+        .flex()
+        .flex_col()
+        .w(gpui::relative(0.26))
+        .child(tab_room(true))
+        .child(area().flex_1().child(code(30., theme.text_dim)).child(code(38., theme.text_dim)).child(code(24., theme.text_dim)));
+    let editor = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .child(tab_room(true))
+        .child(
+            area()
+                .flex_1()
+                .child(code(46., theme.syntax.keyword))
+                .child(div().pl(px(8.)).child(code(64., theme.syntax.string)))
+                .child(div().pl(px(8.)).child(code(40., theme.syntax.function))),
+        );
+    let panel = area().h(px(24.)).child(code(52., theme.text_dim));
+    div()
+        .flex()
+        .flex_col()
+        .h(px(132.))
+        // Clipping doesn't follow rounded corners: the top rounds its own.
+        .rounded_t(px(11.))
+        .bg(theme.panel)
+        // The title bar, with its window buttons.
+        .child(
+            div()
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .gap(px(3.))
+                .h(px(14.))
+                .px(px(8.))
+                .children((0..3).map(|_| div().size(px(4.)).rounded_full().bg(Hsla::from(theme.text_dim).alpha(0.6)))),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_1()
+                .min_h_0()
+                .gap(gap)
+                // Classic: the lines are the gaps over the separator color, with
+                // one under the title bar.
+                .map(|el| if classic { el.pt(px(1.)).bg(line) } else { el.px(gap).pb(gap) })
+                .child(sidebar)
+                .child(div().flex().flex_col().flex_1().gap(gap).child(editor).child(panel)),
+        )
 }
 
 fn grid(mut cells: Vec<AnyElement>, columns: usize, gap: gpui::Pixels) -> gpui::Div {

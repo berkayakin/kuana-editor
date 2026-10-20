@@ -31,7 +31,7 @@ use crate::{
     workspace::Find,
     ui::{
         Button, HoverFill,
-        GAP, focus_glow, icon_button, icon_el, input_box, island, popover, switch, text_button,
+        GAP, focus_glow, icon_button, icon_el, input_box, popover, switch, text_button,
         tooltip_view,
     },
 };
@@ -1055,15 +1055,23 @@ impl Render for Preferences {
             .size_full()
             .text_size(px(13.))
             .font_family(theme.ui_font.clone())
-            // Like the main window: the nav on the chrome, the page on an island.
+            // Like the main window: the nav on the chrome, the page on an
+            // island; Classic, the page flush with the window's edges and
+            // separator lines under the title bar and beside the nav.
+            .when(theme.classic, |el| el.border_t_1().border_color(crate::ui::separator(&theme)))
             .child(self.render_nav(&words, window, cx))
             .child(
-                island(&theme)
+                crate::ui::area(&theme)
                     .p_0()
                     .flex_1()
                     .min_w_0()
-                    .my(px(GAP))
-                    .mr(px(GAP))
+                    .map(|el| {
+                        if theme.classic {
+                            el.border_l_1().border_color(crate::ui::separator(&theme))
+                        } else {
+                            el.my(px(GAP)).mr(px(GAP))
+                        }
+                    })
                     .child(self.render_header(&words, cx))
                     .when_some(self.file_error.clone(), |el, error| el.child(self.render_file_error(error, cx)))
                     .child(content),
