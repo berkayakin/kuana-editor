@@ -19,25 +19,51 @@ wait 1500
 keys escape
 wait 800
 
-# Themes preview live as you move through them; Escape keeps the one before.
+# Themes preview live as you pick them (Welcome Setup's featured ones);
+# Escape keeps the one before.
 action workspace::SelectTheme
-type rose
+type sunset
 wait 1600
-keys down
-wait 1400
-keys down
-wait 1400
+keys secondary-a
+type lighthouse night
+wait 1600
+keys secondary-a
+type one light
+wait 1600
 keys escape
 wait 800
 
-# The terminal.
+# The Classic layout, through Find Action, with a quick look at the
+# terminal in it; then back to Modern.
+action workspace::FindAction
+type classic
+wait 700
+keys enter
+wait 1500
 action workspace::ToggleTerminal
 # Until the shell is ready, or it echoes the keys early.
-wait 2500
-type git log --oneline -6
+wait 1500
+type ls
 keys enter
-wait 2000
+wait 1200
 action workspace::ToggleTerminal
+wait 500
+action workspace::FindAction
+type classic
+wait 500
+keys enter
+wait 1000
+
+# The Git log: the commit graph with branches and tags.
+action workspace::ToggleGitLog
+wait 1500
+keys down
+wait 800
+keys down
+wait 800
+keys down
+wait 1400
+action workspace::ToggleGitLog
 wait 600
 
 # Markdown with its preview beside it.
