@@ -145,6 +145,8 @@ actions!(
         RecentTabBack,
         ToggleSidebar,
         ToggleSidebarPosition,
+        /// Switches the window between the Modern and Classic layouts (`ui_style`).
+        ToggleClassicLayout,
         ToggleProblems,
         ToggleTerminal,
         ToggleGitLog,

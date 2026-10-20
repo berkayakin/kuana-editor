@@ -132,6 +132,20 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Toggle Classic Layout: the window between the Modern and Classic styles.
+    pub(super) fn toggle_classic_layout(&mut self, _: &ToggleClassicLayout, window: &mut Window, cx: &mut Context<Self>) {
+        let style = match Settings::get(cx).ui_style() {
+            settings::UiStyle::Modern => settings::UiStyle::Classic,
+            settings::UiStyle::Classic => settings::UiStyle::Modern,
+        };
+        if let Err(err) = Settings::set_ui_style(style) {
+            let _ = window.prompt(PromptLevel::Warning, "Couldn't save the layout", Some(&err.to_string()), &["OK"], cx);
+        }
+        let problems = settings::reload_now(cx);
+        self.report_config_problems(problems, cx);
+        cx.notify();
+    }
+
     /// The sidebar tabs' right-click menu: move the sidebar to the other side.
     fn open_sidebar_tab_menu(&mut self, position: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let label = if self.sidebar_on_right(cx) { "Move to Left" } else { "Move to Right" };

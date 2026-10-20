@@ -50,7 +50,7 @@ and theme colors.
 | `vim_mode` | `false` | Vim's modes and keys; see [Vim mode](editing.md#vim-mode) |
 | `icon_theme` | built-in | an extension's icon theme by name, e.g. `"Soft Charmed Icons"` |
 | `visual_effects` | `"full"` | how much decoration the interface draws: `"full"`, `"reduced"` (solid colors instead of gradients) or `"minimal"` (also no shadows, glows or animations); Settings → Appearance. The older `"reduce_visual_effects": true` still works, as `"minimal"` |
-| `ui_style` | `"modern"` | the window's layout: `"modern"` (rounded islands with gaps between them, browser-like tabs) or `"classic"` (square areas side by side, separated by lines, rectangular tabs); Settings → Appearance → Layout |
+| `ui_style` | `"modern"` | the window's layout: `"modern"` (rounded islands with gaps between them, browser-like tabs) or `"classic"` (square areas side by side, separated by lines, rectangular tabs); Settings → Appearance → Layout, Welcome Setup, or Toggle Classic Layout in Find Action |
 | `sidebar_dock` | `"left"` | which side of the editor the sidebar (Files, Commit) sits on: `"left"` or `"right"`; Settings → Appearance, Move to Right / Left on its tabs' right-click menu, or Toggle Sidebar Position |
 | `project_avatar` | `true` | the round initial before the project's name in the title bar; Settings → Appearance → Layout |
 | `language_servers` | | per language: `false` turns its server off, `["cmd", "args"]` replaces it |

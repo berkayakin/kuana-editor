@@ -307,6 +307,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::recent_tab_back))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_sidebar_position))
+            .on_action(cx.listener(Self::toggle_classic_layout))
             .on_action(cx.listener(Self::toggle_problems))
             .on_action(cx.listener(Self::toggle_results))
             .on_action(cx.listener(Self::rerun_failed_tests))
