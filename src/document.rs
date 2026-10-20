@@ -2830,6 +2830,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("a.txt");
         std::fs::write(&path, "one\n").unwrap();
+        // Windows' file times tick every few milliseconds: written this soon
+        // after, the save could have the time the document knows.
+        let earlier = SystemTime::now() - Duration::from_secs(60);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(earlier).unwrap();
         let mut doc = Document::open(&path).unwrap();
         doc.edit(vec![(3..3, " two".into())], &[], EditKind::Other);
         let job = doc.save_job().unwrap();

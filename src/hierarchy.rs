@@ -187,17 +187,24 @@ fn item_node(item: &Value, at: Option<LspRange>, note: Option<String>, encoding:
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
-    use crate::lsp::protocol::Position;
+    use crate::lsp::protocol::{Position, path_to_uri};
+
+    /// An absolute path on every platform: Windows has no path for `file:///p`.
+    fn root() -> PathBuf {
+        std::env::temp_dir().join("kuana-hierarchy")
+    }
 
     fn item(name: &str, line: u32) -> Value {
         let range = json!({ "start": { "line": line, "character": 7 }, "end": { "line": line, "character": 12 } });
-        json!({ "name": name, "kind": 12, "uri": "file:///p/src/util.rs", "range": range, "selectionRange": range })
+        json!({ "name": name, "kind": 12, "uri": path_to_uri(&root().join("src").join("util.rs")), "range": range, "selectionRange": range })
     }
 
     #[test]
     fn callers_open_at_their_call_and_count_calls() {
-        let label: Labeler = Rc::new(|p: &Path| p.strip_prefix("/p").unwrap().display().to_string());
+        let label: Labeler = Rc::new(|p: &Path| p.strip_prefix(root()).unwrap().to_string_lossy().replace('\\', "/"));
         let call = |line| json!({ "start": { "line": line, "character": 4 }, "end": { "line": line, "character": 9 } });
         let value = json!([
             { "from": item("twice", 4), "fromRanges": [call(5), call(5)] },
