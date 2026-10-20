@@ -1,5 +1,23 @@
 # Installing and building
 
+## Install script (macOS, Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/berkayakin/kuana-editor/main/install.sh | sh
+```
+
+[`install.sh`](../install.sh) downloads the latest release, checks it against the SHA-256 in the
+release's `latest.json` and installs it:
+
+- **macOS:** `Kuana.app` in `/Applications` (`~/Applications` when that isn't writable). macOS
+  doesn't quarantine what `curl` downloads, so the first launch doesn't need
+  [Open Anyway](#first-launch-on-macos).
+- **Linux:** the `kuana` binary in `~/.local/bin`, plus a desktop entry and icons in
+  `~/.local/share`, so app launchers list it.
+
+It then opens Kuana. Run it again to reinstall. `KUANA_INSTALL_DIR=<folder>` installs somewhere
+else; `KUANA_NO_LAUNCH=1` doesn't open it.
+
 ## Download
 
 Get the latest build from [GitHub Releases](https://github.com/berkayakin/kuana-editor/releases/latest):
@@ -51,6 +69,6 @@ version and the commit it was built from; **Copy Version** copies both for bug r
 ## First launch on macOS
 
 Until the macOS app is signed with a Developer ID, it's only ad-hoc signed, so macOS
-blocks the first launch of a downloaded copy: allow it under System Settings → Privacy &
-Security → **Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/Kuana.app`.
-Updates don't need this.
+blocks the first launch of a copy downloaded with a browser: allow it under System Settings →
+Privacy & Security → **Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/Kuana.app`.
+The [install script](#install-script-macos-linux) and updates don't need this.
