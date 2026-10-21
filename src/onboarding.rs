@@ -438,6 +438,13 @@ impl Onboarding {
                 }),
             ),
             (
+                "Minimap",
+                "An overview of the whole file at the editor's right edge, in place of the scrollbar.",
+                toggle("welcome-minimap", settings.editor.minimap.unwrap_or(false), cx, |this, on, cx| {
+                    this.set_or_default("minimap", json!(on), json!(false), cx);
+                }),
+            ),
+            (
                 "Update automatically",
                 "Download new versions in the background; you choose when to restart.",
                 toggle("welcome-auto-update", settings.auto_update.unwrap_or(true), cx, |this, on, cx| {
