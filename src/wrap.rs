@@ -524,7 +524,9 @@ impl WrapMap {
             self.row_starts[row] = at;
             at += self.rows[row] as usize;
         }
-        if last >= lines {
+        // Up to the last line: the total is where its rows end plus the
+        // blocks after it (moving it by the difference would drop those).
+        if last + 1 >= lines {
             // Blocks after the last line count in the total.
             self.row_starts[lines] = at + self.blocks_above(lines);
         } else {
@@ -1007,6 +1009,20 @@ mod tests {
         assert_eq!(map.line_of(3), (1, 0));
         map.set_blocks(&Arc::default());
         assert_eq!((map.row_count(), map.first_display_row(1)), (4, 1));
+    }
+
+    /// Measuring the last line again (a hint arrived on it) keeps the rows
+    /// after it: they're in the total, which the line's rows end before.
+    #[gpui::test]
+    fn the_last_line_measured_again_keeps_the_rows_after_it(cx: &mut gpui::TestAppContext) {
+        let rope = Rope::from_str("a\ndef f()");
+        let key = WrapKey { width: gpui::px(0.), font_family: "Menlo".into(), font_size: gpui::px(13.), tab_size: 4, wrap: false };
+        let mut map = cx.update(|cx| WrapMap::new(key, 0, &[], Inlays::NONE, &rope, cx.text_system(), gpui::font("Menlo"), gpui::px(8.)));
+        map.set_blocks(&Arc::new(vec![(2, 3)]));
+        assert_eq!((map.row_count(), map.block_start(2)), (5, 2));
+        let hints = [InlayHint { offset: rope.len_bytes(), label: " -> None".into(), pad_left: false, pad_right: false }];
+        cx.update(|cx| map.update(std::iter::empty(), 0, &[], Inlays { hints: &hints, generation: 1 }, &rope, cx.text_system(), gpui::font("Menlo"), gpui::px(8.)));
+        assert_eq!((map.row_count(), map.block_start(2)), (5, 2));
     }
 
     /// Lookups by binary search and the walk in `count_rows` agree with
