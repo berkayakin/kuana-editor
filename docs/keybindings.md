@@ -62,6 +62,8 @@ The table below is the JetBrains keymap.
 | Collapse / expand (fold) | ⌘- / ⌘= | Ctrl+- / Ctrl+= |
 | Collapse all / expand all | ⌘⇧- / ⌘⇧= | Ctrl+Shift+- / Ctrl+Shift+= |
 | Basic completion | ⌃Space | Ctrl+Space |
+| Accept / dismiss an edit prediction (Copilot's ghost text) | ⇥ / ⎋ | Tab / Esc |
+| Ask Copilot for a suggestion at the caret | ⌥\\ | Alt+\\ |
 | Go to Declaration (on the declaration itself: its usages) | ⌘B or ⌘-click | Ctrl+B or Ctrl+click |
 | Go to Implementation | ⌥⌘B | Ctrl+Alt+B |
 | Go to Type Definition | ⌃⇧B | Ctrl+Shift+B |

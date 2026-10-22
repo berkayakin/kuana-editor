@@ -403,12 +403,15 @@ impl Editor {
         self.schedule_code_lenses(cx);
     }
 
-    /// The document's servers that are up, the main one first.
+    /// The document's servers that are up, the main one first. Not
+    /// Copilot's, which only gives ghost text (`prediction.rs`).
     pub(super) fn lsp_servers(&self, cx: &gpui::App) -> Vec<Arc<Server>> {
         let (Some(path), Some(store)) = (self.doc.read(cx).path.as_deref(), self.lsp.store.as_ref().and_then(|s| s.upgrade())) else {
             return Vec::new();
         };
-        store.read(cx).servers_for(path)
+        let mut servers = store.read(cx).servers_for(path);
+        servers.retain(|s| s.id != crate::lsp::copilot::ID);
+        servers
     }
 
     /// The main server.

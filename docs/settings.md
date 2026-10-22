@@ -46,8 +46,10 @@ and theme colors.
 | `minimap` | `false` | the document in miniature at the editor's right edge, in place of the scrollbar: code as colored blocks, the visible part as a slider, problems, search matches and Git changes along its edge |
 | `minimap_width` | `100` | the minimap's width in pixels (40–240) |
 | `syntax_errors` | `true` (`false` for extension languages) | parse errors in Problems when no language server covers the file. Extensions' grammars may not know all valid code (tree-sitter-sql rejects Postgres' `ON CONFLICT (…)`), so turn it on per language for the ones you trust, e.g. `"languages": {"Gleam": {"syntax_errors": true}}` |
-| `languages` | | per-language overrides of the twelve above (all but `minimap_width`), by the name in the status bar |
+| `edit_predictions` | `true` | ghost-text suggestions from `edit_prediction_provider`; `false` turns them off per language or in a project's settings |
+| `languages` | | per-language overrides of the thirteen above (all but `minimap_width`), by the name in the status bar |
 | `vim_mode` | `false` | Vim's modes and keys; see [Vim mode](editing.md#vim-mode) |
+| `edit_prediction_provider` | `"none"` | where ghost-text suggestions come from: `"none"` or `"copilot"` (GitHub Copilot); Settings → Editor → Edit predictions. Only your own settings can choose one, not a project's; see [Edit predictions](editing.md#edit-predictions) |
 | `icon_theme` | built-in | an extension's icon theme by name, e.g. `"Soft Charmed Icons"` |
 | `visual_effects` | `"full"` | how much decoration the interface draws: `"full"`, `"reduced"` (solid colors instead of gradients) or `"minimal"` (also no shadows, glows or animations); Settings → Appearance. The older `"reduce_visual_effects": true` still works, as `"minimal"` |
 | `ui_style` | `"modern"` | the window's layout: `"modern"` (rounded islands with gaps between them, browser-like tabs) or `"classic"` (square areas side by side, separated by lines, rectangular tabs); Settings → Appearance → Layout, Welcome Setup, or Toggle Classic Layout in Find Action |
@@ -125,7 +127,7 @@ ESLint and Prettier load its JavaScript config, `node_modules/.bin` and venv too
 programs, and Git runs commands its config names (an fsmonitor, hooks, an SSH command, diff programs). So the first time you open a
 folder, Kuana asks whether you trust it. Until you do, it stays in **Restricted Mode** (shown in the
 title bar): language servers don't start, formatters and ESLint don't run, the folder's own tools
-aren't used, terminals don't activate its venv, and Git leaves out what the folder's own config would run (its fsmonitor, hooks, SSH command, credential helper and external diff). Editing, Git, Run
+aren't used, Copilot gets none of its files, terminals don't activate its venv, and Git leaves out what the folder's own config would run (its fsmonitor, hooks, SSH command, credential helper and external diff). Editing, Git, Run
 and Debug work as usual.
 
 **Trust Folder** remembers the folder; tick **Trust every project in …** to trust its parent

@@ -82,6 +82,7 @@ const INSTALLERS: &[Installer] = &[
     Installer { command: "yaml-language-server", source: Source::Npm { package: "yaml-language-server" } },
     Installer { command: "bash-language-server", source: Source::Npm { package: "bash-language-server" } },
     Installer { command: "gopls", source: Source::Go { module: "golang.org/x/tools/gopls" } },
+    Installer { command: "copilot-language-server", source: Source::Npm { package: "@github/copilot-language-server" } },
 ];
 
 /// Installers extensions declare (`[language_servers.<id>.installer]`).
@@ -590,7 +591,8 @@ mod tests {
     fn every_built_in_server_with_an_installer_is_known() {
         // Each installer names a command some server list asks for.
         for installer in INSTALLERS {
-            let wanted = crate::syntax::Language::ALL.iter().filter_map(|l| servers::spec(*l)).any(|s| s.candidates.iter().any(|(c, _)| *c == installer.command));
+            let mut specs = crate::syntax::Language::ALL.iter().filter_map(|l| servers::spec(*l)).chain([&servers::COPILOT]);
+            let wanted = specs.any(|s| s.candidates.iter().any(|(c, _)| *c == installer.command));
             assert!(wanted, "{} isn't a candidate of any built-in server", installer.command);
         }
         assert_eq!(folder_name("2026-10-12"), "2026-10-12");

@@ -75,6 +75,7 @@ impl Workspace {
     pub(super) fn render_statusbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = crate::ui::chrome_theme(Theme::get(cx));
         let lsp_item = self.render_lsp_status(&theme, cx);
+        let copilot_item = self.render_copilot_status(&theme, cx);
         let active_editor = self.active_editor(cx);
         let editor = active_editor.as_ref().map(|e| e.read(cx));
         // The file's problems and the last Run's (both counted already).
@@ -147,6 +148,9 @@ impl Workspace {
             }
             if let Some(lsp_item) = lsp_item {
                 right.push(item(lsp_item).into_any_element());
+            }
+            if let Some(copilot_item) = copilot_item {
+                right.push(item(copilot_item).into_any_element());
             }
             right.push(item(e.indent_label().into_any_element()).into_any_element());
             let menu_item = |id: &'static str, label: String, tip: &'static str| {

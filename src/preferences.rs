@@ -25,7 +25,7 @@ use crate::{
     format,
     git::PullStrategy,
     lsp::servers,
-    settings::{self, AutoSave, BaseKeymap, RunConfiguration, Settings, ShowWhitespace, SidebarDock, UiStyle, VisualEffects},
+    settings::{self, AutoSave, BaseKeymap, EditPredictionProvider, RunConfiguration, Settings, ShowWhitespace, SidebarDock, UiStyle, VisualEffects},
     syntax::Language,
     theme::{self, Appearance, Theme, ThemeRegistry},
     workspace::Find,
@@ -144,6 +144,7 @@ enum Setting {
     CodeLens,
     Minimap,
     MinimapWidth,
+    EditPredictions,
     VimMode,
     AutoSave,
     AutoSaveDelay,
@@ -159,7 +160,7 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Setting; 31] = [
+    const ALL: [Setting; 32] = [
         Setting::Theme,
         Setting::IconTheme,
         Setting::VisualEffects,
@@ -179,6 +180,7 @@ impl Setting {
         Setting::CodeLens,
         Setting::Minimap,
         Setting::MinimapWidth,
+        Setting::EditPredictions,
         Setting::VimMode,
         Setting::AutoSave,
         Setting::AutoSaveDelay,
@@ -200,7 +202,7 @@ impl Setting {
             Setting::FontFamily | Setting::FontSize | Setting::LineHeight => Page::Editor,
             Setting::TabSize | Setting::HardTabs | Setting::SoftWrap => Page::Editor,
             Setting::Rulers | Setting::ShowWhitespace | Setting::InlayHints | Setting::CodeLens | Setting::VimMode => Page::Editor,
-            Setting::Minimap | Setting::MinimapWidth => Page::Editor,
+            Setting::Minimap | Setting::MinimapWidth | Setting::EditPredictions => Page::Editor,
             Setting::AutoSave
             | Setting::AutoSaveDelay
             | Setting::FormatOnSave
@@ -226,6 +228,7 @@ impl Setting {
             Setting::Rulers | Setting::ShowWhitespace => "Guides",
             Setting::InlayHints | Setting::CodeLens => "Hints",
             Setting::Minimap | Setting::MinimapWidth => "Minimap",
+            Setting::EditPredictions => "Edit predictions",
             Setting::VimMode => "Vim",
             Setting::AutoSave | Setting::AutoSaveDelay => "Auto-save",
             Setting::FormatOnSave | Setting::TrimWhitespace | Setting::FinalNewline => "On save",
@@ -258,6 +261,7 @@ impl Setting {
             Setting::CodeLens => "Code lens",
             Setting::Minimap => "Show minimap",
             Setting::MinimapWidth => "Width",
+            Setting::EditPredictions => "Suggestions from",
             Setting::VimMode => "Vim mode",
             Setting::AutoSave => "Auto-save",
             Setting::AutoSaveDelay => "Delay",
@@ -294,6 +298,9 @@ impl Setting {
             Setting::CodeLens => "The language server's links above lines: references, implementations, Run and Debug.",
             Setting::Minimap => "The file in miniature at the editor's right edge, in place of the scrollbar. Drag it or click to jump.",
             Setting::MinimapWidth => "In pixels.",
+            Setting::EditPredictions => {
+                "Code suggested after the caret as you type, accepted with Tab. Your code goes to the service only when one is chosen; sign in from the status bar."
+            }
             Setting::VimMode => "Vim's Normal, Insert and Visual modes. The status bar shows the mode.",
             Setting::AutoSave => "Every mode but Off also saves when Kuana quits or a tab closes.",
             Setting::AutoSaveDelay => "How long after you stop typing.",
@@ -331,6 +338,7 @@ impl Setting {
             Setting::CodeLens => "code lens references implementations run debug language server",
             Setting::Minimap => "minimap overview scrollbar outline map document preview scroll",
             Setting::MinimapWidth => "minimap width size pixels",
+            Setting::EditPredictions => "ai copilot github edit predictions inline suggestions ghost text completion autocomplete llm",
             Setting::VimMode => "vim vi modal normal insert visual keys",
             Setting::AutoSave => "autosave save automatically",
             Setting::AutoSaveDelay => "autosave milliseconds idle",
@@ -372,6 +380,7 @@ enum Menu {
     UiStyle,
     SidebarDock,
     PullStrategy,
+    EditPredictions,
     LanguageServer,
     Formatter,
 }
@@ -1470,6 +1479,15 @@ impl Preferences {
             }
             Setting::FinalNewline => {
                 self.bool_switch("pref-newline", "insert_final_newline", settings.editor.insert_final_newline, cx)
+            }
+            Setting::EditPredictions => {
+                let current = settings.edit_prediction_provider.unwrap_or_default();
+                let options = EditPredictionProvider::ALL.iter().map(|p| (p.label().into(), *p == current)).collect();
+                self.dropdown(Menu::EditPredictions, current.label().into(), px(200.), options, cx, move |this, ix, _, cx| {
+                    this.menu = None;
+                    let provider = EditPredictionProvider::ALL[ix];
+                    this.set_or_default("edit_prediction_provider", provider.key().into(), EditPredictionProvider::default().key().into(), cx);
+                })
             }
             Setting::BaseKeymap => {
                 let current = settings.base_keymap.unwrap_or_default();
@@ -2592,6 +2610,7 @@ fn setting_key(setting: Setting) -> &'static str {
         Setting::CodeLens => "code_lens",
         Setting::Minimap => "minimap",
         Setting::MinimapWidth => "minimap_width",
+        Setting::EditPredictions => "edit_prediction_provider",
         Setting::VimMode => "vim_mode",
         Setting::AutoSave => "auto_save",
         Setting::AutoSaveDelay => "auto_save_delay",

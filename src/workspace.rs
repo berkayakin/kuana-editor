@@ -83,6 +83,7 @@ mod background;
 mod commands;
 mod file_tree;
 mod git_ops;
+mod copilot;
 mod language_servers;
 mod line_endings;
 mod local_history;
@@ -208,6 +209,8 @@ actions!(
         PreviousResult,
         OpenKeymap,
         RestartLanguageServer,
+        CopilotSignIn,
+        CopilotSignOut,
         IncreaseFontSize,
         DecreaseFontSize,
         ResetFontSize,

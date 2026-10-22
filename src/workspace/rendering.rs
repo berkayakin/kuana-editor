@@ -330,6 +330,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_settings_file))
             .on_action(cx.listener(Self::open_project_settings))
             .on_action(cx.listener(Self::restart_language_server))
+            .on_action(cx.listener(Self::copilot_sign_in))
+            .on_action(cx.listener(Self::copilot_sign_out))
             .on_action(cx.listener(Self::toggle_terminal))
             .on_action(cx.listener(Self::split_right))
             .on_action(cx.listener(Self::rerun))

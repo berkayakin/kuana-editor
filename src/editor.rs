@@ -8,6 +8,7 @@ pub(crate) mod derived;
 mod lsp;
 mod markers;
 mod minimap;
+mod prediction;
 mod run;
 mod snippet;
 mod sticky;
@@ -135,6 +136,7 @@ actions!(
         JoinLines,
         NewlineAbove,
         ToggleBlockComment,
+        ShowEditPrediction,
         RollbackHunk,
         StageHunk,
         UnstageHunk,
@@ -410,6 +412,8 @@ pub struct Editor {
     wrap_job: Option<WrapJob>,
     /// Language server state: completion, hover, signature help.
     lsp: lsp::EditorLsp,
+    /// Ghost text from Copilot (see `prediction.rs`).
+    prediction: prediction::Predictions,
     /// A parse finishing in the background (see `schedule_parse`).
     parse_task: Option<Task<()>>,
     /// The file being read again in the background (`reload_if_changed`),
@@ -560,6 +564,7 @@ impl Editor {
             wrap: None,
             wrap_job: None,
             lsp: lsp::EditorLsp::default(),
+            prediction: Default::default(),
             highlight_cache: None,
             parse_task: None,
             reload_task: None,
@@ -1279,6 +1284,7 @@ impl Editor {
         self.unfold_at_carets();
         self.schedule_symbol_highlights(cx);
         self.lsp_selection_changed(cx);
+        self.prediction_selection_changed(cx);
         cx.notify();
     }
 
@@ -1393,6 +1399,7 @@ impl Editor {
         self.schedule_code_lenses(cx);
         self.schedule_lint(Duration::from_millis(150), cx);
         self.edited(cx);
+        self.prediction_edited(cx);
         cx.notify();
     }
 
@@ -1635,10 +1642,25 @@ impl Editor {
         let text = doc.slice(start + from.byte as usize..start + to);
         let (_, hints) = self.inlays(cx).of_line(doc.rope(), row);
         let shown = start + from.byte as usize..=start + to;
-        let inlays: Vec<(usize, &str, bool, bool)> =
+        let mut inlays: Vec<(usize, &str, bool, bool)> =
             hints.iter().filter(|h| shown.contains(&h.offset)).map(|h| (h.offset - start, h.label.as_str(), h.pad_left, h.pad_right)).collect();
+        // A suggestion's first line, before the hints at the caret (it's
+        // what would be typed there). Only on a line without breaks: the wrap
+        // map measures lines without it.
+        if let Some((at, ghost)) = self.prediction_inline(cx).filter(|(at, _)| shown.contains(at) && self.line_breaks(row).is_empty()) {
+            let col = at - start;
+            inlays.insert(inlays.partition_point(|i| i.0 < col), (col, ghost, false, false));
+        }
         let dl = DisplayLine::window(&text, from, self.tab_size, &inlays);
         (text, dl)
+    }
+
+    /// Where a suggestion's ghost text starts in `dl`, line `row` as
+    /// displayed, if it's there (a display offset).
+    fn ghost_span(&self, row: usize, dl: &DisplayLine, cx: &App) -> Option<usize> {
+        let (at, ghost) = self.prediction_inline(cx)?;
+        let col = at - self.doc.read(cx).line_start(row);
+        dl.inlays.iter().find(|s| s.column == col && s.label.len() == ghost.len() && s.whole == s.label).map(|s| s.whole.start)
     }
 
     /// Where `display_part` starts building line `row` for its rows `segs`
@@ -1961,6 +1983,7 @@ impl Editor {
             layout: self.layout.as_ref().map(|l| (l.wrap_width, l.char_width)),
             tab_size: self.tab_size,
             code_lens: self.file_settings.code_lens,
+            prediction: self.prediction_key(),
         };
         let fresh = self.blocks_cache.as_ref().is_some_and(|c| c.key == key && c.folds == self.folds.ranges());
         if !fresh {
@@ -2013,12 +2036,16 @@ impl Editor {
                 }
             }
         }
-        // Above a line: the problems of the line before it, then deleted
-        // lines, then the line's own lenses.
+        if let Some((row, lines)) = self.prediction_rows(cx) {
+            blocks.push(Block { line: row + 1, kind: BlockKind::Prediction(lines) });
+        }
+        // Above a line: a suggestion going on from the line before it, that
+        // line's problems, then deleted lines, then the line's own lenses.
         let rank = |kind: &BlockKind| match kind {
-            BlockKind::Problems { .. } => 0,
-            BlockKind::Deleted(_) => 1,
-            BlockKind::Lenses(_) => 2,
+            BlockKind::Prediction(_) => 0,
+            BlockKind::Problems { .. } => 1,
+            BlockKind::Deleted(_) => 2,
+            BlockKind::Lenses(_) => 3,
         };
         blocks.sort_by_key(|b| (b.line, rank(&b.kind)));
         blocks
@@ -2578,7 +2605,7 @@ impl Editor {
     }
 
     fn indent(&mut self, _: &Indent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.completion_key(lsp::CompletionKey::Accept { replace: true }, cx) {
+        if self.completion_key(lsp::CompletionKey::Accept { replace: true }, cx) || self.accept_prediction(cx) {
             return;
         }
         if self.is_chromeless() {
@@ -2882,7 +2909,7 @@ impl Editor {
             cx.notify();
             return;
         }
-        if self.dismiss_lsp_popovers(cx) {
+        if self.dismiss_lsp_popovers(cx) || self.dismiss_prediction(cx) {
             return;
         }
         let p = self.primary_selection();
@@ -3624,6 +3651,13 @@ impl Editor {
                             frame.numbers.push((point(text_left - char_width * 2., y), minus));
                         }
                     }
+                    BlockKind::Prediction(lines) => {
+                        for (i, line) in lines.iter().enumerate().filter(|(i, _)| visible(start + i)) {
+                            let text = DisplayLine::new(line, self.tab_size).text;
+                            let shaped = text_system.shape_line(SharedString::from(text.clone()), font_size, &[run(&text, editor_font.clone(), theme.text_dim.into())], None);
+                            frame.lines.push((point(text_left - self.scroll.x, y_of(start + i)), shaped));
+                        }
+                    }
                     BlockKind::Lenses(lenses) if visible(start) => {
                         // Lined up with the line's text, smaller, like a caption.
                         let y = y_of(start);
@@ -3768,6 +3802,7 @@ impl Editor {
             if !dl.inlays.is_empty() {
                 runs = inlay_runs(runs, &dl, editor_font.clone(), theme.text_dim.into());
             }
+            let ghost = if dl.inlays.is_empty() { None } else { self.ghost_span(row, &dl, cx) };
             if !dl.controls.is_empty() {
                 let controls: Vec<Range<usize>> = dl.controls.iter().map(|r| dl.local(r.clone())).collect();
                 runs = restyle_runs(runs, &controls, |piece| piece.color = theme.text_dim.into());
@@ -3876,7 +3911,9 @@ impl Editor {
 
                 // Inlay hints sit on a soft chip (sorted: the row's by binary search).
                 let first_span = dl.inlays.partition_point(|s| s.label.start < seg_range.start);
-                for span in dl.inlays[first_span..].iter().take_while(|s| s.label.start <= seg_range.end).filter(|s| s.label.end <= seg_range.end) {
+                // Not the suggestion: it reads as text still to come.
+                let hints = dl.inlays[first_span..].iter().take_while(|s| s.label.start <= seg_range.end);
+                for span in hints.filter(|s| s.label.end <= seg_range.end && Some(s.whole.start) != ghost) {
                     let bounds = Bounds::from_corners(
                         point(origin.x + x_of(span.label.start) - px(2.), y + px(2.)),
                         point(origin.x + x_of(span.label.end) + px(2.), y + line_height - px(2.)),
@@ -5509,6 +5546,10 @@ impl Editor {
         });
     }
 
+    fn show_edit_prediction(&mut self, _: &ShowEditPrediction, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_prediction(cx);
+    }
+
     fn toggle_block_comment(&mut self, _: &ToggleBlockComment, _: &mut Window, cx: &mut Context<Self>) {
         self.toggle_block_comments(cx);
     }
@@ -5799,6 +5840,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::join_lines))
             .on_action(cx.listener(Self::newline_above))
             .on_action(cx.listener(Self::toggle_block_comment))
+            .on_action(cx.listener(Self::show_edit_prediction))
             .on_action(cx.listener(Self::rollback_hunk))
             .on_action(cx.listener(Self::stage_hunk))
             .on_action(cx.listener(Self::unstage_hunk))
@@ -5861,6 +5903,8 @@ enum BlockKind {
     Deleted(Vec<String>),
     /// A line's code lenses, on one row.
     Lenses(Vec<crate::document::CodeLens>),
+    /// The lines of a suggestion after its first, under the caret's line.
+    Prediction(Vec<String>),
 }
 
 #[derive(Clone)]
@@ -5873,7 +5917,7 @@ struct Block {
 impl Block {
     fn rows(&self) -> usize {
         match &self.kind {
-            BlockKind::Deleted(lines) => lines.len(),
+            BlockKind::Deleted(lines) | BlockKind::Prediction(lines) => lines.len(),
             BlockKind::Problems { rows, .. } => rows.len(),
             BlockKind::Lenses(_) => 1,
         }
@@ -5905,6 +5949,8 @@ struct BlocksKey {
     layout: Option<(Pixels, Pixels)>,
     tab_size: usize,
     code_lens: bool,
+    /// The suggestion shown (`Editor::prediction_key`).
+    prediction: (u64, bool),
 }
 
 struct BlocksCache {
@@ -6834,6 +6880,24 @@ mod frame_tests {
             e.set_search_highlights(matches, Some(0), cx);
         });
         (editor, host, cx)
+    }
+
+    /// A suggestion going on below the last line shows under it.
+    #[gpui::test]
+    fn suggestion_rows_after_the_last_line(cx: &mut TestAppContext) {
+        let (editor, host, cx) = editor("x\ndef f(n)".into(), cx);
+        frame(&host, cx);
+        editor.update(cx, |e, cx| {
+            e.set_selections(vec![Selection::cursor("x\ndef f(n".len())], 0, cx);
+            // Two problems on the line, which show in full under it.
+            let problem = |at: usize| lint::Diagnostic { range: at..at + 1, severity: Severity::Error, message: "Expected \":\"".into(), rule: "r".into(), unnecessary: false };
+            e.doc.as_mut(cx).set_lsp_diagnostics(vec![problem(2), problem(8)]);
+            e.suggest_for_tests(")", ":\n    aaa\n    bbb", cx);
+        });
+        let frame = frame(&host, cx);
+        let line_height = frame.line_height;
+        let row_of = |text: &str| frame.lines.iter().find(|(_, l)| l.text.as_ref() == text).map(|(p, _)| ((p.y - frame.text_bounds.top()) / line_height).round() as i32);
+        assert_eq!((row_of("    aaa"), row_of("    bbb")), (Some(2), Some(3)));
     }
 
     #[gpui::test]

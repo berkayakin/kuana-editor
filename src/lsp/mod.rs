@@ -9,6 +9,7 @@
 //! requests: the first that can answer, or all for completion and code
 //! actions; see `Editor::lsp_server_with`.
 
+pub mod copilot;
 pub mod install;
 pub mod protocol;
 pub mod rpc;
@@ -262,6 +263,10 @@ pub struct LspStore {
     started: Vec<std::sync::Weak<Client>>,
     /// Stops them as the app quits; registered with the first server.
     quit_hook: Option<gpui::Subscription>,
+    /// Each Copilot server's sign-in and what it last said is wrong (see
+    /// `lsp::copilot`).
+    copilot_auth: HashMap<ServerKey, copilot::Auth>,
+    copilot_problems: HashMap<ServerKey, String>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -332,6 +337,8 @@ impl LspStore {
             test_specs: None,
             started: Vec::new(),
             quit_hook: None,
+            copilot_auth: HashMap::new(),
+            copilot_problems: HashMap::new(),
             _tasks: Vec::new(),
         }
     }
@@ -457,29 +464,41 @@ impl LspStore {
     }
 
     /// The servers for `language` at `path`, the main one first (see
-    /// `servers::specs`), each with a user-configured command if any. None
-    /// when turned off in settings; a command there replaces them all.
+    /// `servers::specs`), each with a user-configured command if any, and
+    /// Copilot's last when it suggests edits.
     #[allow(clippy::type_complexity)]
     fn server_keys(&self, language: Language, path: &Path, cx: &App) -> Vec<(ServerKey, Option<Vec<String>>, &'static servers::ServerSpec)> {
+        let mut keys = self.language_server_keys(language, path, cx);
+        keys.extend(self.copilot_keys(language, path, cx));
+        keys
+    }
+
+    /// The root a server of `spec`'s kind gets for `path`.
+    fn root_for(&self, spec: &servers::ServerSpec, path: &Path) -> PathBuf {
+        let workspace_root = self.workspace_root.as_deref();
+        // A file outside the project (a dependency Go to Declaration
+        // opened): a server of the same kind that's already running
+        // knows it, the project's first; starting another would index
+        // the dependency on its own.
+        if !workspace_root.is_some_and(|r| path.starts_with(r)) {
+            let running = self.servers.keys().filter(|k| k.id == spec.id);
+            if let Some(key) = running.min_by_key(|k| Some(k.root.as_path()) != workspace_root) {
+                return key.root.clone();
+            }
+        }
+        servers::root_for(spec, path, workspace_root)
+    }
+
+    /// The language's own servers (`server_keys`). None when turned off in
+    /// settings; a command there replaces them all.
+    #[allow(clippy::type_complexity)]
+    fn language_server_keys(&self, language: Language, path: &Path, cx: &App) -> Vec<(ServerKey, Option<Vec<String>>, &'static servers::ServerSpec)> {
         let custom = match Settings::get(cx).at(path).language_servers.get(language.name()) {
             Some(Value::Bool(false)) => return Vec::new(),
             Some(Value::Array(command)) => Some(command.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>()),
             _ => None,
         };
-        let workspace_root = self.workspace_root.as_deref();
-        let root = |spec: &servers::ServerSpec| {
-            // A file outside the project (a dependency Go to Declaration
-            // opened): a server of the same kind that's already running
-            // knows it, the project's first; starting another would index
-            // the dependency on its own.
-            if !workspace_root.is_some_and(|r| path.starts_with(r)) {
-                let running = self.servers.keys().filter(|k| k.id == spec.id);
-                if let Some(key) = running.min_by_key(|k| Some(k.root.as_path()) != workspace_root) {
-                    return key.root.clone();
-                }
-            }
-            servers::root_for(spec, path, workspace_root)
-        };
+        let root = |spec: &servers::ServerSpec| self.root_for(spec, path);
         #[cfg(test)]
         if let Some(specs) = &self.test_specs {
             return specs.iter().map(|spec| (ServerKey { id: spec.id.to_string(), root: root(spec) }, None, *spec)).collect();
@@ -673,6 +692,9 @@ impl LspStore {
                 for path in waiting {
                     s.open_document(&path, &key, &server, cx);
                 }
+                if key.id == copilot::ID {
+                    s.check_copilot(&key, cx);
+                }
                 cx.notify();
             })
             .ok();
@@ -777,6 +799,7 @@ impl LspStore {
                         }));
                     }
                 }
+                "didChangeStatus" if key.id == copilot::ID => self.copilot_said(key, &params, cx),
                 "window/showMessage" => {
                     // 1 = error; warnings and info are mostly chatter.
                     if params.get("type").and_then(Value::as_u64) == Some(1)
@@ -847,6 +870,16 @@ impl LspStore {
                         };
                         let edits = protocol::workspace_edit(params.get("edit").unwrap_or(&Value::Null));
                         cx.emit(LspEvent::ApplyEdit { key: key.clone(), request_id: id, encoding, edits });
+                    }
+                    // A web page opens in the browser (Copilot's sign-in); files
+                    // and the like aren't shown this way.
+                    "window/showDocument" => {
+                        let uri = params.get("uri").and_then(Value::as_str).unwrap_or_default();
+                        let web = uri.starts_with("https://") || uri.starts_with("http://");
+                        if web {
+                            cx.open_url(uri);
+                        }
+                        client.respond(id, json!({ "success": web }));
                     }
                     // Progress shows through `$/progress` (Kuana says it does: `workDoneProgress`);
                     // a message's choices aren't offered, so none was picked.
@@ -1322,12 +1355,18 @@ impl LspStore {
     /// every window starts the servers it was missing.
     pub fn install_server(&mut self, path: &Path, cx: &mut Context<Self>) {
         let Some(doc) = self.documents.get(path) else { return };
-        let Some(spec) = doc.servers.iter().find_map(|(key, _)| match self.servers.get(key) {
+        let Some(spec) = doc.servers.iter().filter(|(key, _)| key.id != copilot::ID).find_map(|(key, _)| match self.servers.get(key) {
             Some(ServerState::Missing(spec)) => Some(*spec),
             _ => None,
         }) else {
             return;
         };
+        self.install_spec(spec, cx);
+    }
+
+    /// Installs a missing server; when it's done, every window starts the
+    /// servers it was missing.
+    fn install_spec(&mut self, spec: &'static servers::ServerSpec, cx: &mut Context<Self>) {
         let Some(installer) = install::for_spec(spec) else { return };
         if install::installing(installer.command) {
             return;
@@ -1385,6 +1424,7 @@ impl LspStore {
             })
             .detach();
         }
+        self.sync_copilot(cx);
     }
 
     /// A server's settings again, with what extensions' code said now
@@ -1422,30 +1462,39 @@ impl LspStore {
     pub fn restart(&mut self, path: &Path, cx: &mut Context<Self>) {
         let Some(keys) = self.documents.get(path).map(|d| d.servers.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()) else { return };
         for key in &keys {
-            if let Some(client) = self.client(key) {
-                std::thread::spawn(move || client.shutdown());
-            }
-            self.forget_diagnostics(key, cx);
-            self.servers.remove(key);
-            self.progress.remove(key);
-            self.configs.remove(key);
-            self.generations.remove(key);
-            // The old process's registrations: its `Closed` is ignored now.
-            self.watchers.remove(key);
-            self.pull_registrations.remove(key);
+            self.stop(key, cx);
         }
         self.reregister(|d| keys.iter().any(|key| d.has(key)), cx);
+    }
+
+    /// Stops one server and forgets what it said.
+    fn stop(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
+        if let Some(client) = self.client(key) {
+            std::thread::spawn(move || client.shutdown());
+        }
+        self.forget_diagnostics(key, cx);
+        self.servers.remove(key);
+        self.progress.remove(key);
+        self.configs.remove(key);
+        self.generations.remove(key);
+        // The old process's registrations: its `Closed` is ignored now.
+        self.watchers.remove(key);
+        self.pull_registrations.remove(key);
+        self.copilot_auth.remove(key);
+        self.copilot_problems.remove(key);
     }
 
     /// The main server's state for the status bar; when it's up, the names
     /// of all that are ("typescript-language-server, eslint").
     pub fn status(&self, path: &Path) -> Option<LspStatus> {
         let doc = self.documents.get(path)?;
-        let (main, _) = doc.servers.first()?;
+        // Copilot has a status of its own (`copilot_status`).
+        let (main, _) = doc.servers.iter().find(|(key, _)| key.id != copilot::ID)?;
         let names = || {
             let names: Vec<String> = doc
                 .servers
                 .iter()
+                .filter(|(key, _)| key.id != copilot::ID)
                 .filter_map(|(key, _)| match self.servers.get(key)? {
                     ServerState::Running(server) => Some(server.name.clone()),
                     _ => None,
@@ -1475,6 +1524,8 @@ impl LspStore {
         self.configs.clear();
         self.generations.clear();
         self.documents.clear();
+        self.copilot_auth.clear();
+        self.copilot_problems.clear();
         for client in clients {
             std::thread::spawn(move || client.shutdown());
         }
@@ -1537,7 +1588,7 @@ fn initialize_params(root: &Path, initialization_options: Value) -> Value {
                 "diagnostics": { "refreshSupport": true },
                 "fileOperations": { "willRename": true, "didRename": true },
             },
-            "window": { "workDoneProgress": true },
+            "window": { "workDoneProgress": true, "showDocument": { "support": true } },
             "textDocument": {
                 "synchronization": { "didSave": true },
                 "completion": {

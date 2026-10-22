@@ -19,6 +19,9 @@ bindings, colors, icons) are in the [contributing guide](../CONTRIBUTING.md).
 - `src/syntax.rs` — tree-sitter parsing, highlighting, bracket matching and file outlines
 - `src/lsp/` — language server client: JSON-RPC transport, protocol types, server discovery
 - `src/editor/lsp.rs` — completion, hover, signature help and LSP requests in the editor
+- `src/lsp/copilot.rs`, `src/editor/prediction.rs`, `src/workspace/copilot.rs` — edit predictions
+  from GitHub Copilot: its language server beside a file's own, sign-in, the ghost text and the
+  status bar item
 - `src/results_panel.rs` — the Find panel: results as trees in tabs (usages, hierarchies, test
   runs, Local History), with children that can load as they open
 - `src/hierarchy.rs` — Call and Type Hierarchy from the language server, for the Find panel

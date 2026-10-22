@@ -56,7 +56,7 @@ Updates are signed.
 | | |
 | --- | --- |
 | **Code intelligence** | Completion, hover docs, Go to Declaration / Implementation, Find Usages and Call / Type Hierarchy in a Find panel, Rename, quick fixes, inlay hints and code lenses through [language servers](docs/languages.md), imports updated when you move files; tree-sitter highlighting for 13 languages built in, any other through extensions |
-| **Editing** | Multi-cursor, syntax-aware Extend Selection, column selection, folding, sticky scroll, breadcrumbs, snippets (VS Code format), [Vim mode](docs/editing.md#vim-mode), Markdown preview |
+| **Editing** | Multi-cursor, syntax-aware Extend Selection, column selection, folding, sticky scroll, breadcrumbs, snippets (VS Code format), [Vim mode](docs/editing.md#vim-mode), Markdown preview, GitHub Copilot's suggestions as [ghost text](docs/editing.md#edit-predictions) (off until you turn them on) |
 | **Git** | Gutter changes with inline diffs, staging single changes, side-by-side diffs with word highlights, a commit graph with commit actions (cherry-pick, revert, reset, tag), inline blame, branches, stashes, remotes, merge conflicts resolved in the editor; see [Git](docs/git.md) |
 | **Run & debug** | ▶ next to every test and `main` (Rust, Go, Python, JS/TS), [test results](docs/run-and-debug.md#test-results) as a tree with ✓ / ✕ in the gutter and Rerun Failed, a [debugger](docs/run-and-debug.md#debugging) with conditional breakpoints and logpoints, errors from a run's output in Problems |
 | **Terminal** | Your login shell in tabs and splits, full colors and mouse support, Find in scrollback, ⌘-click paths to open them |
@@ -101,7 +101,7 @@ read what it [doesn't do yet](#known-limitations).
 | [Features](docs/features.md) | Everything Kuana does, in one list |
 | [Key bindings](docs/keybindings.md) | The keymaps and how to change shortcuts |
 | [Languages](docs/languages.md) | Language servers, formatting, Python environments |
-| [Editing, panes and windows](docs/editing.md) | Splits, tabs, Vim mode, snippets, projects |
+| [Editing, panes and windows](docs/editing.md) | Splits, tabs, Vim mode, snippets, Copilot's suggestions, projects |
 | [Terminal, run and debug](docs/run-and-debug.md) | Terminal, running tests, the debugger |
 | [Git](docs/git.md) | Everything Git |
 | [Extensions](docs/extensions.md) | Installing and writing extensions |
@@ -120,7 +120,8 @@ says what's planned):
 - **Windows and Linux are in beta**, see above. No Linux packages (AppImage, `.deb`, Flatpak) yet.
 - **No remote development**: no SSH, dev containers or WSL folders. One folder per window (no
   multi-root workspaces).
-- **No built-in AI features** (inline completion, chat).
+- **AI**: GitHub Copilot's suggestions only ([Edit predictions](docs/editing.md#edit-predictions)),
+  no chat or agent panel; agents like Claude Code or Codex run in the terminal.
 - **Languages**: 13 have highlighting built in; others come from [extensions](docs/extensions.md),
   but there's none yet for C/C++, Kotlin or Swift.
 - **Editing**: no semantic highlighting from language servers, no Emmet, no spell checking;

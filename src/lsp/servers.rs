@@ -38,6 +38,17 @@ pub struct ServerSpec {
 pub const SPEC: ServerSpec =
     ServerSpec { id: "", candidates: &[], install: "", root_markers: &[], initialization_options: None, settings: None, wasm: None };
 
+/// GitHub Copilot's language server, which every file gets beside its own
+/// servers when Copilot suggests edits (`edit_prediction_provider`): it only
+/// gives ghost text (`textDocument/inlineCompletion`), so editors keep it
+/// out of their other requests (see `lsp::copilot`).
+pub static COPILOT: ServerSpec = ServerSpec {
+    id: "copilot",
+    candidates: &[("copilot-language-server", &["--stdio"])],
+    install: "npm install -g @github/copilot-language-server",
+    ..SPEC
+};
+
 /// For a language whose server is only a command in `language_servers`.
 pub static CUSTOM: ServerSpec = ServerSpec { id: "custom", install: "Check the command in language_servers (settings.json)", ..SPEC };
 
@@ -389,6 +400,15 @@ fn defaults(program: &str) -> (Value, Value) {
             schemas => (json!({ "provideFormatter": true }), json!({ "json": { "schemas": schemas } })),
         },
         "vscode-css-language-server" | "vscode-html-language-server" => (json!({ "provideFormatter": true }), Value::Null),
+        // Copilot wants to know the editor it serves.
+        "copilot-language-server" => {
+            let version = env!("CARGO_PKG_VERSION");
+            let options = json!({
+                "editorInfo": { "name": "Kuana", "version": version },
+                "editorPluginInfo": { "name": "Kuana Copilot", "version": version },
+            });
+            (options, Value::Null)
+        }
         _ => (Value::Null, Value::Null),
     }
 }

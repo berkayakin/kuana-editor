@@ -93,6 +93,9 @@ pub struct Settings {
     pub pull_strategy: Option<PullStrategy>,
     /// The minimap's width in pixels (`minimap_width()`).
     pub minimap_width: Option<f32>,
+    /// Where ghost-text suggestions come from (none unless chosen): only the
+    /// user's settings pick a service that's sent code, never a project's.
+    pub edit_prediction_provider: Option<EditPredictionProvider>,
 }
 
 /// One language server's settings (`lsp.<id>`).
@@ -157,6 +160,35 @@ impl BaseKeymap {
             BaseKeymap::VSCode => "VS Code",
             BaseKeymap::SublimeText => "Sublime Text",
             BaseKeymap::Zed => "Zed",
+        }
+    }
+}
+
+/// Who suggests the code after the caret as ghost text (`edit_predictions`).
+#[derive(Deserialize, JsonSchema, Default, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum EditPredictionProvider {
+    #[default]
+    None,
+    /// GitHub Copilot, through its language server.
+    Copilot,
+}
+
+impl EditPredictionProvider {
+    pub const ALL: [EditPredictionProvider; 2] = [EditPredictionProvider::None, EditPredictionProvider::Copilot];
+
+    /// The value in `settings.json`.
+    pub fn key(self) -> &'static str {
+        match self {
+            EditPredictionProvider::None => "none",
+            EditPredictionProvider::Copilot => "copilot",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            EditPredictionProvider::None => "Off",
+            EditPredictionProvider::Copilot => "GitHub Copilot",
         }
     }
 }
@@ -342,6 +374,9 @@ pub struct EditorSettings {
     /// languages; off for extensions', whose grammars may not know all valid
     /// code (tree-sitter-sql and Postgres' `ON CONFLICT`), as in Zed.
     pub syntax_errors: Option<bool>,
+    /// Ghost-text suggestions from `edit_prediction_provider` (on when it's
+    /// set; off per language or project with `false`).
+    pub edit_predictions: Option<bool>,
 }
 
 impl EditorSettings {
@@ -360,6 +395,7 @@ impl EditorSettings {
             code_lens: self.code_lens.or(base.code_lens),
             minimap: self.minimap.or(base.minimap),
             syntax_errors: self.syntax_errors.or(base.syntax_errors),
+            edit_predictions: self.edit_predictions.or(base.edit_predictions),
         }
     }
 
@@ -414,6 +450,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "project_avatar",
     "pull_strategy",
     "minimap_width",
+    "edit_prediction_provider",
 ];
 
 pub const EDITOR_KEYS: &[&str] = &[
@@ -429,6 +466,7 @@ pub const EDITOR_KEYS: &[&str] = &[
     "code_lens",
     "minimap",
     "syntax_errors",
+    "edit_predictions",
 ];
 
 /// Editor options resolved for one file.
@@ -448,6 +486,7 @@ pub struct FileSettings {
     pub code_lens: bool,
     pub minimap: bool,
     pub syntax_errors: bool,
+    pub edit_predictions: bool,
 }
 
 impl Settings {
@@ -640,6 +679,8 @@ impl Settings {
             "code_lens" => self.editor.code_lens.is_some(),
             "minimap" => self.editor.minimap.is_some(),
             "syntax_errors" => self.editor.syntax_errors.is_some(),
+            "edit_predictions" => self.editor.edit_predictions.is_some(),
+            "edit_prediction_provider" => self.edit_prediction_provider.is_some(),
             "minimap_width" => self.minimap_width.is_some(),
             "vim_mode" => self.vim_mode.is_some(),
             "icon_theme" => self.icon_theme.is_some(),
@@ -767,6 +808,7 @@ impl Settings {
             code_lens: None,
             minimap: None,
             syntax_errors: None,
+            edit_predictions: None,
         };
         let s = from_config.or(layered);
         FileSettings {
@@ -784,6 +826,7 @@ impl Settings {
             code_lens: s.code_lens.unwrap_or(true),
             minimap: s.minimap.unwrap_or(false),
             syntax_errors: s.syntax_errors.unwrap_or(true),
+            edit_predictions: s.edit_predictions.unwrap_or(true),
         }
     }
 }
@@ -996,6 +1039,13 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // "syntax_errors": true,
   // Vim keys (Normal, Insert and Visual modes).
   // "vim_mode": false,
+
+  // Ghost-text suggestions after the caret, accepted with Tab: "none" or
+  // "copilot" (GitHub Copilot; sign in from the status bar). Code goes to
+  // the provider only when this is set; "edit_predictions": false turns
+  // them off per language or project.
+  // "edit_prediction_provider": "none",
+  // "edit_predictions": true,
 
   // File icons from an extension's icon theme (Zed's format), by name.
   // "icon_theme": "Soft Charmed Icons",

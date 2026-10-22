@@ -31,6 +31,9 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   trees that load as you open them, highlighted
   uses of the symbol at the caret, Go to Symbol across the project, Rename and context actions
   (quick fixes and refactorings); see [Language servers](languages.md#language-servers)
+- Edit predictions from GitHub Copilot, off until you choose it: code suggested after the caret as
+  dimmed ghost text (several lines too), accepted with Tab; install and sign in from the status bar;
+  see [Edit predictions](editing.md#edit-predictions)
 - Inlay hints from the language server (types, parameter names), rulers, visible whitespace,
   control characters shown as dim symbols (␌ for a form feed, ␛, NEL, LS for U+2028),
   column (box) selection with Alt+drag, sort/reverse/de-duplicate lines and case conversions

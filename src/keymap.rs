@@ -21,7 +21,7 @@ use crate::{
     settings::{BaseKeymap, strip_jsonc},
     theme::{self, config_dir},
     workspace::{
-        CloseAllTabs, CloseOtherTabs, CloseTab, CloseTerminal, NextPane, PreviousPane, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPaneDown, Rerun, RunConfiguration, StopRun, SplitDown, SplitRight, TogglePinTab, DecreaseFontSize, NewTerminal, ToggleTerminal, FileStructure, Find, IncreaseFontSize, OpenKeymap, OpenSettings, ResetFontSize, RestartLanguageServer, FindAction, FindInFiles, FindNext, FindPrevious, GoToFile, GoToLine, OpenSettingsFile,
+        CloseAllTabs, CloseOtherTabs, CloseTab, CloseTerminal, NextPane, PreviousPane, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPaneDown, Rerun, RunConfiguration, StopRun, SplitDown, SplitRight, TogglePinTab, DecreaseFontSize, NewTerminal, ToggleTerminal, FileStructure, Find, IncreaseFontSize, OpenKeymap, OpenSettings, ResetFontSize, RestartLanguageServer, CopilotSignIn, CopilotSignOut, FindAction, FindInFiles, FindNext, FindPrevious, GoToFile, GoToLine, OpenSettingsFile,
         CloseWindow, MinimizeWindow, ZoomWindow, NewFile, NewWindow, NextTab, OpenFile, OpenFolder, OpenFolderInThisWindow,
         PrevTab, Quit, RecentFiles, RecentProjects, RecentTab, RecentTabBack, Replace,
         GitBranches, GitStash, ManageRemotes, GitClone, GitFetch, GitInit, GitPull, GitPush, OpenRemote, OpenThemesFolder, OpenSnippetsFolder, ReloadThemes, ReplaceInFiles,
@@ -150,6 +150,8 @@ fn common(mac: bool) -> Vec<KeyBinding> {
         KeyBinding::new("tab", Indent, e),
         KeyBinding::new("shift-tab", Outdent, e),
         KeyBinding::new("escape", Cancel, e),
+        // Copilot's own shortcut for asking for a suggestion, in VS Code and JetBrains.
+        KeyBinding::new("alt-\\", ShowEditPrediction, e),
         KeyBinding::new("secondary-a", SelectAll, e),
         KeyBinding::new("secondary-c", Copy, e),
         KeyBinding::new("secondary-x", Cut, e),
@@ -729,6 +731,9 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Basic Completion", ShowCompletions),
         a("Quick Documentation", QuickDocumentation),
         a("Restart Language Server", RestartLanguageServer),
+        a("Copilot: Sign In", CopilotSignIn),
+        a("Copilot: Sign Out", CopilotSignOut),
+        a("Show Edit Prediction", ShowEditPrediction),
         a("Terminal", ToggleTerminal),
         a("Run…", RunConfiguration),
         a("Run", Rerun),

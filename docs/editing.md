@@ -50,6 +50,41 @@ Folder** (Find Action) opens `snippets/` in the config folder, with an example o
 with `"scope": "rust,go"`. Type a snippet's prefix and press Tab, or pick it from completion.
 Changes to the files apply right away.
 
+## Edit predictions
+
+Kuana can show code suggested after the caret as dimmed ghost text, from **GitHub Copilot**. It's
+off until you choose it: Settings → Editor → Edit predictions → GitHub Copilot (or
+`"edit_prediction_provider": "copilot"` in `settings.json`). Your code goes to GitHub only then.
+
+- The status bar's **Install Copilot** installs GitHub's Copilot language server
+  (`@github/copilot-language-server`, from npm, into Kuana's own folder; one on your PATH is used
+  instead). It needs a GitHub account with a Copilot plan; the free plan works.
+- **Sign in to Copilot** in the status bar (or **Copilot: Sign In** in Find Action) shows a code:
+  **Copy Code and Open GitHub** copies it and opens GitHub's page, where you paste it and approve.
+  The status bar shows the code until that's done, then **Copilot** with a green light. Copilot
+  keeps the sign-in in its own folder (on macOS and Linux `~/.config/github-copilot`, or under
+  `XDG_CONFIG_HOME` when that's set), so it holds for every window and the next launch. Click
+  **Copilot** in the status bar to sign out or turn suggestions off (**Copilot: Sign Out** in Find
+  Action does the first).
+- Suggestions come a moment after you type: the first line at the caret, the rest as dimmed lines
+  under it. **Tab** accepts one (an open completion list takes Tab first), **Escape** or moving the
+  caret dismisses it, and typing what it suggests keeps the rest. **⌥\\** (Alt+\\ on Windows and
+  Linux) asks for one at the caret.
+- When a suggestion writes again what's after the caret, it goes after that text: with the caret in
+  `def is_prime(n|)`, where typing `(` added the `)`, the suggestion shows (and goes in) after the
+  `)`. Stepping over the `)`, by typing it or with →, keeps the suggestion.
+- `"edit_predictions": false` turns them off for a language (under `"languages"`) or a project (its
+  `.kuana/settings.json`). Environment files (`.env`, `.env.local`), keys and certificates (`.pem`,
+  `.key`) and registry credentials (`.npmrc`, `.netrc`) never get suggestions, and in Restricted
+  Mode nothing is sent.
+
+Suggestions show with one caret and nothing selected, and in Vim mode only in Insert mode. On a line
+that soft wrap breaks, nothing shows until the caret is on a line that fits.
+
+For chat and agents, use the tools you already have: Claude Code, Codex or Gemini CLI run in
+Kuana's terminal, and Kuana picks up the files they change (the Git gutter and the Commit view show
+what they did, Local History undoes it).
+
 ## Local History
 
 Kuana keeps earlier versions of your files, whatever Git knows, as JetBrains IDEs do: when you save
