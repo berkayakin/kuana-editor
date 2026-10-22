@@ -593,6 +593,13 @@ pub fn project_targets(root: &Path, current: Option<(&Path, Language)>) -> Vec<R
         out.push(RunTarget { name, command, cwd: cwd.to_path_buf(), row: None, rows: 0..0, debug, test: None });
     };
     let cargo = |build: &[&str]| Some(DebugSpec::Cargo { build: build.iter().map(|s| s.to_string()).collect(), args: Vec::new() });
+    // Oxie projects: Cargo crates whose sources are .oxi files
+    if is_oxie_project(root) {
+        add("oxie run".into(), "oxie run".into(), root, None);
+        add("oxie test".into(), "oxie test".into(), root, None);
+        add("oxie build".into(), "oxie build".into(), root, None);
+        add("oxie fmt".into(), "oxie fmt".into(), root, None);
+    }
     if root.join("Cargo.toml").is_file() {
         // The default binary by name, so the debug build makes one executable.
         let run_debug = match cargo_package_name(root) {
@@ -668,6 +675,7 @@ pub fn project_targets(root: &Path, current: Option<(&Path, Language)>) -> Vec<R
                 (Some(format!("go run {file}")), Some(debug))
             }
             Language::Php => (Some(format!("php {file}")), None),
+            Language::Extension(_) if language.name() == "Oxie" => (Some(format!("oxie run {file}")), None),
             _ => (None, None),
         };
         if let Some(command) = command {
@@ -675,6 +683,13 @@ pub fn project_targets(root: &Path, current: Option<(&Path, Language)>) -> Vec<R
         }
     }
     out
+}
+
+/// A Cargo crate written in Oxie: it builds with `oxie-build`, or has `src/main.oxi` / `src/lib.oxi`.
+fn is_oxie_project(root: &Path) -> bool {
+    root.join("src/main.oxi").is_file()
+        || root.join("src/lib.oxi").is_file()
+        || std::fs::read_to_string(root.join("Cargo.toml")).is_ok_and(|manifest| manifest.contains("oxie-build"))
 }
 
 // ---- Problems in output ------------------------------------------------------------
@@ -959,6 +974,19 @@ mod tests {
         let current = project_targets(&dir, Some((&dir.join("a.ts"), Language::TypeScript)));
         let path = dir.join("a.ts").to_string_lossy().into_owned();
         assert_eq!(current.last().unwrap().debug, Some(DebugSpec::Node { runtime: "npx".into(), args: vec!["tsx".into(), path] }));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn oxie_project_targets() {
+        let dir = temp_project(&[
+            ("Cargo.toml", "[package]\nname = \"app\"\n\n[build-dependencies]\noxie-build = { path = \"../oxie-build\" }\n"),
+            ("src/main.oxi", "fun main() {}\n"),
+        ]);
+        let targets = project_targets(&dir, None);
+        let names: Vec<&str> = targets.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(&names[..4], ["oxie run", "oxie test", "oxie build", "oxie fmt"]);
+        assert!(names.contains(&"cargo run"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

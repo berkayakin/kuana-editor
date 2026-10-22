@@ -90,6 +90,7 @@ file_icons![
     "npm",
     "nuxt",
     "odin",
+    "oxie",
     "package-config",
     "package-lock",
     "pcss",
@@ -146,6 +147,10 @@ file_icons![
 
 const DEFAULT: &str = "_file";
 
+/// Icons for languages Charmed Icons doesn't cover, by lowercased suffix or file name.
+/// Kept out of `charmed.json` so the vendored pack stays unchanged.
+const EXTRA: &[(&str, &str)] = &[("oxi", "oxie")];
+
 /// Asset paths of one icon in both sets.
 #[derive(Clone)]
 struct Paths {
@@ -200,6 +205,7 @@ fn associations() -> &'static Associations {
     ASSOCIATIONS.get_or_init(|| Associations {
         by_name: parse(include_str!("../assets/file-icons/charmed.json"))
             .into_iter()
+            .chain(EXTRA.iter().map(|(key, icon)| (key.to_string(), icon.to_string())))
             .map(|(key, icon)| (key, Paths::new(&icon)))
             .collect(),
         file: Paths::new(DEFAULT),
@@ -315,6 +321,7 @@ mod tests {
         let used: std::collections::HashSet<String> = parse(include_str!("../assets/file-icons/charmed.json"))
             .into_values()
             .chain([DEFAULT, "_folder", "_folder_open"].map(String::from))
+            .chain(EXTRA.iter().map(|(_, icon)| icon.to_string()))
             .collect();
         let embedded: Vec<&str> = FILE_ICONS.iter().map(|(p, _)| *p).collect();
         for icon in &used {
@@ -332,6 +339,7 @@ mod tests {
     #[test]
     fn matches_names_then_suffixes() {
         assert_eq!(icon("main.rs"), "rust");
+        assert_eq!(icon("main.oxi"), "oxie");
         assert_eq!(icon("App.TSX"), "react-typescript");
         assert_eq!(icon("tsconfig.json"), "typescript-config");
         assert_eq!(icon("vite.config.ts"), "vite");
