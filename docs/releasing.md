@@ -30,6 +30,17 @@ The release notes come from [git-cliff](https://git-cliff.org) ([`cliff.toml`](.
 every commit and pull request since the previous tag, each change once (a pull request is one
 line, however it was merged), with authors @mentioned and first-time contributors listed.
 
+### Homebrew cask
+
+Once a release is published, the workflow's `homebrew` job copies
+[`scripts/kuana.rb`](../scripts/kuana.rb) into
+[berkayakin/homebrew-tap](https://github.com/berkayakin/homebrew-tap) as `Casks/kuana.rb`, with the
+release's version and the SHA-256 of its macOS `.zip`, and pushes it. Change the cask in
+`scripts/kuana.rb`, not in the tap. It needs the `HOMEBREW_TAP_TOKEN` repository secret: a
+fine-grained token with read and write access to the tap's contents only. Without it, or for a
+pre-release or a release without a macOS build, the cask stays as it was. Once releases are
+notarized, remove the cask's Gatekeeper `caveats`.
+
 ### Signing the macOS app
 
 The workflow signs `Kuana.app` and the `.dmg` with a Developer ID and has Apple notarize them as

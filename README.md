@@ -73,8 +73,14 @@ There's much more: see the [full feature list](docs/features.md).
 curl -fsSL https://raw.githubusercontent.com/berkayakin/kuana-editor/main/install.sh | sh
 ```
 
+**With Homebrew** on macOS:
+
+```bash
+brew install --cask berkayakin/tap/kuana
+```
+
 **Or download it** for macOS, Windows or Linux from
-[GitHub Releases](https://github.com/berkayakin/kuana-editor/releases/latest). Either way, it
+[GitHub Releases](https://github.com/berkayakin/kuana-editor/releases/latest). Whichever way, it
 updates itself from then on.
 
 | Platform | Status |
@@ -114,7 +120,7 @@ read what it [doesn't do yet](#known-limitations).
 Kuana is at 0.1. What people most often expect that isn't there yet (the [roadmap](docs/roadmap.md)
 says what's planned):
 
-- **Builds aren't signed yet**: on macOS, a copy downloaded with a browser asks you to allow its
+- **Builds aren't signed yet**: on macOS, a copy downloaded with a browser or Homebrew asks you to allow its
   first launch ([how](docs/install.md#first-launch-on-macos); the install script above doesn't),
   and Windows SmartScreen warns. Updates are signed.
 - **Windows and Linux are in beta**, see above. No Linux packages (AppImage, `.deb`, Flatpak) yet.

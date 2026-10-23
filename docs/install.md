@@ -18,6 +18,20 @@ release's `latest.json` and installs it:
 It then opens Kuana. Run it again to reinstall. `KUANA_INSTALL_DIR=<folder>` installs somewhere
 else; `KUANA_NO_LAUNCH=1` doesn't open it.
 
+## Homebrew (macOS)
+
+```bash
+brew install --cask berkayakin/tap/kuana
+```
+
+The cask ([`scripts/kuana.rb`](../scripts/kuana.rb), published in
+[berkayakin/homebrew-tap](https://github.com/berkayakin/homebrew-tap)) installs `Kuana.app` in
+`/Applications` and the `kuana` command, which opens files and folders in the running Kuana, like
+Kuana's own **Install Command**. Kuana keeps updating itself; `brew upgrade` only catches up a copy
+that hasn't. Homebrew quarantines what it downloads, so the first launch needs
+[Open Anyway](#first-launch-on-macos). `brew uninstall --zap kuana` also removes Kuana's settings
+and state (`~/.config/kuana`).
+
 ## Download
 
 Get the latest build from [GitHub Releases](https://github.com/berkayakin/kuana-editor/releases/latest):
@@ -69,6 +83,6 @@ version and the commit it was built from; **Copy Version** copies both for bug r
 ## First launch on macOS
 
 Until the macOS app is signed with a Developer ID, it's only ad-hoc signed, so macOS
-blocks the first launch of a copy downloaded with a browser: allow it under System Settings →
+blocks the first launch of a copy downloaded with a browser or Homebrew: allow it under System Settings →
 Privacy & Security → **Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/Kuana.app`.
 The [install script](#install-script-macos-linux) and updates don't need this.
