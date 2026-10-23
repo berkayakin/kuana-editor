@@ -306,6 +306,44 @@ jobs:
           gh release upload "$TAG" latest.json latest.json.minisig SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
           gh release edit "$TAG" --draft=false --repo "$GITHUB_REPOSITORY"
 
+  # Points the Homebrew cask (github.com/berkayakin/homebrew-tap) at this release,
+  # from scripts/kuana.rb. Needs the HOMEBREW_TAP_TOKEN secret: a fine-grained
+  # token with write access to that repository's contents only. Pre-releases
+  # and releases without a macOS build leave the cask as it is.
+  homebrew:
+    needs: [create, publish]
+    if: ${{ !cancelled() && needs.publish.result == 'success' && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.create.outputs.version }}
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Update the cask
+        run: |
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "::notice::No HOMEBREW_TAP_TOKEN secret; the Homebrew cask isn't updated"
+            exit 0
+          fi
+          zip="Kuana-$VERSION-macos.zip"
+          sha=$(curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/SHA256SUMS" \
+            | awk -v name="$zip" '$2 == name { print $1 }')
+          if [ -z "$sha" ]; then
+            echo "::warning::$zip isn't in this release; the Homebrew cask stays as it was"
+            exit 0
+          fi
+          git clone --depth 1 "https://x-access-token:$HOMEBREW_TAP_TOKEN@github.com/berkayakin/homebrew-tap.git" "$RUNNER_TEMP/tap"
+          mkdir -p "$RUNNER_TEMP/tap/Casks"
+          sed -e "s/^  version \".*\"$/  version \"$VERSION\"/" -e "s/^  sha256 \".*\"$/  sha256 \"$sha\"/" \
+            scripts/kuana.rb > "$RUNNER_TEMP/tap/Casks/kuana.rb"
+          cd "$RUNNER_TEMP/tap"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/kuana.rb
+          git diff --cached --quiet && exit 0
+          git commit -m "kuana $VERSION"
+          git push
+
   # Starts each published build and drives it through its main areas; see smoke.yml.
   smoke:
     needs: publish
