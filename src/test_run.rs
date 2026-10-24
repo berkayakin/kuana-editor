@@ -33,7 +33,8 @@ impl Framework {
         match words.as_slice() {
             // `oxie test` runs libtest over the Rust that Oxie compiles to
             ["cargo", "test", ..] | ["oxie", "test", ..] => Some(Framework::Cargo),
-            ["go", "test", ..] => Some(Framework::Go),
+            // `lyth test` runs go test over the Go that Lyth compiles to
+            ["go", "test", ..] | ["lyth", "test", ..] => Some(Framework::Go),
             ["pytest", ..] | [_, "-m", "pytest", ..] => Some(Framework::Pytest),
             ["node", ..] if words.contains(&"--test") => Some(Framework::Js),
             _ if words.iter().any(|w| matches!(*w, "jest" | "vitest")) => Some(Framework::Js),
@@ -454,7 +455,8 @@ pub fn rerun_failed(target: &RunTarget, run: &TestRun) -> Option<RunTarget> {
             let mut tops: Vec<&str> = failed.iter().map(|id| id.split('/').next().unwrap_or(id)).collect();
             tops.dedup();
             let pattern = format!("^({})$", tops.join("|"));
-            format!("go test -v -run {} {}", shell_quote(&pattern), go_packages(&target.command))
+            let runner = if target.command.starts_with("lyth test") { "lyth test" } else { "go test" };
+            format!("{runner} -v -run {} {}", shell_quote(&pattern), go_packages(&target.command))
         }
         Framework::Pytest => {
             // Node ids are relative to the rootdir; the run may start elsewhere.
@@ -868,5 +870,9 @@ Tests:       1 failed, 1 skipped, 1 passed, 3 total
         assert_eq!(oxie.command, "oxie test '/my p/t.oxi' -- __oxie_tests::test_adds_two --exact --format=pretty");
         let project = rerun_failed(&target("oxie test -- --format=pretty"), &failed(Framework::Cargo, &["a::__oxie_tests::test_b"], None)).unwrap();
         assert_eq!(project.command, "oxie test -- a::__oxie_tests::test_b --exact --format=pretty");
+        // `lyth test` is go test over the generated Go, and reruns with lyth, which compiles the .lyth files.
+        assert_eq!(Framework::of("lyth test -v ./..."), Some(Framework::Go));
+        let lyth = rerun_failed(&target("lyth test -v -run '^TestAdd$' ."), &failed(Framework::Go, &["TestAdd", "TestSub/negative"], None)).unwrap();
+        assert_eq!(lyth.command, "lyth test -v -run '^(TestAdd|TestSub)$' .");
     }
 }

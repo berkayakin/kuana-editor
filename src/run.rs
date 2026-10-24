@@ -246,7 +246,7 @@ fn extension_targets(language: Language, path: &Path, text: &str, tree: &Tree, o
                 .chain(task.args.iter().map(|a| shell_quote(&plain(a))))
                 .collect::<Vec<_>>()
                 .join(" ");
-            let test = oxie_test(language, path, task, &vars, &command);
+            let test = oxie_test(language, path, task, &vars, &command).or_else(|| lyth_test(language, task, &vars, &command));
             out.push(RunTarget {
                 name: plain(&task.label),
                 command,
@@ -638,6 +638,14 @@ pub fn project_targets(root: &Path, current: Option<(&Path, Language)>) -> Vec<R
             add(format!("{manager} run {name}"), format!("{manager} run {}", shell_quote(name)), root, debug);
         }
     }
+    // Lyth modules: Go modules whose packages are .lyth files, which lyth compiles
+    if root.join("go.mod").is_file() && has_lyth_files(root, 3) {
+        add("lyth run .".into(), "lyth run .".into(), root, None);
+        // -v names every test, for the test results
+        add("lyth test ./...".into(), "lyth test -v ./...".into(), root, None);
+        add("lyth build ./...".into(), "lyth build ./...".into(), root, None);
+        add("lyth vet ./...".into(), "lyth vet ./...".into(), root, None);
+    }
     if root.join("go.mod").is_file() {
         let debug = Some(DebugSpec::Go { mode: "debug".into(), program: root.to_path_buf(), args: Vec::new() });
         add("go run .".into(), "go run .".into(), root, debug);
@@ -678,6 +686,7 @@ pub fn project_targets(root: &Path, current: Option<(&Path, Language)>) -> Vec<R
             }
             Language::Php => (Some(format!("php {file}")), None),
             Language::Extension(_) if language.name() == "Oxie" => (Some(format!("oxie run {file}")), None),
+            Language::Extension(_) if language.name() == "Lyth" => (Some(format!("lyth run {file}")), None),
             _ => (None, None),
         };
         if let Some(command) = command {
@@ -692,6 +701,38 @@ fn is_oxie_project(root: &Path) -> bool {
     root.join("src/main.oxi").is_file()
         || root.join("src/lib.oxi").is_file()
         || std::fs::read_to_string(root.join("Cargo.toml")).is_ok_and(|manifest| manifest.contains("oxie-build"))
+}
+
+/// Whether `dir` or its folders `depth` levels down hold a .lyth file
+/// (hidden folders, dependencies and build output aside).
+fn has_lyth_files(dir: &Path, depth: usize) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+    let mut subdirs = Vec::new();
+    for path in entries.filter_map(|e| e.ok()).map(|e| e.path()) {
+        if path.extension().is_some_and(|e| e == "lyth") && path.is_file() {
+            return true;
+        }
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if depth > 0 && path.is_dir() && !name.starts_with('.') && !matches!(name.as_str(), "node_modules" | "target" | "vendor") {
+            subdirs.push(path);
+        }
+    }
+    subdirs.iter().any(|d| has_lyth_files(d, depth - 1))
+}
+
+/// The test a Lyth extension task runs, by the name `go test -v` reports: a
+/// task given a test function's name (`lyth test -v -run '^TestAdd$' .`),
+/// which `lyth test` runs with go test.
+fn lyth_test(language: Language, task: &crate::extensions::Task, vars: &[(String, String)], command: &str) -> Option<(Framework, String)> {
+    const NAME: &str = "ZED_CUSTOM_LYTH_TEST_NAME";
+    if language.name() != "Lyth" || Framework::of(command) != Some(Framework::Go) {
+        return None;
+    }
+    // A task that runs the whole package shares the row, but not the test.
+    if !std::iter::once(&task.label).chain(&task.args).any(|a| a.contains(NAME)) {
+        return None;
+    }
+    Some((Framework::Go, vars.iter().find(|(k, _)| k == NAME)?.1.clone()))
 }
 
 /// The test an Oxie extension task runs, by the id `oxie test` reports
@@ -1045,6 +1086,21 @@ mod tests {
         assert_eq!(oxie_slug("Adds two  numbers!"), "adds_two_numbers");
         assert_eq!(oxie_slug("2 + 2"), "test_2_2");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn lyth_project_targets() {
+        let dir = temp_project(&[("go.mod", "module app\n\ngo 1.26\n"), ("cmd/app/main.lyth", "func main() {}\n")]);
+        let targets = project_targets(&dir, None);
+        let names: Vec<&str> = targets.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(&names[..4], ["lyth run .", "lyth test ./...", "lyth build ./...", "lyth vet ./..."]);
+        assert!(names.contains(&"go run ."));
+        assert_eq!(targets.iter().find(|t| t.name == "lyth test ./...").map(|t| t.command.as_str()), Some("lyth test -v ./..."));
+        // A Go module without .lyth files has no lyth commands.
+        let plain = temp_project(&[("go.mod", "module app\n"), ("main.go", "package main\n")]);
+        assert!(!project_targets(&plain, None).iter().any(|t| t.name.starts_with("lyth")));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&plain).ok();
     }
 
     #[test]

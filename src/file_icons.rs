@@ -79,6 +79,7 @@ file_icons![
     "luau-config",
     "luau-def",
     "luau",
+    "lyth",
     "makefile",
     "markdown",
     "markdownx",
@@ -149,7 +150,7 @@ const DEFAULT: &str = "_file";
 
 /// Icons for languages Charmed Icons doesn't cover, by lowercased suffix or file name.
 /// Kept out of `charmed.json` so the vendored pack stays unchanged.
-const EXTRA: &[(&str, &str)] = &[("oxi", "oxie")];
+const EXTRA: &[(&str, &str)] = &[("oxi", "oxie"), ("lyth", "lyth")];
 
 /// Asset paths of one icon in both sets.
 #[derive(Clone)]
@@ -340,6 +341,7 @@ mod tests {
     fn matches_names_then_suffixes() {
         assert_eq!(icon("main.rs"), "rust");
         assert_eq!(icon("main.oxi"), "oxie");
+        assert_eq!(icon("main.lyth"), "lyth");
         assert_eq!(icon("App.TSX"), "react-typescript");
         assert_eq!(icon("tsconfig.json"), "typescript-config");
         assert_eq!(icon("vite.config.ts"), "vite");
