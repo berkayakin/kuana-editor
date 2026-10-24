@@ -20,8 +20,9 @@ vscode-langservers (HTML, CSS, JSON), yaml-language-server and bash-language-ser
 packages, installed with your Node.js or, without one, a Node.js LTS Kuana downloads once (checked
 against its SHASUMS256.txt); gopls comes from `go install`. A server you install yourself is
 always used instead, and Kuana looks for a newer version of its own copies once a week (it runs from
-the next start). Servers without an installer show **No language server**; click it to copy the
-install command.
+the next start). An extension can bring an installer for its server too: Oxie's downloads the `oxie`
+command from its GitHub release. Servers without an installer show **No language server**; click it
+to copy the install command.
 
 | Language | Server | Install |
 | --- | --- | --- |

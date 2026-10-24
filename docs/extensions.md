@@ -15,7 +15,7 @@ too.
 
 **Available** lists the extensions in Kuana's registry
 ([kuana-extensions](https://github.com/berkayakin/kuana-extensions)): popular languages that Kuana
-doesn't have built in, such as Java, C#, Dart, Ruby, Elixir, Zig and Vue. Each is built there from its
+doesn't have built in, such as Java, C#, Dart, Ruby, Elixir, Zig and Vue, and Oxie. Each is built there from its
 author's repository, with its grammars and its own code compiled, so nothing needs compiling here. Type
 to search, then click **Install**. **Update** appears when the registry has a newer version; only
 extensions installed from it get one, never one from Git or a folder. Kuana checks the list's
@@ -85,7 +85,8 @@ initialization_options = { lint = true }
 settings = { mylang = { formatting = "auto" } }
 
 # How the status bar's Install gets it (Kuana's key; checksummed like Kuana's own):
-# an npm package, a Go module, or a GitHub release asset per platform.
+# an npm package, a Go module, or a GitHub release asset per platform (the binary, gzipped,
+# or in a .zip or tarball such as cargo-dist's .tar.xz).
 [language_servers.mylang-ls.installer]
 github = "someone/mylang-ls"
 assets = { "macos-aarch64" = "mylang-ls-darwin-arm64.gz", "linux-x86_64" = "mylang-ls-linux-x64.gz" }

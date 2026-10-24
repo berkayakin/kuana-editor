@@ -42,7 +42,7 @@ impl std::fmt::Debug for Installer {
 }
 
 enum Source {
-    /// A release asset on GitHub: the binary itself, gzipped, or in a zip.
+    /// A release asset on GitHub: the binary itself, gzipped, or in a zip or tarball.
     GitHub { repo: &'static str, asset: Asset },
     Npm { package: &'static str },
     /// `go install <module>@latest`, with the user's Go.
@@ -304,11 +304,7 @@ fn install_github(installer: &Installer, home: &Path, repo: &str, asset: &Asset)
     }
     let installed = install_into(home, &version, |dir| {
         let binary = installer.binary(dir);
-        if asset.ends_with(".gz") {
-            let mut input = flate2::read::GzDecoder::new(std::fs::File::open(&temp).map_err(|e| e.to_string())?);
-            let mut output = std::fs::File::create(&binary).map_err(|e| e.to_string())?;
-            std::io::copy(&mut input, &mut output).map_err(|e| format!("couldn't unpack {asset}: {e}"))?;
-        } else if asset.ends_with(".zip") {
+        if is_archive(&asset) {
             unzip(&temp, dir)?;
             // The binary may sit in a folder inside the archive.
             let name = exe_name(installer.command);
@@ -316,6 +312,10 @@ fn install_github(installer: &Installer, home: &Path, repo: &str, asset: &Asset)
             if inside != binary {
                 std::fs::rename(&inside, &binary).map_err(|e| e.to_string())?;
             }
+        } else if asset.ends_with(".gz") {
+            let mut input = flate2::read::GzDecoder::new(std::fs::File::open(&temp).map_err(|e| e.to_string())?);
+            let mut output = std::fs::File::create(&binary).map_err(|e| e.to_string())?;
+            std::io::copy(&mut input, &mut output).map_err(|e| format!("couldn't unpack {asset}: {e}"))?;
         } else {
             std::fs::copy(&temp, &binary).map_err(|e| e.to_string())?;
         }
@@ -488,7 +488,7 @@ fn install_node() -> Result<(), String> {
 
 // ---- Files ------------------------------------------------------------------------------
 
-/// Unpacks a .zip or .tar.gz with `tar`, which macOS, Linux and Windows 10+
+/// Unpacks a .zip or a tarball with `tar`, which macOS, Linux and Windows 10+
 /// have (bsdtar reads zips too). GNU tar doesn't, so on Linux a zip (by its
 /// first bytes: the name may not say) goes to `unzip`.
 pub(crate) fn unzip(archive: &Path, into: &Path) -> Result<(), String> {
@@ -508,6 +508,12 @@ pub(crate) fn unzip(archive: &Path, into: &Path) -> Result<(), String> {
     } else {
         Err(format!("couldn't unpack {}: {}", archive.display(), String::from_utf8_lossy(&output.stderr).trim()))
     }
+}
+
+/// A release asset holding files (a binary among them), by its name: a .zip
+/// or a tarball (cargo-dist's `.tar.xz` included), not a lone gzipped binary.
+fn is_archive(asset: &str) -> bool {
+    [".zip", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tar.zst"].iter().any(|suffix| asset.ends_with(suffix))
 }
 
 fn is_zip(path: &Path) -> bool {
@@ -603,6 +609,8 @@ mod tests {
         std::fs::write(&file, b"\x1f\x8b gzip").unwrap();
         assert!(!is_zip(&file));
         std::fs::remove_file(&file).ok();
+        assert!(is_archive("oxie-aarch64-apple-darwin.tar.xz") && is_archive("x.tar.gz") && is_archive("x.zip"));
+        assert!(!is_archive("rust-analyzer-aarch64-apple-darwin.gz") && !is_archive("x"));
         assert_eq!(folder_name("v1.2/x"), "v1.2_x");
         assert!(rust_analyzer_asset().is_some() && taplo_asset().is_some());
         assert_eq!(phpactor_asset().is_some(), !cfg!(windows));
@@ -639,6 +647,29 @@ mod tests {
         install(marksman).unwrap();
         let path = installed("marksman").expect("installed");
         let output = std::process::Command::new(&path).arg("--version").output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        std::fs::remove_dir_all(&config).ok();
+    }
+
+    /// An extension's installer for a cargo-dist release (`.tar.xz`, the
+    /// binary in a folder): the Oxie extension's.
+    /// `cargo test -- --ignored installs_a_tarball_from_github`.
+    #[test]
+    #[ignore = "downloads from GitHub"]
+    fn installs_a_tarball_from_github() {
+        let config = std::env::temp_dir().join(format!("kuana-install-tarball-{}", std::process::id()));
+        // SAFETY: tests that touch XDG_CONFIG_HOME run alone (--ignored, one test).
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config) };
+        let manifest: toml::Table = toml::from_str(
+            r#"github = "oxie-lang/oxie"
+            assets = { "macos-aarch64" = "oxie-aarch64-apple-darwin.tar.xz", "macos-x86_64" = "oxie-x86_64-apple-darwin.tar.xz", "linux-x86_64" = "oxie-x86_64-unknown-linux-gnu.tar.xz", "linux-aarch64" = "oxie-aarch64-unknown-linux-gnu.tar.xz", "windows-x86_64" = "oxie-x86_64-pc-windows-msvc.zip" }"#,
+        )
+        .unwrap();
+        let oxie: &'static Installer = Box::leak(Box::new(Installer::from_manifest("oxie", &manifest).unwrap()));
+        set_extension_installers(vec![oxie]);
+        install(oxie).unwrap();
+        let path = installed("oxie").expect("installed");
+        let output = std::process::Command::new(&path).arg("version").output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         std::fs::remove_dir_all(&config).ok();
     }
