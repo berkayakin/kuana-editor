@@ -246,6 +246,7 @@ fn extension_targets(language: Language, path: &Path, text: &str, tree: &Tree, o
                 .chain(task.args.iter().map(|a| shell_quote(&plain(a))))
                 .collect::<Vec<_>>()
                 .join(" ");
+            let test = oxie_test(language, path, task, &vars, &command);
             out.push(RunTarget {
                 name: plain(&task.label),
                 command,
@@ -253,7 +254,7 @@ fn extension_targets(language: Language, path: &Path, text: &str, tree: &Tree, o
                 row: Some(node.start_position().row),
                 rows: node.start_position().row..node.end_position().row + 1,
                 debug: None,
-                test: None,
+                test,
             });
         }
     }
@@ -596,7 +597,8 @@ pub fn project_targets(root: &Path, current: Option<(&Path, Language)>) -> Vec<R
     // Oxie projects: Cargo crates whose sources are .oxi files
     if is_oxie_project(root) {
         add("oxie run".into(), "oxie run".into(), root, None);
-        add("oxie test".into(), "oxie test".into(), root, None);
+        // Without `--quiet`'s format, so passed tests are named too (test results)
+        add("oxie test".into(), "oxie test -- --format=pretty".into(), root, None);
         add("oxie build".into(), "oxie build".into(), root, None);
         add("oxie fmt".into(), "oxie fmt".into(), root, None);
     }
@@ -690,6 +692,53 @@ fn is_oxie_project(root: &Path) -> bool {
     root.join("src/main.oxi").is_file()
         || root.join("src/lib.oxi").is_file()
         || std::fs::read_to_string(root.join("Cargo.toml")).is_ok_and(|manifest| manifest.contains("oxie-build"))
+}
+
+/// The test an Oxie extension task runs, by the id `oxie test` reports
+/// (libtest's): a task given a `test "…"` block's name gets
+/// `[module::]__oxie_tests::test_<slug>`, as the compiler names its Rust test.
+fn oxie_test(language: Language, path: &Path, task: &crate::extensions::Task, vars: &[(String, String)], command: &str) -> Option<(Framework, String)> {
+    const NAME: &str = "ZED_CUSTOM_OXIE_TEST_NAME";
+    if language.name() != "Oxie" || Framework::of(command) != Some(Framework::Cargo) {
+        return None;
+    }
+    // A task that runs the whole file shares the row, but not the test.
+    if !std::iter::once(&task.label).chain(&task.args).any(|a| a.contains(NAME)) {
+        return None;
+    }
+    let name = &vars.iter().find(|(k, _)| k == NAME)?.1;
+    let slug = oxie_slug(name);
+    let test = if slug.starts_with("test") { slug } else { format!("test_{slug}") };
+    let id: Vec<String> = oxie_module(path).into_iter().chain(["__oxie_tests".to_string(), test]).collect();
+    Some((Framework::Cargo, id.join("::")))
+}
+
+/// A test's name as an identifier, as the Oxie compiler makes it.
+fn oxie_slug(name: &str) -> String {
+    let mut slug: String = name.chars().map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect();
+    while slug.contains("__") {
+        slug = slug.replace("__", "_");
+    }
+    let slug = slug.trim_matches('_');
+    if slug.is_empty() || slug.starts_with(|c: char| c.is_ascii_digit()) { format!("test_{slug}") } else { slug.to_string() }
+}
+
+/// The module an .oxi file is in a project (`src/a/b.oxi` → `a::b`; `main`,
+/// `lib` and `mod` files as in Rust); none for a script outside one.
+fn oxie_module(path: &Path) -> Vec<String> {
+    let Some(src) = path.ancestors().skip(1).find(|d| d.file_name().is_some_and(|n| n == "src") && d.parent().is_some_and(is_oxie_project)) else {
+        return Vec::new();
+    };
+    let Ok(rel) = path.with_extension("").strip_prefix(src).map(Path::to_path_buf) else { return Vec::new() };
+    let mut parts: Vec<String> = rel.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    match parts.last().map(String::as_str) {
+        Some("main" | "lib") if parts.len() == 1 => Vec::new(),
+        Some("mod") => {
+            parts.pop();
+            parts
+        }
+        _ => parts,
+    }
 }
 
 // ---- Problems in output ------------------------------------------------------------
@@ -987,6 +1036,14 @@ mod tests {
         let names: Vec<&str> = targets.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(&names[..4], ["oxie run", "oxie test", "oxie build", "oxie fmt"]);
         assert!(names.contains(&"cargo run"));
+        // Test ids as the compiler names them, in the file's module.
+        assert_eq!(oxie_module(&dir.join("src/main.oxi")), Vec::<String>::new());
+        assert_eq!(oxie_module(&dir.join("src/parser.oxi")), ["parser"]);
+        assert_eq!(oxie_module(&dir.join("src/net/http.oxi")), ["net", "http"]);
+        assert_eq!(oxie_module(&dir.join("src/net/mod.oxi")), ["net"]);
+        assert_eq!(oxie_module(&std::env::temp_dir().join("script.oxi")), Vec::<String>::new());
+        assert_eq!(oxie_slug("Adds two  numbers!"), "adds_two_numbers");
+        assert_eq!(oxie_slug("2 + 2"), "test_2_2");
         std::fs::remove_dir_all(&dir).ok();
     }
 

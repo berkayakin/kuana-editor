@@ -39,11 +39,15 @@ A ▶ in the gutter marks what can run in the file; click it to run that one thi
 | Go | `Test…`, `Benchmark…`, `Example…` functions, `func main` | `go test -v -run '^Name$'`, `go run .` |
 | Python | `test_…` functions, `Test…` classes and methods, `if __name__ == "__main__"` | `python3 -m pytest -v file::Class::test`, `python3 file` |
 | JavaScript, TypeScript | `test(…)`, `it(…)`, `describe(…)` | the project's vitest or jest, else `node --test` |
+| Oxie (its [extension](extensions.md)) | `test "…"` blocks, `fun main` | `oxie test file name`, `oxie run file` |
+
+Other languages' extensions add their own ▶ (their `runnables.scm` and `tasks.json`).
 
 **Run at caret** (⌃⇧R / Ctrl+Shift+F10) runs the innermost test or function around the caret.
 **Run…** (⌃⌥R / Alt+Shift+F10) lists the last run first, then your `run_configurations`, the
 project's commands (cargo run/test/build and binaries, `package.json` scripts with its package
-manager, go, Makefile targets, pytest) and the current file's tests. **Run** (⌃R / Shift+F10)
+manager, go, Makefile targets, pytest; `oxie run`/`test`/`build`/`fmt` in an Oxie project) and the
+current file's tests. **Run** (⌃R / Shift+F10)
 repeats the last one (run or debugged), **Stop** (⌘F2 / Ctrl+F2) interrupts it. The title bar's
 top right has the same: the last configuration (click it for Run…; the project keeps it for next
 time), Run, Debug and, while something runs, Stop, next to the sidebar and bottom panel toggles.
@@ -64,7 +68,7 @@ PATH work as in the terminal.
 
 ### Test results
 
-When a test run ends (cargo test, `go test -v`, pytest, Jest, Vitest or `node --test`, from the
+When a test run ends (cargo test, `go test -v`, pytest, Jest, Vitest, `node --test` or `oxie test`, from the
 gutter, Run… or your own configurations), Kuana reads its results from the output:
 
 - A notification says how it went ("Tests failed: 1 failed, 12 passed"), with **Show Results**.

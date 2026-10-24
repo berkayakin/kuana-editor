@@ -37,7 +37,7 @@ bindings, colors, icons) are in the [contributing guide](../CONTRIBUTING.md).
 - `src/terminal.rs` — the integrated terminal
 - `src/run.rs`, `src/editor/run.rs` — run and test targets and the gutter ▶
 - `src/test_run.rs` — test results read from a run's output (cargo, go, pytest, Jest, Vitest,
-  node), their tree, the gutter's ✓ / ✕ and Rerun Failed
+  node, `oxie test`), their tree, the gutter's ✓ / ✕ and Rerun Failed
 - `src/local_history.rs`, `src/workspace/local_history.rs` — Local History: files' earlier
   versions under `<config>/local_history/`, listed with a diff and Restore
 - `src/keymap.rs` — JetBrains-style key bindings

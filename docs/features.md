@@ -93,9 +93,10 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   formatters or project tools until you do; see [Project trust](settings.md#project-trust)
 - Python virtual environments detected per project and used by terminals, Run, the debugger,
   language servers and formatters; see [Python environments](languages.md#python-environments)
-- Run and test: ▶ in the gutter next to tests and `main` functions (Rust, Go, Python, JS/TS),
+- Run and test: ▶ in the gutter next to tests and `main` functions (Rust, Go, Python, JS/TS, and
+  languages whose extension adds them, such as Oxie),
   project commands (cargo, npm scripts, go, make, pytest) and your own run configurations, each
-  in its own terminal tab with a pass/fail icon; test runs (cargo, go, pytest, Jest, Vitest, node) show
+  in its own terminal tab with a pass/fail icon; test runs (cargo, go, pytest, Jest, Vitest, node, `oxie test`) show
   their results as a tree in the Find panel and ✓ / ✕ in the gutter, with Rerun Failed; see
   [Run and test](run-and-debug.md#run-and-test)
 - Image preview: PNG, JPEG, GIF (animated), WebP, BMP, TIFF, ICO, TGA and QOI files open as a

@@ -2157,6 +2157,17 @@ impl Editor {
                 .filter_map(|t| Some((t.row?, t.test.as_ref().and_then(|test| crate::test_run::status_of(test, &statuses)))))
                 .collect();
             rows.sort_unstable_by_key(|(row, _)| *row);
+            // One mark per row: an extension's tasks can share one (a test,
+            // and the whole file's), and only some name a test.
+            rows.dedup_by(|later, kept| {
+                if later.0 != kept.0 {
+                    return false;
+                }
+                if let Some(status) = later.1 {
+                    kept.1 = Some(crate::test_run::TestStatus::combine(kept.1, status));
+                }
+                true
+            });
             self.run_rows = (Some((targets, statuses)), Arc::new(rows));
         }
         self.run_rows.1.clone()

@@ -31,7 +31,8 @@ impl Framework {
     pub fn of(command: &str) -> Option<Framework> {
         let words: Vec<&str> = command.split_whitespace().collect();
         match words.as_slice() {
-            ["cargo", "test", ..] => Some(Framework::Cargo),
+            // `oxie test` runs libtest over the Rust that Oxie compiles to
+            ["cargo", "test", ..] | ["oxie", "test", ..] => Some(Framework::Cargo),
             ["go", "test", ..] => Some(Framework::Go),
             ["pytest", ..] | [_, "-m", "pytest", ..] => Some(Framework::Pytest),
             ["node", ..] if words.contains(&"--test") => Some(Framework::Js),
@@ -70,7 +71,7 @@ impl TestStatus {
 
     /// The status of tests together: failed if one did, else passed if one
     /// did, else skipped.
-    fn combine(a: Option<TestStatus>, b: TestStatus) -> TestStatus {
+    pub fn combine(a: Option<TestStatus>, b: TestStatus) -> TestStatus {
         match (a, b) {
             (Some(TestStatus::Failed), _) | (_, TestStatus::Failed) => TestStatus::Failed,
             (Some(TestStatus::Passed), _) | (_, TestStatus::Passed) => TestStatus::Passed,
@@ -444,9 +445,9 @@ pub fn rerun_failed(target: &RunTarget, run: &TestRun) -> Option<RunTarget> {
     }
     let command = match run.framework {
         Framework::Cargo => {
-            let base = target.command.split(" -- ").next().unwrap_or(&target.command);
+            let (base, harness) = target.command.split_once(" -- ").unwrap_or((&target.command, ""));
             let names: Vec<String> = failed.iter().map(|id| shell_quote(id)).collect();
-            format!("{base} -- {} --exact", names.join(" "))
+            format!("{} -- {} --exact{}", cargo_base(base), names.join(" "), harness_options(harness))
         }
         Framework::Go => {
             // Subtests run with their test.
@@ -487,6 +488,41 @@ pub fn rerun_failed(target: &RunTarget, run: &TestRun) -> Option<RunTarget> {
         debug: None,
         test: None,
     })
+}
+
+/// The part of a `cargo test` / `oxie test` command line before the
+/// harness's, without the test it named: `oxie test <file> <name>` takes the
+/// name as a filter, which the failed ones' ids replace.
+fn cargo_base(base: &str) -> &str {
+    if !base.starts_with("oxie test") {
+        return base;
+    }
+    match base.find(".oxi") {
+        // Up to the file's end, its closing quote included.
+        Some(at) => &base[..at + 4 + usize::from(base[at + 4..].starts_with('\''))],
+        None => "oxie test",
+    }
+}
+
+/// The harness options a run passed (`--format=pretty`, `--nocapture`),
+/// with their values, for its rerun; its filters and `--exact` go.
+fn harness_options(harness: &str) -> String {
+    let mut kept = String::new();
+    let mut words = harness.split_whitespace();
+    while let Some(word) = words.next() {
+        if !word.starts_with('-') || word == "--exact" {
+            continue;
+        }
+        kept.push(' ');
+        kept.push_str(word);
+        if matches!(word, "--format" | "--color" | "--test-threads" | "--skip" | "--logfile" | "-Z")
+            && let Some(value) = words.next()
+        {
+            kept.push(' ');
+            kept.push_str(value);
+        }
+    }
+    kept
 }
 
 /// The packages a `go test` command line names (`.` when none).
@@ -824,5 +860,13 @@ Tests:       1 failed, 1 skipped, 1 passed, 3 total
         let node = rerun_failed(&target("node --test --test-name-pattern=old /p/a.test.js"), &failed(Framework::Js, &["adds"], None)).unwrap();
         assert_eq!(node.command, "node --test-name-pattern=adds --test /p/a.test.js");
         assert!(rerun_failed(&target("cargo test"), &failed(Framework::Cargo, &[], None)).is_none());
+        // The run's options stay; `oxie test`'s name filter goes.
+        let options = rerun_failed(&target("cargo test -- tests --test-threads 1 --nocapture"), &failed(Framework::Cargo, &["tests::a"], None)).unwrap();
+        assert_eq!(options.command, "cargo test -- tests::a --exact --test-threads 1 --nocapture");
+        let ids = ["__oxie_tests::test_adds_two"];
+        let oxie = rerun_failed(&target("oxie test '/my p/t.oxi' 'adds two' -- --format=pretty"), &failed(Framework::Cargo, &ids, None)).unwrap();
+        assert_eq!(oxie.command, "oxie test '/my p/t.oxi' -- __oxie_tests::test_adds_two --exact --format=pretty");
+        let project = rerun_failed(&target("oxie test -- --format=pretty"), &failed(Framework::Cargo, &["a::__oxie_tests::test_b"], None)).unwrap();
+        assert_eq!(project.command, "oxie test -- a::__oxie_tests::test_b --exact --format=pretty");
     }
 }
