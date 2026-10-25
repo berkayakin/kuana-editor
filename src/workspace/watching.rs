@@ -179,6 +179,10 @@ impl Workspace {
     }
 
     fn project_updated(&mut self, snapshot: ProjectSnapshot, cx: &mut Context<Self>) {
+        // The tree's search looks through the files too. It lets go of the
+        // old ones first, so they're freed with the old snapshot.
+        let files = snapshot.openable();
+        self.tree.update(cx, |t, cx| t.set_files(files, cx));
         // Freeing a big project's paths takes a while: not on the UI thread.
         let old = std::mem::replace(&mut self.project, Arc::new(snapshot));
         cx.background_executor().spawn(async move { drop(old) }).detach();

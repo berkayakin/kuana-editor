@@ -869,11 +869,19 @@ impl Workspace {
         });
         let tree = cx.new(ProjectTree::new);
         let tree_subscription = cx.subscribe_in(&tree, window, |ws, _, event: &TreeEvent, window, cx| match event {
-            TreeEvent::Open(path) => ws.open_path(path.clone(), window, cx),
+            TreeEvent::Open { path, focus } => {
+                ws.open_path(path.clone(), window, cx);
+                // A click shows the file and leaves the keyboard in the tree (typing
+                // searches it), unless opening it asked something first: the
+                // question has the keyboard then.
+                if !*focus && ws.active_item(cx).is_some_and(|item| item.focus_handle(cx).is_focused(window)) {
+                    window.focus(&ws.tree.focus_handle(cx));
+                }
+            }
             TreeEvent::Menu { path, is_dir, position } => ws.open_tree_menu(path.clone(), *is_dir, *position, window, cx),
             TreeEvent::Move { from, into } => ws.move_entry(from.clone(), into.clone(), cx),
             TreeEvent::CopyIn { paths, into } => ws.drop_into_tree(paths.clone(), into.clone(), window, cx),
-            TreeEvent::History { redo } => ws.step_file_history(*redo, window, cx),
+            TreeEvent::History { redo } => ws.step_file_history(*redo, true, window, cx),
             TreeEvent::Toggled => ws.schedule_session_save(cx),
             TreeEvent::RootDrop(on) => {
                 ws.tree_root_drop = *on;

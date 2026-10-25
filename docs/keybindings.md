@@ -32,6 +32,8 @@ The table below is the JetBrains keymap.
 | Start new line / line above | ⇧↩ / ⌥⌘↩ | Shift+Enter / Ctrl+Alt+Enter |
 | Add caret above / below | ⌥⌘↑ / ⌥⌘↓ | Ctrl+Alt+↑ / ↓ |
 | Project sidebar / Problems | ⌘1 / ⌘6 | Alt+1 / Alt+6 |
+| Search the file tree (in the tree; ↑ ↓ go from match to match, Esc ends it) | type a name, or ⌘F | type a name, or Ctrl+F |
+| Move / close and open folders / open in the editor (in the file tree) | ↑ ↓ / ← → / ↩ | ↑ ↓ / ← → / Enter |
 | Terminal (open, focus, hide) | ⌥F12 | Alt+F12 |
 | Run… / Run again | ⌃⌥R / ⌃R | Alt+Shift+F10 / Shift+F10 |
 | Run test or function at caret | ⌃⇧R | Ctrl+Shift+F10 |
