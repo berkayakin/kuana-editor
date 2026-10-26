@@ -327,22 +327,27 @@ impl Workspace {
             self.show_sidebar = true;
             self.sidebar_mode = SidebarMode::Files;
         }
-        // Leaving the Commit view: its message box must not keep focus while hidden, or
-        // key presses (⌘0 included) go nowhere.
-        if self.git_panel.focus_handle(cx).contains_focused(window, cx) {
-            self.focus_active(window, cx);
-        }
+        self.release_hidden_focus(window, cx);
         self.save_state(cx);
         cx.notify();
+    }
+
+    /// A sidebar view that's hidden now gives the keyboard to the editor. One
+    /// that kept it (the Commit view's message box, the file tree a click on a
+    /// file leaves it in) would leave key presses (⌘0 included) going nowhere.
+    fn release_hidden_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let hidden = |mode| !self.show_sidebar || self.sidebar_mode != mode;
+        if (hidden(SidebarMode::Files) && self.tree.focus_handle(cx).contains_focused(window, cx))
+            || (hidden(SidebarMode::Commit) && self.git_panel.focus_handle(cx).contains_focused(window, cx))
+        {
+            self.focus_active(window, cx);
+        }
     }
 
     /// Shows or hides the sidebar, keeping the view it has.
     pub(super) fn set_sidebar_visible(&mut self, visible: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.show_sidebar = visible;
-        // A hidden Commit view's message box must not keep focus (see `toggle_sidebar`).
-        if !visible && self.git_panel.focus_handle(cx).contains_focused(window, cx) {
-            self.focus_active(window, cx);
-        }
+        self.release_hidden_focus(window, cx);
         if visible && self.sidebar_mode == SidebarMode::Commit {
             self.refresh_commit_view(cx);
         }
@@ -356,9 +361,7 @@ impl Workspace {
             return;
         }
         self.sidebar_mode = SidebarMode::Files;
-        if self.git_panel.focus_handle(cx).contains_focused(window, cx) {
-            self.focus_active(window, cx);
-        }
+        self.release_hidden_focus(window, cx);
         self.save_state(cx);
         cx.notify();
     }

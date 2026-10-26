@@ -120,6 +120,13 @@ fn common(mac: bool) -> Vec<KeyBinding> {
         KeyBinding::new("right", MoveRight, Some("Results")),
         KeyBinding::new("enter", Newline, Some("Results")),
         KeyBinding::new("escape", Cancel, Some("Results")),
+        // The file tree; its search field passes these on to it.
+        KeyBinding::new("up", MoveUp, Some("FileTree")),
+        KeyBinding::new("down", MoveDown, Some("FileTree")),
+        KeyBinding::new("left", MoveLeft, Some("FileTree")),
+        KeyBinding::new("right", MoveRight, Some("FileTree")),
+        KeyBinding::new("enter", Newline, Some("FileTree")),
+        KeyBinding::new("escape", Cancel, Some("FileTree")),
         KeyBinding::new("escape", Cancel, Some("Preferences")),
         KeyBinding::new("up", MoveUp, Some("ContextMenu")),
         KeyBinding::new("down", MoveDown, Some("ContextMenu")),
@@ -1179,6 +1186,27 @@ mod tests {
         assert_eq!(resolve(BaseKeymap::JetBrains, "f8", editor), Some("workspace::StepOver"));
         assert_eq!(resolve(BaseKeymap::VSCode, "f2", editor), Some("editor::RenameSymbol"));
         assert_eq!(resolve(BaseKeymap::Zed, "f2", editor), Some("editor::RenameSymbol"));
+    }
+
+    #[test]
+    fn the_file_tree_and_its_search_field_take_the_same_keys() {
+        let tree_keys = [
+            ("up", "editor::MoveUp"),
+            ("down", "editor::MoveDown"),
+            ("enter", "editor::Newline"),
+            ("escape", "editor::Cancel"),
+            // Find in the tree searches it.
+            ("secondary-f", "workspace::Find"),
+        ];
+        for base in BaseKeymap::ALL {
+            for (keys, action) in tree_keys {
+                assert_eq!(resolve(base, keys, &["Workspace", "FileTree"]), Some(action), "{base:?}: {keys}");
+                // The search field passes them on to the tree.
+                assert_eq!(resolve(base, keys, &["Workspace", "FileTree", "Editor"]), Some(action), "{base:?}: {keys} in the field");
+            }
+            assert_eq!(resolve(base, "left", &["Workspace", "FileTree"]), Some("editor::MoveLeft"), "{base:?}");
+            assert_eq!(resolve(base, "right", &["Workspace", "FileTree"]), Some("editor::MoveRight"), "{base:?}");
+        }
     }
 
     use serde_json::json;

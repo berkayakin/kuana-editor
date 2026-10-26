@@ -289,8 +289,8 @@ impl Workspace {
             TreeAction::LocalHistory(path) => self.show_local_history_of(path, window, cx),
             TreeAction::AskGit(prompt) => self.ask_for_name(PendingInput::Git(prompt), window, cx),
             TreeAction::CopyText(text) => cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)),
-            TreeAction::UndoFileChange => self.step_file_history(false, window, cx),
-            TreeAction::RedoFileChange => self.step_file_history(true, window, cx),
+            TreeAction::UndoFileChange => self.step_file_history(false, false, window, cx),
+            TreeAction::RedoFileChange => self.step_file_history(true, false, window, cx),
         }
     }
 
@@ -525,8 +525,10 @@ impl Workspace {
     }
 
     /// Undoes (or redoes) the last file operation. Moving files with unsaved
-    /// edits to the Trash asks first.
-    pub(super) fn step_file_history(&mut self, redo: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// edits to the Trash asks first, and so does moving any from the keys
+    /// (`keys`: ⌘Z in the tree, which a click on a file leaves the keyboard
+    /// in, may have been meant for that file).
+    pub(super) fn step_file_history(&mut self, redo: bool, keys: bool, window: &mut Window, cx: &mut Context<Self>) {
         let label = if redo { self.file_history.redo_label() } else { self.file_history.undo_label() };
         let Some(label) = label.map(str::to_string) else { return };
         let mut trashes = Vec::new();
@@ -541,14 +543,23 @@ impl Workspace {
             let doc = t.read(cx).doc.read(cx);
             doc.is_dirty() && doc.path.as_deref().is_some_and(|p| trashes.iter().any(|t| p.starts_with(t)))
         });
-        if !dirty {
+        let asks = dirty || (keys && !trashes.is_empty());
+        if !asks {
             self.apply_file_history(redo, window, cx);
             return;
         }
         let verb = if redo { "Redo" } else { "Undo" };
-        let detail = format!("This moves files with unsaved changes to the {}; the changes will be lost.", trash_name());
-        // Unsaved changes don't come back: Cancel is the default.
-        let confirmed = ask(window, &format!("{verb} {label}?"), &detail, verb, false, cx);
+        let detail = if dirty {
+            format!("This moves files with unsaved changes to the {}; the changes will be lost.", trash_name())
+        } else {
+            let what = match trashes.as_slice() {
+                [path] => format!("“{}”", path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())),
+                paths => format!("{} files and folders", paths.len()),
+            };
+            format!("This moves {what} to the {}.", trash_name())
+        };
+        // Unsaved changes don't come back: Cancel is the default then.
+        let confirmed = ask(window, &format!("{verb} {label}?"), &detail, verb, !dirty, cx);
         cx.spawn_in(window, async move |this, cx| {
             if confirmed.await {
                 this.update_in(cx, |ws, window, cx| ws.apply_file_history(redo, window, cx)).ok();
@@ -934,7 +945,7 @@ impl Workspace {
             return;
         }
         match button {
-            ToastButton::UndoFile(_) => self.step_file_history(false, window, cx),
+            ToastButton::UndoFile(_) => self.step_file_history(false, false, window, cx),
             ToastButton::SaveBackground => self.save_background(false, false, cx),
             ToastButton::ShowTestResults => self.toggle_results(&ToggleResults, window, cx),
         }

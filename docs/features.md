@@ -118,8 +118,14 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   Reveal in Finder; drag entries onto a folder to move them (open tabs follow); **Select Opened File**
   (⌥F1 / Alt+F1, or a tab's menu) shows the current file in the tree; ⌘Z / ⇧⌘Z (Ctrl+Z / Ctrl+Shift+Z)
   in the tree, or its right-click menu, undo and redo file operations, deletes included (they come
-  back from the Trash; the notification after a delete has **Undo** too); tabs, custom title bar,
-  IME support
+  back from the Trash; the notification after a delete has **Undo** too; the keys ask before moving
+  files there); tabs, custom title bar, IME support
+- In the file tree, a click opens a file and leaves the keyboard in the tree, a double click or Enter
+  moves to its editor, and the arrow keys move (← / → close and open folders). Typing a name, or Find
+  (⌘F / Ctrl+F), searches the tree as JetBrains' speed search does: the tree stays as it is, the
+  matching part of each name is marked, and the first match is selected, its folders opened (closed
+  folders are searched too; ignored ones, like `node_modules`, once you've opened them); ↑ / ↓ go
+  from match to match, Enter opens one, Escape ends the search
 - Local History: earlier versions of each file (on save, before and after outside changes, before a
   rollback), listed by day with a diff against the file as it is and Restore; see
   [Local History](editing.md#local-history)
