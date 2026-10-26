@@ -882,6 +882,12 @@ impl Workspace {
             TreeEvent::Move { from, into } => ws.move_entry(from.clone(), into.clone(), cx),
             TreeEvent::CopyIn { paths, into } => ws.drop_into_tree(paths.clone(), into.clone(), window, cx),
             TreeEvent::History { redo } => ws.step_file_history(*redo, true, window, cx),
+            // With no editor open, the keyboard stays in the tree rather than going nowhere.
+            TreeEvent::Leave => {
+                if ws.active_item(cx).is_some() {
+                    ws.focus_active(window, cx);
+                }
+            }
             TreeEvent::Toggled => ws.schedule_session_save(cx),
             TreeEvent::RootDrop(on) => {
                 ws.tree_root_drop = *on;

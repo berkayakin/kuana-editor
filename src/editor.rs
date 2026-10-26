@@ -769,6 +769,11 @@ impl Editor {
         self.doc.read(cx).rope().to_string()
     }
 
+    /// An input method (or a dead key) is composing text it hasn't committed.
+    pub fn composing(&self) -> bool {
+        self.marked_range.is_some()
+    }
+
     /// Replaces the whole text (as one undoable edit) and selects it.
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
         let text = if self.is_single_line() { text.replace('\n', " ") } else { text.to_string() };

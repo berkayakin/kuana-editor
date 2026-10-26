@@ -14,7 +14,8 @@
 //! stays as it is, the matching part of each match's name is marked, and the
 //! first match is selected, the folders down to it opened (closed folders are
 //! searched too, ignored ones once the tree has read them). ↑/↓ go from match
-//! to match, Enter opens one, Escape (or leaving the tree) ends the search.
+//! to match, Enter opens one, Escape (or leaving the tree) ends the search;
+//! Escape without one goes back to the editor, as in JetBrains.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -81,6 +82,8 @@ pub enum TreeEvent {
     CopyIn { paths: Vec<PathBuf>, into: PathBuf },
     /// ⌘Z / ⇧⌘Z with the tree focused: undo or redo a file operation.
     History { redo: bool },
+    /// Escape with no search to end: the keyboard goes back to the editor.
+    Leave,
     /// A folder opened or closed (the session keeps which).
     Toggled,
     /// A drag over the tree started or stopped targeting the project folder
@@ -115,6 +118,15 @@ struct Search {
     /// The window, for what comes when the matches do.
     window: AnyWindowHandle,
     _subscriptions: [Subscription; 2],
+}
+
+impl Search {
+    /// Lets go of the matches off the UI thread: a broad query's in a big
+    /// project are tens of thousands of paths, milliseconds to free.
+    fn free_matches(&mut self, cx: &gpui::App) {
+        let matches = (self.found.take(), std::mem::take(&mut self.marks));
+        cx.background_executor().spawn(async move { drop(matches) }).detach();
+    }
 }
 
 pub struct ProjectTree {
@@ -462,9 +474,17 @@ impl ProjectTree {
         self.selected.as_deref()?.ancestors().find_map(|p| self.entries.iter().position(|e| e.path.as_path() == p))
     }
 
+    /// Selects a row, scrolled into view only as far as it takes: one below
+    /// the view comes in at its bottom edge, one above at its top, so ↑/↓
+    /// scroll a row at a time.
     fn select_row(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let strategy = match self.selected_row() {
+            Some(row) if ix < row => ScrollStrategy::Top,
+            Some(_) => ScrollStrategy::Bottom,
+            None => ScrollStrategy::Center,
+        };
         self.selected = self.entries.get(ix).map(|e| e.path.clone());
-        self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
+        self.scroll.scroll_to_item(ix, strategy);
         cx.notify();
     }
 
@@ -555,7 +575,8 @@ impl ProjectTree {
     /// Ends the search. What it shows stays (the match selected, its folders
     /// open), and the keyboard goes back to the tree if the query field had it.
     fn end_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(search) = self.search.take() else { return };
+        let Some(mut search) = self.search.take() else { return };
+        search.free_matches(cx);
         if search.input.focus_handle(cx).is_focused(window) {
             window.focus(&self.focus);
         }
@@ -566,16 +587,21 @@ impl ProjectTree {
     }
 
     /// Searches for the query as it is now, in the background (a project
-    /// can have many files); the marks shown stay until it's done.
+    /// can have many files); the marks shown stay until it's done. Not while
+    /// an input method or a dead key composes (a lone accent finds nothing):
+    /// what it commits is an edit, searched then.
     fn research(&mut self, cx: &mut Context<Self>) {
         let Some(root) = self.root.clone() else { return };
         let Some(search) = self.search.as_mut() else { return };
+        if search.input.read(cx).composing() {
+            return;
+        }
         let query = search.input.read(cx).text(cx);
         search.stale = false;
         if query.trim().is_empty() {
-            (search.found, search.task, search.open_first) = (None, None, false);
+            search.free_matches(cx);
+            (search.task, search.open_first) = (None, false);
             search.query.clear();
-            search.marks.clear();
             cx.notify();
             return;
         }
@@ -619,6 +645,7 @@ impl ProjectTree {
         };
         let again = std::mem::take(&mut search.stale);
         search.query = query;
+        search.free_matches(cx);
         (search.found, search.marks) = (Some(found), marks);
         match shown {
             Some(path) => self.show_match(path, cx),
@@ -699,9 +726,14 @@ impl ProjectTree {
         self.open_match(window, cx);
     }
 
-    /// Escape ends a search (and nothing else: the editor's Find bar stays).
+    /// Escape ends a search; without one, it goes back to the editor, as in
+    /// JetBrains (the editor's Find bar stays either way).
     fn on_escape(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
-        self.end_search(window, cx);
+        if self.search.is_some() {
+            self.end_search(window, cx);
+        } else {
+            cx.emit(TreeEvent::Leave);
+        }
     }
 
     /// Find with the tree focused searches it (as in VS Code and JetBrains).
@@ -878,9 +910,21 @@ impl Render for ProjectTree {
                                 }))
                                 .child(icon)
                                 .child(div().flex_1().min_w_0().truncate().text_color(name_color).map(|el| match marks {
-                                    // In the color of the editor's current search match.
+                                    // In the color of the editor's current search match, the name
+                                    // kept readable on it (a dim, ignored one most of all) over the
+                                    // row's own fill.
                                     Some(marks) => {
-                                        let marked = HighlightStyle { background_color: Some(theme.search_active.into()), ..Default::default() };
+                                        let fill: Hsla = if cursor {
+                                            theme.selection.into()
+                                        } else if selected {
+                                            theme.accent_soft.into()
+                                        } else {
+                                            gpui::transparent_black()
+                                        };
+                                        let row = Hsla { a: 1., ..theme.background.into() }.blend(fill);
+                                        let color = crate::contrast::keep_legible(name_color, row.blend(theme.search_active.into()), row);
+                                        let marked =
+                                            HighlightStyle { color: Some(color), background_color: Some(theme.search_active.into()), ..Default::default() };
                                         el.child(StyledText::new(e.name.clone()).with_highlights(marks.iter().map(|r| (r.clone(), marked))))
                                     }
                                     None => el.child(e.name.clone()),
@@ -1210,7 +1254,10 @@ fn joined(ranges: impl IntoIterator<Item = Range<usize>>) -> Vec<Range<usize>> {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, rc::Rc};
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
 
     use gpui::{AppContext, Modifiers, TestAppContext, VisualTestContext};
 
@@ -1382,7 +1429,9 @@ mod tests {
     /// folders opened), ↓ goes to the next one (the folders opened for the
     /// last close again), Enter opens it (once the query's matches are in).
     /// Escape ends a search, the match staying selected, and so does leaving
-    /// the tree; Find starts one.
+    /// the tree; without a search, Escape goes back to the editor. A dead
+    /// key's accent opens a search, searched once it's composed. Find starts
+    /// one too.
     #[gpui::test]
     fn clicks_open_and_typing_searches_the_tree(cx: &mut TestAppContext) {
         let dir = std::env::temp_dir().join(format!("kuana-tree-search-{}", std::process::id()));
@@ -1397,14 +1446,15 @@ mod tests {
         });
         let (tree, cx) = cx.add_window_view(|_, cx| ProjectTree::new(cx));
         let opened = Rc::new(RefCell::new(Vec::new()));
+        let left = Rc::new(Cell::new(0));
         cx.update(|window, cx| {
             // Focus changes are told in an active window only.
             window.activate_window();
-            let opened = opened.clone();
-            cx.subscribe(&tree, move |_, event: &TreeEvent, _| {
-                if let TreeEvent::Open { path, focus } = event {
-                    opened.borrow_mut().push((path.clone(), *focus));
-                }
+            let (opened, left) = (opened.clone(), left.clone());
+            cx.subscribe(&tree, move |_, event: &TreeEvent, _| match event {
+                TreeEvent::Open { path, focus } => opened.borrow_mut().push((path.clone(), *focus)),
+                TreeEvent::Leave => left.set(left.get() + 1),
+                _ => {}
             })
             .detach();
         });
@@ -1469,13 +1519,28 @@ mod tests {
         cx.simulate_keystrokes("a i n . r enter");
         assert_eq!(opened.borrow().last(), Some(&(dir.join("src/ui/domain.rs"), true)));
 
-        // Escape ends a search, the match staying selected.
+        // Escape ends a search, the match staying selected; without a search,
+        // it goes back to the editor.
         cx.simulate_keystrokes("r e a d");
         assert_eq!(selected(cx), Some(dir.join("README.md")));
         cx.simulate_keystrokes("escape");
         tree.read_with(cx, |t, _| assert!(t.search.is_none()));
         assert_eq!(selected(cx), Some(dir.join("README.md")));
         assert!(cx.update(|window, cx| tree.read(cx).focus.is_focused(window)));
+        assert_eq!(left.get(), 0);
+        cx.simulate_keystrokes("escape");
+        assert_eq!(left.get(), 1);
+
+        // A dead key's accent (or what an input method composes) opens the
+        // search but isn't searched for; what it commits is.
+        cx.update(|window, cx| tree.update(cx, |t, cx| t.replace_and_mark_text_in_range(None, "´", None, window, cx)));
+        cx.run_until_parked();
+        tree.read_with(cx, |t, _| assert!(t.search.as_ref().is_some_and(|s| s.task.is_none() && s.found.is_none())));
+        cx.update(|window, cx| tree.update(cx, |t, cx| t.replace_text_in_range(None, "é", window, cx)));
+        cx.run_until_parked();
+        tree.read_with(cx, |t, _| assert_eq!(t.search.as_ref().and_then(|s| s.found.clone()), Some(Vec::new())));
+        cx.simulate_keystrokes("escape");
+        assert_eq!(left.get(), 1);
 
         // Find starts a search too; leaving the tree ends it.
         cx.simulate_keystrokes("secondary-f d o c");
