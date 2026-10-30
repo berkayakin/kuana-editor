@@ -3615,6 +3615,7 @@ dependencies = [
  "tree-sitter-typescript",
  "tree-sitter-yaml",
  "unicode-normalization",
+ "unicode-width",
  "url",
  "wasmtime",
  "wasmtime-wasi",

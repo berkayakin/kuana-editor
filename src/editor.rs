@@ -353,6 +353,10 @@ pub struct Editor {
     scrollbar_hovered: bool,
     /// The thumb fades out when the text stops scrolling; the track's markers stay.
     scrollbar_fade: crate::ui::ScrollbarFade,
+    /// The same for the horizontal scrollbar (lines wider than the view).
+    h_scrollbar_drag: Option<Pixels>,
+    h_scrollbar_hovered: bool,
+    h_scrollbar_fade: crate::ui::ScrollbarFade,
     minimap_cache: minimap::MinimapCache,
     /// The scrollbar's markers, kept until what they show changes.
     markers: markers::Markers,
@@ -529,6 +533,9 @@ impl Editor {
             scrollbar_drag: None,
             scrollbar_hovered: false,
             scrollbar_fade: Default::default(),
+            h_scrollbar_drag: None,
+            h_scrollbar_hovered: false,
+            h_scrollbar_fade: Default::default(),
             minimap_cache: Default::default(),
             markers: Default::default(),
             blocks_cache: None,
@@ -1685,10 +1692,31 @@ impl Editor {
     /// The columns of line `row` laid out for display rows
     /// `first_drow..last_drow` (see `display_part`).
     fn shown_columns(&self, row: usize, first_drow: usize, last_drow: usize, cx: &App) -> Range<usize> {
-        let first = self.first_display_row(row);
-        let segs = first_drow.saturating_sub(first)..=last_drow.saturating_sub(1).saturating_sub(first);
-        let (from, to) = self.part_bounds(row, segs, cx);
+        let (from, to) = self.part_bounds(row, self.shown_segments(row, first_drow, last_drow, cx), cx);
         from.byte as usize..to
+    }
+
+    /// The segments of line `row` on screen: those on display rows
+    /// `first_drow..last_drow`, or, side by side, those in the view's width.
+    fn shown_segments(&self, row: usize, first_drow: usize, last_drow: usize, cx: &App) -> std::ops::RangeInclusive<usize> {
+        let breaks = self.line_breaks(row);
+        if let Some(l) = self.layout.as_ref().filter(|_| self.side_by_side() && !breaks.is_empty()) {
+            let width = l.bounds.right() - l.text_left - self.right_edge_width(cx);
+            let left = (self.scroll.x / l.char_width).floor().max(0.) as usize;
+            let right = ((self.scroll.x + width) / l.char_width).ceil().max(0.) as usize;
+            // One more on the left: wide characters make a segment wider
+            // than its columns.
+            let first = breaks.partition_point(|b| b.indent as usize <= left).saturating_sub(1);
+            return first..=breaks.partition_point(|b| (b.indent as usize) < right);
+        }
+        let first = self.first_display_row(row);
+        first_drow.saturating_sub(first)..=last_drow.saturating_sub(1).saturating_sub(first)
+    }
+
+    /// Whether long lines' segments sit side by side (no soft wrap; see
+    /// `WrapMap::side_by_side`).
+    fn side_by_side(&self) -> bool {
+        self.wrap.as_ref().is_some_and(WrapMap::side_by_side)
     }
 
     /// Where buffer column `col` of line `row` shows (a display offset),
@@ -1736,11 +1764,15 @@ impl Editor {
     }
 
     fn offset_for_display_row_x(&self, drow: usize, x: Pixels, window: &mut Window, cx: &App) -> usize {
-        let (row, seg) = self.line_of_display_row(drow, cx);
+        let (row, mut seg) = self.line_of_display_row(drow, cx);
+        let side_by_side = self.side_by_side();
+        if side_by_side {
+            seg = self.line_breaks(row).partition_point(|b| self.char_width() * b.indent as f32 <= x);
+        }
         let shape = self.shape_segment(row, seg, window, cx);
         let mut col = shape.range.start + shape.line.closest_index_for_x((x - shape.indent).max(px(0.)));
         // The end of a wrapped row is the start of the next one; stay on this row.
-        if !shape.last && col >= shape.range.end && shape.range.end > shape.range.start {
+        if !side_by_side && !shape.last && col >= shape.range.end && shape.range.end > shape.range.start {
             col = shape.dl.slice(shape.range.clone()).char_indices().last().map_or(col, |(i, _)| shape.range.start + i);
         }
         self.doc.read(cx).line_start(row) + shape.dl.to_buffer(col)
@@ -2215,14 +2247,13 @@ impl Editor {
                 _ => ranges.push(start..end),
             }
         }
-        let (row, seg) = self.line_of_display_row(first_drow, cx);
-        if let (Some(r), Some(b)) = (ranges.first_mut(), seg.checked_sub(1).and_then(|s| self.line_breaks(row).get(s))) {
-            // From the character the row's text starts in (see `display_part`).
-            r.start = (self.doc.read(cx).line_start(row) + b.from.byte as usize).min(r.end);
+        // A long line's from the character its first segment on screen starts
+        // in (see `display_part`).
+        if let Some(r) = ranges.first_mut().filter(|_| first_row < last_row) {
+            r.start = (self.doc.read(cx).line_start(first_row) + self.shown_columns(first_row, first_drow, last_drow, cx).start).min(r.end);
         }
-        let (row, seg) = self.line_of_display_row(last_drow.saturating_sub(1), cx);
-        if let (Some(r), Some(b)) = (ranges.last_mut(), self.line_breaks(row).get(seg)) {
-            r.end = (self.doc.read(cx).line_start(row) + b.byte as usize).max(r.start);
+        if let Some(r) = ranges.last_mut().filter(|_| first_row < last_row) {
+            r.end = (self.doc.read(cx).line_start(last_row - 1) + self.shown_columns(last_row - 1, first_drow, last_drow, cx).end).max(r.start);
         }
         let key = (self.doc.read(cx).tree_version(), self.doc.read(cx).language, ranges);
         if let Some((k, highlights)) = &self.highlight_cache
@@ -2274,7 +2305,7 @@ impl Editor {
     fn display_row_of(&self, offset: usize, cx: &App) -> usize {
         let row = self.doc.read(cx).row_of(offset);
         let breaks = self.line_breaks(row);
-        if breaks.is_empty() {
+        if breaks.is_empty() || self.side_by_side() {
             return self.first_display_row(row);
         }
         let col = self.display_column(row, offset - self.doc.read(cx).line_start(row), cx);
@@ -3099,6 +3130,29 @@ impl Editor {
         Some((track, thumb))
     }
 
+    /// The horizontal scrollbar's track (along the text's bottom, up to the
+    /// vertical one or the minimap) and thumb, when lines are wider than the
+    /// view (no soft wrap). Lines count once they've been drawn.
+    fn h_scrollbar_geometry(&self, cx: &App) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+        let l = self.layout.as_ref()?;
+        if self.is_chromeless() || self.wrap.as_ref().is_some_and(|w| w.key.wrap) {
+            return None;
+        }
+        let right = l.bounds.right() - self.right_edge_width(cx);
+        let viewport = right - l.text_left;
+        // As far as `clamp_scroll` lets it scroll.
+        let content = self.max_line_width + l.char_width * 4.;
+        if viewport <= px(0.) || content <= viewport {
+            return None;
+        }
+        let track = Bounds::from_corners(point(l.text_left, l.bounds.bottom() - px(SCROLLBAR_WIDTH)), point(right, l.bounds.bottom()));
+        let thumb_w = (viewport * (viewport / content)).max(px(28.));
+        let t = (self.scroll.x / (content - viewport)).clamp(0., 1.);
+        // As thick as the vertical thumb, as far from the edge.
+        let thumb = Bounds::new(point(track.left() + (viewport - thumb_w) * t, track.bottom() - px(8.)), size(thumb_w, px(6.)));
+        Some((track, thumb))
+    }
+
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle);
         self.sync_wrap(cx);
@@ -3115,6 +3169,17 @@ impl Editor {
             } else {
                 self.scrollbar_drag = Some(thumb.size.height / 2.);
                 self.drag_scrollbar_to(event.position.y, cx);
+            }
+            return;
+        }
+        if let Some((track, thumb)) = self.h_scrollbar_geometry(cx)
+            && track.contains(&event.position)
+        {
+            if thumb.contains(&event.position) {
+                self.h_scrollbar_drag = Some(event.position.x - thumb.left());
+            } else {
+                self.h_scrollbar_drag = Some(thumb.size.width / 2.);
+                self.drag_h_scrollbar_to(event.position.x, cx);
             }
             return;
         }
@@ -3364,10 +3429,25 @@ impl Editor {
         cx.notify();
     }
 
+    fn drag_h_scrollbar_to(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        let (Some(grab), Some((track, thumb)), Some(l)) = (self.h_scrollbar_drag, self.h_scrollbar_geometry(cx), self.layout.as_ref()) else {
+            return;
+        };
+        let content = self.max_line_width + l.char_width * 4.;
+        let range = track.size.width - thumb.size.width;
+        if range <= px(0.) {
+            return;
+        }
+        let t = ((x - grab - track.left()) / range).clamp(0., 1.);
+        self.scroll.x = (content - track.size.width) * t;
+        cx.notify();
+    }
+
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         if event.pressed_button != Some(MouseButton::Left) {
             self.drag = None;
             self.scrollbar_drag = None;
+            self.h_scrollbar_drag = None;
             let over_gutter = !self.is_chromeless()
                 && self.layout.as_ref().is_some_and(|l| {
                     l.bounds.contains(&event.position) && event.position.x < l.bounds.left() + l.gutter_width
@@ -3387,22 +3467,40 @@ impl Editor {
                 self.hover_at(event.position, window, cx);
             }
             self.update_link(event.position, event.modifiers.secondary(), window, cx);
-            return;
         }
+        // With the button down, `on_mouse_drag` (heard window-wide).
+    }
+
+    /// Whether a drag the editor follows is on: a selection, a scrollbar.
+    fn dragging(&self) -> bool {
+        self.drag.is_some() || self.scrollbar_drag.is_some() || self.h_scrollbar_drag.is_some()
+    }
+
+    /// The pointer moved with the left button down during a drag, wherever
+    /// it is: over other views or out of the window, a selection keeps
+    /// following it and scrolling (GPUI repeats the last move every 16 ms
+    /// while the button is down, so a still pointer past an edge scrolls on).
+    fn on_mouse_drag(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.scrollbar_drag.is_some() {
             self.drag_scrollbar_to(event.position.y, cx);
+            return;
+        }
+        if self.h_scrollbar_drag.is_some() {
+            self.drag_h_scrollbar_to(event.position.x, cx);
             return;
         }
         let Some(drag) = self.drag.as_ref() else { return };
         let (mode, origin, column_from) = (drag.mode, drag.origin.clone(), drag.column_from);
         self.sync_wrap(cx);
+        self.drag_scroll(event.position, cx);
         if let Some(from) = column_from {
             let row = self.doc.read(cx).row_of(self.offset_for_position(event.position, window, cx));
             // Still on the spot it started: an Alt+click, not a box yet.
             if (row, self.column_at_x(event.position.x)) != from {
                 self.select_box(from, event.position, cx);
             }
-            self.autoscroll = self.layout.as_ref().is_some_and(|l| !l.bounds.contains(&event.position));
+            // Only the drag scrolls (see below).
+            self.autoscroll = false;
             return;
         }
         let offset = self.offset_for_position(event.position, window, cx);
@@ -3419,11 +3517,48 @@ impl Editor {
         let mut selections = self.selections.clone();
         selections[self.primary] = sel;
         self.set_selections(selections, self.primary, cx);
-        // Only scroll when the pointer leaves the viewport.
-        self.autoscroll = self
-            .layout
-            .as_ref()
-            .is_some_and(|l| !l.bounds.contains(&event.position));
+        // Only the drag scrolls, as in Zed: autoscroll would pull a caret
+        // under a pointer past the edge back inside it, against the drag
+        // (the view flickered between the two).
+        self.autoscroll = false;
+    }
+
+    /// Dragging a selection near or past the text's edges scrolls that way,
+    /// the further out the faster, a step per pointer move (as in Zed): up
+    /// and down within a row of the top and bottom, sideways within
+    /// `DRAG_SCROLL_MARGIN` columns of the left and right.
+    fn drag_scroll(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(l) = self.layout.as_ref() else { return };
+        let past = |d: Pixels| (d / px(1.)).powf(1.2);
+        let margin = l.line_height.min(l.bounds.size.height / 3.);
+        let (top, bottom) = (l.bounds.top() + margin, l.bounds.bottom() - margin);
+        let rows = if position.y < top {
+            -(past(top - position.y) / 100.).min(3.)
+        } else if position.y > bottom {
+            (past(position.y - bottom) / 100.).min(3.)
+        } else {
+            0.
+        };
+        let right_edge = l.bounds.right() - if self.is_single_line() { px(0.) } else { self.right_edge_width(cx) };
+        let margin = (l.char_width * DRAG_SCROLL_MARGIN).min((right_edge - l.text_left) / 3.).max(px(0.));
+        let (left, right) = (l.text_left + margin, right_edge - margin);
+        let columns = if position.x < left {
+            -past(left - position.x) / 300.
+        } else if position.x > right {
+            past(position.x - right) / 300.
+        } else {
+            0.
+        };
+        if rows == 0. && columns == 0. {
+            return;
+        }
+        let before = self.scroll;
+        self.scroll.y += l.line_height * rows;
+        self.scroll.x += l.char_width * columns;
+        self.clamp_scroll(cx);
+        if self.scroll != before {
+            cx.notify();
+        }
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -3431,11 +3566,16 @@ impl Editor {
             self.vim_after_mouse(cx);
         }
         self.scrollbar_drag = None;
+        self.h_scrollbar_drag = None;
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let line_height = self.layout.as_ref().map_or(px(20.), |l| l.line_height);
         let mut delta = event.delta.pixel_delta(line_height);
+        // Shift turns a mouse wheel sideways (where the system doesn't already).
+        if event.modifiers.shift && delta.x == px(0.) {
+            delta = point(delta.y, px(0.));
+        }
         // Lock to the dominant axis to avoid diagonal jitter on trackpads.
         if delta.x.abs() > delta.y.abs() {
             delta.y = px(0.);
@@ -3732,10 +3872,14 @@ impl Editor {
             let (line_start, line_end) = (self.doc.read(cx).line_start(row), self.doc.read(cx).line_end(row));
             // This line's rows on screen.
             let breaks_count = self.line_breaks(row).len();
-            if row_first_drow + breaks_count < first_drow || row_first_drow >= last_drow {
+            // Side by side, a long line's segments share its one row.
+            let side_by_side = self.side_by_side() && breaks_count > 0;
+            let row_count = if side_by_side { 1 } else { breaks_count + 1 };
+            if row_first_drow + row_count <= first_drow || row_first_drow >= last_drow {
                 continue;
             }
-            let (seg_lo, seg_hi) = (first_drow.saturating_sub(row_first_drow), (last_drow - 1 - row_first_drow).min(breaks_count));
+            let shown = self.shown_segments(row, first_drow, last_drow, cx);
+            let (seg_lo, seg_hi) = (*shown.start(), (*shown.end()).min(breaks_count));
             let segs = Segments::new(self.line_breaks(row), seg_lo..=seg_hi);
             // The part of the line laid out: all of it, or a long line's rows
             // on screen; its buffer text, from column `part.start`.
@@ -3845,13 +3989,17 @@ impl Editor {
 
             // Each wrapped segment of the line is its own display row.
             for seg in seg_lo..=seg_hi {
-                let drow = row_first_drow + seg;
+                let drow = row_first_drow + if side_by_side { 0 } else { seg };
                 if drow < first_drow || drow >= last_drow {
                     continue;
                 }
                 let (seg_range, wrap_indent) = segs.range(seg, dl.end());
                 let first_seg = seg == 0;
                 let last_seg = seg == breaks_count;
+                // What's drawn once per row (backgrounds, guides, the
+                // gutter): side by side, with the first segment drawn.
+                let row_once = !side_by_side || seg == seg_lo;
+                let gutter_row = if side_by_side { seg == seg_lo } else { first_seg };
                 let seg_runs = if breaks_count == 0 { std::mem::take(&mut runs) } else { slice_runs(&runs, dl.local(seg_range.clone())) };
                 let shaped = text_system.shape_line(
                     SharedString::from(dl.slice(seg_range.clone()).to_string()),
@@ -3860,7 +4008,12 @@ impl Editor {
                     None,
                 );
                 if !wrapping {
-                    self.max_line_width = self.max_line_width.max(shaped.width);
+                    self.max_line_width = self.max_line_width.max(char_width * wrap_indent as f32 + shaped.width);
+                    // Side by side, scrolling reaches the line's end before it's drawn.
+                    if side_by_side && seg == seg_lo && seg_hi < breaks_count {
+                        let end = self.shape_segment(row, breaks_count, window, cx);
+                        self.max_line_width = self.max_line_width.max(end.indent + end.line.width);
+                    }
                 }
                 let y = top + line_height * drow as f32 - self.scroll.y;
                 let base_x = text_left - self.scroll.x;
@@ -3875,12 +4028,13 @@ impl Editor {
                         return None;
                     }
                     let (s, e) = (ds.max(seg_range.start), de.min(seg_range.end));
-                    let continues = if last_seg { past_line_end } else { de >= seg_range.end };
+                    // (Side by side, the next segment is right after this one.)
+                    let continues = if last_seg { past_line_end } else { !side_by_side && de >= seg_range.end };
                     (s < e || continues).then_some((s, e, continues))
                 };
 
                 // The line a debug session is paused on.
-                if debug_row == Some(row) && !single {
+                if debug_row == Some(row) && !single && row_once {
                     frame.backgrounds.push(fill(
                         Bounds::from_corners(point(bounds.left(), y), point(bounds.right(), y + line_height)),
                         Hsla::from(theme.warning).alpha(0.16),
@@ -3888,7 +4042,7 @@ impl Editor {
                 }
 
                 // Current line highlight.
-                if is_cursor_row && self.selections.len() == 1 && !single {
+                if is_cursor_row && self.selections.len() == 1 && !single && row_once {
                     frame.backgrounds.push(fill(
                         Bounds::from_corners(point(bounds.left(), y), point(bounds.right(), y + line_height)),
                         theme.current_line,
@@ -3897,7 +4051,7 @@ impl Editor {
 
                 // Merge conflict regions: current side green, incoming blue,
                 // markers stronger.
-                if let Some(c) = conflicts.iter().find(|c| c.rows().contains(&row)) {
+                if let Some(c) = conflicts.iter().find(|c| c.rows().contains(&row)).filter(|_| row_once) {
                     let marker = row == c.start || row == c.end || row + 1 == c.theirs.start || c.base.as_ref().is_some_and(|b| row + 1 == b.start);
                     let color: Hsla = if row == c.start || c.ours.contains(&row) {
                         theme.git_added.into()
@@ -3914,7 +4068,7 @@ impl Editor {
 
                 // Indent guides.
                 let mut col = 0;
-                while !single && col + guide_step <= indent.max(1) && col < indent {
+                while !single && row_once && col + guide_step <= indent.max(1) && col < indent {
                     let x = base_x + char_width * col as f32;
                     if x >= text_bounds.left() {
                         frame.guides.push(fill(
@@ -4112,7 +4266,7 @@ impl Editor {
                 }
 
                 // Gutter: line number and diagnostic dot, on the line's first row.
-                if first_seg {
+                if gutter_row {
                     let number = SharedString::from((row + 1).to_string());
                     let number_color = if debug_row == Some(row) {
                         theme.warning
@@ -4212,7 +4366,7 @@ impl Editor {
                 let bar_x = bounds.left() + gutter_width - px(GIT_BAR_OFFSET) - px(1.5);
                 // Hunks are sorted and don't overlap: just the ones at this row.
                 let first_hunk = self.hunks.partition_point(|h| h.new_rows.end < row);
-                for (hix, hunk) in self.hunks.iter().enumerate().skip(first_hunk).take_while(|(_, h)| h.new_rows.start <= row) {
+                for (hix, hunk) in self.hunks.iter().enumerate().skip(first_hunk).take_while(|(_, h)| row_once && h.new_rows.start <= row) {
                     let color: Hsla = match hunk.kind {
                         HunkKind::Added => theme.git_added,
                         HunkKind::Modified => theme.git_modified,
@@ -4222,15 +4376,15 @@ impl Editor {
                     // Staged changes are drawn faded.
                     let color = if self.hunk_staged.get(hix).copied().unwrap_or(false) { color.alpha(0.4) } else { color };
                     if hunk.kind == HunkKind::Deleted {
-                        if hunk.new_rows.start == row && first_seg {
+                        if hunk.new_rows.start == row && gutter_row {
                             frame.gutter_marks.push(
                                 fill(Bounds::new(point(bar_x - px(1.5), y - px(3.)), size(px(6.), px(6.))), color)
                                     .corner_radii(px(3.)),
                             );
                         }
                     } else if hunk.new_rows.contains(&row) {
-                        let first = row == hunk.new_rows.start && first_seg;
-                        let last = row + 1 == hunk.new_rows.end && last_seg;
+                        let first = row == hunk.new_rows.start && gutter_row;
+                        let last = row + 1 == hunk.new_rows.end && (last_seg || side_by_side);
                         let top = if first { y + px(1.) } else { y };
                         let bottom = if last { y + line_height - px(1.) } else { y + line_height };
                         frame.gutter_marks.push(
@@ -4392,16 +4546,7 @@ impl Editor {
         if minimap.is_some() || scrollbar.is_some() {
             let active = self.scrollbar_drag.is_some() || self.scrollbar_hovered;
             let (fade, wake) = self.scrollbar_fade.step(self.scroll.y, active, theme.reduce_effects);
-            match wake {
-                crate::ui::FadeWake::Frame => window.request_animation_frame(),
-                crate::ui::FadeWake::After(delay) => cx
-                    .spawn(async move |this, cx| {
-                        cx.background_executor().timer(delay).await;
-                        this.update(cx, |_, cx| cx.notify()).ok();
-                    })
-                    .detach(),
-                crate::ui::FadeWake::None => {}
-            }
+            wake_scrollbar(wake, window, cx);
             let track = match (&minimap, scrollbar) {
                 (Some(g), _) => {
                     frame.scrollbar_track = Some(g.bounds);
@@ -4420,6 +4565,17 @@ impl Editor {
             // Problems, changes, matches and carets: laid out when they or
             // the rows change, not per frame.
             self.layout_markers(&mut frame, track, cx);
+        }
+        // The horizontal scrollbar, after the lines that tell its width.
+        if let Some((track, thumb)) = self.h_scrollbar_geometry(cx) {
+            let active = self.h_scrollbar_drag.is_some() || self.h_scrollbar_hovered;
+            let (fade, wake) = self.h_scrollbar_fade.step(self.scroll.x, active, theme.reduce_effects);
+            wake_scrollbar(wake, window, cx);
+            if fade > 0. {
+                let alpha = if active { 0.28 } else { 0.16 } * fade;
+                frame.scrollbar.push(fill(thumb, Hsla::from(theme.text).alpha(alpha)).corner_radii(px(3.)));
+            }
+            frame.h_scrollbar_track = Some(track);
         }
 
         // The ⌘/Ctrl-hover link's word, for the pointing hand over it.
@@ -4842,6 +4998,24 @@ impl Segments {
 }
 
 /// The part of `runs` (covering a whole line) that falls in `range`.
+/// Paints a scrollbar again when its fade (`ui::ScrollbarFade`) asks.
+fn wake_scrollbar(wake: crate::ui::FadeWake, window: &mut Window, cx: &mut Context<Editor>) {
+    match wake {
+        crate::ui::FadeWake::Frame => window.request_animation_frame(),
+        crate::ui::FadeWake::After(delay) => cx
+            .spawn(async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach(),
+        crate::ui::FadeWake::None => {}
+    }
+}
+
+/// How close to the text's left and right edges (in columns) dragging a
+/// selection scrolls sideways (Zed's `horizontal_scroll_margin`).
+const DRAG_SCROLL_MARGIN: f32 = 5.;
+
 fn slice_runs(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
     let mut out = Vec::new();
     let mut pos = 0;
@@ -6062,6 +6236,8 @@ pub struct FrameLayout {
     /// The scrollbar's (or minimap's) strip, for its cursor and hover.
     scrollbar_track: Option<Bounds<Pixels>>,
     scrollbar_hitbox: Option<Hitbox>,
+    h_scrollbar_track: Option<Bounds<Pixels>>,
+    h_scrollbar_hitbox: Option<Hitbox>,
     sticky_bgs: Vec<PaintQuad>,
     sticky_lines: Vec<(Point<Pixels>, ShapedLine)>,
     sticky_numbers: Vec<(Point<Pixels>, ShapedLine)>,
@@ -6122,6 +6298,7 @@ impl Element for EditorElement {
         frame.lens_hitboxes = frame.lens_bounds.iter().map(|b| window.insert_hitbox(*b, HitboxBehavior::Normal)).collect();
         frame.link_hitbox = frame.link_bounds.map(|b| window.insert_hitbox(b, HitboxBehavior::Normal));
         frame.scrollbar_hitbox = frame.scrollbar_track.map(|b| window.insert_hitbox(b, HitboxBehavior::Normal));
+        frame.h_scrollbar_hitbox = frame.h_scrollbar_track.map(|b| window.insert_hitbox(b, HitboxBehavior::Normal));
         frame
     }
 
@@ -6143,17 +6320,32 @@ impl Element for EditorElement {
         for hitbox in frame.lens_hitboxes.iter().chain(&frame.link_hitbox) {
             window.set_cursor_style(CursorStyle::PointingHand, hitbox);
         }
-        if let Some(hitbox) = frame.scrollbar_hitbox.clone() {
+        // Drags anywhere in the window and past it: the editor's own move
+        // listener hears only moves over the editor. (In the capture phase,
+        // so views under the pointer can't keep them.)
+        let editor = self.editor.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase == gpui::DispatchPhase::Capture && event.pressed_button == Some(MouseButton::Left) && editor.read(cx).dragging() {
+                editor.update(cx, |e, cx| e.on_mouse_drag(event, window, cx));
+            }
+        });
+        let hovered: [(Option<Hitbox>, fn(&mut Editor) -> &mut bool); 2] =
+            [(frame.scrollbar_hitbox.clone(), |e| &mut e.scrollbar_hovered), (frame.h_scrollbar_hitbox.clone(), |e| &mut e.h_scrollbar_hovered)];
+        for (hitbox, flag) in hovered {
+            let Some(hitbox) = hitbox else { continue };
             window.set_cursor_style(CursorStyle::Arrow, &hitbox);
             // Anywhere in the window: leaving the editor straight from the bar
             // ends its hover too.
             let editor = self.editor.clone();
             window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
                 let over = hitbox.is_hovered(window);
-                if phase == gpui::DispatchPhase::Bubble && editor.read(cx).scrollbar_hovered != over {
+                if phase == gpui::DispatchPhase::Bubble {
                     editor.update(cx, |e, cx| {
-                        e.scrollbar_hovered = over;
-                        cx.notify();
+                        let hovered = flag(e);
+                        if *hovered != over {
+                            *hovered = over;
+                            cx.notify();
+                        }
                     });
                 }
             });
@@ -6992,34 +7184,168 @@ mod frame_tests {
     }
 
     #[gpui::test]
-    fn a_long_lines_rows_are_built_where_they_show(cx: &mut TestAppContext) {
+    fn a_long_lines_segments_are_built_where_they_show(cx: &mut TestAppContext) {
         let line = long_line(100_000);
         let (editor, host, cx) = editor(format!("{line}\nend\n"), cx);
         let shaped = |f: &FrameLayout| f.lines.iter().map(|(_, l)| l.text.len()).sum::<usize>();
         let top = frame(&host, cx);
-        // A screen of rows, not the line.
-        assert!(shaped(&top) <= 31 * 512 * 3, "{} bytes shaped", shaped(&top));
-        // In the middle of it: the rows there, as the whole line shows them.
-        editor.update(cx, |e, _| e.scroll.y = px(20. * 1_000.));
-        let middle = frame(&host, cx);
+        // Without soft wrap the line keeps one row, and only a view's width of it is shaped.
+        assert_eq!(editor.update(cx, |e, cx| e.display_row_count(cx)), 3);
+        assert!(shaped(&top) <= 4 * 512 * 3, "{} bytes shaped", shaped(&top));
+        // Scrolled to its middle: the segments there, side by side where the whole line has them.
         let whole = DisplayLine::new(&line, 4);
         let breaks = editor.update(cx, |e, _| e.line_breaks(0).to_vec());
-        assert_eq!(middle.lines.len(), 31);
-        for (i, (_, row)) in middle.lines.iter().enumerate() {
-            let (range, _) = wrap::segment(&breaks, 1_000 + i, whole.end());
-            assert_eq!(row.text.as_ref(), whole.slice(range), "row {}", 1_000 + i);
+        let (char_width, text_left) = editor.update(cx, |e, _| e.layout.as_ref().map(|l| (l.char_width, l.text_left)).unwrap());
+        let scroll = char_width * breaks[999].indent as f32;
+        editor.update(cx, |e, _| e.scroll.x = scroll);
+        let middle = frame(&host, cx);
+        assert_eq!(editor.update(cx, |e, _| e.scroll.x), scroll, "scrolls past what's been drawn");
+        let segments: Vec<_> = middle.lines.iter().filter(|(_, row)| !row.text.is_empty() && row.text.as_ref() != "end").collect();
+        assert!((2..=4).contains(&segments.len()), "{} segments", segments.len());
+        let mut shown = Vec::new();
+        for (origin, row) in &segments {
+            assert_eq!(origin.y, segments[0].0.y, "on one row");
+            let seg = 1 + breaks.iter().position(|b| (text_left - scroll + char_width * b.indent as f32 - origin.x).abs() < px(0.5)).expect("at a segment's column");
+            assert_eq!(row.text.as_ref(), whole.slice(wrap::segment(&breaks, seg, whole.end()).0), "segment {seg}");
+            shown.push(seg);
         }
-        // A caret there shows where the whole line has it.
+        assert!(shown.contains(&1_000), "{shown:?}");
+        // A caret further on is on the same row, and scrolls into view.
         let at = line.len() / 2;
         editor.update(cx, |e, cx| {
             e.set_selections(vec![Selection::cursor(at)], 0, cx);
-            e.autoscroll = false;
-            let drow = e.display_row_of(at, cx);
-            assert_eq!(drow, wrap::segment_of(&breaks, whole.to_display(at)));
-            e.scroll.y = px(20. * drow as f32);
+            assert_eq!(e.display_row_of(at, cx), 0);
         });
         let caret = frame(&host, cx);
         assert_eq!(caret.cursors.len(), 1);
+        let x = caret.cursors[0].bounds.left();
+        assert!(x > text_left && x < px(800.), "caret at {x:?}");
+        // Clicking there puts a caret at the same place.
+        let y = caret.cursors[0].bounds.center().y;
+        let clicked = editor.update_in(cx, |e, window, cx| e.offset_for_position(point(x + px(1.), y), window, cx));
+        assert_eq!(clicked, at);
+    }
+
+    /// Dragging a selection past the text's edges scrolls that way, as in
+    /// Zed: sideways too, to the left as well as the right.
+    #[gpui::test]
+    fn dragging_past_the_edges_scrolls(cx: &mut TestAppContext) {
+        let (editor, host, cx) = editor(format!("{}\n", "abc ".repeat(400)).repeat(100), cx);
+        frame(&host, cx);
+        let (bounds, text_left) = editor.update(cx, |e, _| e.layout.as_ref().map(|l| (l.bounds, l.text_left)).unwrap());
+        let mid = bounds.center();
+        let drag = |position: Point<Pixels>, cx: &mut VisualTestContext| {
+            editor.update(cx, |e, cx| {
+                e.drag_scroll(position, cx);
+                e.scroll
+            })
+        };
+        // In the middle: nothing.
+        assert_eq!(drag(mid, cx), Point::default());
+        let right = drag(point(bounds.right() + px(40.), mid.y), cx);
+        assert!(right.x > px(0.) && right.y == px(0.), "{right:?}");
+        let further = drag(point(bounds.right() + px(200.), mid.y), cx);
+        assert!(further.x - right.x > right.x, "faster further out: {right:?} then {further:?}");
+        let left = drag(point(text_left - px(40.), mid.y), cx);
+        assert!(left.x < further.x, "{left:?}");
+        let down = drag(point(mid.x, bounds.bottom() + px(30.)), cx);
+        assert!(down.y > px(0.) && down.x == left.x, "{down:?}");
+        let up = drag(point(mid.x, bounds.top() - px(300.)), cx);
+        assert_eq!(up.y, px(0.), "at most three rows a step, and not above the top");
+    }
+
+    /// Lines wider than the view get a horizontal scrollbar along the
+    /// text's bottom, whose thumb drags the view sideways.
+    #[gpui::test]
+    fn wide_lines_get_a_horizontal_scrollbar(cx: &mut TestAppContext) {
+        let (editor, host, cx) = editor(format!("{}\nshort\n", "abc ".repeat(100)), cx);
+        let first = frame(&host, cx);
+        let (track, thumb) = editor.update(cx, |e, cx| e.h_scrollbar_geometry(cx)).expect("a scrollbar");
+        assert_eq!(first.h_scrollbar_track, Some(track));
+        let text_left = editor.update(cx, |e, _| e.layout.as_ref().unwrap().text_left);
+        assert_eq!(track.left(), text_left);
+        assert!(thumb.size.width < track.size.width / 2., "{thumb:?} in {track:?}");
+        // Dragged to the end, the view shows the lines' end.
+        editor.update(cx, |e, cx| {
+            e.h_scrollbar_drag = Some(px(0.));
+            e.drag_h_scrollbar_to(track.right(), cx);
+            e.h_scrollbar_drag = None;
+        });
+        frame(&host, cx);
+        let (scroll, (_, thumb)) = editor.update(cx, |e, cx| (e.scroll.x, e.h_scrollbar_geometry(cx).unwrap()));
+        assert!(scroll > px(0.));
+        assert_eq!(thumb.right(), track.right());
+        // With soft wrap there's nothing to scroll sideways.
+        editor.update(cx, |e, _| e.soft_wrap = true);
+        let wrapped = frame(&host, cx);
+        assert_eq!(wrapped.h_scrollbar_track, None);
+    }
+
+    #[gpui::test]
+    fn short_lines_get_no_horizontal_scrollbar(cx: &mut TestAppContext) {
+        let (_, host, cx) = editor("short\n".into(), cx);
+        assert_eq!(frame(&host, cx).h_scrollbar_track, None);
+    }
+
+    /// A selection dragged out of the window keeps following the pointer
+    /// and scrolling: the editor hears drags outside its own bounds, and a
+    /// pointer held still past an edge (GPUI repeats its last move) scrolls on.
+    #[gpui::test]
+    fn a_drag_out_of_the_window_keeps_scrolling(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::blank_for_tests()));
+        let text = format!("{}\n", "abc ".repeat(400)).repeat(50);
+        let (editor, cx) = cx.add_window_view(|_, cx| {
+            let mut e = Editor::new(Document::from_text(text, None), cx);
+            e.soft_wrap = false;
+            e
+        });
+        let redraw = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            })
+        };
+        redraw(cx);
+        let (text_left, top) = editor.update(cx, |e, _| e.layout.as_ref().map(|l| (l.text_left, l.bounds.top())).unwrap());
+        let y = top + px(30.);
+        cx.simulate_mouse_down(point(text_left + px(40.), y), MouseButton::Left, gpui::Modifiers::none());
+        redraw(cx);
+        let scroll = |cx: &mut VisualTestContext| editor.update(cx, |e, _| e.scroll.x);
+        // Far out of the window to the right, then held there.
+        let right = point(px(5_000.), y);
+        cx.simulate_mouse_move(right, MouseButton::Left, gpui::Modifiers::none());
+        let first = scroll(cx);
+        assert!(first > px(0.), "scrolls once out");
+        cx.simulate_mouse_move(right, MouseButton::Left, gpui::Modifiers::none());
+        let second = scroll(cx);
+        assert!(second > first, "and on while held");
+        let sel = editor.update(cx, |e, _| e.selections[0]);
+        assert!(sel.head > sel.anchor, "the selection follows: {sel:?}");
+        // Out to the left: back.
+        let left = point(px(-500.), y);
+        cx.simulate_mouse_move(left, MouseButton::Left, gpui::Modifiers::none());
+        assert!(scroll(cx) < second, "scrolls back");
+        // Drawing doesn't move the view on: only the drag scrolls it (the
+        // caret past the edge, autoscroll fought it, and the view flickered).
+        let right_edge = editor.update(cx, |e, cx| e.layout.as_ref().unwrap().bounds.right() - e.right_edge_width(cx));
+        for x in [right_edge + px(60.), right_edge + px(300.), right_edge + px(1_500.)] {
+            for _ in 0..3 {
+                cx.simulate_mouse_move(point(x, y), MouseButton::Left, gpui::Modifiers::none());
+                redraw(cx);
+                // The caret stays under the pointer, past the edge.
+                let shown = editor.update_in(cx, |e, window, cx| text_left + e.x_for_offset(e.selections[0].head, window, cx) - e.scroll.x);
+                assert!(shown > right_edge, "pointer at {x:?}, caret at {shown:?}");
+            }
+        }
+        cx.simulate_mouse_move(point(px(400.), px(5_000.)), MouseButton::Left, gpui::Modifiers::none());
+        let below = editor.update(cx, |e, _| e.scroll);
+        redraw(cx);
+        assert_eq!(editor.update(cx, |e, _| e.scroll), below, "below the window");
+        cx.simulate_mouse_up(left, MouseButton::Left, gpui::Modifiers::none());
+        assert!(!editor.update(cx, |e, _| e.dragging()));
+        let held = scroll(cx);
+        cx.simulate_mouse_move(left, None, gpui::Modifiers::none());
+        assert_eq!(scroll(cx), held, "done with the button up");
     }
 
     /// The time per frame (the fastest of a few) of an editor `make` sets up.

@@ -7,7 +7,8 @@
 //! expanded, inlay hints in place: they take room on their rows like text).
 //! A break's offset starts a new row, so a cursor exactly on a break shows at
 //! the start of the next row. Continuation rows keep the
-//! line's indentation, like VS Code.
+//! line's indentation, like VS Code. Without soft wrap, a long line's
+//! segments sit side by side on its one row instead (`side_by_side`).
 
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
@@ -32,7 +33,8 @@ pub struct Break {
     pub ix: u32,
     /// The same place as a byte offset in the line's own text.
     pub byte: u32,
-    /// Leading spaces drawn before the row's text.
+    /// Leading spaces drawn before the row's text; without soft wrap, the
+    /// column the segment starts at on the line's one row.
     pub indent: u32,
     /// Where building the row's display text from the buffer starts, so a
     /// long line's rows on screen are built without the rest of it (see
@@ -95,11 +97,12 @@ pub struct WrapMap {
     hidden: Vec<(usize, usize)>,
 }
 
-/// A line longer than this (in bytes) always breaks into rows, soft wrap or
-/// not: shaping, highlighting and drawing it whole each frame is too slow
-/// (minified code, one-line JSON).
+/// A line longer than this (in bytes) always breaks into segments, soft wrap
+/// or not: shaping, highlighting and drawing it whole each frame is too slow
+/// (minified code, one-line JSON). Without soft wrap they stay on one row,
+/// side by side, and only those in view are drawn.
 pub const LONG_LINE: usize = 1024;
-/// The most display columns on a row of a long line without soft wrap.
+/// The most display characters in a segment of a long line without soft wrap.
 const LONG_LINE_ROW: usize = 512;
 
 /// Generations of every map, so a new map's never is an old one's.
@@ -219,7 +222,16 @@ impl<'a> Measure<'a> {
                 .collect()
         };
         if !self.wrap {
-            return at(dl.text.char_indices().map(|(ix, _)| (ix, 0)).step_by(LONG_LINE_ROW).skip(1).collect());
+            // Each segment starts at its column, where the ones before it end.
+            let mut col = 0;
+            let mut starts = Vec::new();
+            for (n, (ix, c)) in dl.text.char_indices().enumerate() {
+                if n > 0 && n % LONG_LINE_ROW == 0 {
+                    starts.push((ix, col as u32));
+                }
+                col += unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
+            }
+            return at(starts);
         }
         // A hint is one piece: rows break before or after it, not inside; so
         // is a control character's name (a Control Picture is one character).
@@ -519,7 +531,8 @@ impl WrapMap {
             }
             if dirty.lines[row] {
                 let shown = self.hidden.get(hidden).is_none_or(|&(start, _)| row < start);
-                self.rows[row] = if shown { (above + 1 + self.breaks[row].len()) as u32 } else { 0 };
+                let text = if self.key.wrap { 1 + self.breaks[row].len() } else { 1 };
+                self.rows[row] = if shown { (above + text) as u32 } else { 0 };
             }
             self.row_starts[row] = at;
             at += self.rows[row] as usize;
@@ -552,6 +565,13 @@ impl WrapMap {
         matches!((self.row_starts.get(row), self.row_starts.get(row + 1)), (Some(a), Some(b)) if a == b)
     }
 
+    /// Whether a line's segments sit side by side on its one row (each at
+    /// its break's `indent` column) rather than on rows of their own: a long
+    /// line's without soft wrap.
+    pub fn side_by_side(&self) -> bool {
+        !self.key.wrap
+    }
+
     pub fn breaks(&self, row: usize) -> &[Break] {
         self.breaks.get(row).map_or(&[], Vec::as_slice)
     }
@@ -580,7 +600,8 @@ impl WrapMap {
         self.row_starts[..lines].partition_point(|&s| s <= drow).saturating_sub(1)
     }
 
-    /// The buffer line and its segment index shown on display row `drow`.
+    /// The buffer line and its segment index shown on display row `drow`
+    /// (0 for a line whose segments are side by side: which one depends on x).
     pub fn line_of(&self, drow: usize) -> (usize, usize) {
         let lines = self.row_starts.len().saturating_sub(1);
         if lines == 0 {
@@ -595,6 +616,9 @@ impl WrapMap {
                 Some(above) => (above, self.breaks(above).len()),
                 None => (row, 0),
             };
+        }
+        if self.side_by_side() {
+            return (row, 0);
         }
         (row, (drow - text).min(self.breaks(row).len()))
     }
@@ -876,7 +900,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn long_lines_break_without_soft_wrap(cx: &mut gpui::TestAppContext) {
+    fn long_lines_keep_one_row_without_soft_wrap(cx: &mut gpui::TestAppContext) {
         use crate::document::{Document, EditKind};
         let text_system = cx.update(|cx| cx.text_system().clone());
         let key = WrapKey { width: gpui::px(300.), font_family: "Test".into(), font_size: gpui::px(14.), tab_size: 4, wrap: false };
@@ -886,9 +910,13 @@ mod tests {
         assert!(doc.has_long_lines());
         let map = WrapMap::new(key.clone(), doc.version(), &[], Inlays::NONE, doc.rope(), &text_system, gpui::font("Test"), gpui::px(7.));
         assert!(map.breaks(0).is_empty());
-        let at = |n: u32| Break { ix: n, byte: n, indent: 0, from: Resume { byte: n, ix: n, col: n } };
+        // Segments side by side on the line's one row, each at its column.
+        let at = |n: u32| Break { ix: n, byte: n, indent: n, from: Resume { byte: n, ix: n, col: n } };
         assert_eq!(map.breaks(1), [at(512), at(1024)]);
-        assert_eq!(map.row_count(), 1 + 3 + 1);
+        assert!(map.side_by_side());
+        assert_eq!(map.row_count(), 1 + 1 + 1);
+        assert_eq!(map.line_of(1), (1, 0));
+        assert_eq!(map.first_display_row(2), 2);
         // Shortened below the limit, it's an ordinary line again.
         let start = doc.line_start(1);
         doc.edit(vec![(start + 10..start + 1000, String::new())], &[], EditKind::Other);

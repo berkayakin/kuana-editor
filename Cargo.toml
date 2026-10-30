@@ -70,6 +70,9 @@ tree-sitter-yaml = "0.7.2"
 # The file tree's search matches decomposed names (macOS writes some) as
 # composed (rumdl already depends on it).
 unicode-normalization = "0.1.25"
+# Where a long line's segments start without soft wrap (alacritty_terminal already
+# depends on it).
+unicode-width = "0.2.2"
 url = "2.5.8"
 # Zed extensions' own code (`extension.wasm`, a WebAssembly component) for their
 # language servers: the wasmtime tree-sitter already brings, with components and WASI,
