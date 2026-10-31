@@ -601,9 +601,47 @@ impl Workspace {
         self.show_context_menu(entries, actions, position, None, window, cx);
     }
 
+    /// A terminal's right-click menu, over its output.
+    pub(super) fn open_terminal_menu(&mut self, terminal: Entity<TerminalView>, position: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = terminal.read(cx).has_selection();
+        let mut entries = Vec::new();
+        let mut actions = Vec::new();
+        let mut add = |entry: MenuEntry, action: Option<MenuAction>| {
+            entries.push(entry);
+            actions.push(action);
+        };
+        let keys = |action: &dyn gpui::Action| crate::ui::binding_label_in(action, "Workspace Terminal", window);
+        let tab = |action: TerminalTabAction| Some(MenuAction::TerminalTab(action, terminal.clone()));
+        if selected {
+            add(MenuEntry::item("Copy", Icon::Copy).shortcut(keys(&TerminalCopy)), tab(TerminalTabAction::Copy));
+        }
+        add(MenuEntry::item("Paste", Icon::Clipboard).shortcut(keys(&TerminalPaste)), tab(TerminalTabAction::Paste));
+        add(MenuEntry::text("Select All"), tab(TerminalTabAction::SelectAll));
+        add(MenuEntry::Separator, None);
+        add(MenuEntry::item("Find…", Icon::Search).shortcut(keys(&TerminalFind)), tab(TerminalTabAction::Find));
+        add(MenuEntry::text("Clear").shortcut(keys(&TerminalClear)), tab(TerminalTabAction::Clear));
+        add(MenuEntry::Separator, None);
+        add(
+            MenuEntry::item("Split Terminal", Icon::SplitRight).shortcut(keys(&SplitTerminal)),
+            tab(TerminalTabAction::Split),
+        );
+        self.show_context_menu(entries, actions, position, None, window, cx);
+    }
+
     pub(super) fn run_terminal_tab_action(&mut self, action: TerminalTabAction, terminal: Entity<TerminalView>, window: &mut Window, cx: &mut Context<Self>) {
         let Some((g, ix)) = self.terminal_position(&terminal, cx) else { return };
         let closing: Vec<Entity<TerminalView>> = match action {
+            // Closing the menu focused the editor; these act in the terminal, which keeps the keyboard.
+            TerminalTabAction::Copy | TerminalTabAction::Paste | TerminalTabAction::SelectAll | TerminalTabAction::Find => {
+                self.activate_terminal(g, ix, window, cx);
+                terminal.update(cx, |t, cx| match action {
+                    TerminalTabAction::Copy => t.copy(&TerminalCopy, window, cx),
+                    TerminalTabAction::Paste => t.paste(&TerminalPaste, window, cx),
+                    TerminalTabAction::SelectAll => t.select_all(cx),
+                    _ => t.open_search(&TerminalFind, window, cx),
+                });
+                return;
+            }
             TerminalTabAction::Rename => return self.open_rename_terminal(terminal, window, cx),
             TerminalTabAction::ResetName => {
                 terminal.update(cx, |t, cx| t.set_custom_title(None, cx));

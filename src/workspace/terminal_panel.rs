@@ -22,6 +22,8 @@ pub(super) enum TerminalPanelEvent {
     Failed(Entity<TerminalView>, String),
     /// A tab was right-clicked.
     TabMenu { terminal: Entity<TerminalView>, position: gpui::Point<Pixels> },
+    /// A terminal's output was right-clicked.
+    ContextMenu { terminal: Entity<TerminalView>, position: gpui::Point<Pixels> },
     /// The tabs that don't fit, to pick from.
     Overflow { terminals: Vec<(Entity<TerminalView>, String)>, position: gpui::Point<Pixels> },
     /// A group's + and split buttons.
@@ -117,6 +119,7 @@ impl TerminalPanel {
             TerminalEvent::OpenFile { path, line, column } => {
                 cx.emit(TerminalPanelEvent::OpenFile { path: path.clone(), line: *line, column: *column })
             }
+            TerminalEvent::ContextMenu(position) => cx.emit(TerminalPanelEvent::ContextMenu { terminal, position: *position }),
         });
         self.subscriptions.insert(terminal.entity_id(), subscription);
         if terminal.read(cx).run().is_some() {

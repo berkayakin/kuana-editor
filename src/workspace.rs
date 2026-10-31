@@ -65,7 +65,7 @@ use crate::{
     syntax::Language,
     settings::{self, AutoSave, Settings, StartupProblems},
     run::{self, DebugSpec, RunTarget},
-    terminal::{RunState, TerminalEvent, TerminalView},
+    terminal::{RunState, TerminalClear, TerminalCopy, TerminalEvent, TerminalFind, TerminalPaste, TerminalView},
     theme::{self, Theme},
     preferences,
     theme_picker::{ThemePicker, ThemePickerEvent},
@@ -501,7 +501,7 @@ enum MenuAction {
     ChooseVenv,
     /// A terminal tab from its strip's overflow menu.
     Terminal(Entity<TerminalView>),
-    /// A terminal tab's right-click menu.
+    /// A terminal tab's or its output's right-click menu.
     TerminalTab(TerminalTabAction, Entity<TerminalView>),
     /// Status bar: a file changed without a tab.
     OpenFile(PathBuf),
@@ -509,9 +509,13 @@ enum MenuAction {
     SaveBackground,
 }
 
-/// What a terminal tab's menu does with it.
+/// What a terminal tab's (or its output's) menu does with it.
 #[derive(Clone, Copy, PartialEq)]
 enum TerminalTabAction {
+    Copy,
+    Paste,
+    SelectAll,
+    Find,
     Rename,
     ResetName,
     Clear,
@@ -903,6 +907,7 @@ impl Workspace {
             TerminalPanelEvent::Exited(terminal) => ws.remove_terminal(terminal, window, cx),
             TerminalPanelEvent::Failed(terminal, error) => ws.terminal_failed(terminal, error.clone(), window, cx),
             TerminalPanelEvent::TabMenu { terminal, position } => ws.open_terminal_tab_menu(terminal.clone(), *position, window, cx),
+            TerminalPanelEvent::ContextMenu { terminal, position } => ws.open_terminal_menu(terminal.clone(), *position, window, cx),
             TerminalPanelEvent::Overflow { terminals, position } => {
                 let entries = terminals.iter().map(|(_, name)| MenuEntry::item(name.clone(), Icon::Terminal)).collect();
                 let actions = terminals.iter().map(|(t, _)| Some(MenuAction::Terminal(t.clone()))).collect();

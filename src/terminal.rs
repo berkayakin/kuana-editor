@@ -89,6 +89,8 @@ pub enum TerminalEvent {
     Failed(String),
     /// ⌘/Ctrl-click on a `path:line:col` in the output (1-based line and column).
     OpenFile { path: PathBuf, line: Option<u32>, column: Option<u32> },
+    /// A right-click: the workspace shows the terminal's menu there.
+    ContextMenu(Point<Pixels>),
 }
 
 /// Something clickable in the output.
@@ -430,20 +432,52 @@ impl TerminalView {
         if self.marked.is_some() || self.search.as_ref().is_some_and(|s| s.input.focus_handle(cx).is_focused(window)) {
             return;
         }
-        if let Some(bytes) = escape_for(&event.keystroke, self.mode()) {
+        // Off macOS, Ctrl+C copies while text is selected and interrupts
+        // otherwise, and Ctrl+V pastes on Windows, as in Windows Terminal
+        // and VS Code (Ctrl+Shift+C/V always do).
+        let keystroke = &event.keystroke;
+        if !cfg!(target_os = "macos") && keystroke.modifiers == Modifiers::control() {
+            if keystroke.key == "c" && self.has_selection() {
+                cx.stop_propagation();
+                self.copy(&TerminalCopy, window, cx);
+                self.term.lock().selection = None;
+                cx.notify();
+                return;
+            }
+            if cfg!(windows) && keystroke.key == "v" {
+                cx.stop_propagation();
+                self.paste(&TerminalPaste, window, cx);
+                return;
+            }
+        }
+        if let Some(bytes) = escape_for(keystroke, self.mode()) {
             cx.stop_propagation();
             self.input(bytes, cx);
         }
         // Plain text arrives through the input handler.
     }
 
-    fn copy(&mut self, _: &TerminalCopy, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn has_selection(&self) -> bool {
+        self.term.lock().selection_to_string().is_some_and(|t| !t.is_empty())
+    }
+
+    pub fn copy(&mut self, _: &TerminalCopy, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = self.term.lock().selection_to_string().filter(|t| !t.is_empty()) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
 
-    fn paste(&mut self, _: &TerminalPaste, _: &mut Window, cx: &mut Context<Self>) {
+    /// Selects the scrollback and the screen.
+    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        let mut term = self.term.lock();
+        let mut selection = Selection::new(SelectionType::Lines, GridPoint::new(term.topmost_line(), Column(0)), Side::Left);
+        selection.update(GridPoint::new(term.bottommost_line(), term.last_column()), Side::Right);
+        term.selection = Some(selection);
+        drop(term);
+        cx.notify();
+    }
+
+    pub fn paste(&mut self, _: &TerminalPaste, _: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else { return };
         // Shells expect Enter as \r; bracketed paste lets them tell pasted
         // newlines from typed ones.
@@ -471,7 +505,7 @@ impl TerminalView {
 
     /// Find (⌘F / Ctrl+Shift+F in the terminal): opens the query field, with
     /// the selection as the query.
-    fn open_search(&mut self, _: &TerminalFind, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_search(&mut self, _: &TerminalFind, window: &mut Window, cx: &mut Context<Self>) {
         let selected = self.term.lock().selection_to_string().filter(|t| !t.trim().is_empty() && !t.contains('\n'));
         let input = match &self.search {
             Some(search) => search.input.clone(),
@@ -754,6 +788,24 @@ impl TerminalView {
         self.term.lock().selection = Some(Selection::new(ty, point, side));
         self.selecting = true;
         cx.notify();
+    }
+
+    /// Programs that take the mouse get the right button; otherwise it opens
+    /// the menu, keeping the selection for its Copy.
+    fn on_right_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus_handle);
+        if self.mouse_reporting(&event.modifiers) {
+            self.report_mouse(2, event.position, true, &event.modifiers);
+            return;
+        }
+        cx.stop_propagation();
+        cx.emit(TerminalEvent::ContextMenu(event.position));
+    }
+
+    fn on_right_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+        if self.mouse_reporting(&event.modifiers) {
+            self.report_mouse(2, event.position, false, &event.modifiers);
+        }
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -1813,6 +1865,8 @@ impl Render for TerminalView {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
+            .on_mouse_up(MouseButton::Right, cx.listener(Self::on_right_mouse_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .child(TerminalElement { view: cx.entity() })
             .children(search)
