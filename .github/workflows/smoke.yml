@@ -34,7 +34,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             asset: "Kuana-*-macos.zip"
             binary: Kuana.app/Contents/MacOS/kuana
           - os: windows-latest

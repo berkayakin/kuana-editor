@@ -63,7 +63,7 @@ jobs:
 
   macos:
     needs: create
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       VERSION: ${{ needs.create.outputs.version }}
       APP: target/aarch64-apple-darwin/dist/bundle/osx/Kuana.app
