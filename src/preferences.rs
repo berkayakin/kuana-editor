@@ -131,6 +131,7 @@ enum Setting {
     UiStyle,
     SidebarDock,
     ProjectAvatar,
+    CompactActivityBar,
     BaseKeymap,
     FontFamily,
     FontSize,
@@ -160,13 +161,14 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Setting; 32] = [
+    const ALL: [Setting; 33] = [
         Setting::Theme,
         Setting::IconTheme,
         Setting::VisualEffects,
         Setting::UiStyle,
         Setting::SidebarDock,
         Setting::ProjectAvatar,
+        Setting::CompactActivityBar,
         Setting::BaseKeymap,
         Setting::FontFamily,
         Setting::FontSize,
@@ -197,7 +199,7 @@ impl Setting {
 
     fn page(self) -> Page {
         match self {
-            Setting::Theme | Setting::IconTheme | Setting::VisualEffects | Setting::UiStyle | Setting::SidebarDock | Setting::ProjectAvatar => Page::Appearance,
+            Setting::Theme | Setting::IconTheme | Setting::VisualEffects | Setting::UiStyle | Setting::SidebarDock | Setting::ProjectAvatar | Setting::CompactActivityBar => Page::Appearance,
             Setting::BaseKeymap => Page::Keymap,
             Setting::FontFamily | Setting::FontSize | Setting::LineHeight => Page::Editor,
             Setting::TabSize | Setting::HardTabs | Setting::SoftWrap => Page::Editor,
@@ -220,7 +222,7 @@ impl Setting {
             Setting::Theme => "Theme",
             Setting::IconTheme => "File icons",
             Setting::VisualEffects => "Effects",
-            Setting::UiStyle | Setting::SidebarDock | Setting::ProjectAvatar => "Layout",
+            Setting::UiStyle | Setting::SidebarDock | Setting::ProjectAvatar | Setting::CompactActivityBar => "Layout",
             Setting::BaseKeymap => "Keymap",
             Setting::FontFamily | Setting::FontSize | Setting::LineHeight => "Font",
             Setting::TabSize | Setting::HardTabs => "Indentation",
@@ -248,6 +250,7 @@ impl Setting {
             Setting::UiStyle => "Style",
             Setting::SidebarDock => "Sidebar position",
             Setting::ProjectAvatar => "Project avatar",
+            Setting::CompactActivityBar => "Compact activity bar",
             Setting::BaseKeymap => "Base keymap",
             Setting::FontFamily => "Family",
             Setting::FontSize => "Size",
@@ -285,6 +288,7 @@ impl Setting {
             Setting::UiStyle => "Modern floats rounded islands with browser-like tabs; Classic puts square areas side by side, separated by lines.",
             Setting::SidebarDock => "Which side of the editor the Files and Commit views sit on.",
             Setting::ProjectAvatar => "The round initial before the project's name in the title bar.",
+            Setting::CompactActivityBar => "A narrower bar beside the sidebar, with smaller buttons and icons, for more room.",
             Setting::BaseKeymap => "The shortcuts Kuana starts from. Your own changes below stay on top of any of them.",
             Setting::FontFamily => "Monospaced fonts installed on this computer.",
             Setting::FontSize => "Zoom (Increase / Decrease Font Size) adds to this until you reset it.",
@@ -325,6 +329,7 @@ impl Setting {
             Setting::UiStyle => "style classic modern islands gaps padding borders separators lines tabs chrome flat simple compact layout look",
             Setting::SidebarDock => "sidebar side dock left right position move layout file tree project panel git commit",
             Setting::ProjectAvatar => "project avatar monogram initial letter circle badge icon title bar header name chip hide show",
+            Setting::CompactActivityBar => "compact activity bar icons size large small big narrow buttons left panel sidebar tools space room",
             Setting::BaseKeymap => "keymap shortcuts key bindings vscode vs code jetbrains intellij webstorm sublime zed",
             Setting::FontFamily => "typeface family monospace",
             Setting::FontSize => "font zoom text",
@@ -1470,6 +1475,9 @@ impl Preferences {
                 })
             }
             Setting::ProjectAvatar => self.switch_with_default("pref-project-avatar", "project_avatar", settings.project_avatar, true, cx),
+            Setting::CompactActivityBar => {
+                self.switch_with_default("pref-compact-activity-bar", "compact_activity_bar", settings.compact_activity_bar, false, cx)
+            }
             Setting::FormatOnSave => self.bool_switch("pref-format", "format_on_save", settings.editor.format_on_save, cx),
             Setting::TrustAll => self.switch_with_default("pref-trust-all", "trust_all_projects", settings.trust_all_projects, false, cx),
             Setting::NativeGrammars => self.switch_with_default("pref-native-grammars", "native_grammars", settings.native_grammars, false, cx),
@@ -2603,6 +2611,7 @@ fn setting_key(setting: Setting) -> &'static str {
         Setting::UiStyle => "ui_style",
         Setting::SidebarDock => "sidebar_dock",
         Setting::ProjectAvatar => "project_avatar",
+        Setting::CompactActivityBar => "compact_activity_bar",
         Setting::SoftWrap => "soft_wrap",
         Setting::Rulers => "rulers",
         Setting::ShowWhitespace => "show_whitespace",

@@ -7,16 +7,59 @@
 use super::*;
 use gpui::svg;
 
-/// A view tab's height, and the other buttons': a row of the bar each.
-const VIEW_TAB_HEIGHT: f32 = 40.0;
-/// The rounded fill of a resting view tab and of the other buttons; the
-/// current view's tab starts where it would.
-const ACTIVITY_BUTTON: f32 = 34.0;
-/// Between the bar's buttons.
-const ACTIVITY_SPACING: f32 = 4.0;
-/// How far past a view's icon (20pt) its count may reach: the room to the
-/// island less 6pt.
-const BADGE_ROOM: f32 = (ACTIVITY_WIDTH - 20.) / 2. - 6.;
+/// The activity bar's measures: full-size, or compact (`compact_activity_bar`),
+/// which gives the sidebar and editor its room.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) struct BarSize {
+    /// The bar's width: a button and a gap on each side, wide enough that the
+    /// Commit view's count fits beside its icon.
+    pub(super) width: f32,
+    /// A view tab's height, and the other buttons': a row of the bar each.
+    row: f32,
+    /// The rounded fill of a resting view tab and of the other buttons; the
+    /// current view's tab starts where it would.
+    button: f32,
+    /// Between the bar's rows.
+    spacing: f32,
+    icon: f32,
+    radius: f32,
+    /// The Commit view's count: its pill's height and its digits' size.
+    badge: f32,
+    badge_text: f32,
+}
+
+impl BarSize {
+    pub(super) const FULL: BarSize =
+        BarSize { width: 52., row: 40., button: 34., spacing: 4., icon: 20., radius: 9., badge: 13., badge_text: 9. };
+    /// The title bar's buttons' measures (`bar_button`): an 18pt icon in a
+    /// 30pt square; the count's pill hugs its digits.
+    const COMPACT: BarSize =
+        BarSize { width: 40., row: 32., button: 30., spacing: 2., icon: 18., radius: 8., badge: 10., badge_text: 8. };
+
+    /// The bar's measures as the settings ask.
+    pub(super) fn of(cx: &App) -> Self {
+        if Settings::get(cx).compact_activity_bar() { Self::COMPACT } else { Self::FULL }
+    }
+
+    /// How far a selected view's icon moves toward the island: from the
+    /// buttons' line (the bar's middle) to its tab's middle, the tab starting
+    /// a gap (`width - button`) / 2 off the window's edge.
+    fn view_tab_shift(self) -> f32 {
+        (self.width - self.button) / 4.
+    }
+
+    /// How far past a view's icon its count may reach: the room to the
+    /// island less 6pt.
+    fn badge_room(self) -> f32 {
+        (self.width - self.icon) / 2. - 6.
+    }
+
+    /// Between the view tabs: none in Classic, where they're rectangles
+    /// stacked like the editor's tabs side by side.
+    fn views_gap(self, theme: &Theme) -> f32 {
+        if theme.classic { 0. } else { self.spacing }
+    }
+}
 
 /// The line between the views and the panels' toggles, and its margin above and below.
 const SEPARATOR: f32 = 1.0;
@@ -40,14 +83,12 @@ struct Tool {
     run: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
 }
 
-/// Which of `tools` fit in a bar `room` tall (under its top padding, over its
-/// bottom one) besides the views, in their places' order: as many as fit by
-/// priority, with a More button for the rest.
-fn fit_tools(tools: &[Tool], room: f32) -> Vec<usize> {
-    let button = VIEW_TAB_HEIGHT + ACTIVITY_SPACING;
-    // The two views and the separator, each with the gap after it.
-    let views = 2. * (VIEW_TAB_HEIGHT + ACTIVITY_SPACING) + SEPARATOR + 2. * SEPARATOR_MARGIN + ACTIVITY_SPACING;
-    let fits = |n: usize| (room - views) / button >= n as f32;
+/// Which of `tools` fit in `room` (the bar's height besides its padding, the
+/// views and the separator), each taking `button` (a row and the gap after
+/// it), in their places' order: as many as fit by priority, with a More
+/// button for the rest.
+fn fit_tools(tools: &[Tool], room: f32, button: f32) -> Vec<usize> {
+    let fits = |n: usize| room / button >= n as f32;
     let mut order: Vec<usize> = (0..tools.len()).collect();
     if !fits(tools.len()) {
         order.sort_by_key(|&ix| tools[ix].priority);
@@ -59,11 +100,6 @@ fn fit_tools(tools: &[Tool], room: f32) -> Vec<usize> {
     order
 }
 
-/// How far a selected view's icon moves toward the island: from the buttons'
-/// line (the bar's middle) to its tab's middle, the tab starting a gap
-/// (`ACTIVITY_WIDTH - ACTIVITY_BUTTON`) / 2 off the window's edge.
-const VIEW_TAB_SHIFT: f32 = (ACTIVITY_WIDTH - ACTIVITY_BUTTON) / 4.;
-
 impl Workspace {
     /// The sidebar's side of the window, below the tab row: the activity bar
     /// and, while it shows, the sidebar's island beside it.
@@ -71,7 +107,7 @@ impl Workspace {
         let theme = Theme::get(cx).clone();
         let right = self.sidebar_on_right(cx);
         // Classic: a separator line between the bar and the sidebar.
-        let bar_room = ACTIVITY_WIDTH + if theme.classic && self.show_sidebar { 1. } else { 0. };
+        let bar_room = BarSize::of(cx).width + if theme.classic && self.show_sidebar { 1. } else { 0. };
         let width = bar_room + if self.show_sidebar { f32::from(self.shown_sidebar_width()) } else { 0. };
         div()
             .flex()
@@ -130,20 +166,24 @@ impl Workspace {
             SidebarMode::Files => 0.,
             SidebarMode::Commit => 1.,
         };
-        let top = TAB_STRIP_INSET + index * (VIEW_TAB_HEIGHT + ACTIVITY_SPACING);
-        crate::ui::SideJoint { right: self.sidebar_on_right(cx), below: top + VIEW_TAB_HEIGHT + TAB_FOOT }
+        let bar = BarSize::of(cx);
+        let top = TAB_STRIP_INSET + index * (bar.row + bar.spacing);
+        crate::ui::SideJoint { right: self.sidebar_on_right(cx), below: top + bar.row + TAB_FOOT }
     }
 
     fn render_activity_bar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = crate::ui::chrome_theme(Theme::get(cx));
         // Its buttons are centered on it: as far from the window's edge as
-        // from the island's (`ACTIVITY_WIDTH` = a button and two gaps).
+        // from the island's (its width = a button and two gaps).
+        let bar = BarSize::of(cx);
         let sep = || div().flex_shrink_0().w(px(18.)).h(px(SEPARATOR)).my(px(SEPARATOR_MARGIN)).bg(theme.border);
         let top = if theme.classic { 0. } else { TAB_STRIP_INSET };
         // The bar's height: under the tab row, above the status bar.
         let height = f32::from(self.viewport.height) - (TAB_STRIP_HEIGHT - 1.) - STATUSBAR_HEIGHT - if theme.classic { 1. } else { 0. };
         let tools = self.activity_tools(cx);
-        let shown = fit_tools(&tools, height - top - GAP);
+        // The two views and the separator, each with the gap after it.
+        let views = 2. * bar.row + bar.views_gap(&theme) + SEPARATOR + 2. * SEPARATOR_MARGIN + 2. * bar.spacing;
+        let shown = fit_tools(&tools, height - top - GAP - views, bar.row + bar.spacing);
         let hidden: Vec<usize> = (0..tools.len()).filter(|i| !shown.contains(i)).collect();
         let button = |ix: usize, cx: &mut Context<Self>| {
             let tool = &tools[ix];
@@ -177,11 +217,11 @@ impl Workspace {
             .flex()
             .flex_col()
             .items_center()
-            .w(px(ACTIVITY_WIDTH))
+            .w(px(bar.width))
             // Modern: the first tab's foot lands on the island's straight edge.
             .pt(px(top))
             .pb(px(GAP))
-            .gap(px(ACTIVITY_SPACING))
+            .gap(px(bar.spacing))
             // Not clipped: the current view's tab reaches 1px into the island,
             // over its border (`fit_tools` keeps the buttons within the bar).
             .when(theme.classic, |el| el.bg(theme.panel))
@@ -191,8 +231,16 @@ impl Workspace {
             }))
             // Only the views are tabs, at the top; the buttons that open
             // panels and pages are grouped at the foot, so none reads as one.
-            .child(self.render_view_tab(SidebarMode::Files, cx))
-            .child(self.render_view_tab(SidebarMode::Commit, cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_shrink_0()
+                    .w_full()
+                    .gap(px(bar.views_gap(&theme)))
+                    .child(self.render_view_tab(SidebarMode::Files, cx))
+                    .child(self.render_view_tab(SidebarMode::Commit, cx)),
+            )
             .child(div().flex_1().min_h_0())
             .children(more)
             .children(panels)
@@ -262,6 +310,7 @@ impl Workspace {
             SidebarMode::Commit => ("activity-commit", Icon::GitBranch),
         };
         let changes = if mode == SidebarMode::Commit { self.git_status.files.len() } else { 0 };
+        let bar = BarSize::of(cx);
         let (rest, hover): (Hsla, Hsla) = if on { (theme.accent.into(), theme.accent.into()) } else { (theme.text_dim.into(), theme.text.into()) };
         let tab = div()
             .id(id)
@@ -271,7 +320,7 @@ impl Workspace {
             .items_center()
             .justify_center()
             .w_full()
-            .h(px(VIEW_TAB_HEIGHT))
+            .h(px(bar.row))
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |ws, _, window, cx| match mode {
@@ -299,22 +348,36 @@ impl Workspace {
                     })
                 }
             })
-            .map(|el| if on { el.child(view_tab_shape(right, &theme)) } else { el });
+            .map(|el| if on { el.child(view_tab_shape(right, bar, &theme)) } else { el })
+            // Classic: a line under each tab, like the one after each editor
+            // tab, out to the bar's separator (which the current tab covers).
+            .when(theme.classic, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .h(px(1.))
+                        .left(px(if right { -1. } else { 0. }))
+                        .right(px(if right { 0. } else { -1. }))
+                        .bg(crate::ui::separator(&theme)),
+                )
+            });
         // Selected, the icon glides to the middle of its tab, which starts a gap
         // off the window's edge and runs into the island; elsewhere it's on the
         // buttons' line. The Classic tab spans the bar: nothing to move.
-        let shift = if theme.classic { 0. } else if right { -VIEW_TAB_SHIFT } else { VIEW_TAB_SHIFT };
+        let shift = if theme.classic { 0. } else if right { -bar.view_tab_shift() } else { bar.view_tab_shift() };
+        let size = bar.icon;
         let glyph = div()
             .relative()
-            .size(px(20.))
+            .size(px(size))
             .flex_shrink_0()
-            .child(svg().path(icon.path()).size(px(20.)).text_color(rest))
+            .child(svg().path(icon.path()).size(px(size)).text_color(rest))
             // A resting tab's icon brightens on hover.
             .when(!on, |el| {
                 el.child(
                     svg()
                         .path(icon.path())
-                        .size(px(20.))
+                        .size(px(size))
                         .absolute()
                         .top_0()
                         .left_0()
@@ -324,7 +387,7 @@ impl Workspace {
                 )
             })
             // Uncommitted changes, so they show from the Files view too.
-            .when(changes > 0, |el| el.child(count_badge(changes, &theme)))
+            .when(changes > 0, |el| el.child(count_badge(changes, bar, &theme)))
             .with_transition(SharedString::from(format!("{id}-shift")), on, transition::FOCUS, move |el, t| el.left(px(shift * t)));
         // The same elements selected or not, so the glide keeps its state. A
         // resting tab is a plain button: a rounded fill on hover.
@@ -332,11 +395,11 @@ impl Workspace {
         tab.group(id).child(
             div()
                 .id(SharedString::from(format!("{id}-fill")))
-                .size(px(ACTIVITY_BUTTON))
+                .size(px(bar.button))
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(9.))
+                .rounded(px(bar.radius))
                 .hover_fill(Hsla::from(theme.hover).alpha(0.), fill)
                 .child(glyph),
         )
@@ -360,12 +423,14 @@ impl Workspace {
         } else {
             (Hsla::from(theme.hover).alpha(0.), theme.hover.into())
         };
+        let bar = BarSize::of(cx);
+        let size = bar.icon;
         let glyph = div()
             .relative()
-            .size(px(20.))
+            .size(px(size))
             .flex_shrink_0()
-            .child(svg().path(icon.path()).size(px(20.)).text_color(rest))
-            .child(svg().path(icon.path()).size(px(20.)).absolute().top_0().left_0().text_color(hover).invisible().group_hover(id, |s| s.visible()));
+            .child(svg().path(icon.path()).size(px(size)).text_color(rest))
+            .child(svg().path(icon.path()).size(px(size)).absolute().top_0().left_0().text_color(hover).invisible().group_hover(id, |s| s.visible()));
         div()
             .id(id)
             .group(id)
@@ -374,18 +439,18 @@ impl Workspace {
             .items_center()
             .justify_center()
             .w_full()
-            .h(px(VIEW_TAB_HEIGHT))
+            .h(px(bar.row))
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(on_click))
             .child(
                 div()
                     .id(SharedString::from(format!("{id}-fill")))
-                    .size(px(ACTIVITY_BUTTON))
+                    .size(px(bar.button))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(9.))
+                    .rounded(px(bar.radius))
                     .hover_fill(fill, fill_hover)
                     .child(glyph),
             )
@@ -396,10 +461,10 @@ impl Workspace {
 /// the island, outlined in the island's border down to concave feet that join
 /// its edge, like the editor's current tab (`tab_shape`) turned on its side.
 /// It starts a gap off the window's edge, like the buttons' fills, so its
-/// middle is `VIEW_TAB_SHIFT` toward the island from theirs. Painted from one
+/// middle is `BarSize::view_tab_shift` toward the island from theirs. Painted from one
 /// set of pixel-snapped coordinates, as the editor's is. Classic: a rectangle
 /// that covers the separator, opening onto the sidebar.
-fn view_tab_shape(right: bool, theme: &Theme) -> AnyElement {
+fn view_tab_shape(right: bool, bar: BarSize, theme: &Theme) -> AnyElement {
     let island: Hsla = theme.background.into();
     if theme.classic {
         return div()
@@ -412,7 +477,7 @@ fn view_tab_shape(right: bool, theme: &Theme) -> AnyElement {
             .into_any_element();
     }
     let edge = crate::ui::island_edge(theme);
-    let outer = (ACTIVITY_WIDTH - ACTIVITY_BUTTON) / 2.;
+    let outer = (bar.width - bar.button) / 2.;
     gpui::canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
@@ -467,28 +532,30 @@ fn badge_text(fill: Hsla) -> Hsla {
 /// around it: the chrome behind is a gradient and the button's fill changes
 /// on hover, so a ring in any one color would show as a halo. It hangs below
 /// the icon's lower right corner, covering little of it; a count too long
-/// for the room beside the icon starts further in, so it keeps `BADGE_ROOM`
+/// for the room beside the icon starts further in, so it keeps `badge_room`
 /// past the icon's edge, 6pt from the island.
-fn count_badge(count: usize, theme: &Theme) -> impl IntoElement + use<> {
+fn count_badge(count: usize, bar: BarSize, theme: &Theme) -> impl IntoElement + use<> {
     let fill: Hsla = theme.accent.into();
     let label = if count > 99 { "99+".to_string() } else { count.to_string() };
-    // Padding plus a 9pt bold digit's width (as drawn) each.
-    let width = 6. + 7. * label.chars().count() as f32;
+    // Padding plus a bold digit's width (as drawn, ~0.78em) each.
+    let pad = bar.badge * 0.23;
+    let width = 2. * pad + 0.78 * bar.badge_text * label.chars().count() as f32;
     div()
         .absolute()
-        // Hanging below the icon's corner: it covers little of it.
-        .bottom(px(-9.))
-        .left(px(13_f32.min(20. + BADGE_ROOM - width)))
-        .h(px(13.))
-        .min_w(px(13.))
-        .px(px(3.))
+        // Hanging below the icon's corner, its top 4pt over it: it covers
+        // little of it, but stays in its row (Classic draws a line under the tab).
+        .bottom(px(-((bar.badge - 4.).min((bar.row - bar.icon) / 2. - 1.))))
+        .left(px((bar.icon - 7.).min(bar.icon + bar.badge_room() - width)))
+        .h(px(bar.badge))
+        .min_w(px(bar.badge))
+        .px(px(pad))
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(6.5))
+        .rounded(px(bar.badge / 2.))
         .bg(fill)
-        .text_size(px(9.))
-        .line_height(px(13.))
+        .text_size(px(bar.badge_text))
+        .line_height(px(bar.badge))
         .font_weight(FontWeight::BOLD)
         .text_color(badge_text(fill))
         .child(label)
@@ -519,14 +586,13 @@ mod tests {
     #[test]
     fn tools_fit_the_bar_by_priority() {
         let all = tools(&[0, 2, 4, 3, 6, 1]);
-        assert_eq!(fit_tools(&all, 2000.), vec![0, 1, 2, 3, 4, 5]);
-        let views = 2. * (VIEW_TAB_HEIGHT + ACTIVITY_SPACING) + SEPARATOR + 2. * SEPARATOR_MARGIN + ACTIVITY_SPACING;
-        let button = VIEW_TAB_HEIGHT + ACTIVITY_SPACING;
+        let button = 44.;
+        assert_eq!(fit_tools(&all, 2000., button), vec![0, 1, 2, 3, 4, 5]);
         // Room for four buttons: three tools and More.
-        assert_eq!(fit_tools(&all, views + 4. * button), vec![0, 1, 5]);
+        assert_eq!(fit_tools(&all, 4. * button, button), vec![0, 1, 5]);
         // Exactly all six: no More.
-        assert_eq!(fit_tools(&all, views + 6. * button).len(), 6);
+        assert_eq!(fit_tools(&all, 6. * button, button).len(), 6);
         // Not even one beside More.
-        assert!(fit_tools(&all, views).is_empty());
+        assert!(fit_tools(&all, 0., button).is_empty());
     }
 }

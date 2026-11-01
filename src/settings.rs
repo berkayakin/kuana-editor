@@ -87,6 +87,8 @@ pub struct Settings {
     /// The round initial before the project's name in the title bar (shown
     /// unless `false`).
     pub project_avatar: Option<bool>,
+    /// A narrower activity bar with smaller buttons and icons (`true`).
+    pub compact_activity_bar: Option<bool>,
     /// How Update Project (pull) combines incoming commits with local ones
     /// when both branches have new commits. Unset: as the Git config says,
     /// else asked the first time it happens.
@@ -448,6 +450,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "sidebar_dock",
     "ui_style",
     "project_avatar",
+    "compact_activity_bar",
     "pull_strategy",
     "minimap_width",
     "edit_prediction_provider",
@@ -608,6 +611,11 @@ impl Settings {
         self.project_avatar.unwrap_or(true)
     }
 
+    /// Whether the activity bar is the narrower one, with smaller buttons.
+    pub fn compact_activity_bar(&self) -> bool {
+        self.compact_activity_bar.unwrap_or(false)
+    }
+
     /// Writes the layout style; the default (Modern) removes the key.
     pub fn set_ui_style(style: UiStyle) -> std::io::Result<()> {
         if style == UiStyle::default() {
@@ -688,6 +696,7 @@ impl Settings {
             "sidebar_dock" => self.sidebar_dock.is_some(),
             "ui_style" => self.ui_style.is_some(),
             "project_avatar" => self.project_avatar.is_some(),
+            "compact_activity_bar" => self.compact_activity_bar.is_some(),
             "terminal_shell" => self.terminal_shell.is_some(),
             "run_configurations" => !self.run_configurations.is_empty(),
             "auto_update" => self.auto_update.is_some(),
@@ -1062,6 +1071,9 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // "ui_style": "modern",
   // The round initial before the project's name in the title bar.
   // "project_avatar": true,
+  // A narrower activity bar beside the sidebar, with smaller buttons and icons
+  // (the title bar's buttons' size), for more room.
+  // "compact_activity_bar": false,
 
   // Per-language overrides, by the name shown in the status bar.
   // "languages": {
@@ -1477,6 +1489,14 @@ mod tests {
         assert!(avatar("{}"));
         assert!(!avatar(r#"{"project_avatar": false}"#));
         assert!(Settings::unknown_keys(r#"{"project_avatar": false}"#).is_empty());
+    }
+
+    #[test]
+    fn the_activity_bar_is_full_size_unless_compact() {
+        let compact = |json: &str| Settings::parse(json).unwrap().compact_activity_bar();
+        assert!(!compact("{}"));
+        assert!(compact(r#"{"compact_activity_bar": true}"#));
+        assert!(Settings::unknown_keys(r#"{"compact_activity_bar": true}"#).is_empty());
     }
 
     #[test]

@@ -80,7 +80,7 @@ impl Workspace {
     /// needs to keep a pane's width in a narrow window (not below the
     /// sidebar's own minimum). The saved width comes back as the window grows.
     pub(super) fn shown_sidebar_width(&self) -> Pixels {
-        let editor = px(ACTIVITY_WIDTH + 2. * GAP + MIN_PANE_WIDTH);
+        let editor = px(self.activity_width + 2. * GAP + MIN_PANE_WIDTH);
         self.sidebar_width.min(self.viewport.width - editor).max(px(SIDEBAR_MIN_WIDTH))
     }
 
@@ -236,7 +236,7 @@ impl Workspace {
             Edge::Sidebar => {
                 // Leave the editor a pane's width. On the right, dragging left
                 // (toward the editor) widens it.
-                let max = (viewport.width - px(ACTIVITY_WIDTH + 2. * GAP + MIN_PANE_WIDTH)).max(px(SIDEBAR_MIN_WIDTH));
+                let max = (viewport.width - px(self.activity_width + 2. * GAP + MIN_PANE_WIDTH)).max(px(SIDEBAR_MIN_WIDTH));
                 let delta = event.position.x - resize.start;
                 let delta = if self.sidebar_on_right(cx) { -delta } else { delta };
                 self.sidebar_width = (resize.size + delta).clamp(px(SIDEBAR_MIN_WIDTH), max);
@@ -292,6 +292,7 @@ impl Focusable for Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.viewport = window.viewport_size();
+        self.activity_width = activity_bar::BarSize::of(cx).width;
         // The Problems panel lists the active file's diagnostics.
         if self.shows(BottomPanel::Problems) {
             let active = self.active_editor(cx);

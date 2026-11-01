@@ -633,10 +633,6 @@ const TAB_FOOT: f32 = 8.0;
 const TAB_STRIP_INSET: f32 = crate::ui::ISLAND_RADIUS + TAB_FOOT;
 /// Between the title bar's lead or trail and the tabs beside them.
 const TITLE_END_GAP: f32 = 10.0;
-/// The activity bar along the sidebar's side: its views as vertical tabs, the
-/// panel toggles and the window's tools. A button and a gap on each side,
-/// wide enough that the Commit view's count fits beside its icon.
-const ACTIVITY_WIDTH: f32 = 52.0;
 /// The sidebar's narrowest: a file tree that's still usable.
 const SIDEBAR_MIN_WIDTH: f32 = 160.0;
 /// What a bottom panel leaves the editor above it: its tab strip and a few lines.
@@ -682,6 +678,8 @@ pub struct Workspace {
     /// The window's size at the last render: the sidebar and the bottom panels
     /// show smaller than their saved sizes when it can't spare them.
     viewport: gpui::Size<Pixels>,
+    /// The activity bar's width (`BarSize`), noted each render like `viewport`.
+    activity_width: f32,
     /// What the bottom area shows; its height is `problems_height`.
     bottom: Option<BottomPanel>,
     /// Height of the bottom panel (Problems or Terminal; one shows at a time).
@@ -1103,6 +1101,7 @@ impl Workspace {
             show_sidebar: false,
             title_ends: Default::default(),
             viewport: window.viewport_size(),
+            activity_width: activity_bar::BarSize::of(cx).width,
             // One panel at a time; the terminal wins, as it always opened over the others.
             bottom: if state.show_terminal.unwrap_or(false) {
                 Some(BottomPanel::Terminal)
