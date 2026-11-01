@@ -35,6 +35,7 @@ pub fn open_window(
         titlebar: Some(TitlebarOptions {
             title: Some("Kuana".into()),
             appears_transparent: true,
+            // On the line of the chips beside them (`title_bar::chip_top`).
             traffic_light_position: Some(point(px(16.), px(13.))),
         }),
         window_min_size: Some(size(px(480.), px(320.))),

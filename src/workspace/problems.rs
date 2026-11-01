@@ -9,7 +9,7 @@ impl Workspace {
     pub(super) fn render_problems(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
         area(&theme)
-            .h(self.problems_height)
+            .h(self.shown_panel_height())
             .flex_shrink_0()
             .child(cached(&self.problems))
             .child(self.resize_handle(Edge::Problems, cx))
@@ -19,7 +19,7 @@ impl Workspace {
     pub(super) fn render_results(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
         area(&theme)
-            .h(self.problems_height)
+            .h(self.shown_panel_height())
             .flex_shrink_0()
             .child(cached(&self.results))
             .child(self.resize_handle(Edge::Problems, cx))

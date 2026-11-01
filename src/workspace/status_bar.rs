@@ -5,20 +5,16 @@ use super::*;
 impl Workspace {
     /// The active file's language server: its name, what it's busy with, or
     /// what's wrong (click to copy the install command or to restart).
-    pub(super) fn render_lsp_status(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// `chars`: the most of its label shown; `None`, just its light (the
+    /// tooltip names it).
+    pub(super) fn render_lsp_status(&self, theme: &Theme, chars: Option<usize>, cx: &mut Context<Self>) -> Option<AnyElement> {
         let path = self.active_editor(cx)?.read(cx).doc.read(cx).path.clone()?;
         let status = self.lsp.read(cx).status(&path)?;
         let dim: Hsla = theme.text_dim.into();
         let (label, color, tip): (String, Hsla, Option<String>) = match &status {
             LspStatus::Starting => ("Starting language server…".into(), dim, None),
-            LspStatus::Busy(work) => {
-                let mut short = work.clone();
-                if short.chars().count() > 48 {
-                    short = short.chars().take(47).collect::<String>() + "…";
-                }
-                (short, dim, Some(work.clone()))
-            }
-            LspStatus::Ready(name) => (name.clone(), dim, None),
+            LspStatus::Busy(work) => (work.clone(), dim, Some(work.clone())),
+            LspStatus::Ready(name) => (name.clone(), dim, chars.is_none().then(|| name.clone())),
             LspStatus::Missing { installer: Some(installer), .. } => (
                 format!("Install {}", installer.command),
                 theme.warning.into(),
@@ -30,6 +26,8 @@ impl Workspace {
             LspStatus::Installing(command) => (format!("Installing {command}…"), dim, None),
             LspStatus::Failed(message) => ("Language server stopped".into(), theme.error.into(), Some(format!("{message}. Click to restart."))),
         };
+        let tip = tip.or_else(|| chars.is_none().then(|| label.clone()));
+        let label = chars.map(|chars| ellipsize(&label, chars));
         // A small light: green when ready, the accent while working.
         let light: Hsla = match &status {
             LspStatus::Ready(_) => theme.success.into(),
@@ -48,7 +46,7 @@ impl Workspace {
                     div().size(px(6.)).rounded_full().bg(light).shadow(crate::ui::glow(theme, light.alpha(0.6), 4., 0.)),
                 )
                 .when(matches!(status, LspStatus::Missing { .. } | LspStatus::Failed(_)), |el| el.cursor_pointer())
-                .child(label)
+                .children(label)
                 .when_some(tip, |el, tip| el.tooltip(move |_, cx| tooltip_view(tip.clone(), cx)))
                 .on_click(cx.listener(move |ws, _, window, cx| match &status {
                     LspStatus::Missing { installer: Some(_), .. } => {
@@ -74,7 +72,8 @@ impl Workspace {
 
     pub(super) fn render_statusbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = crate::ui::chrome_theme(Theme::get(cx));
-        let lsp_item = self.render_lsp_status(&theme, cx);
+        let fit = StatusFit::for_width(f32::from(self.viewport.width));
+        let lsp_item = self.render_lsp_status(&theme, fit.lsp_chars, cx);
         let copilot_item = self.render_copilot_status(&theme, cx);
         let active_editor = self.active_editor(cx);
         let editor = active_editor.as_ref().map(|e| e.read(cx));
@@ -113,12 +112,12 @@ impl Workspace {
             let (line, col) = e.cursor_position(cx);
             let selected = e.selected_chars(cx);
             let cursors = e.selections().len();
-            let mut pos = format!("Ln {line}, Col {col}");
-            if cursors > 1 {
-                pos.push_str(&format!("  ({cursors} cursors)"));
-            } else if selected > 0 {
-                pos.push_str(&format!("  ({selected} selected)"));
-            }
+            let pos = match () {
+                _ if fit.short_position => format!("{line}:{col}"),
+                _ if cursors > 1 => format!("Ln {line}, Col {col}  ({cursors} cursors)"),
+                _ if selected > 0 => format!("Ln {line}, Col {col}  ({selected} selected)"),
+                _ => format!("Ln {line}, Col {col}"),
+            };
             right.push(
                 item(div().font_family(theme.mono_font.clone()).text_size(px(11.)).text_color(theme.text_muted).child(pos).into_any_element())
                     .into_any_element(),
@@ -152,7 +151,9 @@ impl Workspace {
             if let Some(copilot_item) = copilot_item {
                 right.push(item(copilot_item).into_any_element());
             }
-            right.push(item(e.indent_label().into_any_element()).into_any_element());
+            if fit.indent {
+                right.push(item(e.indent_label().into_any_element()).into_any_element());
+            }
             let menu_item = |id: &'static str, label: String, tip: &'static str| {
                 div()
                     .id(id)
@@ -168,26 +169,28 @@ impl Workspace {
                     .tooltip(move |_, cx| tooltip_view(tip, cx))
                     .child(label)
             };
-            let tab = active_editor.clone();
-            right.push(
-                menu_item("line-endings", if e.doc.read(cx).uses_crlf { "CRLF".into() } else { "LF".into() }, "Line Endings")
-                    .on_click(cx.listener(move |ws, event: &ClickEvent, window, cx| {
-                        if let Some(editor) = tab.clone() {
-                            ws.open_line_endings_menu(editor, event.position(), window, cx);
-                        }
-                    }))
-                    .into_any_element(),
-            );
-            let tab = active_editor.clone();
-            right.push(
-                menu_item("encoding", e.doc.read(cx).encoding.label(), "File Encoding")
-                    .on_click(cx.listener(move |ws, event: &ClickEvent, window, cx| {
-                        if let Some(editor) = tab.clone() {
-                            ws.open_encoding_menu(editor, event.position(), window, cx);
-                        }
-                    }))
-                    .into_any_element(),
-            );
+            if fit.file_format {
+                let tab = active_editor.clone();
+                right.push(
+                    menu_item("line-endings", if e.doc.read(cx).uses_crlf { "CRLF".into() } else { "LF".into() }, "Line Endings")
+                        .on_click(cx.listener(move |ws, event: &ClickEvent, window, cx| {
+                            if let Some(editor) = tab.clone() {
+                                ws.open_line_endings_menu(editor, event.position(), window, cx);
+                            }
+                        }))
+                        .into_any_element(),
+                );
+                let tab = active_editor.clone();
+                right.push(
+                    menu_item("encoding", e.doc.read(cx).encoding.label(), "File Encoding")
+                        .on_click(cx.listener(move |ws, event: &ClickEvent, window, cx| {
+                            if let Some(editor) = tab.clone() {
+                                ws.open_encoding_menu(editor, event.position(), window, cx);
+                            }
+                        }))
+                        .into_any_element(),
+                );
+            }
             if e.doc.read(cx).language == Language::Python
                 && self.root.is_some()
                 && let Some(dir) = e.doc.read(cx).path.as_deref().and_then(Path::parent)
@@ -215,7 +218,7 @@ impl Workspace {
                         .items_center()
                         .gap_1()
                         .child(icon_el(icon, px(13.), color))
-                        .child(e.doc.read(cx).language.name())
+                        .when(fit.language, |el| el.child(e.doc.read(cx).language.name()))
                         .into_any_element(),
                 )
                 .into_any_element(),
@@ -284,6 +287,43 @@ impl Workspace {
                         .tooltip(move |_, cx| tooltip_view(tip.clone(), cx)),
                 )
             })
-            .children(right)
+            // Whatever still doesn't fit is cut at its start, the status bar's
+            // middle, rather than past the window's edge.
+            .child(div().flex().flex_shrink().min_w_0().overflow_hidden().justify_end().children(right))
+    }
+}
+
+/// What the status bar shows at the window's width: the less used items go
+/// first (each is also in a menu or Find Action), then the language server's
+/// name shortens to its light, the caret's place to "line:column".
+#[derive(Clone, Copy)]
+struct StatusFit {
+    /// The language server's label; `None`, just its light.
+    lsp_chars: Option<usize>,
+    indent: bool,
+    /// Line endings and encoding.
+    file_format: bool,
+    short_position: bool,
+    /// The language's name beside its icon.
+    language: bool,
+}
+
+impl StatusFit {
+    fn for_width(width: f32) -> Self {
+        Self {
+            lsp_chars: if width >= 1200. {
+                Some(48)
+            } else if width >= 1000. {
+                Some(32)
+            } else if width >= 800. {
+                Some(20)
+            } else {
+                None
+            },
+            indent: width >= 720.,
+            file_format: width >= 600.,
+            short_position: width < 600.,
+            language: width >= 520.,
+        }
     }
 }

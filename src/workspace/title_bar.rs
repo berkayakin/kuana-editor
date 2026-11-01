@@ -1,4 +1,8 @@
-//! The title bar: project and branch chips, the run widget, panel toggles, search and settings, window controls.
+//! The title bar, which shares the window's top row with the editor's tabs:
+//! its lead (traffic lights, project and branch chips) at the top left, its
+//! trail (the run widget, window controls) at the top right, and the top
+//! panes' tab strips between them (`PaneChrome::title_ends`). The tools are
+//! on the activity bar (`activity_bar.rs`).
 
 use super::*;
 use gpui::svg;
@@ -50,65 +54,127 @@ fn drag_window() {
 }
 
 impl Workspace {
-    pub(super) fn render_titlebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The title bar's start, over the tab row's left end: room for the
+    /// traffic lights (or the app menu). The project and branch are above the
+    /// sidebar (`render_title_chips`), so they never push the tabs; with the
+    /// sidebar hidden only Restricted Mode stays, as its icon.
+    pub(super) fn render_title_lead(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mac = cfg!(target_os = "macos");
-        let theme = crate::ui::chrome_theme(Theme::get(cx));
-        let fit = BarFit::for_width(f32::from(window.viewport_size().width));
+        let theme = Theme::get(cx);
         div()
-            .id("titlebar")
+            .id("title-lead")
+            .absolute()
+            .top_0()
+            .left_0()
+            .h(px(TAB_STRIP_HEIGHT - 1.))
+            .pt(px(chip_top(theme)))
             .flex()
             .flex_row()
             .items_center()
-            .flex_shrink_0()
-            .h(px(TITLEBAR_HEIGHT))
-            .w_full()
             // On Windows a title bar click must reach no listener, or GPUI reports
             // it handled and the system's drag, double-click and window buttons
             // don't happen. Blocking the mouse keeps the workspace root from
             // taking focus on it.
             .when(cfg!(windows), |el| el.occlude())
-            // Drag areas (Windows) are the bar's empty parts, not the bar itself:
-            // GPUI picks the first control area under the pointer, and a parent's
-            // comes before its children's (the window buttons).
-            //
+            .child(self.track_title_end(true, cx))
             // Room for the traffic lights, which macOS moves out of the window in full screen.
-            .child(window_drag_area("titlebar-start").flex_shrink_0().w(px(if mac && !window.is_fullscreen() { 86. } else { GAP + 4. })))
+            .child(window_drag_area("titlebar-start").flex_shrink_0().w(px(if mac && !window.is_fullscreen() { 82. } else { GAP + 4. })))
             .when(app_menu::APP_MENU_IN_TITLE_BAR, |el| {
                 el.child(self.render_app_menu(cx)).child(window_drag_area("titlebar-menu-gap").flex_shrink_0().w(px(GAP)))
             })
-            // The chips give way (their names cut) before the tools would. An
-            // open app menu's names take their place.
-            .when(!self.app_menu_open(), |el| el.child(
-                div()
-                    .flex()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .items_center()
-                    .gap_1p5()
-                    .when(self.root.is_some(), |el| el.child(self.render_project_chip(fit, cx)))
-                    .when(self.repo.is_some(), |el| el.child(self.render_branch_chip(fit, cx)))
-                    .when_some(self.render_sync_counts(window, cx).filter(|_| fit.counts), |el, counts| el.child(counts))
-                    .when(self.restricted(cx), |el| el.child(self.render_restricted_chip(fit, cx))),
-            ))
-            .child(window_drag_area("titlebar-middle").flex_1().min_w(px(GAP)))
-            .child(
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap_2p5()
-                    .child(self.render_run_widget(fit, window, cx))
-                    .child(separator(&theme))
-                    .child(self.render_panel_dock(fit, cx))
-                    .child(separator(&theme))
-                    .when(fit.search, |el| el.child(self.render_search_button(window, cx)))
-                    .when(fit.extensions, |el| el.child(self.render_extensions_button(window, cx)))
-                    .child(self.render_settings_button(window, cx)),
-            )
-            .map(|el| match mac {
+            .when(!self.show_sidebar && !self.app_menu_open() && self.restricted(cx), |el| el.child(self.render_restricted_chip(false, cx)))
+    }
+
+    /// The project, branch, commits to sync and Restricted Mode, in the tab
+    /// row's part above the sidebar, `room` wide: fitted to it from their
+    /// names' measured widths (`fit_chips`), so the editor's tabs start at their
+    /// island whatever the names are. `None` while an open app menu's names
+    /// take their place.
+    pub(super) fn render_title_chips(&self, room: f32, window: &Window, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        if self.app_menu_open() {
+            return None;
+        }
+        let theme = Theme::get(cx).clone();
+        let size = px(13.);
+        let measure = |text: &str, weight: FontWeight| -> Text {
+            let font = gpui::Font { weight, ..gpui::font(theme.ui_font.clone()) };
+            let run = gpui::TextRun { len: text.len(), font, color: theme.text.into(), background_color: None, underline: None, strikethrough: None };
+            let width = window.text_system().shape_line(text.to_string().into(), size, &[run], None).width;
+            Text { width: f32::from(width), chars: text.chars().count().max(1) }
+        };
+        let project = self.root.as_deref().map(|root| measure(&folder_name(root), FontWeight::SEMIBOLD));
+        let branch = self.repo.is_some().then(|| measure(&self.branch_label(), FontWeight::NORMAL));
+        let counts = self.render_sync_counts(window, cx);
+        let restricted = self.restricted(cx).then(|| RESTRICTED_LABEL_CHROME + measure("Restricted Mode", FontWeight::NORMAL).width);
+        let fit = fit_chips(ChipNeeds {
+            room,
+            project,
+            branch,
+            // About its icons and digits; it goes first anyway.
+            counts: counts.is_some().then_some(SYNC_COUNTS_WIDTH),
+            restricted,
+            avatar: Settings::get(cx).project_avatar(),
+        });
+        Some(
+            div()
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .gap(px(CHIP_GAP))
+                .when_some(fit.project, |el, chars| el.child(self.render_project_chip(chars, fit.monogram, cx)))
+                .when_some(fit.branch, |el, chars| el.child(self.render_branch_chip(chars, cx)))
+                .when_some(counts.filter(|_| fit.counts), |el, counts| el.child(counts))
+                .when_some(fit.restricted, |el, label| el.child(self.render_restricted_chip(label, cx))),
+        )
+    }
+
+    /// The title bar's end, over the tab row's right end: the run widget and,
+    /// off macOS, the window's buttons.
+    pub(super) fn render_title_trail(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::get(cx);
+        let fit = BarFit::for_width(f32::from(window.viewport_size().width));
+        div()
+            .id("title-trail")
+            .absolute()
+            .top_0()
+            .right_0()
+            .h(px(TAB_STRIP_HEIGHT - 1.))
+            .flex()
+            .flex_row()
+            .when(cfg!(windows), |el| el.occlude())
+            .child(self.track_title_end(false, cx))
+            .child(div().flex().items_center().pt(px(tab_strip_top(theme))).child(self.render_run_widget(fit, window, cx)))
+            .map(|el| match cfg!(target_os = "macos") {
                 true => el.child(window_drag_area("titlebar-end").flex_shrink_0().w(px(GAP + 2.))),
                 false => el.child(div().w(px(GAP)).h_full().flex_shrink_0()).child(self.render_window_controls(window, cx)),
             })
+    }
+
+    /// Notes where the lead ends (`lead`) or the trail starts, for the tab
+    /// strips under them. A change tells the panes after this frame: they're
+    /// cached, so told while it's drawn they wouldn't redraw.
+    fn track_title_end(&self, lead: bool, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let ends = self.title_ends.clone();
+        let this = cx.entity().downgrade();
+        gpui::canvas(
+            |_, _, _| {},
+            move |bounds, _, _, cx| {
+                let mut now = ends.get();
+                if lead {
+                    now.0 = f32::from(bounds.right());
+                } else {
+                    now.1 = f32::from(bounds.left());
+                }
+                if now != ends.get() {
+                    ends.set(now);
+                    cx.defer(move |cx| {
+                        this.update(cx, |_, cx| cx.notify()).ok();
+                    });
+                }
+            },
+        )
+        .absolute()
+        .size_full()
     }
 
     /// The selected run configuration (the last one launched, run or
@@ -197,91 +263,10 @@ impl Workspace {
             })
     }
 
-    /// Show/hide toggles for the sidebar and the bottom panels: an open
-    /// one's icon takes the accent color. In narrow windows the less used ones
-    /// show only while their panel is open (so it can be closed from here).
-    pub(super) fn render_panel_dock(&self, fit: BarFit, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = crate::ui::chrome_theme(Theme::get(cx));
-        let toggle = |id, icon, on: bool, cx: &mut Context<Self>, f: fn(&mut Self, &mut Window, &mut Context<Self>)| {
-            let (rest, hover) = if on { (theme.accent, None) } else { (theme.text_dim, Some(theme.text.into())) };
-            self.bar_button(id, icon, rest.into(), hover, cx, move |ws, _, window, cx| f(ws, window, cx))
-        };
-        div()
-            .flex()
-            .items_center()
-            .gap(px(2.))
-            .child(
-                toggle("toggle-sidebar", if self.sidebar_on_right(cx) { Icon::PanelRight } else { Icon::PanelLeft }, self.show_sidebar, cx, |ws, window, cx| ws.set_sidebar_visible(!ws.show_sidebar, window, cx))
-                    .tooltip(|_, cx| tooltip_view("Toggle Sidebar", cx)),
-            )
-            .child(
-                toggle("toggle-terminal", Icon::Terminal, self.shows(BottomPanel::Terminal), cx, |ws, window, cx| {
-                    ws.set_terminal_shown(!ws.shows(BottomPanel::Terminal), window, cx)
-                })
-                .tooltip(|window, cx| status_tooltip("Terminal", &ToggleTerminal, window, cx)),
-            )
-            .when(fit.problems || self.shows(BottomPanel::Problems), |el| el.child(
-                toggle("toggle-problems", Icon::PanelBottom, self.shows(BottomPanel::Problems), cx, |ws, window, cx| {
-                    ws.toggle_problems(&ToggleProblems, window, cx)
-                })
-                .tooltip(|window, cx| status_tooltip("Problems", &ToggleProblems, window, cx)),
-            ))
-            .when(self.has_results && (fit.problems || self.shows(BottomPanel::Results)), |el| el.child(
-                toggle("toggle-results", Icon::TextSearch, self.shows(BottomPanel::Results), cx, |ws, window, cx| {
-                    ws.toggle_results(&ToggleResults, window, cx)
-                })
-                .tooltip(|window, cx| status_tooltip("Find", &ToggleResults, window, cx)),
-            ))
-            .when(self.repo.is_some() && (fit.git_log || self.shows(BottomPanel::GitLog)), |el| {
-                el.child(
-                    toggle("toggle-git-log", Icon::GitCommit, self.shows(BottomPanel::GitLog), cx, |ws, window, cx| {
-                        ws.toggle_git_log(&ToggleGitLog, window, cx)
-                    })
-                    .tooltip(|window, cx| status_tooltip("Git Log", &ToggleGitLog, window, cx)),
-                )
-            })
-            .when(self.debug.is_some() && (fit.git_log || self.shows(BottomPanel::Debug)), |el| {
-                el.child(
-                    toggle("toggle-debug", Icon::Bug, self.shows(BottomPanel::Debug), cx, |ws, window, cx| {
-                        ws.toggle_debug_panel(&ToggleDebugPanel, window, cx)
-                    })
-                    .tooltip(|window, cx| status_tooltip("Debug", &ToggleDebugPanel, window, cx)),
-                )
-            })
-    }
-
-    /// Opens Search Everywhere, like JetBrains' magnifier.
-    pub(super) fn render_search_button(&self, _: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = crate::ui::chrome_theme(Theme::get(cx));
-        self.bar_button("search-everywhere", Icon::Search, theme.text_dim.into(), Some(theme.text.into()), cx, |ws, _, window, cx| {
-            ws.search_everywhere(&SearchEverywhere, window, cx)
-        })
-        .tooltip(|_, cx| tooltip_view(format!("Search Everywhere ({})", double_shift_label()), cx))
-    }
-
-    /// Opens Settings' Extensions page; lit while it shows.
-    pub(super) fn render_extensions_button(&self, _: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = crate::ui::chrome_theme(Theme::get(cx));
-        let on = self.preferences_shown(cx) == Some(true);
-        let (rest, hover) = if on { (theme.accent, None) } else { (theme.text_dim, Some(theme.text.into())) };
-        self.bar_button("open-extensions", Icon::Puzzle, rest.into(), hover, cx, |ws, _, window, cx| ws.open_extensions(&OpenExtensions, window, cx))
-            .tooltip(|window, cx| status_tooltip("Extensions", &OpenExtensions, window, cx))
-    }
-
     /// Whether Settings is open, and if so whether on its Extensions page.
-    fn preferences_shown(&self, cx: &App) -> Option<bool> {
+    pub(super) fn preferences_shown(&self, cx: &App) -> Option<bool> {
         let page = cx.try_global::<preferences::Shown>().and_then(|shown| shown.0)?;
         Some(page == preferences::Page::Extensions)
-    }
-
-    /// Windows and Linux have no app menu, so Settings needs a way in.
-    pub(super) fn render_settings_button(&self, _: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = crate::ui::chrome_theme(Theme::get(cx));
-        // The Extensions button stands for its own page.
-        let on = self.preferences_shown(cx) == Some(false);
-        let (rest, hover) = if on { (theme.accent, None) } else { (theme.text_dim, Some(theme.text.into())) };
-        self.bar_button("open-settings", Icon::Settings, rest.into(), hover, cx, |ws, _, window, cx| ws.open_settings(&OpenSettings, window, cx))
-            .tooltip(|window, cx| status_tooltip("Settings", &OpenSettings, window, cx))
     }
 
     /// A title bar icon button: just the icon (18 px in a 30 px target), `color` at rest and `hover`
@@ -317,36 +302,38 @@ impl Workspace {
             })
     }
 
-    /// The open project: a pill like the branch chip beside it, with a round
-    /// tinted monogram (unless `project_avatar` is off) and the folder name.
-    /// Clicking lists recent projects.
-    pub(super) fn render_project_chip(&self, fit: BarFit, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The open project: a round tinted monogram (unless `project_avatar` is
+    /// off) and the folder name, a pill like the branch chip beside it under
+    /// the pointer. At rest it's plain text on the chrome: a filled pill would
+    /// crowd the islands just below. Clicking lists recent projects.
+    /// `chars`: the most of its name shown; `None`, just the monogram, which
+    /// `avatar` shows (it's off in tight room and with `project_avatar` off).
+    pub(super) fn render_project_chip(&self, chars: Option<usize>, avatar: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = crate::ui::chrome_theme(Theme::get(cx));
         let name = self.root.as_deref().map(folder_name).unwrap_or_default();
         let initial = name.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().to_string()).unwrap_or_default();
         let tint = monogram_color(&name, &theme);
-        let avatar = Settings::get(cx).project_avatar();
         div()
             .id("project-chip")
             .flex()
             .items_center()
             .gap_2()
             .h(px(CHIP_HEIGHT))
-            .pl(px(if avatar { 4. } else { 12. }))
-            .pr(px(12.))
+            .pl(px(if avatar { 3. } else { 10. }))
+            .pr(px(10.))
             .rounded_full()
             .cursor_pointer()
             .text_size(px(13.))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(theme.text)
-            .hover_fill(theme.hover, theme.active)
+            .hover_fill(Hsla::from(theme.hover).alpha(0.), theme.hover)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|ws, _, window, cx| ws.recent_projects(&RecentProjects, window, cx)))
             .tooltip(|window, cx| status_tooltip("Recent Projects…", &RecentProjects, window, cx))
-            .max_w(px(fit.project_chars as f32 * 9. + if avatar { 40. } else { 24. }))
+            .when(chars.is_none(), |el| el.pr(px(3.)))
             .when(avatar, |el| el.child(
                 div()
-                    .size(px(CHIP_HEIGHT - 8.))
+                    .size(px(CHIP_HEIGHT - 6.))
                     .flex()
                     .flex_shrink_0()
                     .items_center()
@@ -363,20 +350,21 @@ impl Workspace {
                             ))
                         }
                     })
-                    .text_size(px(11.))
+                    .text_size(px(10.))
                     .font_weight(FontWeight::BOLD)
                     .text_color(monogram_letter(tint, &theme))
                     .child(initial),
             ))
-            .child(div().min_w_0().truncate().child(ellipsize(&name, fit.project_chars)))
+            .when_some(chars, |el, chars| el.child(div().whitespace_nowrap().child(ellipsize(&name, chars))))
     }
 
     /// The current branch beside the project name. Clicking opens Branches….
-    pub(super) fn render_branch_chip(&self, fit: BarFit, cx: &mut Context<Self>) -> impl IntoElement {
+    /// `chars`: the most of its name shown; `None`, just its icon.
+    pub(super) fn render_branch_chip(&self, chars: Option<usize>, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = crate::ui::chrome_theme(Theme::get(cx));
         let branch = self.branch_label();
         // Just the icon in the narrowest windows; the tooltip names the branch.
-        let tip = if fit.branch_chars.is_some() { "Branches…".to_string() } else { format!("{branch} · Branches…") };
+        let tip = if chars.is_some() { "Branches…".to_string() } else { format!("{branch} · Branches…") };
         // Uncommitted changes aren't marked here: the Commit tab counts them.
         div()
             .id("branch-chip")
@@ -384,21 +372,20 @@ impl Workspace {
             .items_center()
             .gap_1p5()
             .h(px(CHIP_HEIGHT))
-            .max_w(px(fit.branch_chars.unwrap_or(0) as f32 * 9. + 40.))
             .pl(px(10.))
-            .pr(px(if fit.branch_chars.is_some() { 12. } else { 10. }))
+            .pr(px(if chars.is_some() { 12. } else { 10. }))
             .rounded_full()
             .cursor_pointer()
             // The same size as the project's name beside it.
             .text_size(px(13.))
             .text_color(theme.text_muted)
-            .hover_fill(theme.hover, theme.active)
+            .hover_fill(Hsla::from(theme.hover).alpha(0.), theme.hover)
             .hover(|st| st.text_color(theme.text))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|ws, _, window, cx| ws.git_branches(&GitBranches, window, cx)))
             .tooltip(move |window, cx| status_tooltip(&tip, &GitBranches, window, cx))
             .child(icon_el(Icon::GitBranch, px(14.), theme.text_dim.into()))
-            .when_some(fit.branch_chars, |el, chars| el.child(div().min_w_0().truncate().child(ellipsize(&branch, chars))))
+            .when_some(chars, |el, chars| el.child(div().whitespace_nowrap().child(ellipsize(&branch, chars))))
     }
 
     /// Commits to push and to pull, beside the branch pill: Push… when there
@@ -460,7 +447,8 @@ impl Workspace {
     }
 
     /// Shown while the project isn't trusted; opens the trust dialog.
-    pub(super) fn render_restricted_chip(&self, fit: BarFit, cx: &mut Context<Self>) -> impl IntoElement {
+    /// `label`: with "Restricted Mode" beside its icon.
+    pub(super) fn render_restricted_chip(&self, label: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = crate::ui::chrome_theme(Theme::get(cx));
         div()
             .id("restricted-chip")
@@ -471,7 +459,7 @@ impl Workspace {
             // A pill like the branch chip beside it: it's a button too.
             .h(px(CHIP_HEIGHT))
             .pl(px(10.))
-            .pr(px(if fit.counts { 12. } else { 10. }))
+            .pr(px(if label { 12. } else { 10. }))
             .rounded_full()
             .cursor_pointer()
             .text_size(px(12.5))
@@ -481,7 +469,7 @@ impl Workspace {
             .on_click(cx.listener(|ws, _, window, cx| ws.open_trust_dialog(window, cx)))
             .tooltip(|_, cx| tooltip_view("Language servers, formatters and project tools are off until you trust this folder", cx))
             .child(icon_el(Icon::ShieldAlert, px(14.), theme.warning.into()))
-            .when(fit.counts, |el| el.child("Restricted Mode"))
+            .when(label, |el| el.child("Restricted Mode"))
     }
 
     /// The checked-out branch, or what HEAD is when it isn't one.
@@ -512,57 +500,136 @@ impl Workspace {
     }
 }
 
-/// The project, branch and Restricted Mode pills' height.
-const CHIP_HEIGHT: f32 = 28.;
+/// The project, branch and Restricted Mode pills' height: a full pill that,
+/// raised a little (`chip_top`), still keeps clear of the islands just below
+/// under the pointer.
+const CHIP_HEIGHT: f32 = 24.;
 
-/// What the title bar shows at the window's width. As it narrows, the less
-/// used tools go first (each is also in a menu, Find Action or a shortcut),
-/// then the chips' names shorten; Run, Stop, the sidebar and terminal toggles
-/// and Settings always stay.
+/// Room above the chips and the traffic lights in the tab row: they sit a
+/// little above the tabs' names (the tabs hang from the islands), centered
+/// between the window's top and the islands as near as a pill this tall allows
+/// while leaving 5pt below it. Classic tabs fill their row: centered with them.
+pub(super) fn chip_top(theme: &Theme) -> f32 {
+    if theme.classic { 0. } else { 3. }
+}
+
+/// What the title bar's trail shows at the window's width: the less it
+/// takes, the more room the tabs beside it have. The run configuration's name
+/// goes first, then Debug (both also in menus, Find Action and shortcuts).
 #[derive(Clone, Copy)]
 pub(super) struct BarFit {
     run_label: bool,
-    extensions: bool,
-    /// The Git Log and Debug panel toggles (shown anyway while open).
-    git_log: bool,
-    /// The Problems toggle (shown anyway while open); the status bar's counts open it too.
-    problems: bool,
     debug: bool,
-    /// The commits to push/pull beside the branch, and Restricted Mode's label.
-    counts: bool,
-    search: bool,
-    project_chars: usize,
-    /// `None`: the branch chip is just its icon.
-    branch_chars: Option<usize>,
 }
 
 impl BarFit {
     fn for_width(width: f32) -> Self {
-        Self {
-            run_label: width >= 1000.,
-            extensions: width >= 860.,
-            git_log: width >= 860.,
-            problems: width >= 760.,
-            debug: width >= 760.,
-            counts: width >= 760.,
-            search: width >= 640.,
-            project_chars: if width >= 900. { 30 } else if width >= 640. { 16 } else { 10 },
-            branch_chars: if width >= 900. {
-                Some(28)
-            } else if width >= 640. {
-                Some(12)
-            } else if width >= 560. {
-                Some(8)
-            } else {
-                None
-            },
-        }
+        Self { run_label: width >= 1100., debug: width >= 760. }
     }
 }
 
-/// A short hairline between groups of title bar buttons.
-fn separator(theme: &Theme) -> Div {
-    div().w(px(1.)).h(px(18.)).flex_shrink_0().bg(theme.border)
+/// Between the chips above the sidebar.
+const CHIP_GAP: f32 = 4.;
+/// A chip's padding, icon and gaps around its name (see the `render_*_chip`s).
+const PROJECT_CHROME: f32 = 3. + 18. + 8. + 10.;
+const PROJECT_CHROME_PLAIN: f32 = 10. + 10.;
+/// Just the monogram.
+const PROJECT_MONOGRAM: f32 = 3. + 18. + 3.;
+const BRANCH_CHROME: f32 = 10. + 14. + 6. + 12.;
+/// A branch or Restricted Mode chip that's just its icon.
+const ICON_CHIP: f32 = 10. + 14. + 10.;
+const RESTRICTED_LABEL_CHROME: f32 = 10. + 14. + 6. + 12.;
+/// The commits to push and pull, about.
+const SYNC_COUNTS_WIDTH: f32 = 64.;
+/// The least of a name worth showing, about four characters and "…".
+const MIN_NAME: f32 = 36.;
+
+/// A name's measured width and its length.
+#[derive(Clone, Copy)]
+pub(super) struct Text {
+    width: f32,
+    chars: usize,
+}
+
+impl Text {
+    /// How many of its characters fit `width`, the "…" among them.
+    fn chars_in(self, width: f32) -> usize {
+        if width >= self.width { self.chars } else { ((width / (self.width / self.chars as f32)).floor() as usize).max(1) }
+    }
+}
+
+/// What the chips above the sidebar have to fit (see `fit_chips`).
+pub(super) struct ChipNeeds {
+    room: f32,
+    project: Option<Text>,
+    branch: Option<Text>,
+    counts: Option<f32>,
+    /// Restricted Mode's chip with its label, when the project isn't trusted.
+    restricted: Option<f32>,
+    avatar: bool,
+}
+
+/// How the chips show: names as characters (`None`, just the icon or
+/// monogram), the project's monogram, the sync counts, and Restricted Mode
+/// (`Some(label)`).
+#[derive(Debug, PartialEq, Default)]
+pub(super) struct ChipFit {
+    project: Option<Option<usize>>,
+    monogram: bool,
+    branch: Option<Option<usize>>,
+    counts: bool,
+    restricted: Option<bool>,
+}
+
+/// Fits the chips to their room. All as they are when they fit; else the
+/// sync counts go and Restricted Mode keeps just its icon, then the branch's
+/// name shortens, keeping the project's whole while it can, then both
+/// shorten, then the branch is just its icon, then gone, and last the project
+/// is just its monogram. The monogram stays throughout (`project_avatar`
+/// turns it off), and Restricted Mode, a warning, while anything does.
+pub(super) fn fit_chips(n: ChipNeeds) -> ChipFit {
+    let gap = CHIP_GAP;
+    let with_gap = |w: Option<f32>| w.map_or(0., |w| w + gap);
+    let chrome = if n.avatar { PROJECT_CHROME } else { PROJECT_CHROME_PLAIN };
+    let names = with_gap(n.project.map(|t| chrome + t.width)) + with_gap(n.branch.map(|t| BRANCH_CHROME + t.width));
+    let natural = ChipFit {
+        project: n.project.map(|t| Some(t.chars)),
+        monogram: n.avatar,
+        branch: n.branch.map(|t| Some(t.chars)),
+        counts: false,
+        restricted: None,
+    };
+    if names + with_gap(n.counts) + with_gap(n.restricted) <= n.room {
+        return ChipFit { counts: n.counts.is_some(), restricted: n.restricted.map(|_| true), ..natural };
+    }
+    let restricted = n.restricted.map(|_| false);
+    let natural = ChipFit { restricted, ..natural };
+    let room = n.room - if restricted.is_some() { ICON_CHIP + gap } else { 0. };
+    if names <= room {
+        return natural;
+    }
+    let Some(p) = n.project else {
+        // A repository's branch without a project folder doesn't happen; just the warning.
+        return ChipFit { restricted, ..Default::default() };
+    };
+    let left = |others: f32| room - chrome - others;
+    if let Some(b) = n.branch {
+        // Both named: the branch gives way first, then both.
+        let shared = left(gap + BRANCH_CHROME);
+        if shared >= 2. * MIN_NAME {
+            let for_project = p.width.min(shared - MIN_NAME);
+            let for_branch = (shared - for_project).min(b.width);
+            return ChipFit { project: Some(Some(p.chars_in(for_project))), branch: Some(Some(b.chars_in(for_branch))), ..natural };
+        }
+        if left(gap + ICON_CHIP) >= MIN_NAME {
+            return ChipFit { project: Some(Some(p.chars_in(left(gap + ICON_CHIP)))), branch: Some(None), ..natural };
+        }
+    }
+    if left(0.) >= MIN_NAME {
+        return ChipFit { project: Some(Some(p.chars_in(left(0.)))), branch: None, ..natural };
+    }
+    let monogram = n.avatar && room >= PROJECT_MONOGRAM;
+    ChipFit { project: monogram.then_some(None), monogram, branch: None, counts: false, restricted }
 }
 
 /// The monogram's letter: dark or light, whichever reads better on its tint
@@ -617,7 +684,7 @@ pub fn window_controls(window: &Window, cx: &App) -> impl IntoElement + use<> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BarFit, monogram_letter};
+    use super::{BarFit, ChipFit, ChipNeeds, Text, fit_chips, monogram_letter};
     use crate::theme::Theme;
 
     /// Dark on a light tint, light on a dark one.
@@ -633,18 +700,45 @@ mod tests {
     /// Narrowing the window only ever takes things away.
     #[test]
     fn narrower_windows_only_drop_things() {
-        let shown = |f: BarFit| {
-            [f.run_label, f.extensions, f.git_log, f.problems, f.debug, f.counts, f.search].map(usize::from).iter().sum::<usize>()
-                + f.project_chars
-                + f.branch_chars.unwrap_or(0)
-        };
+        let shown = |f: BarFit| usize::from(f.run_label) + usize::from(f.debug);
         let mut last = shown(BarFit::for_width(2000.));
         for width in (480..2000).rev().step_by(10) {
             let now = shown(BarFit::for_width(width as f32));
             assert!(now <= last, "more shows at {width} px than wider");
             last = now;
         }
-        let smallest = BarFit::for_width(480.);
-        assert!(!smallest.search && !smallest.extensions && smallest.branch_chars.is_none());
+        assert_eq!(shown(BarFit::for_width(480.)), 0);
+    }
+
+    /// The chips give way in order as their room narrows, never past it.
+    #[test]
+    fn chips_fit_their_room() {
+        // "kuana-editor" and "ui/activity-bar", about 7.5pt a character.
+        let needs = |room: f32| ChipNeeds {
+            room,
+            project: Some(Text { width: 90., chars: 12 }),
+            branch: Some(Text { width: 112., chars: 15 }),
+            counts: Some(64.),
+            restricted: None,
+            avatar: true,
+        };
+        let all = ChipFit { project: Some(Some(12)), monogram: true, branch: Some(Some(15)), counts: true, restricted: None };
+        assert_eq!(fit_chips(needs(400.)), all);
+        // No room for the counts.
+        assert_eq!(fit_chips(needs(300.)), ChipFit { counts: false, ..all });
+        // The branch shortens; the project's name and monogram stay whole.
+        let fit = fit_chips(needs(220.));
+        assert_eq!((fit.project, fit.monogram), (Some(Some(12)), true));
+        assert!(matches!(fit.branch, Some(Some(n)) if n < 15));
+        // Then both, then the branch is its icon, then gone, then the project its monogram.
+        assert!(matches!(fit_chips(needs(160.)).project, Some(Some(n)) if n < 12));
+        assert_eq!(fit_chips(needs(120.)).branch, Some(None));
+        assert_eq!(fit_chips(needs(80.)).branch, None);
+        assert!(fit_chips(needs(80.)).monogram);
+        assert_eq!(fit_chips(needs(40.)), ChipFit { project: Some(None), monogram: true, ..Default::default() });
+        // Restricted Mode keeps its icon while the rest gives way.
+        let fit = fit_chips(ChipNeeds { restricted: Some(140.), ..needs(220.) });
+        assert_eq!(fit.restricted, Some(false));
+        assert!(fit.project.is_some());
     }
 }

@@ -24,7 +24,8 @@ pub(super) enum TabSlot {
 /// (short names stay whole); else the current tab keeps its name and the
 /// others show their icons; and when even those don't fit, the tabs farthest
 /// from the current one go to the overflow menu. The current tab is never
-/// hidden. Widths are whole points, so tab edges stay on pixels.
+/// hidden, and in a very narrow strip it narrows, down to its icon, so it and
+/// the menu still fit. Widths are whole points, so tab edges stay on pixels.
 pub(super) fn fit_tabs(naturals: &[f32], active: usize, available: f32) -> Vec<TabSlot> {
     let n = naturals.len();
     if n == 0 || naturals.iter().sum::<f32>() <= available {
@@ -34,7 +35,8 @@ pub(super) fn fit_tabs(naturals: &[f32], active: usize, available: f32) -> Vec<T
     if limit >= TAB_NAMED_MIN {
         return naturals.iter().map(|&w| if w <= limit { TabSlot::Natural } else { TabSlot::Fixed(limit) }).collect();
     }
-    let active_width = naturals[active].clamp(TAB_ICON_WIDTH, TAB_ACTIVE_MIN).floor();
+    let menu = if n > 1 { TAB_OVERFLOW_WIDTH } else { 0. };
+    let active_width = naturals[active].clamp(TAB_ICON_WIDTH, TAB_ACTIVE_MIN).min((available - menu).max(TAB_ICON_WIDTH)).floor();
     let others = (n - 1) as f32;
     let mut slots = vec![TabSlot::Hidden; n];
     slots[active] = TabSlot::Fixed(active_width);
@@ -329,11 +331,20 @@ fn classic_tab_shape(el: Stateful<gpui::Div>, active: bool, theme: &Theme) -> St
 /// the same shape as `tab_foot`, from snapped coordinates.
 pub(super) fn paint_tab_foot(window: &mut Window, x: Pixels, bottom: Pixels, left: bool, fill: Hsla, edge: Option<Hsla>) {
     let r = px(TAB_FOOT);
-    let one = px(1.);
     // The square overlaps the tab's 1px border column.
+    let one = px(1.);
     let square_x = if left { x - r + one } else { x - one };
     let square = Bounds { origin: point(square_x, bottom - r), size: size(r, r) };
     let center = point(if left { square_x } else { square_x + r }, bottom - r);
+    paint_concave(window, square, center, fill, edge);
+}
+
+/// A foot's shape: the `square` filled but for a quarter circle around its
+/// corner `center`, with the `edge` along the curve (radius `TAB_FOOT - 1` to
+/// `TAB_FOOT`). GPUI can't clip to curves, so it's a thick ring around that
+/// circle, clipped to the square.
+pub(super) fn paint_concave(window: &mut Window, square: Bounds<Pixels>, center: gpui::Point<Pixels>, fill: Hsla, edge: Option<Hsla>) {
+    let (r, one) = (px(TAB_FOOT), px(1.));
     let ring = |width: Pixels, color: Hsla| {
         let outer = r - one + width;
         gpui::quad(

@@ -322,6 +322,21 @@ pub fn soft_shadow(theme: &Theme, depth: u8) -> Vec<gpui::BoxShadow> {
 /// A rounded card on the chrome: the sidebar, each pane, each bottom panel,
 /// Preferences' pages, a picker's list.
 pub fn island(theme: &Theme) -> Div {
+    island_joined(theme, None)
+}
+
+/// Where a tab on an island's side joins it (the activity bar's current
+/// view): its side edge is open down to `below` (from the island's top), so
+/// the edge's sheen starts there, under the tab's lower foot.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct SideJoint {
+    /// The right edge; else the left one.
+    pub right: bool,
+    pub below: f32,
+}
+
+/// An island with a tab joined to one of its sides (`SideJoint`).
+pub fn island_joined(theme: &Theme, joint: Option<SideJoint>) -> Div {
     div()
         .relative()
         .flex()
@@ -332,7 +347,7 @@ pub fn island(theme: &Theme) -> Div {
         .border_1()
         .border_color(island_edge(theme))
         .shadow(soft_shadow(theme, 1))
-        .when(theme.gradients, |el| el.child(edge_sheen(theme)))
+        .when(theme.gradients, |el| el.child(edge_sheen(theme, joint)))
 }
 
 /// One of the main window's areas (the sidebar, a pane, a bottom panel): an
@@ -340,8 +355,14 @@ pub fn island(theme: &Theme) -> Div {
 /// the lines between areas are the 1px gaps the layout leaves (`layout_gap`)
 /// over the window's separator-colored background.
 pub fn area(theme: &Theme) -> Div {
+    area_joined(theme, None)
+}
+
+/// [`area`] with a tab joined to one of its sides; the Classic square has no
+/// edges to light.
+pub fn area_joined(theme: &Theme, joint: Option<SideJoint>) -> Div {
     if !theme.classic {
-        return island(theme);
+        return island_joined(theme, joint);
     }
     div().relative().flex().flex_col().bg(theme.background)
 }
@@ -430,7 +451,7 @@ pub fn area_inset(theme: &Theme) -> f32 {
 /// answers to its own distance, as to a light near it: the far side stays put,
 /// a corner moves both of its edges. Two gradient quads per edge (GPUI's
 /// gradients have two stops).
-fn edge_sheen(theme: &Theme) -> impl IntoElement {
+fn edge_sheen(theme: &Theme, joint: Option<SideJoint>) -> impl IntoElement {
     // A light island can't get brighter than its edge (white would vanish
     // into it), so there the glint is a darker touch of the text color.
     let lit = match theme.appearance {
@@ -442,7 +463,7 @@ fn edge_sheen(theme: &Theme) -> impl IntoElement {
         move |bounds, _, window, _| {
             let view = window.viewport_size();
             let width = f32::from(view.width).max(1.);
-            let edges = SheenEdge::of(bounds, width, f32::from(view.height));
+            let edges = SheenEdge::of(bounds, width, f32::from(view.height), joint);
             let drawn = edges.map(|edge| edge.map(|edge| edge.shape(window.mouse_position(), width, lit.a)));
             for (edge, shape) in edges.iter().zip(&drawn) {
                 let (Some(edge), Some(shape)) = (edge, shape) else { continue };
@@ -592,8 +613,9 @@ impl SheenShape {
 
 impl SheenEdge {
     /// The edges of an island (its border box) that have a straight part, in
-    /// a window `width` × `height`.
-    fn of(bounds: gpui::Bounds<Pixels>, width: f32, height: f32) -> [Option<SheenEdge>; 3] {
+    /// a window `width` × `height`. A side with a tab joined to it starts
+    /// under the tab: above it the edge is the tab's to draw.
+    fn of(bounds: gpui::Bounds<Pixels>, width: f32, height: f32, joint: Option<SideJoint>) -> [Option<SheenEdge>; 3] {
         let (left, top) = (f32::from(bounds.left()), f32::from(bounds.top()));
         let (right, bottom) = (f32::from(bounds.right()), f32::from(bounds.bottom()));
         let r = ISLAND_RADIUS;
@@ -601,7 +623,8 @@ impl SheenEdge {
         // bottom's island left), which resizing along the edge leaves alone: a
         // longer edge's sheen only stretches.
         let side = |side, at: f32, salt: f32, facing: f32| {
-            let (start, end) = (top + r, bottom - r);
+            let joined = joint.filter(|j| j.right == (side == SheenSide::Right)).map_or(0., |j| j.below);
+            let (start, end) = (top + r.max(joined), bottom - r);
             let band = height * (0.62 - 0.5 * (at / width).clamp(0., 1.));
             let along = 0.7 * ((band - start) / (end - start)).clamp(0., 1.) + 0.3 * wobble(at, salt);
             (end > start).then_some(SheenEdge { side, at, start, end, seed: at, salt, along, facing })
@@ -1159,6 +1182,26 @@ pub fn modal_panel(cx: &App) -> Div {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A side with a tab joined to it lights only under the tab's lower foot,
+    /// and the pointer can't draw its sheen up past the joint.
+    #[test]
+    fn a_joined_side_lights_only_below_its_tab() {
+        let bounds = gpui::Bounds::from_corners(gpui::point(px(46.), px(37.)), gpui::point(px(300.), px(800.)));
+        let joint = SideJoint { right: false, below: 112. };
+        let [left, right, bottom] = SheenEdge::of(bounds, 1400., 875., Some(joint));
+        let (left, right, bottom) = (left.unwrap(), right.unwrap(), bottom.unwrap());
+        assert_eq!(left.start, 37. + 112.);
+        // The other edges are as without a tab.
+        assert_eq!(right.start, 37. + ISLAND_RADIUS);
+        assert_eq!(bottom.start, 46. + ISLAND_RADIUS);
+        // The pointer by the tab, above the joint.
+        let shape = left.shape(gpui::point(px(40.), px(80.)), 1400., 0.5);
+        assert!(shape.from >= left.start);
+        // A tab on the right joins the right side.
+        let [left, right, _] = SheenEdge::of(bounds, 1400., 875., Some(SideJoint { right: true, below: 112. }));
+        assert_eq!((left.unwrap().start, right.unwrap().start), (37. + ISLAND_RADIUS, 37. + 112.));
+    }
 
     #[test]
     fn chrome_text_leans_toward_the_accent_at_its_own_lightness() {

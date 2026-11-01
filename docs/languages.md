@@ -87,7 +87,7 @@ in the **Find** panel at the bottom, grouped by file, each with its line and the
 (F4 / ⇧F4 in the VS Code keymap, or Find Action) steps through them from anywhere. A new search
 replaces the panel's tab unless you pin it (the pin at its top right); pinned searches stay as
 tabs. **Toggle Find Panel** (⌘3 / Alt+3 in the JetBrains keymap, View → Find Panel) shows it again,
-and the title bar has a toggle once it has results. Go to Declaration on a declaration still lists
+and the activity bar has a toggle once it has results. Go to Declaration on a declaration still lists
 its usages in a quick popup, as in JetBrains.
 
 **Call Hierarchy** (⌃⌥H / Ctrl+Alt+H in the JetBrains keymap, ⇧⌥H in VS Code's, or the editor's

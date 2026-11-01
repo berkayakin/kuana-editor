@@ -78,7 +78,7 @@ impl Workspace {
     pub(super) fn render_git_log_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
         area(&theme)
-            .h(self.problems_height)
+            .h(self.shown_panel_height())
             .flex_shrink_0()
             .child(cached(&self.git_log))
             .child(self.resize_handle(Edge::Problems, cx))
@@ -357,7 +357,7 @@ impl Workspace {
         div()
             .relative()
             .flex()
-            .h(self.problems_height)
+            .h(self.shown_panel_height())
             .flex_shrink_0()
             .child(cached(&self.terminals))
             .child(self.resize_handle(Edge::Problems, cx))
