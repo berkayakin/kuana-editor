@@ -7,9 +7,10 @@
 use super::*;
 use gpui::svg;
 
-/// A view tab's height.
+/// A view tab's height, and the other buttons': a row of the bar each.
 const VIEW_TAB_HEIGHT: f32 = 40.0;
-/// The bar's other buttons: a square hover target.
+/// The rounded fill of a resting view tab and of the other buttons; the
+/// current view's tab starts where it would.
 const ACTIVITY_BUTTON: f32 = 34.0;
 /// Between the bar's buttons.
 const ACTIVITY_SPACING: f32 = 4.0;
@@ -43,7 +44,7 @@ struct Tool {
 /// bottom one) besides the views, in their places' order: as many as fit by
 /// priority, with a More button for the rest.
 fn fit_tools(tools: &[Tool], room: f32) -> Vec<usize> {
-    let button = ACTIVITY_BUTTON + ACTIVITY_SPACING;
+    let button = VIEW_TAB_HEIGHT + ACTIVITY_SPACING;
     // The two views and the separator, each with the gap after it.
     let views = 2. * (VIEW_TAB_HEIGHT + ACTIVITY_SPACING) + SEPARATOR + 2. * SEPARATOR_MARGIN + ACTIVITY_SPACING;
     let fits = |n: usize| (room - views) / button >= n as f32;
@@ -341,8 +342,9 @@ impl Workspace {
         )
     }
 
-    /// An activity bar button: the icon in a square that fills on hover; `on`
-    /// (an open panel or page) in the accent on a soft accent fill.
+    /// An activity bar button, built like a resting view tab: a row as tall
+    /// as one, the icon in a rounded square that fills on hover while the icon
+    /// brightens; `on` (an open panel or page) in the accent on a soft accent fill.
     fn activity_button(
         &self,
         id: &'static str,
@@ -350,7 +352,7 @@ impl Workspace {
         on: bool,
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
-    ) -> crate::ui::Button {
+    ) -> Stateful<Div> {
         let theme = crate::ui::chrome_theme(Theme::get(cx));
         let (rest, hover): (Hsla, Hsla) = if on { (theme.accent.into(), theme.accent.into()) } else { (theme.text_dim.into(), theme.text.into()) };
         let (fill, fill_hover): (Hsla, Hsla) = if on {
@@ -358,23 +360,35 @@ impl Workspace {
         } else {
             (Hsla::from(theme.hover).alpha(0.), theme.hover.into())
         };
+        let glyph = div()
+            .relative()
+            .size(px(20.))
+            .flex_shrink_0()
+            .child(svg().path(icon.path()).size(px(20.)).text_color(rest))
+            .child(svg().path(icon.path()).size(px(20.)).absolute().top_0().left_0().text_color(hover).invisible().group_hover(id, |s| s.visible()));
         div()
             .id(id)
-            .size(px(ACTIVITY_BUTTON))
+            .group(id)
             .flex()
             .flex_shrink_0()
             .items_center()
             .justify_center()
-            .rounded(px(9.))
+            .w_full()
+            .h(px(VIEW_TAB_HEIGHT))
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(on_click))
-            // The fill and the icon ease together (an svg takes its own color,
-            // so it's added here, from the progress).
-            .with_hover_transition(SharedString::from(format!("{id}-hover")), transition::FOCUS, move |el, t| {
-                el.bg(transition::mix(fill, fill_hover, t))
-                    .child(svg().path(icon.path()).size(px(19.)).flex_shrink_0().text_color(transition::mix(rest, hover, t)))
-            })
+            .child(
+                div()
+                    .id(SharedString::from(format!("{id}-fill")))
+                    .size(px(ACTIVITY_BUTTON))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(9.))
+                    .hover_fill(fill, fill_hover)
+                    .child(glyph),
+            )
     }
 }
 
@@ -507,7 +521,7 @@ mod tests {
         let all = tools(&[0, 2, 4, 3, 6, 1]);
         assert_eq!(fit_tools(&all, 2000.), vec![0, 1, 2, 3, 4, 5]);
         let views = 2. * (VIEW_TAB_HEIGHT + ACTIVITY_SPACING) + SEPARATOR + 2. * SEPARATOR_MARGIN + ACTIVITY_SPACING;
-        let button = ACTIVITY_BUTTON + ACTIVITY_SPACING;
+        let button = VIEW_TAB_HEIGHT + ACTIVITY_SPACING;
         // Room for four buttons: three tools and More.
         assert_eq!(fit_tools(&all, views + 4. * button), vec![0, 1, 5]);
         // Exactly all six: no More.
