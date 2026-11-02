@@ -33,7 +33,7 @@ use alacritty_terminal::{
 };
 use futures::{StreamExt, channel::mpsc};
 use gpui::{
-    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element, ElementId, ElementInputHandler,
+    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, DispatchPhase, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight, GlobalElementId,
     Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, KeyDownEvent, LayoutId, Modifiers, ModifiersChangedEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render,
@@ -114,7 +114,15 @@ pub struct TerminalView {
     /// Geometry from the last frame, for mouse hit-testing.
     origin: Point<Pixels>,
     cell: (Pixels, Pixels),
-    selecting: bool,
+    /// The press being followed until its button goes up.
+    gesture: Option<Gesture>,
+    /// The cell the last motion report was for: programs hear of a move once per cell.
+    reported_cell: Option<GridPoint>,
+    /// Whether the terminal had focus (in an active window) last time we looked,
+    /// for the focus reports programs ask for (mode 1004).
+    focused: bool,
+    /// Focus and window activation changes, for `sync_focus` (set up on the first render, which has the window).
+    focus_watch: Vec<Subscription>,
     /// Remainder of fractional wheel scrolling, in lines.
     scroll_rest: f32,
     /// Set for a Run tab: what runs, and its exit code once it's done.
@@ -130,6 +138,16 @@ pub struct TerminalView {
     /// What an input method is composing, not sent to the shell yet.
     marked: Option<Marked>,
     _events: Task<()>,
+}
+
+/// A mouse press the terminal follows until its button goes up, wherever
+/// the pointer goes meanwhile.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Gesture {
+    /// Selecting text: no program took the mouse, or Shift was held.
+    Select,
+    /// Reported to the program that took the mouse: the button's code.
+    Report(u8),
 }
 
 /// The shell's pty, which starts in the background (`TerminalView::create`).
@@ -315,7 +333,10 @@ impl TerminalView {
             size: None,
             origin: Point::default(),
             cell: (px(8.), px(16.)),
-            selecting: false,
+            gesture: None,
+            reported_cell: None,
+            focused: false,
+            focus_watch: Vec::new(),
             scroll_rest: 0.,
             run: None,
             exit_code: None,
@@ -717,9 +738,15 @@ impl TerminalView {
         self.mode().intersects(TermMode::MOUSE_MODE) && !modifiers.shift
     }
 
+    /// Tells the program of a mouse event at the cell under `position`
+    /// (clamped to the screen, so a drag past the edges stays on it).
     fn report_mouse(&mut self, button: u8, position: Point<Pixels>, pressed: bool, modifiers: &Modifiers) {
         let (point, _) = self.grid_point(position);
-        let row = point.line.0 + self.term.lock().grid().display_offset() as i32;
+        let (mode, offset) = {
+            let term = self.term.lock();
+            (*term.mode(), term.grid().display_offset() as i32)
+        };
+        let row = (point.line.0 + offset).max(0) as usize;
         let mut code = button;
         if modifiers.shift {
             code += 4;
@@ -730,8 +757,37 @@ impl TerminalView {
         if modifiers.control {
             code += 16;
         }
-        let action = if pressed { 'M' } else { 'm' };
-        self.write(format!("\x1b[<{code};{};{}{action}", point.column.0 + 1, row + 1).into_bytes());
+        if let Some(bytes) = mouse_report(mode, code, point.column.0, row, pressed) {
+            self.write(bytes);
+        }
+    }
+
+    /// A press the program hears of; it hears of its moves and release too,
+    /// even when Shift changes meanwhile.
+    fn report_press(&mut self, button: u8, event: &MouseDownEvent) {
+        self.gesture = Some(Gesture::Report(button));
+        self.reported_cell = Some(self.grid_point(event.position).0);
+        self.report_mouse(button, event.position, true, &event.modifiers);
+    }
+
+    /// A move, for a program that follows the mouse: while a button is down
+    /// in mode 1002, always in 1003 (Claude Code, which selects text itself).
+    fn report_motion(&mut self, event: &MouseMoveEvent) {
+        let button = match (self.gesture, event.pressed_button) {
+            (Some(Gesture::Report(button)), _) => button,
+            (None, None) => 3,
+            // A press the program never heard of.
+            _ => return,
+        };
+        let mode = self.mode();
+        if !(mode.contains(TermMode::MOUSE_MOTION) || mode.contains(TermMode::MOUSE_DRAG) && button != 3) {
+            return;
+        }
+        let (cell, _) = self.grid_point(event.position);
+        if self.reported_cell != Some(cell) {
+            self.reported_cell = Some(cell);
+            self.report_mouse(32 + button, event.position, true, &event.modifiers);
+        }
     }
 
     /// The URL or existing file at `position` (in screen coordinates).
@@ -776,7 +832,7 @@ impl TerminalView {
             return;
         }
         if self.mouse_reporting(&event.modifiers) {
-            self.report_mouse(0, event.position, true, &event.modifiers);
+            self.report_press(0, event);
             return;
         }
         let (point, side) = self.grid_point(event.position);
@@ -785,8 +841,15 @@ impl TerminalView {
             n if n >= 3 => SelectionType::Lines,
             _ => SelectionType::Simple,
         };
-        self.term.lock().selection = Some(Selection::new(ty, point, side));
-        self.selecting = true;
+        let mut term = self.term.lock();
+        // Shift+click extends the selection there is; without one, Shift
+        // starts a selection in programs that take the mouse.
+        match term.selection.as_mut() {
+            Some(selection) if event.modifiers.shift && ty == SelectionType::Simple => selection.update(point, side),
+            _ => term.selection = Some(Selection::new(ty, point, side)),
+        }
+        drop(term);
+        self.gesture = Some(Gesture::Select);
         cx.notify();
     }
 
@@ -795,46 +858,102 @@ impl TerminalView {
     fn on_right_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle);
         if self.mouse_reporting(&event.modifiers) {
-            self.report_mouse(2, event.position, true, &event.modifiers);
+            self.report_press(2, event);
             return;
         }
         cx.stop_propagation();
         cx.emit(TerminalEvent::ContextMenu(event.position));
     }
 
-    fn on_right_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    /// The middle button only means something to programs that take the mouse.
+    fn on_middle_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, _: &mut Context<Self>) {
+        window.focus(&self.focus_handle);
         if self.mouse_reporting(&event.modifiers) {
-            self.report_mouse(2, event.position, false, &event.modifiers);
+            self.report_press(1, event);
         }
     }
 
-    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.last_mouse = Some(event.position);
-        if event.pressed_button.is_none() {
-            self.update_link(event.position, &event.modifiers, cx);
+    /// Moves anywhere in the window during a press (`TerminalElement::paint`
+    /// listens window-wide), else over the terminal.
+    fn on_mouse_move(&mut self, event: &MouseMoveEvent, hovered: bool, cx: &mut Context<Self>) {
+        if hovered {
+            self.last_mouse = Some(event.position);
+            if event.pressed_button.is_none() {
+                self.update_link(event.position, &event.modifiers, cx);
+            }
         }
-        if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
-            return;
+        match self.gesture {
+            Some(Gesture::Select) if event.pressed_button == Some(MouseButton::Left) => self.drag_selection(event.position, cx),
+            Some(Gesture::Report(_)) => self.report_motion(event),
+            None if hovered && self.mouse_reporting(&event.modifiers) => self.report_motion(event),
+            _ => {}
         }
-        let (point, side) = self.grid_point(event.position);
+    }
+
+    /// Past the top or bottom, a selection scrolls through the history (the
+    /// alternate screen has none), faster the farther the pointer is.
+    fn drag_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let (_, h) = self.cell;
+        let top = self.origin.y;
+        let bottom = top + h * self.size.map_or(0, |(_, rows, ..)| rows) as f32;
+        let lines = if position.y < top {
+            ((top - position.y) / h).ceil() as i32
+        } else if position.y > bottom {
+            -((position.y - bottom) / h).ceil() as i32
+        } else {
+            0
+        };
+        if lines != 0 {
+            let mut term = self.term.lock();
+            if !term.mode().contains(TermMode::ALT_SCREEN) {
+                term.scroll_display(Scroll::Delta(lines.clamp(-3, 3)));
+            }
+        }
+        let (point, side) = self.grid_point(position);
         if let Some(selection) = self.term.lock().selection.as_mut() {
             selection.update(point, side);
         }
         cx.notify();
     }
 
-    fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.mouse_reporting(&event.modifiers) {
-            self.report_mouse(0, event.position, false, &event.modifiers);
-            return;
+    /// Releases anywhere in the window end the press they belong to.
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
+        let button = match event.button {
+            MouseButton::Left => 0,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+            _ => return,
+        };
+        match self.gesture {
+            Some(Gesture::Report(pressed)) if pressed == button => {
+                self.gesture = None;
+                self.reported_cell = None;
+                self.report_mouse(button, event.position, false, &event.modifiers);
+            }
+            Some(Gesture::Select) if button == 0 => {
+                self.gesture = None;
+                // A click without a drag leaves no selection.
+                let mut term = self.term.lock();
+                if term.selection.as_ref().is_some_and(|s| s.ty == SelectionType::Simple && term.selection_to_string().is_none_or(|t| t.is_empty())) {
+                    term.selection = None;
+                }
+                drop(term);
+                cx.notify();
+            }
+            _ => {}
         }
-        self.selecting = false;
-        // A click without a drag leaves no selection.
-        let mut term = self.term.lock();
-        if term.selection.as_ref().is_some_and(|s| s.ty == SelectionType::Simple && term.selection_to_string().is_none_or(|t| t.is_empty())) {
-            term.selection = None;
+    }
+
+    /// Programs that asked (mode 1004) hear when the terminal gains or loses
+    /// focus, a window switch included (Claude Code notifies only when it's away).
+    fn sync_focus(&mut self, window: &Window) {
+        let focused = self.focus_handle.is_focused(window) && window.is_window_active();
+        if focused != self.focused {
+            self.focused = focused;
+            if self.mode().contains(TermMode::FOCUS_IN_OUT) {
+                self.write(if focused { &b"\x1b[I"[..] } else { &b"\x1b[O"[..] });
+            }
         }
-        cx.notify();
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -1027,6 +1146,33 @@ impl TerminalView {
 
 /// The run of non-space characters around `col`, without the brackets,
 /// quotes and punctuation that usually surround a path or URL in output.
+/// The bytes telling a program of a mouse event at a screen cell (0-based),
+/// in the encoding it asked for: SGR (mode 1006: `CSI < code;x;y M`, `m` for
+/// a release), else xterm's original bytes (`CSI M` and three bytes offset by
+/// 32), where a release is button 3 and a far cell is out of reach unless
+/// mode 1005 encodes it as UTF-8.
+fn mouse_report(mode: TermMode, code: u8, col: usize, row: usize, pressed: bool) -> Option<Vec<u8>> {
+    if mode.contains(TermMode::SGR_MOUSE) {
+        let action = if pressed { 'M' } else { 'm' };
+        return Some(format!("\x1b[<{code};{};{}{action}", col + 1, row + 1).into_bytes());
+    }
+    let code = if pressed { code } else { (code & !0b11) | 3 };
+    let mut bytes = vec![0x1b, b'[', b'M', 32 + code];
+    for at in [col, row] {
+        let value = 32 + 1 + at;
+        match value {
+            0..0x80 => bytes.push(value as u8),
+            0x80..0x800 if mode.contains(TermMode::UTF8_MOUSE) => {
+                bytes.push(0xC0 | (value >> 6) as u8);
+                bytes.push(0x80 | (value & 0x3F) as u8);
+            }
+            0x80..0x100 if !mode.contains(TermMode::UTF8_MOUSE) => bytes.push(value as u8),
+            _ => return None,
+        }
+    }
+    Some(bytes)
+}
+
 fn word_at(chars: &[char], col: usize) -> Option<(Range<usize>, String)> {
     let stop = |c: char| c.is_whitespace() || "\"'`<>()[]{},|".contains(c);
     if chars.get(col).is_none_or(|c| stop(*c)) {
@@ -1841,6 +1987,15 @@ impl Focusable for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.focus_watch.is_empty() {
+            let handle = self.focus_handle.clone();
+            self.focus_watch = vec![
+                cx.on_focus(&handle, window, |view, window, _| view.sync_focus(window)),
+                cx.on_blur(&handle, window, |view, window, _| view.sync_focus(window)),
+                cx.observe_window_activation(window, |view, window, _| view.sync_focus(window)),
+            ];
+            self.sync_focus(window);
+        }
         let search = self.search.as_ref().map(|search| self.render_search(search, window, cx).into_any_element());
         let theme = Theme::get(cx);
         div()
@@ -1861,12 +2016,10 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::on_find_up))
             .on_action(cx.listener(Self::on_find_down))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
+            // Moves and releases: `TerminalElement::paint`, window-wide.
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
-            .on_mouse_up(MouseButton::Right, cx.listener(Self::on_right_mouse_up))
+            .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_middle_mouse_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .child(TerminalElement { view: cx.entity() })
             .children(search)
@@ -2015,9 +2168,27 @@ impl Element for TerminalElement {
     ) {
         let focus_handle = self.view.read(cx).focus_handle.clone();
         window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.view.clone()), cx);
-        if let Some(hitbox) = frame.hitbox.as_ref() {
+        if let Some(hitbox) = frame.hitbox.clone() {
             let style = if frame.link.is_some() { CursorStyle::PointingHand } else { CursorStyle::IBeam };
-            window.set_cursor_style(style, hitbox);
+            window.set_cursor_style(style, &hitbox);
+            // A press is followed anywhere in the window and past it (a div's
+            // listeners hear only what's over it), in the capture phase so
+            // views under the pointer can't keep its moves or release.
+            let view = self.view.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                let hovered = hitbox.is_hovered(window);
+                let pressed = view.read(cx).gesture.is_some();
+                let ours = if pressed { phase == DispatchPhase::Capture } else { phase == DispatchPhase::Bubble && hovered };
+                if ours {
+                    view.update(cx, |view, cx| view.on_mouse_move(event, hovered, cx));
+                }
+            });
+            let view = self.view.clone();
+            window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                if phase == DispatchPhase::Capture && view.read(cx).gesture.is_some() {
+                    view.update(cx, |view, cx| view.on_mouse_up(event, cx));
+                }
+            });
         }
         window.with_content_mask(Some(ContentMask { bounds: frame.bounds }), |window| {
             if let Some(underline) = frame.link.take() {
@@ -2141,6 +2312,24 @@ mod tests {
         assert_eq!(parse_link("src/missing.rs:3", &dir), None);
         assert!(word_at(&row, 0).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn mouse_reports_use_the_encoding_asked_for() {
+        let sgr = TermMode::MOUSE_MOTION | TermMode::SGR_MOUSE;
+        assert_eq!(mouse_report(sgr, 0, 4, 2, true).unwrap(), b"\x1b[<0;5;3M");
+        assert_eq!(mouse_report(sgr, 0, 4, 2, false).unwrap(), b"\x1b[<0;5;3m");
+        // A left drag: the motion bit.
+        assert_eq!(mouse_report(sgr, 32, 300, 99, true).unwrap(), b"\x1b[<32;301;100M");
+        let x10 = TermMode::MOUSE_REPORT_CLICK;
+        assert_eq!(mouse_report(x10, 0, 0, 0, true).unwrap(), b"\x1b[M !!");
+        // A release is button 3, modifiers kept (Ctrl = 16).
+        assert_eq!(mouse_report(x10, 16 + 2, 1, 1, false).unwrap(), b"\x1b[M3\"\"");
+        assert_eq!(mouse_report(x10, 0, 222, 0, true).unwrap(), [0x1b, b'[', b'M', 32, 255, 33]);
+        assert_eq!(mouse_report(x10, 0, 223, 0, true), None);
+        let utf8 = x10 | TermMode::UTF8_MOUSE;
+        assert_eq!(mouse_report(utf8, 0, 95, 0, true).unwrap(), [0x1b, b'[', b'M', 32, 0xC2, 0x80, 33]);
+        assert_eq!(mouse_report(utf8, 0, 2015, 0, true), None);
     }
 
     #[test]
@@ -2390,6 +2579,71 @@ mod tests {
             })
         });
         assert_eq!(terminal.read_with(cx, |t, _| sent(t)), "漢字");
+    }
+
+    /// A program that takes the mouse (Claude Code: modes 1003 and 1006)
+    /// hears of the whole drag, once per cell, and its release, even when
+    /// Shift goes down meanwhile; Shift+drag selects instead.
+    #[gpui::test]
+    fn programs_that_take_the_mouse_hear_drags(cx: &mut gpui::TestAppContext) {
+        let (terminal, host, cx) = hosted(cx);
+        frame(&host, cx);
+        terminal.update(cx, |t, _| parse(&mut t.term.lock(), "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"));
+        let at = |t: &TerminalView, col: f32, row: f32| t.origin + point(t.cell.0 * (col + 0.2), t.cell.1 * (row + 0.5));
+        cx.update(|window, cx| {
+            terminal.update(cx, |t, cx| {
+                let down = MouseDownEvent { button: MouseButton::Left, position: at(t, 1., 0.), click_count: 1, ..Default::default() };
+                t.on_mouse_down(&down, window, cx);
+                for col in [1., 1., 2., 3.] {
+                    let moved = MouseMoveEvent { position: at(t, col, 1.), pressed_button: Some(MouseButton::Left), ..Default::default() };
+                    t.on_mouse_move(&moved, true, cx);
+                }
+                let up = MouseUpEvent { button: MouseButton::Left, position: at(t, 3., 1.), modifiers: Modifiers::shift(), ..Default::default() };
+                t.on_mouse_up(&up, cx);
+                // Without a button, a move is still news in mode 1003.
+                t.on_mouse_move(&MouseMoveEvent { position: at(t, 0., 0.), ..Default::default() }, true, cx);
+            })
+        });
+        let reports = terminal.read_with(cx, |t, _| sent(t));
+        assert_eq!(reports, "\x1b[<0;2;1M\x1b[<32;2;2M\x1b[<32;3;2M\x1b[<32;4;2M\x1b[<4;4;2m\x1b[<35;1;1M");
+
+        terminal.update(cx, |t, _| parse(&mut t.term.lock(), "hello"));
+        cx.update(|window, cx| {
+            terminal.update(cx, |t, cx| {
+                let shift = Modifiers::shift();
+                let down = MouseDownEvent { button: MouseButton::Left, position: at(t, 0., 0.), modifiers: shift, click_count: 1, ..Default::default() };
+                t.on_mouse_down(&down, window, cx);
+                let moved = MouseMoveEvent { position: at(t, 4., 0.), pressed_button: Some(MouseButton::Left), modifiers: shift };
+                t.on_mouse_move(&moved, true, cx);
+                t.on_mouse_up(&MouseUpEvent { button: MouseButton::Left, position: at(t, 4., 0.), ..Default::default() }, cx);
+            })
+        });
+        terminal.read_with(cx, |t, _| {
+            assert_eq!(sent(t).len(), reports.len(), "a selection isn't reported");
+            assert_eq!(t.term.lock().selection_to_string().as_deref(), Some("hell"));
+        });
+    }
+
+    /// Focus reports (mode 1004) say when the terminal gains or loses focus.
+    #[gpui::test]
+    fn programs_that_ask_hear_of_focus(cx: &mut gpui::TestAppContext) {
+        let (terminal, _, cx) = hosted(cx);
+        terminal.update(cx, |t, _| parse(&mut t.term.lock(), "\x1b[?1004h"));
+        cx.run_until_parked();
+        // The first render starts listening, and says where focus is.
+        cx.draw(point(px(0.), px(0.)), size(px(800.), px(600.)), |_, _| gpui::AnyView::from(terminal.clone()));
+        assert_eq!(terminal.read_with(cx, |t, _| sent(t)), "\x1b[I");
+        // Another app comes to the front; then another view takes focus.
+        cx.deactivate_window();
+        assert_eq!(terminal.read_with(cx, |t, _| sent(t)), "\x1b[I\x1b[O");
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        // (The test context's draws don't dispatch focus changes: `on_blur` is told by hand.)
+        cx.update(|window, cx| {
+            window.blur();
+            terminal.update(cx, |t, _| t.sync_focus(window));
+        });
+        assert_eq!(terminal.read_with(cx, |t, _| sent(t)), "\x1b[I\x1b[O\x1b[I\x1b[O");
     }
 
     /// A Run's end: its exit code comes first, then its last output; it's
