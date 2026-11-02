@@ -2,7 +2,7 @@
 
 ## Terminal
 
-**Terminal** (⌥F12 / Alt+F12, or its button at the top right) opens a shell in the project folder in
+**Terminal** (⌥F12 / Alt+F12, or its button on the activity bar) opens a shell in the project folder in
 the bottom panel, which it shares with Problems. Press it again to jump between the terminal and
 the editor. Each **+** tab is its own shell; a tab closes when its shell exits.
 
@@ -50,10 +50,10 @@ project's commands (cargo run/test/build and binaries, `package.json` scripts wi
 manager, go, Makefile targets, pytest; `oxie run`/`test`/`build`/`fmt` in an Oxie project; `lyth run`/`test`/`build`/`vet`
 in a Go module with `.lyth` files) and the
 current file's tests. **Run** (⌃R / Shift+F10)
-repeats the last one (run or debugged), **Stop** (⌘F2 / Ctrl+F2) interrupts it. The title bar's
-top right has the same: the last configuration (click it for Run…; the project keeps it for next
-time), Run, Debug and, while something runs, Stop, at the end of the tab row. The bottom panel
-toggles are on the activity bar at the window's side.
+repeats the last one (run or debugged), **Stop** (⌘F2 / Ctrl+F2) interrupts it. The activity bar at the
+window's side has the same above the bottom panels' toggles: Run, Debug and, while something runs, Stop,
+for the last configuration (its name is in their tooltips; the project keeps it for next time).
+Right-click Run or Debug to pick another configuration.
 
 Each run gets a terminal tab named after it, which stays open with the exit code when it ends and
 shows ▶ while running, ✓ on success and ✕ on failure. Running the same thing again reuses its tab.
@@ -120,7 +120,7 @@ and Zed use):
 - **Attach to Process…** (⌥⇧F5 / Ctrl+Alt+F5, or the Run menu) lists your running processes (search
   by name, command line or PID) and debugs the one you pick: Node with js-debug, Python with debugpy,
   Go with Delve, anything else (Rust, C, C++) with lldb-dap. Stop detaches and leaves it running.
-- **The Debug panel** (bottom area; the bug button at the top right brings it back) shows the
+- **The Debug panel** (bottom area; the bug button among the activity bar's panel toggles brings it back) shows the
   stepping toolbar, the paused thread's frames (click one to see its line and variables), variables
   you can expand, watch expressions, and a console with the program's output that also evaluates
   expressions in the selected frame. The line the program is paused on is highlighted.

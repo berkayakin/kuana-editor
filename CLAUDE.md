@@ -254,17 +254,18 @@ Everything is one binary crate. The window's root view is `Workspace`; every ope
   without `extends` fill missing colors from. Clay Black: near-black, *monochrome UI* (neutral grays, white accent) with a
   *colored* syntax palette and clear diagnostic colors — don't make code or lint colors gray.
 - Minimal chrome: project and current branch in the tab row above the sidebar (`render_title_chips` in `render_sidebar_room`, beside the lead or trail laid over it; not shown while the sidebar is hidden, so they never push the tabs), fitted to that room from their measured names (`fit_chips`: sync counts go first, then the branch's name shortens while the project's stays whole, then the branch is its icon; the monogram stays), as plain text that becomes a pill under the pointer (`CHIP_HEIGHT`: a compact 20pt pill, its name on the tabs' names' line, which hangs 15pt above the islands, so a taller pill or a resting fill would crowd them; the project's with a round monogram unless `project_avatar` is off, opens Recent Projects; the branch opens Branches…), branch name also in the Commit view's
-  header, at the top right the run widget (last configuration, Run, Debug, Stop while running; `bar_button`: plain
-  icons). The tools are on the activity bar (`workspace/activity_bar.rs`, `ACTIVITY_WIDTH`) on the sidebar's side
+  header; the title bar's trail holds only the window buttons (off macOS). The tools are on the activity bar (`workspace/activity_bar.rs`, `ACTIVITY_WIDTH`) on the sidebar's side
   under the tab row, as in VS Code: the sidebar's Files / Commit views as vertical tabs (`render_view_tab`; the
   current one, while the sidebar shows, is the editor's current tab turned on its side, `view_tab_shape`: island
   color, rounded on the far side a gap off the window's edge, outline and concave feet (`paint_concave`) joining the sidebar island's edge, painted after the island, which starts that
   side's edge light under it; its icon glides `VIEW_TAB_SHIFT` from the buttons' line to the tab's middle when selected, `area_joined` + `SideJoint` from `view_tab_joint`; a click on it hides the sidebar;
   Commit carries a change-count badge, without a ring: the chrome behind is a gradient); at its foot, apart from
-  the tabs so none reads as one, the bottom panels' toggles, a hairline, then Search
+  the tabs so none reads as one, groups (`Group`) between hairlines: Run, Debug and, while anything runs, Stop for
+  the last configuration (`run_tools`: Run and Stop `tint`ed green and red, the configuration in the tooltip, a
+  right-click opens Run Configuration…), the bottom panels' toggles, then Search
   Everywhere, Extensions and Settings (`activity_tools`; in a short window `fit_tools` keeps them by
-  priority and puts the rest in a More menu; `activity_button`: built like a resting view tab, a row as tall as one with the icon in an
-  `ACTIVITY_BUTTON` rounded square that fills on hover; an open panel or page in the accent on `accent_soft`; its measures come from `BarSize` (`FULL`, or `COMPACT` with `compact_activity_bar`: 40pt wide, the title bar's buttons' 30pt squares and 18pt icons; the workspace notes the width in `activity_width` for the sidebar's room); Classic view tabs are stacked rectangles with a separator line under each, like the editor's tabs; every button centered on the bar, `ACTIVITY_WIDTH` = a button and a gap each side); `render_sidebar_block` lays out the bar and the island together. The status bar only shows status,
+  priority and puts the rest in a More menu, reserving a separator only between groups that show; `activity_button`: built like a resting view tab, a row as tall as one with the icon in an
+  `ACTIVITY_BUTTON` rounded square that fills on hover; an open panel or page in the accent on `accent_soft`; its measures come from `BarSize` (`FULL`, or `COMPACT` with `compact_activity_bar`: 40pt wide, the title bar's buttons' 30pt squares and 18pt icons; the workspace notes the width in `activity_width` for the sidebar's room); Classic view tabs are stacked rectangles, the open one edged with separator lines above and below (the first one's top is the tab row's line) and covering the bar's separator, like the current editor tab; every button centered on the bar, `ACTIVITY_WIDTH` = a button and a gap each side); `render_sidebar_block` lays out the bar and the island together. The status bar only shows status,
   no redundant labels or header rows.
 - The sidebar docks left (default) or right of the editor area (`sidebar_dock`, `Workspace::sidebar_on_right`;
   Preferences → Appearance → Layout, the activity bar's right-click Move to Right / Left, Toggle Sidebar Position):
