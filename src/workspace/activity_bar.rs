@@ -54,9 +54,10 @@ impl BarSize {
         (self.width - self.icon) / 2. - 6.
     }
 
-    /// Between the view tabs: none in Classic, where they're rectangles
-    /// stacked like the editor's tabs side by side.
-    fn views_gap(self, theme: &Theme) -> f32 {
+    /// Between the bar's rows: none in Classic, where the view tabs are
+    /// rectangles stacked like the editor's tabs side by side, and the
+    /// buttons under them follow on the same way.
+    fn gap(self, theme: &Theme) -> f32 {
         if theme.classic { 0. } else { self.spacing }
     }
 }
@@ -167,7 +168,7 @@ impl Workspace {
             SidebarMode::Commit => 1.,
         };
         let bar = BarSize::of(cx);
-        let top = TAB_STRIP_INSET + index * (bar.row + bar.spacing);
+        let top = TAB_STRIP_INSET + index * (bar.row + bar.gap(Theme::get(cx)));
         crate::ui::SideJoint { right: self.sidebar_on_right(cx), below: top + bar.row + TAB_FOOT }
     }
 
@@ -182,8 +183,9 @@ impl Workspace {
         let height = f32::from(self.viewport.height) - (TAB_STRIP_HEIGHT - 1.) - STATUSBAR_HEIGHT - if theme.classic { 1. } else { 0. };
         let tools = self.activity_tools(cx);
         // The two views and the separator, each with the gap after it.
-        let views = 2. * bar.row + bar.views_gap(&theme) + SEPARATOR + 2. * SEPARATOR_MARGIN + 2. * bar.spacing;
-        let shown = fit_tools(&tools, height - top - GAP - views, bar.row + bar.spacing);
+        let gap = bar.gap(&theme);
+        let views = 2. * bar.row + 3. * gap + SEPARATOR + 2. * SEPARATOR_MARGIN;
+        let shown = fit_tools(&tools, height - top - GAP - views, bar.row + gap);
         let hidden: Vec<usize> = (0..tools.len()).filter(|i| !shown.contains(i)).collect();
         let button = |ix: usize, cx: &mut Context<Self>| {
             let tool = &tools[ix];
@@ -221,7 +223,7 @@ impl Workspace {
             // Modern: the first tab's foot lands on the island's straight edge.
             .pt(px(top))
             .pb(px(GAP))
-            .gap(px(bar.spacing))
+            .gap(px(gap))
             // Not clipped: the current view's tab reaches 1px into the island,
             // over its border (`fit_tools` keeps the buttons within the bar).
             .when(theme.classic, |el| el.bg(theme.panel))
@@ -237,7 +239,7 @@ impl Workspace {
                     .flex_col()
                     .flex_shrink_0()
                     .w_full()
-                    .gap(px(bar.views_gap(&theme)))
+                    .gap(px(gap))
                     .child(self.render_view_tab(SidebarMode::Files, cx))
                     .child(self.render_view_tab(SidebarMode::Commit, cx)),
             )
@@ -392,21 +394,11 @@ impl Workspace {
         // The same elements selected or not, so the glide keeps its state. A
         // resting tab is a plain button: a rounded fill on hover.
         let fill: Hsla = if on { Hsla::from(theme.hover).alpha(0.) } else { theme.hover.into() };
-        tab.group(id).child(
-            div()
-                .id(SharedString::from(format!("{id}-fill")))
-                .size(px(bar.button))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(bar.radius))
-                .hover_fill(Hsla::from(theme.hover).alpha(0.), fill)
-                .child(glyph),
-        )
+        tab.group(id).child(button_fill(SharedString::from(format!("{id}-fill")), (Hsla::from(theme.hover).alpha(0.), fill), bar, &theme, glyph))
     }
 
     /// An activity bar button, built like a resting view tab: a row as tall
-    /// as one, the icon in a rounded square that fills on hover while the icon
+    /// as one, the icon in a rounded square (none in Classic) that fills on hover while the icon
     /// brightens; `on` (an open panel or page) in the accent on a soft accent fill.
     fn activity_button(
         &self,
@@ -443,18 +435,15 @@ impl Workspace {
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(on_click))
-            .child(
-                div()
-                    .id(SharedString::from(format!("{id}-fill")))
-                    .size(px(bar.button))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(bar.radius))
-                    .hover_fill(fill, fill_hover)
-                    .child(glyph),
-            )
+            .child(button_fill(SharedString::from(format!("{id}-fill")), (fill, fill_hover), bar, &theme, glyph))
     }
+}
+
+/// A button's icon in a rounded square that takes `fill` (at rest, hovered).
+/// Classic has none: only the icon's color answers hover and an open panel.
+fn button_fill(id: SharedString, fill: (Hsla, Hsla), bar: BarSize, theme: &Theme, glyph: impl IntoElement) -> AnyElement {
+    let square = div().id(id).size(px(bar.button)).flex().items_center().justify_center().child(glyph);
+    if theme.classic { square.into_any_element() } else { square.rounded(px(bar.radius)).hover_fill(fill.0, fill.1).into_any_element() }
 }
 
 /// The current view's tab: the island's color, rounded on the side away from
