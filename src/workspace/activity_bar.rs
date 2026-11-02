@@ -62,7 +62,7 @@ impl BarSize {
     }
 }
 
-/// The line between the views and the panels' toggles, and its margin above and below.
+/// The line between groups of buttons at the bar's foot, and its margin above and below.
 const SEPARATOR: f32 = 1.0;
 const SEPARATOR_MARGIN: f32 = 6.0;
 
@@ -73,15 +73,31 @@ struct Tool {
     label: &'static str,
     /// Its panel or page shows.
     on: bool,
-    /// A bottom panel's toggle, above the separator at the bar's foot; else
-    /// one of the window's tools under it.
-    panel: bool,
+    /// Its group at the bar's foot, between separators.
+    group: Group,
+    /// Its icon's own color (Run, Stop: what they do), else the bar's.
+    tint: Option<Hsla>,
+    /// Its tooltip, with `action`'s shortcut, when it says more than `label`
+    /// (the run configuration).
+    tip: Option<String>,
     /// Kept before those with a larger number when the bar is too short for
     /// them all (the rest go to its More menu).
     priority: u8,
     /// For its shortcut in the tooltip and the More menu.
     action: Box<dyn gpui::Action>,
     run: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
+}
+
+/// The groups of buttons at the bar's foot, in order.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Group {
+    /// Run, Debug and, while something runs, Stop, for the selected run
+    /// configuration (the last one launched); like JetBrains' run widget.
+    Run,
+    /// The bottom panels' toggles.
+    Panel,
+    /// The window's tools: Search Everywhere, Extensions, Settings.
+    Window,
 }
 
 /// Which of `tools` fit in `room` (the bar's height besides its padding, the
@@ -182,32 +198,61 @@ impl Workspace {
         // The bar's height: under the tab row, above the status bar.
         let height = f32::from(self.viewport.height) - (TAB_STRIP_HEIGHT - 1.) - STATUSBAR_HEIGHT - if theme.classic { 1. } else { 0. };
         let tools = self.activity_tools(cx);
-        // The two views and the separator, each with the gap after it.
+        // The two views, each with the gap after it, and a separator (and
+        // its gap) between each two groups that show: as many as there are
+        // groups, then fewer if fewer groups made it.
         let gap = bar.gap(&theme);
-        let views = 2. * bar.row + 3. * gap + SEPARATOR + 2. * SEPARATOR_MARGIN;
-        let shown = fit_tools(&tools, height - top - GAP - views, bar.row + gap);
+        let views = 2. * bar.row + 3. * gap;
+        let separator = SEPARATOR + 2. * SEPARATOR_MARGIN + gap;
+        let groups_in = |shown: &[usize]| {
+            let mut groups: Vec<Group> = shown.iter().map(|&ix| tools[ix].group).collect();
+            groups.dedup();
+            groups.len()
+        };
+        let fit = |separators: usize| {
+            fit_tools(&tools, height - top - GAP - views - separators as f32 * separator, bar.row + gap)
+        };
+        let mut shown = fit(groups_in(&(0..tools.len()).collect::<Vec<_>>()).saturating_sub(1));
+        loop {
+            let separators = groups_in(&shown).saturating_sub(1);
+            let more = fit(separators);
+            if more.len() <= shown.len() || groups_in(&more).saturating_sub(1) > separators {
+                break;
+            }
+            shown = more;
+        }
         let hidden: Vec<usize> = (0..tools.len()).filter(|i| !shown.contains(i)).collect();
         let button = |ix: usize, cx: &mut Context<Self>| {
             let tool = &tools[ix];
             let run = tool.run;
-            let (label, action) = (tool.label, tool.action.boxed_clone());
-            self.activity_button(tool.id, tool.icon, tool.on, cx, move |ws, _, window, cx| run(ws, window, cx))
-                .map(|el| match tool.id {
+            let (label, action, tip) = (tool.label, tool.action.boxed_clone(), tool.tip.clone());
+            self.activity_button(tool.id, tool.icon, tool.on, tool.tint, cx, move |ws, _, window, cx| run(ws, window, cx))
+                .map(|el| match (tool.id, tip) {
                     // Its shortcut is a double Shift, which no binding holds.
-                    "search-everywhere" => el.tooltip(|_, cx| tooltip_view(format!("Search Everywhere ({})", double_shift_label()), cx)),
+                    ("search-everywhere", _) => el.tooltip(|_, cx| tooltip_view(format!("Search Everywhere ({})", double_shift_label()), cx)),
+                    (_, Some(tip)) => el.tooltip(move |window, cx| status_tooltip(&tip, &*action, window, cx)),
                     _ => el.tooltip(move |window, cx| status_tooltip(label, &*action, window, cx)),
+                })
+                // Run and Debug go by the selected configuration: right-click picks another.
+                .when(tool.group == Group::Run && tool.id != "stop-run", |el| {
+                    el.on_mouse_down(MouseButton::Right, cx.listener(|ws, _, window, cx| {
+                        cx.stop_propagation();
+                        ws.run_configuration(&RunConfiguration, window, cx);
+                    }))
                 })
                 .into_any_element()
         };
-        let panels: Vec<AnyElement> = shown.iter().filter(|&&ix| tools[ix].panel).map(|&ix| button(ix, cx)).collect();
-        let foot: Vec<AnyElement> = shown.iter().filter(|&&ix| !tools[ix].panel).map(|&ix| button(ix, cx)).collect();
-        // The separator goes between the panels' toggles and the tools.
-        let both = !panels.is_empty() && !foot.is_empty();
+        let group = |group: Group, cx: &mut Context<Self>| -> Vec<AnyElement> {
+            shown.iter().filter(|&&ix| tools[ix].group == group).map(|&ix| button(ix, cx)).collect()
+        };
+        // Separators go between the groups that show.
+        let groups: Vec<Vec<AnyElement>> =
+            [Group::Run, Group::Panel, Group::Window].into_iter().map(|g| group(g, cx)).filter(|g| !g.is_empty()).collect();
         let more = (!hidden.is_empty()).then(|| {
             let entries: Vec<(&'static str, Icon, Box<dyn gpui::Action>)> =
                 hidden.iter().map(|&ix| (tools[ix].label, tools[ix].icon, tools[ix].action.boxed_clone())).collect();
             let lit = hidden.iter().any(|&ix| tools[ix].on);
-            self.activity_button("activity-more", Icon::More, lit, cx, move |ws, event, window, cx| {
+            self.activity_button("activity-more", Icon::More, lit, None, cx, move |ws, event, window, cx| {
                 let items = entries.iter().map(|(label, icon, _)| MenuEntry::item(*label, *icon)).collect();
                 let actions = entries.iter().map(|(_, _, action)| Some(MenuAction::Run(action.boxed_clone()))).collect();
                 ws.show_context_menu(items, actions, event.position(), None, window, cx);
@@ -245,9 +290,9 @@ impl Workspace {
             )
             .child(div().flex_1().min_h_0())
             .children(more)
-            .children(panels)
-            .when(both, |el| el.child(sep()))
-            .children(foot)
+            .children(groups.into_iter().enumerate().flat_map(|(ix, buttons)| {
+                (ix > 0).then(|| sep().into_any_element()).into_iter().chain(buttons)
+            }))
     }
 
     /// The bar's buttons other than the views, in their places' order at its
@@ -256,43 +301,122 @@ impl Workspace {
     /// session), then Search Everywhere, Extensions and Settings (lit while its
     /// page shows).
     fn activity_tools(&self, cx: &App) -> Vec<Tool> {
-        let tool = |id, icon, label, on, panel, priority, action: Box<dyn gpui::Action>, run| Tool { id, icon, label, on, panel, priority, action, run };
-        let mut tools = vec![
-            tool("toggle-terminal", Icon::Terminal, "Terminal", self.shows(BottomPanel::Terminal), true, 0, Box::new(ToggleTerminal), |ws, window, cx| {
+        let tool = |id, icon, label, on, group, priority, action: Box<dyn gpui::Action>, run| Tool {
+            id,
+            icon,
+            label,
+            on,
+            group,
+            tint: None,
+            tip: None,
+            priority,
+            action,
+            run,
+        };
+        let mut tools = self.run_tools(cx);
+        tools.extend([
+            tool("toggle-terminal", Icon::Terminal, "Terminal", self.shows(BottomPanel::Terminal), Group::Panel, 0, Box::new(ToggleTerminal), |ws, window, cx| {
                 // Lit, it hides the panel even while the editor has the keyboard.
                 ws.set_terminal_shown(!ws.shows(BottomPanel::Terminal), window, cx)
             }),
-            tool("toggle-problems", Icon::PanelBottom, "Problems", self.shows(BottomPanel::Problems), true, 2, Box::new(ToggleProblems), |ws, window, cx| {
+            tool("toggle-problems", Icon::PanelBottom, "Problems", self.shows(BottomPanel::Problems), Group::Panel, 2, Box::new(ToggleProblems), |ws, window, cx| {
                 ws.toggle_problems(&ToggleProblems, window, cx)
             }),
-        ];
+        ]);
         if self.has_results {
-            tools.push(tool("toggle-results", Icon::TextSearch, "Find", self.shows(BottomPanel::Results), true, 5, Box::new(ToggleResults), |ws, window, cx| {
+            tools.push(tool("toggle-results", Icon::TextSearch, "Find", self.shows(BottomPanel::Results), Group::Panel, 5, Box::new(ToggleResults), |ws, window, cx| {
                 ws.toggle_results(&ToggleResults, window, cx)
             }));
         }
         if self.repo.is_some() {
-            tools.push(tool("toggle-git-log", Icon::GitCommit, "Git Log", self.shows(BottomPanel::GitLog), true, 4, Box::new(ToggleGitLog), |ws, window, cx| {
+            tools.push(tool("toggle-git-log", Icon::GitCommit, "Git Log", self.shows(BottomPanel::GitLog), Group::Panel, 4, Box::new(ToggleGitLog), |ws, window, cx| {
                 ws.toggle_git_log(&ToggleGitLog, window, cx)
             }));
         }
         if self.debug.is_some() {
             // While debugging, its panel matters most after the terminal.
-            tools.push(tool("toggle-debug", Icon::Bug, "Debug", self.shows(BottomPanel::Debug), true, 1, Box::new(ToggleDebugPanel), |ws, window, cx| {
+            tools.push(tool("toggle-debug", Icon::Bug, "Debug", self.shows(BottomPanel::Debug), Group::Panel, 1, Box::new(ToggleDebugPanel), |ws, window, cx| {
                 ws.toggle_debug_panel(&ToggleDebugPanel, window, cx)
             }));
         }
         let page = self.preferences_shown(cx);
-        tools.push(tool("search-everywhere", Icon::Search, "Search Everywhere", false, false, 3, Box::new(SearchEverywhere), |ws, window, cx| {
+        tools.push(tool("search-everywhere", Icon::Search, "Search Everywhere", false, Group::Window, 3, Box::new(SearchEverywhere), |ws, window, cx| {
             ws.search_everywhere(&SearchEverywhere, window, cx)
         }));
         // The Extensions button stands for its own page.
-        tools.push(tool("open-extensions", Icon::Puzzle, "Extensions", page == Some(true), false, 6, Box::new(OpenExtensions), |ws, window, cx| {
+        tools.push(tool("open-extensions", Icon::Puzzle, "Extensions", page == Some(true), Group::Window, 6, Box::new(OpenExtensions), |ws, window, cx| {
             ws.open_extensions(&OpenExtensions, window, cx)
         }));
-        tools.push(tool("open-settings", Icon::Settings, "Settings", page == Some(false), false, 1, Box::new(OpenSettings), |ws, window, cx| {
+        tools.push(tool("open-settings", Icon::Settings, "Settings", page == Some(false), Group::Window, 1, Box::new(OpenSettings), |ws, window, cx| {
             ws.open_settings(&OpenSettings, window, cx)
         }));
+        tools
+    }
+
+    /// Run (Rerun while the selected configuration runs), Debug and, while
+    /// anything runs, Stop. The configuration's name is in their tooltips:
+    /// the bar has no room for it.
+    fn run_tools(&self, cx: &App) -> Vec<Tool> {
+        let theme = crate::ui::chrome_theme(Theme::get(cx));
+        let selected = self.last_run.as_ref();
+        // From fields kept by events: reading terminals here would redraw the
+        // window whenever one prints.
+        let running_selected =
+            selected.is_some_and(|target| self.running.iter().any(|(name, command)| *name == target.name && *command == target.command));
+        let running = self.debug_active || !self.running.is_empty();
+        let debuggable = selected.is_some_and(|t| t.debug.is_some());
+        let run_tip = match (selected, running_selected) {
+            (Some(t), true) => format!("Rerun {}", t.name.trim_start_matches("Run ")),
+            (Some(t), false) => t.name.clone(),
+            (None, _) => "Run…".into(),
+        };
+        let debug_tip = match selected {
+            Some(t) if debuggable => format!("Debug {}", t.name.trim_start_matches("Run ").trim_start_matches("Test ")),
+            _ => "Debug…".into(),
+        };
+        let mut tools = vec![
+            Tool {
+                id: "run",
+                icon: if running_selected { Icon::Refresh } else { Icon::Play },
+                label: "Run",
+                on: false,
+                group: Group::Run,
+                tint: Some(theme.success.into()),
+                tip: Some(run_tip),
+                priority: 0,
+                action: Box::new(Rerun),
+                run: |ws, window, cx| ws.rerun(&Rerun, window, cx),
+            },
+            Tool {
+                id: "debug-run",
+                icon: Icon::Bug,
+                label: "Debug",
+                on: false,
+                group: Group::Run,
+                tint: None,
+                tip: Some(debug_tip),
+                priority: 1,
+                action: Box::new(DebugConfiguration),
+                run: |ws, window, cx| match ws.last_run.clone() {
+                    Some(target) if target.debug.is_some() => ws.debug_target(target, window, cx),
+                    _ => ws.debug_configuration(&DebugConfiguration, window, cx),
+                },
+            },
+        ];
+        if running {
+            tools.push(Tool {
+                id: "stop-run",
+                icon: Icon::Stop,
+                label: "Stop",
+                on: false,
+                group: Group::Run,
+                tint: Some(theme.error.into()),
+                tip: None,
+                priority: 0,
+                action: Box::new(StopRun),
+                run: |ws, window, cx| ws.stop_run(&StopRun, window, cx),
+            });
+        }
         tools
     }
 
@@ -351,18 +475,19 @@ impl Workspace {
                 }
             })
             .map(|el| if on { el.child(view_tab_shape(right, bar, &theme)) } else { el })
-            // Classic: a line under each tab, like the one after each editor
-            // tab, out to the bar's separator (which the current tab covers).
-            .when(theme.classic, |el| {
-                el.child(
+            // Classic: the open tab is edged above and below, out to the bar's
+            // separator (which it covers), like the current editor tab between
+            // its neighbors' lines. The first one's top edge is the tab row's line.
+            .when(theme.classic && on, |el| {
+                let line = || {
                     div()
                         .absolute()
-                        .bottom_0()
                         .h(px(1.))
                         .left(px(if right { -1. } else { 0. }))
                         .right(px(if right { 0. } else { -1. }))
-                        .bg(crate::ui::separator(&theme)),
-                )
+                        .bg(crate::ui::separator(&theme))
+                };
+                el.child(line().bottom_0()).when(mode != SidebarMode::Files, |el| el.child(line().top_0()))
             });
         // Selected, the icon glides to the middle of its tab, which starts a gap
         // off the window's edge and runs into the island; elsewhere it's on the
@@ -399,17 +524,23 @@ impl Workspace {
 
     /// An activity bar button, built like a resting view tab: a row as tall
     /// as one, the icon in a rounded square (none in Classic) that fills on hover while the icon
-    /// brightens; `on` (an open panel or page) in the accent on a soft accent fill.
+    /// brightens; `on` (an open panel or page) in the accent on a soft accent
+    /// fill; a `tint` (Run, Stop) is the icon's color, a little faded at rest.
     fn activity_button(
         &self,
         id: &'static str,
         icon: Icon,
         on: bool,
+        tint: Option<Hsla>,
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
     ) -> Stateful<Div> {
         let theme = crate::ui::chrome_theme(Theme::get(cx));
-        let (rest, hover): (Hsla, Hsla) = if on { (theme.accent.into(), theme.accent.into()) } else { (theme.text_dim.into(), theme.text.into()) };
+        let (rest, hover): (Hsla, Hsla) = match tint {
+            _ if on => (theme.accent.into(), theme.accent.into()),
+            Some(tint) => (tint.alpha(tint.a * 0.8), tint),
+            None => (theme.text_dim.into(), theme.text.into()),
+        };
         let (fill, fill_hover): (Hsla, Hsla) = if on {
             (theme.accent_soft.into(), Hsla::from(theme.accent).alpha(0.24))
         } else {
@@ -531,10 +662,11 @@ fn count_badge(count: usize, bar: BarSize, theme: &Theme) -> impl IntoElement + 
     let width = 2. * pad + 0.78 * bar.badge_text * label.chars().count() as f32;
     div()
         .absolute()
-        // Hanging below the icon's corner, its top 4pt over it: it covers
-        // little of it, but stays in its row (Classic draws a line under the tab).
-        .bottom(px(-((bar.badge - 4.).min((bar.row - bar.icon) / 2. - 1.))))
-        .left(px((bar.icon - 7.).min(bar.icon + bar.badge_room() - width)))
+        // Hanging below the icon's corner, its top 6pt over it and its left
+        // 9pt in: close to the icon, covering little of it, and in its row
+        // (Classic draws a line under the tab).
+        .bottom(px(-((bar.badge - 6.).min((bar.row - bar.icon) / 2. - 1.))))
+        .left(px((bar.icon - 9.).min(bar.icon + bar.badge_room() - width)))
         .h(px(bar.badge))
         .min_w(px(bar.badge))
         .px(px(pad))
@@ -562,7 +694,9 @@ mod tests {
                 icon: Icon::Terminal,
                 label: "Tool",
                 on: false,
-                panel: true,
+                group: Group::Panel,
+                tint: None,
+                tip: None,
                 priority,
                 action: Box::new(ToggleTerminal),
                 run: |_, _, _| {},

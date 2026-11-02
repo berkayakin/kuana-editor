@@ -128,11 +128,9 @@ impl Workspace {
         )
     }
 
-    /// The title bar's end, over the tab row's right end: the run widget and,
-    /// off macOS, the window's buttons.
+    /// The title bar's end, over the tab row's right end: off macOS, the
+    /// window's buttons (Run and Debug are on the activity bar).
     pub(super) fn render_title_trail(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::get(cx);
-        let fit = BarFit::for_width(f32::from(window.viewport_size().width));
         div()
             .id("title-trail")
             .absolute()
@@ -143,7 +141,6 @@ impl Workspace {
             .flex_row()
             .when(cfg!(windows), |el| el.occlude())
             .child(self.track_title_end(false, cx))
-            .child(div().flex().items_center().pt(px(tab_strip_top(theme))).child(self.render_run_widget(fit, window, cx)))
             .map(|el| match cfg!(target_os = "macos") {
                 true => el.child(window_drag_area("titlebar-end").flex_shrink_0().w(px(GAP + 2.))),
                 false => el.child(div().w(px(GAP)).h_full().flex_shrink_0()).child(self.render_window_controls(window, cx)),
@@ -175,92 +172,6 @@ impl Workspace {
         )
         .absolute()
         .size_full()
-    }
-
-    /// The selected run configuration (the last one launched, run or
-    /// debugged) with Run, Debug and, while something runs, Stop; like
-    /// JetBrains' run widget.
-    pub(super) fn render_run_widget(&self, fit: BarFit, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = crate::ui::chrome_theme(Theme::get(cx));
-        let selected = self.last_run.clone();
-        // From fields kept by events: reading terminals here would redraw the
-        // window whenever one prints.
-        let running_selected = selected
-            .as_ref()
-            .is_some_and(|target| self.running.iter().any(|(name, command)| *name == target.name && *command == target.command));
-        let running = self.debug_active || !self.running.is_empty();
-        let debuggable = selected.as_ref().is_some_and(|t| t.debug.is_some());
-
-        let run_tip = match (&selected, running_selected) {
-            (Some(t), true) => format!("Rerun {}", t.name.trim_start_matches("Run ")),
-            (Some(t), false) => t.name.clone(),
-            (None, _) => "Run…".into(),
-        };
-
-        let debug_tip = match &selected {
-            Some(t) if debuggable => format!("Debug {}", t.name.trim_start_matches("Run ").trim_start_matches("Test ")),
-            _ => "Debug…".into(),
-        };
-        let with_keys = |label: String, action: &dyn gpui::Action| match binding_label(action, window) {
-            Some(keys) => format!("{label} ({keys})"),
-            None => label,
-        };
-        let (run_tip, debug_tip, stop_tip) = (with_keys(run_tip, &Rerun), with_keys(debug_tip, &DebugConfiguration), with_keys("Stop".into(), &StopRun));
-
-        // Plain icons, no fills or shadows: Run and Stop keep their colors
-        // (what they do), the rest light up on hover.
-        div()
-            .flex()
-            .items_center()
-            .gap(px(2.))
-            .when_some(selected.filter(|_| fit.run_label), |el, target| {
-                el.child(
-                    div()
-                        .id("run-configuration")
-                        .group("run-configuration")
-                        .flex()
-                        .items_center()
-                        .gap_1p5()
-                        .h(px(28.))
-                        .pl_1()
-                        .pr_1p5()
-                        .cursor_pointer()
-                        .text_size(px(12.5))
-                        .text_color(theme.text_muted)
-                        .hover(|s| s.text_color(theme.text))
-                        .tooltip(|window, cx| status_tooltip("Run Configuration…", &RunConfiguration, window, cx))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(|ws, _, window, cx| ws.run_configuration(&RunConfiguration, window, cx)))
-                        .child(ellipsize(&target.name, 26))
-                        .child(
-                            svg()
-                                .path(Icon::ChevronDown.path())
-                                .size(px(14.))
-                                .flex_shrink_0()
-                                .text_color(theme.text_dim)
-                                .group_hover("run-configuration", |s| s.text_color(theme.text)),
-                        ),
-                )
-            })
-            .child(
-                self.bar_button("run", if running_selected { Icon::Refresh } else { Icon::Play }, theme.success.into(), None, cx, |ws, _, window, cx| {
-                    ws.rerun(&Rerun, window, cx)
-                })
-                .tooltip(move |_, cx| tooltip_view(run_tip.clone(), cx)),
-            )
-            .when(fit.debug, |el| el.child(
-                self.bar_button("debug", Icon::Bug, theme.text_dim.into(), Some(theme.text.into()), cx, |ws, _, window, cx| match ws.last_run.clone() {
-                    Some(target) if target.debug.is_some() => ws.debug_target(target, window, cx),
-                    _ => ws.debug_configuration(&DebugConfiguration, window, cx),
-                })
-                .tooltip(move |_, cx| tooltip_view(debug_tip.clone(), cx)),
-            ))
-            .when(running, |el| {
-                el.child(
-                    self.bar_button("stop", Icon::Stop, theme.error.into(), None, cx, |ws, _, window, cx| ws.stop_run(&StopRun, window, cx))
-                        .tooltip(move |_, cx| tooltip_view(stop_tip.clone(), cx)),
-                )
-            })
     }
 
     /// Whether Settings is open, and if so whether on its Extensions page.
@@ -513,21 +424,6 @@ pub(super) fn chip_top(theme: &Theme) -> f32 {
     if theme.classic { 0. } else { 3. }
 }
 
-/// What the title bar's trail shows at the window's width: the less it
-/// takes, the more room the tabs beside it have. The run configuration's name
-/// goes first, then Debug (both also in menus, Find Action and shortcuts).
-#[derive(Clone, Copy)]
-pub(super) struct BarFit {
-    run_label: bool,
-    debug: bool,
-}
-
-impl BarFit {
-    fn for_width(width: f32) -> Self {
-        Self { run_label: width >= 1100., debug: width >= 760. }
-    }
-}
-
 /// Between the chips above the sidebar.
 const CHIP_GAP: f32 = 4.;
 /// A chip's padding, icon and gaps around its name (see the `render_*_chip`s).
@@ -684,7 +580,7 @@ pub fn window_controls(window: &Window, cx: &App) -> impl IntoElement + use<> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BarFit, ChipFit, ChipNeeds, Text, fit_chips, monogram_letter};
+    use super::{ChipFit, ChipNeeds, Text, fit_chips, monogram_letter};
     use crate::theme::Theme;
 
     /// Dark on a light tint, light on a dark one.
@@ -695,19 +591,6 @@ mod tests {
         assert!(monogram_letter(gpui::rgba(0xf7d26eff).into(), &theme).l < 0.5);
         assert!(monogram_letter(gpui::rgba(0x4078f2ff).into(), &theme).l > 0.5);
         assert!(monogram_letter(gpui::rgba(0xa626a4ff).into(), &theme).l > 0.5);
-    }
-
-    /// Narrowing the window only ever takes things away.
-    #[test]
-    fn narrower_windows_only_drop_things() {
-        let shown = |f: BarFit| usize::from(f.run_label) + usize::from(f.debug);
-        let mut last = shown(BarFit::for_width(2000.));
-        for width in (480..2000).rev().step_by(10) {
-            let now = shown(BarFit::for_width(width as f32));
-            assert!(now <= last, "more shows at {width} px than wider");
-            last = now;
-        }
-        assert_eq!(shown(BarFit::for_width(480.)), 0);
     }
 
     /// The chips give way in order as their room narrows, never past it.
