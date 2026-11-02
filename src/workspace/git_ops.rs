@@ -1049,6 +1049,10 @@ pub(super) fn perform_git(dir: &Path, op: GitOp, status: &RepoStatus) -> Result<
                 git::Pulled::Merged(n) => Outcome::Done(Some(format!("Pulled {} and merged", commits(n as u64)))),
                 git::Pulled::Rebased(n) => Outcome::Done(Some(format!("Pulled {}, yours rebased on top", commits(n as u64)))),
                 git::Pulled::Conflicts => Outcome::Done(Some("Update stopped on conflicts".into())),
+                git::Pulled::ChangesConflict(n) => Outcome::Done(Some(format!(
+                    "Pulled {}; putting your changes back stopped on conflicts (they're also kept in a stash)",
+                    commits(n as u64)
+                ))),
                 git::Pulled::Diverged { branch, upstream, ahead, behind } => Outcome::Diverged { branch, upstream, ahead, behind },
             });
         }

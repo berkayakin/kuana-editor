@@ -778,6 +778,10 @@ pub enum Pulled {
     Rebased(usize),
     /// A merge or rebase stopped on conflicts (Continue or Abort it).
     Conflicts,
+    /// This many commits came in, but putting the local changes back over
+    /// them stopped on conflicts: the files are left conflicted and the
+    /// changes kept in a stash.
+    ChangesConflict(usize),
     /// Both branches have commits the other doesn't, and the pull only
     /// fast-forwards: nothing changed.
     Diverged { branch: String, upstream: String, ahead: u32, behind: u32 },
@@ -794,6 +798,10 @@ pub fn pull_configured(root: &Path, branch: Option<&str>) -> bool {
 /// config decides if it says how; otherwise only a fast-forward happens, and
 /// branches that both have new commits come back as `Diverged`, so nobody gets
 /// a merge commit they didn't choose.
+///
+/// Local changes don't stop it: when Git refuses to merge or rebase over
+/// them, the pull runs again with `--autostash`, which puts them back on
+/// top afterwards (or leaves them conflicted and kept in a stash).
 pub fn pull(root: &Path, strategy: Option<PullStrategy>) -> Result<Pulled, String> {
     let head = || run(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).ok().map(|s| s.trim().to_string());
     let count = |range: &str| run(root, &["rev-list", "--count", range]).ok().and_then(|n| n.trim().parse().ok()).unwrap_or(0);
@@ -803,26 +811,75 @@ pub fn pull(root: &Path, strategy: Option<PullStrategy>) -> Result<Pulled, Strin
         None if pull_configured(root, status(root).ok().and_then(|s| s.branch).as_deref()) => &["--no-edit"],
         None => PullStrategy::FfOnly.args(),
     };
-    if let Err(err) = run(root, &[["pull"].as_slice(), args].concat()) {
+    let pull_with = |extra: &[&str]| run(root, &[["pull"].as_slice(), args, extra].concat());
+    let started = SystemTime::now();
+    let mut result = pull_with(&[]);
+    // Files whose whole change was staged: a stash comes back unstaged.
+    let mut restage: Option<Vec<String>> = None;
+    if let Err(err) = &result {
         if conflicts_or(root, err.clone()).is_ok() {
             return Ok(Pulled::Conflicts);
         }
+        let now = status(root);
         // A fast-forward-only pull fetched before it gave up, so this
         // compares with what came in.
-        return match status(root) {
-            Ok(s) if args == PullStrategy::FfOnly.args() && s.ahead > 0 && s.behind > 0 => Ok(Pulled::Diverged {
-                branch: s.branch.unwrap_or_default(),
-                upstream: s.upstream.unwrap_or_default(),
+        if let Ok(s) = &now
+            && args == PullStrategy::FfOnly.args()
+            && s.ahead > 0
+            && s.behind > 0
+        {
+            return Ok(Pulled::Diverged {
+                branch: s.branch.clone().unwrap_or_default(),
+                upstream: s.upstream.clone().unwrap_or_default(),
                 ahead: s.ahead,
                 behind: s.behind,
-            }),
-            _ => Err(err),
-        };
+            });
+        }
+        // Git refuses to merge over local changes to the files coming in, and
+        // to rebase over any. Its message is in the user's language, so this
+        // goes by what happened: it fetched, then changed nothing, and there
+        // are changes to tracked files. (A failed fetch isn't tried again.)
+        if let Ok(s) = &now
+            && s.files.iter().any(|f| f.staged.is_some() || f.unstaged.is_some_and(|c| c != Change::Untracked))
+            && head() == before
+            && fetched_since(root, started)
+        {
+            restage = Some(
+                s.files
+                    .iter()
+                    .filter(|f| f.unstaged.is_none() && f.staged.is_some_and(|c| c != Change::Conflicted))
+                    .map(|f| f.rel.clone())
+                    .collect(),
+            );
+            result = pull_with(&["--autostash"]);
+            if let Err(err) = &result
+                && conflicts_or(root, err.clone()).is_ok()
+            {
+                // Git puts the changes back when the merge or rebase ends.
+                return Ok(Pulled::Conflicts);
+            }
+        }
     }
+    result?;
+    let stash_conflicted = match restage {
+        Some(rels) => {
+            let conflicted: Vec<String> =
+                status(root).map(|s| s.conflicted().map(|f| f.rel.clone()).collect()).unwrap_or_default();
+            let rels: Vec<String> = rels.into_iter().filter(|rel| !conflicted.contains(rel)).collect();
+            if !rels.is_empty() {
+                let _ = stage(root, &rels);
+            }
+            !conflicted.is_empty()
+        }
+        None => false,
+    };
     let Some(after) = head().filter(|after| before.as_ref() != Some(after)) else { return Ok(Pulled::UpToDate) };
     // A branch without commits of its own gets everything.
     let Some(before) = before else { return Ok(Pulled::FastForwarded(count("HEAD"))) };
     let incoming = count(&format!("{before}..@{{upstream}}"));
+    if stash_conflicted {
+        return Ok(Pulled::ChangesConflict(incoming));
+    }
     let parents = run(root, &["rev-list", "--parents", "-n", "1", "HEAD"]).unwrap_or_default();
     let parents: Vec<&str> = parents.split_whitespace().skip(1).collect();
     Ok(if parents.len() > 1 && parents.contains(&before.as_str()) {
@@ -832,6 +889,14 @@ pub fn pull(root: &Path, strategy: Option<PullStrategy>) -> Result<Pulled, Strin
     } else {
         Pulled::Rebased(incoming)
     })
+}
+
+/// Whether a fetch wrote `FETCH_HEAD` since `time`.
+fn fetched_since(root: &Path, time: SystemTime) -> bool {
+    let Ok(path) = run(root, &["rev-parse", "--git-path", "FETCH_HEAD"]) else { return false };
+    // Some file systems keep modification times to the second or two.
+    let time = time - Duration::from_secs(2);
+    std::fs::metadata(root.join(path.trim())).and_then(|m| m.modified()).is_ok_and(|m| m >= time)
 }
 
 pub fn fetch(root: &Path) -> Result<String, String> {
@@ -2791,6 +2856,111 @@ u UU N... 100644 100644 100644 100644 f g h conflict.js\0\
         assert_eq!(repo_state(&ours), Some(RepoState::Rebasing));
         abort(&ours, RepoState::Rebasing).unwrap();
         assert_eq!(std::fs::read_to_string(ours.join("a.txt")).unwrap(), "ours\n");
+        for dir in [&ours, &remote, &theirs] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn pull_over_local_changes() {
+        if !is_available() {
+            return;
+        }
+        let ours = test_repo("pull-dirty");
+        let remote = ours.with_extension("remote.git");
+        let theirs = ours.with_extension("theirs");
+        for dir in [&remote, &theirs] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        run(&ours, &["init", "--bare", "--quiet", remote.to_str().unwrap()]).unwrap();
+        run(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]).unwrap();
+        run(&ours, &["remote", "add", "origin", remote.to_str().unwrap()]).unwrap();
+        let lines = |second: &str, last: &str| format!("1\n{second}\n3\n4\n5\n6\n7\n{last}\n");
+        let write = |root: &Path, rel: &str, text: &str| std::fs::write(root.join(rel), text).unwrap();
+        let read = |rel: &str| std::fs::read_to_string(ours.join(rel)).unwrap();
+        let commit_in = |root: &Path, rel: &str, text: &str| {
+            write(root, rel, text);
+            stage(root, &[rel.to_string()]).unwrap();
+            commit(root, &format!("{rel}: {}", text.trim()), false).unwrap();
+        };
+        commit_in(&ours, "a.txt", &lines("2", "8"));
+        commit_in(&ours, "b.txt", "b\n");
+        push(&ours, Some(("origin", "main")), false).unwrap();
+        run(&ours, &["clone", "--quiet", "--config", "core.autocrlf=false", remote.to_str().unwrap(), theirs.to_str().unwrap()]).unwrap();
+        run(&theirs, &["config", "user.name", "Them"]).unwrap();
+        run(&theirs, &["config", "user.email", "them@example.com"]).unwrap();
+        let publish = |rel: &str, text: &str| {
+            run(&theirs, &["pull", "--quiet", "--ff-only"]).unwrap();
+            commit_in(&theirs, rel, text);
+            push(&theirs, None, false).unwrap();
+        };
+        let file = |rel: &str| status(&ours).unwrap().files.into_iter().find(|f| f.rel == rel).map(|f| (f.staged, f.unstaged));
+        let clean = || {
+            run(&ours, &["reset", "--hard", "--quiet"]).unwrap();
+            run(&ours, &["clean", "-fdq"]).unwrap();
+            run(&ours, &["stash", "clear"]).unwrap();
+        };
+        let modified = Some(Change::Modified);
+
+        // Changes to other files stay as they are, staged ones staged.
+        publish("a.txt", &lines("two", "8"));
+        write(&ours, "b.txt", "b mine\n");
+        write(&ours, "d.txt", "new\n");
+        stage(&ours, &["d.txt".into()]).unwrap();
+        assert_eq!(pull(&ours, None).unwrap(), Pulled::FastForwarded(1));
+        assert_eq!(read("b.txt"), "b mine\n");
+        assert_eq!(file("d.txt"), Some((Some(Change::Added), None)));
+        assert!(stashes(&ours).is_empty());
+        clean();
+
+        // A change to a file coming in, apart from the incoming change: both.
+        publish("a.txt", &lines("deux", "8"));
+        write(&ours, "a.txt", &lines("two", "mine"));
+        assert_eq!(pull(&ours, None).unwrap(), Pulled::FastForwarded(1));
+        assert_eq!(read("a.txt"), lines("deux", "mine"));
+        assert_eq!(file("a.txt"), Some((None, modified)));
+        assert!(stashes(&ours).is_empty());
+        clean();
+
+        // Staged, it stays staged.
+        publish("a.txt", &lines("zwei", "8"));
+        write(&ours, "a.txt", &lines("deux", "mine"));
+        stage(&ours, &["a.txt".into()]).unwrap();
+        assert_eq!(pull(&ours, None).unwrap(), Pulled::FastForwarded(1));
+        assert_eq!(read("a.txt"), lines("zwei", "mine"));
+        assert_eq!(file("a.txt"), Some((modified, None)));
+        clean();
+
+        // The same line: the commits come in, the change is left conflicted
+        // and kept in a stash.
+        publish("a.txt", &lines("theirs", "8"));
+        write(&ours, "a.txt", &lines("mine", "8"));
+        assert_eq!(pull(&ours, None).unwrap(), Pulled::ChangesConflict(1));
+        assert_eq!(file("a.txt").and_then(|(staged, _)| staged), Some(Change::Conflicted));
+        assert!(read("a.txt").contains("<<<<<<<") && read("a.txt").contains("mine"));
+        assert_eq!(stashes(&ours).len(), 1);
+        assert_eq!(repo_state(&ours), None);
+        clean();
+
+        // Rebasing refuses any local change; it's put back after.
+        publish("e.txt", "theirs\n");
+        commit_in(&ours, "f.txt", "ours\n");
+        write(&ours, "b.txt", "b mine\n");
+        assert_eq!(pull(&ours, Some(PullStrategy::Rebase)).unwrap(), Pulled::Rebased(1));
+        assert_eq!(read("b.txt"), "b mine\n");
+        assert!(stashes(&ours).is_empty());
+        push(&ours, None, false).unwrap();
+        clean();
+
+        // An untracked file where one comes in: nothing changes.
+        publish("g.txt", "theirs\n");
+        write(&ours, "g.txt", "mine\n");
+        write(&ours, "b.txt", "b mine\n");
+        let before = run(&ours, &["rev-parse", "HEAD"]).unwrap();
+        assert!(pull(&ours, None).is_err());
+        assert_eq!(run(&ours, &["rev-parse", "HEAD"]).unwrap(), before);
+        assert_eq!((read("g.txt"), read("b.txt")), ("mine\n".to_string(), "b mine\n".to_string()));
+        assert!(stashes(&ours).is_empty());
         for dir in [&ours, &remote, &theirs] {
             let _ = std::fs::remove_dir_all(dir);
         }
