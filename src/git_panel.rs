@@ -167,9 +167,10 @@ pub fn change_color(theme: &Theme, change: Change) -> Hsla {
 
 /// Whether a commit takes every change to tracked files (Commit All): only
 /// when nothing is chosen, neither staged nor checked. Checking new files
-/// chooses what goes in, so the tracked changes left unstaged stay out.
-fn commits_all(status: &RepoStatus, include: &HashSet<String>) -> bool {
-    status.staged().next().is_none() && include.is_empty()
+/// chooses what goes in, so the tracked changes left unstaged stay out. An
+/// amend takes only what's chosen: with nothing, it rewrites the message.
+fn commits_all(status: &RepoStatus, include: &HashSet<String>, amend: bool) -> bool {
+    !amend && status.staged().next().is_none() && include.is_empty()
 }
 
 impl GitPanel {
@@ -266,7 +267,7 @@ impl GitPanel {
         if !self.can_commit(cx) {
             return;
         }
-        let all = commits_all(&self.status, &self.include);
+        let all = commits_all(&self.status, &self.include, self.amend);
         let mut untracked: Vec<String> = self.include.iter().cloned().collect();
         untracked.sort();
         cx.emit(GitPanelEvent::Run(GitOp::Commit {
@@ -678,7 +679,7 @@ impl GitPanel {
         // All changes to tracked files; unversioned ones only when checked.
         let label = if self.amend {
             "Amend Commit"
-        } else if commits_all(&self.status, &self.include) && self.status.unstaged().next().is_some() {
+        } else if commits_all(&self.status, &self.include, false) && self.status.unstaged().next().is_some() {
             "Commit All"
         } else {
             "Commit"
@@ -949,14 +950,15 @@ mod tests {
             ..RepoStatus::default()
         };
         let mut include = HashSet::new();
-        // Nothing chosen: Commit All.
-        assert!(commits_all(&status, &include));
+        // Nothing chosen: Commit All, but an amend only rewrites the message.
+        assert!(commits_all(&status, &include, false));
+        assert!(!commits_all(&status, &include, true));
         // Only the new file checked: just it.
         include.insert("new.rs".to_string());
-        assert!(!commits_all(&status, &include));
+        assert!(!commits_all(&status, &include, false));
         // Something staged: what's staged (and checked), never the rest.
         include.clear();
         status.files.push(file("staged.rs", Some(Change::Modified), None));
-        assert!(!commits_all(&status, &include));
+        assert!(!commits_all(&status, &include, false));
     }
 }

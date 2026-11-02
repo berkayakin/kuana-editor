@@ -642,7 +642,24 @@ pub fn unstage(root: &Path, rels: &[String], has_head: bool) -> Result<(), Strin
         vec!["--literal-pathspecs", "rm", "--cached", "-r", "--quiet", "--"]
     };
     args.extend(rels.iter().map(String::as_str));
+    // A staged rename is listed by its new path; restoring only that would
+    // leave the old one staged as deleted.
+    let origins = if has_head { staged_rename_origins(root, rels)? } else { Vec::new() };
+    args.extend(origins.iter().map(String::as_str));
     run(root, &args).map(drop)
+}
+
+/// The old paths of the staged renames whose new paths are `rels` (or in
+/// a folder among them).
+fn staged_rename_origins(root: &Path, rels: &[String]) -> Result<Vec<String>, String> {
+    let out = run(root, &["diff", "--cached", "--name-status", "-z", "-M", "HEAD"])?;
+    let named = |to: &str| rels.iter().any(|rel| to == rel || to.strip_prefix(rel.as_str()).is_some_and(|rest| rest.starts_with('/')));
+    Ok(parse_name_status(&out)
+        .into_iter()
+        .filter(|f| f.change == Change::Renamed && named(&f.rel))
+        .filter_map(|f| f.old_rel)
+        .filter(|from| !rels.contains(from))
+        .collect())
 }
 
 /// Throws away working-tree changes. Untracked files go to the Trash.
@@ -672,7 +689,11 @@ pub fn commit(root: &Path, message: &str, amend: bool) -> Result<String, String>
     if amend {
         args.push("--amend");
     }
-    run_with_stdin(root, &args, message.as_bytes())?;
+    if let Err(error) = run_with_stdin(root, &args, message.as_bytes()) {
+        // Git says so on stdout, after "On branch …", in the user's language.
+        let staged = run(root, &["diff", "--cached", "--quiet"]).is_err() || !has_head(root);
+        return Err(if !amend && !staged && repo_state(root).is_none() { "Nothing to commit: no changes are staged".into() } else { error });
+    }
     Ok(run(root, &["log", "-1", "--format=%h %s"])?.trim().to_string())
 }
 
@@ -1643,6 +1664,10 @@ pub fn stage_lines(root: &Path, rel: &str, current: &str, rows: Range<usize>) ->
     let target = crate::encoding::to_lf(current.to_string());
     let hunks = diff_hunks(&index.text, &target);
     let staged = splice(&own_lines(&index.raw), &index.lines_for(&target), &hunks, |h| rows_touch(&h.new_rows, &rows));
+    // All of a deleted file's lines: the deletion, not an empty file.
+    if staged.is_empty() && std::fs::symlink_metadata(root.join(rel)).is_err() {
+        return stage(root, &[rel.to_string()]);
+    }
     write_index(root, rel, &index.encode(&staged)?)
 }
 
@@ -3085,5 +3110,41 @@ u UU N... 100644 100644 100644 100644 f g h conflict.js\0\
         let _ = std::fs::remove_dir_all(&parent);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&remote);
+    }
+    #[test]
+    fn renames_deletions_and_empty_commits() {
+        if !is_available() {
+            return;
+        }
+        let root = test_repo("renames");
+        let staged = || -> Vec<(String, Option<Change>)> {
+            status(&root).unwrap().files.into_iter().filter(|f| f.staged.is_some()).map(|f| (f.rel, f.staged)).collect()
+        };
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        std::fs::write(root.join("b.txt"), "b\n").unwrap();
+        stage(&root, &["a.txt".into(), "b.txt".into()]).unwrap();
+        commit(&root, "first", false).unwrap();
+
+        // A staged rename is listed by its new name; unstaging that takes
+        // the old name's deletion out of the index too.
+        run(&root, &["mv", "b.txt", "c d.txt"]).unwrap();
+        assert_eq!(staged(), [("c d.txt".to_string(), Some(Change::Renamed))]);
+        unstage(&root, &["c d.txt".into()], true).unwrap();
+        assert!(staged().is_empty());
+        std::fs::rename(root.join("c d.txt"), root.join("b.txt")).unwrap();
+
+        // Staging all of a deleted file's lines stages the deletion.
+        std::fs::remove_file(root.join("a.txt")).unwrap();
+        stage_lines(&root, "a.txt", "", 0..1).unwrap();
+        assert_eq!(staged(), [("a.txt".to_string(), Some(Change::Deleted))]);
+        unstage(&root, &["a.txt".into()], true).unwrap();
+
+        // Nothing staged: said so, not Git's "On branch main".
+        assert_eq!(commit(&root, "empty", false).unwrap_err(), "Nothing to commit: no changes are staged");
+        // A message starting with '#' is kept whole.
+        stage(&root, &["a.txt".into()]).unwrap();
+        commit(&root, "#12 Remove a\n\n# not a comment", false).unwrap();
+        assert_eq!(last_commit_message(&root).unwrap(), "#12 Remove a\n\n# not a comment");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
