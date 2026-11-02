@@ -99,6 +99,12 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"
 
+# GPUI 0.2.2 needs taffy 0.9.0 exactly; this copy never reuses a cached final
+# layout, so an element doesn't keep the shrink-to-fit layout it got while its
+# parent was being measured (text fields at their minimum width at some window widths).
+[patch.crates-io]
+taffy = { path = "vendor/taffy" }
+
 # Debug builds: Kuana's own code compiles quickly, dependencies (tree-sitter, oxc, gpui) stay fast.
 [profile.dev]
 opt-level = 1
