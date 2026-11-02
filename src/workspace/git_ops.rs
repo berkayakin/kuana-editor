@@ -417,6 +417,16 @@ impl Workspace {
                             ws.toast(ToastKind::Error, format!("Can't fast-forward {branch} to {upstream}"), Some(detail), cx);
                         }
                     },
+                    Ok(Outcome::CommittedNotPushed { summary, error }) => {
+                        ws.git_panel.update(cx, |p, cx| p.committed(cx));
+                        match error {
+                            None => {
+                                ws.toast(ToastKind::Info, format!("Committed {summary}"), None, cx);
+                                ws.show_push(window, cx);
+                            }
+                            Some(error) => ws.toast(ToastKind::Error, format!("Committed {summary}, but the push failed"), Some(error), cx),
+                        }
+                    }
                     Ok(Outcome::PartlyApplied { not_restored, error }) => {
                         // Git applies the changes to tracked files first, then restores
                         // untracked ones, skipping those that exist (or stopping).
@@ -430,7 +440,7 @@ impl Workspace {
                     }
                     Err(err) => {
                         let title = match &op {
-                            GitOp::Push | GitOp::PushNow { .. } | GitOp::Commit { push: true, .. } => "Push failed",
+                            GitOp::Push | GitOp::PushNow { .. } => "Push failed",
                             GitOp::Pull(_) => "Update failed",
                             GitOp::Fetch => "Fetch failed",
                             GitOp::Commit { .. } => "Commit failed",
@@ -954,6 +964,9 @@ pub(super) enum Outcome {
     Diverged { branch: String, upstream: String, ahead: u32, behind: u32 },
     /// A stash applied in part and kept (see `git::Unstashed::Partly`).
     PartlyApplied { not_restored: Vec<String>, error: String },
+    /// Commit & Push committed, then didn't push: it failed with `error`,
+    /// or (None) the branch is behind its upstream.
+    CommittedNotPushed { summary: String, error: Option<String> },
 }
 
 /// "1 commit", "3 commits".
@@ -1023,6 +1036,9 @@ pub(super) fn perform_git(dir: &Path, op: GitOp, status: &RepoStatus) -> Result<
             git::discard(dir, &files).map(|_| Some(format!("Rolled back {n} file{}", if n == 1 { "" } else { "s" })))
         }
         GitOp::Commit { message, amend, all, untracked, push: and_push } => {
+            // A checked file deleted since it was listed would fail the
+            // whole commit (and leave what `all` staged behind).
+            let untracked: Vec<String> = untracked.into_iter().filter(|rel| std::fs::symlink_metadata(dir.join(rel)).is_ok()).collect();
             // Untracked files only when checked: a commit of "everything"
             // mustn't pick up build output or notes nobody chose.
             if all {
@@ -1032,12 +1048,19 @@ pub(super) fn perform_git(dir: &Path, op: GitOp, status: &RepoStatus) -> Result<
                 git::stage(dir, &untracked)?;
             }
             let summary = git::commit(dir, &message, amend)?;
-            if and_push {
-                push(dir, false, None)?;
-                Ok(Some(format!("Committed and pushed {summary}")))
-            } else {
-                Ok(Some(format!("Committed {summary}")))
+            if !and_push {
+                return Ok(Outcome::Done(Some(format!("Committed {summary}"))));
             }
+            // Behind its upstream (an amended commit that was pushed, or
+            // commits fetched since), a push would be refused: the Push
+            // dialog says why and offers Force Push.
+            if git::status(dir).is_ok_and(|s| s.upstream.is_some() && s.behind > 0) {
+                return Ok(Outcome::CommittedNotPushed { summary, error: None });
+            }
+            return Ok(match push(dir, false, None) {
+                Ok(_) => Outcome::Done(Some(format!("Committed and pushed {summary}"))),
+                Err(error) => Outcome::CommittedNotPushed { summary, error: Some(error) },
+            });
         }
         // `Push` opens the dialog before it gets here; treat it as a plain push.
         GitOp::Push => push(dir, false, None).map(Some),
@@ -1153,5 +1176,55 @@ mod tests {
         work.add(StatusWork::paths([root.join("b.txt")]));
         assert!(work.all && work.paths.is_empty());
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Commit & Push: checked files that went away are skipped, a branch
+    /// behind its upstream (an amended pushed commit) isn't pushed, and a
+    /// push that fails still reports the commit.
+    #[test]
+    fn commit_and_push() {
+        if !git::is_available() {
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("kuana-commit-push-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let remote = base.join("remote.git");
+        let dir = base.join("work");
+        std::fs::create_dir_all(&remote).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        git::run(&remote, &["init", "--bare", "--quiet"]).unwrap();
+        git::init(&dir).unwrap();
+        let root = git::discover(&dir).unwrap();
+        for args in [["config", "user.name", "Test"], ["config", "user.email", "test@example.com"], ["symbolic-ref", "HEAD", "refs/heads/main"]] {
+            git::run(&root, &args).unwrap();
+        }
+        git::add_remote(&root, "origin", remote.to_str().unwrap()).unwrap();
+        let write = |rel: &str, text: &str| std::fs::write(root.join(rel), text).unwrap();
+        let commit = |message: &str, amend: bool, untracked: &[&str], status: &RepoStatus| {
+            let untracked = untracked.iter().map(|rel| rel.to_string()).collect();
+            perform_git(&root, GitOp::Commit { message: message.into(), amend, all: !amend, untracked, push: true }, status)
+        };
+
+        // The first push sets the upstream; a checked file deleted since is left out.
+        write("a.txt", "one\n");
+        write("gone.txt", "");
+        let status = git::status(&root).unwrap();
+        std::fs::remove_file(root.join("gone.txt")).unwrap();
+        assert!(matches!(commit("first", false, &["a.txt", "gone.txt"], &status), Ok(Outcome::Done(Some(m))) if m.starts_with("Committed and pushed")));
+        let status = git::status(&root).unwrap();
+        assert_eq!((status.upstream.as_deref(), status.ahead, status.files.len()), (Some("origin/main"), 0, 0));
+
+        // Amending the pushed commit: committed, not pushed (the Push dialog offers to force).
+        assert!(matches!(commit("first, amended", true, &[], &status), Ok(Outcome::CommittedNotPushed { error: None, .. })));
+        assert_eq!(git::last_commit_message(&root).unwrap(), "first, amended");
+
+        // A push that fails still reports the commit.
+        git::run(&root, &["reset", "--quiet", "--hard", "origin/main"]).unwrap();
+        git::checkout_commit(&root, &status.head_oid.clone().unwrap()).unwrap();
+        write("a.txt", "two\n");
+        let status = git::status(&root).unwrap();
+        assert!(matches!(commit("detached", false, &[], &status), Ok(Outcome::CommittedNotPushed { error: Some(_), .. })));
+        assert_eq!(git::last_commit_message(&root).unwrap(), "detached");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
