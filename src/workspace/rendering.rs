@@ -76,6 +76,20 @@ impl Workspace {
         )
     }
 
+    /// The sidebar's width as shown: its saved width, less what the editor
+    /// needs to keep a pane's width in a narrow window (not below the
+    /// sidebar's own minimum). The saved width comes back as the window grows.
+    pub(super) fn shown_sidebar_width(&self) -> Pixels {
+        let editor = px(self.activity_width + 2. * GAP + MIN_PANE_WIDTH);
+        self.sidebar_width.min(self.viewport.width - editor).max(px(SIDEBAR_MIN_WIDTH))
+    }
+
+    /// The bottom panels' height as shown: the saved height, less what the
+    /// editor above needs in a short window.
+    pub(super) fn shown_panel_height(&self) -> Pixels {
+        self.problems_height.min(panel_max_height(self.viewport.height)).max(px(90.).min(self.problems_height))
+    }
+
     /// An invisible grab area over the gap after an island; only the cursor
     /// shows it. It's `GAP` wide, centered on the gap, so a Classic layout's
     /// 1px line is as easy to grab.
@@ -115,8 +129,9 @@ impl Workspace {
             cx.listener(move |ws, e: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
                 let (start, size) = match edge {
-                    Edge::Problems => (e.position.y, ws.problems_height),
-                    Edge::Sidebar => (e.position.x, ws.sidebar_width),
+                    // From the size shown, which a small window may have cut.
+                    Edge::Problems => (e.position.y, ws.shown_panel_height()),
+                    Edge::Sidebar => (e.position.x, ws.shown_sidebar_width()),
                     // A double click evens the split out (as VS Code's sashes do).
                     Edge::Split { split, .. } if e.click_count == 2 => {
                         ws.center.even_out(split);
@@ -216,13 +231,12 @@ impl Workspace {
         match resize.edge {
             Edge::Problems => {
                 // Keep room for the tab bar and a few editor lines above the panel.
-                let max = (viewport.height - px(TITLEBAR_HEIGHT + TAB_HEIGHT + STATUSBAR_HEIGHT + 120.)).max(px(90.));
-                self.problems_height = (resize.size + (resize.start - event.position.y)).clamp(px(90.), max);
+                self.problems_height = (resize.size + (resize.start - event.position.y)).clamp(px(90.), panel_max_height(viewport.height).max(px(90.)));
             }
             Edge::Sidebar => {
-                // Leave the editor at least 320pt wide. On the right, dragging
-                // left (toward the editor) widens it.
-                let max = (viewport.width - px(320.)).max(px(SIDEBAR_MIN_WIDTH));
+                // Leave the editor a pane's width. On the right, dragging left
+                // (toward the editor) widens it.
+                let max = (viewport.width - px(self.activity_width + 2. * GAP + MIN_PANE_WIDTH)).max(px(SIDEBAR_MIN_WIDTH));
                 let delta = event.position.x - resize.start;
                 let delta = if self.sidebar_on_right(cx) { -delta } else { delta };
                 self.sidebar_width = (resize.size + delta).clamp(px(SIDEBAR_MIN_WIDTH), max);
@@ -263,6 +277,12 @@ impl Workspace {
 
 }
 
+/// The tallest a bottom panel may be in a window `height` tall: the editor
+/// above it keeps its tab row and a few lines, the status bar its room.
+fn panel_max_height(height: Pixels) -> Pixels {
+    height - px(EDITOR_MIN_HEIGHT + STATUSBAR_HEIGHT + GAP)
+}
+
 impl Focusable for Workspace {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -271,6 +291,8 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.viewport = window.viewport_size();
+        self.activity_width = activity_bar::BarSize::of(cx).width;
         // The Problems panel lists the active file's diagnostics.
         if self.shows(BottomPanel::Problems) {
             let active = self.active_editor(cx);
@@ -290,6 +312,7 @@ impl Render for Workspace {
         let toasts = self.render_toasts(cx);
         let terminal_panel = self.shows(BottomPanel::Terminal).then(|| self.render_terminal_panel(cx).into_any_element());
         let panes = self.render_panes(window, cx).into_any_element();
+        let sidebar_right = self.sidebar_on_right(cx);
 
         div()
             .id("workspace")
@@ -412,21 +435,23 @@ impl Render for Workspace {
             .text_color(theme.text)
             .font_family(theme.ui_font.clone())
             .text_size(px(theme.ui_font_size))
-            .child(self.render_titlebar(window, cx))
             .when_some(self.onboarding.as_ref().map(|(o, _)| o.clone()), |el, onboarding| {
                 el.child(
-                    area(&theme)
+                    div()
+                        .flex()
+                        .flex_col()
                         .flex_1()
                         .min_h_0()
-                        // Classic: flush with the window's edges, a line under the title bar.
-                        .map(|el| {
-                            if theme.classic {
-                                el.border_t_1().border_color(crate::ui::separator(&theme))
-                            } else {
-                                el.mx(px(GAP)).mb(px(GAP))
-                            }
-                        })
-                        .child(div().size_full().overflow_hidden().child(onboarding)),
+                        // The tab row's room, for the title bar's ends.
+                        .child(tab_room(window_drag_area("onboarding-room").w_full(), &theme))
+                        .child(
+                            area(&theme)
+                                .flex_1()
+                                .min_h_0()
+                                // Classic: flush with the window's edges.
+                                .when(!theme.classic, |el| el.mx(px(GAP)))
+                                .child(div().size_full().overflow_hidden().child(onboarding)),
+                        ),
                 )
             })
             .when(self.onboarding.is_none(), |el| el.child(
@@ -436,18 +461,22 @@ impl Render for Workspace {
                     .flex_1()
                     .min_h_0()
                     // Classic: the areas cover this but for 1px gaps between
-                    // them and lines above and below, the separators.
+                    // them and a line above the status bar, the separators.
+                    // Modern: the window's edge on the side away from the
+                    // activity bar keeps the islands' gap.
                     .map(|el| {
                         if theme.classic {
-                            el.py(px(1.)).bg(crate::ui::separator(&theme))
+                            el.pb(px(1.)).bg(crate::ui::separator(&theme))
+                        } else if sidebar_right {
+                            el.pl(px(GAP))
                         } else {
-                            el.px(px(GAP))
+                            el.pr(px(GAP))
                         }
                     })
                     .gap(px(layout_gap(&theme)))
-                    // The sidebar keeps its full height on either side; the
-                    // bottom panels stay under the editor area.
-                    .when(self.show_sidebar && !self.sidebar_on_right(cx), |el| el.child(self.render_sidebar(window, cx)))
+                    // The activity bar and the sidebar keep their full height on
+                    // either side; the bottom panels stay under the editor area.
+                    .when(!sidebar_right, |el| el.child(self.render_sidebar_block(window, cx)))
                     .child(
                         div()
                             .flex()
@@ -462,9 +491,12 @@ impl Render for Workspace {
                             .when(self.shows(BottomPanel::GitLog), |el| el.child(self.render_git_log_panel(cx)))
                             .when(self.shows(BottomPanel::Debug), |el| el.children(self.render_debug_panel(cx))),
                     )
-                    .when(self.show_sidebar && self.sidebar_on_right(cx), |el| el.child(self.render_sidebar(window, cx))),
-            )
-            .child(self.render_statusbar(cx)))
+                    .when(sidebar_right, |el| el.child(self.render_sidebar_block(window, cx))),
+            ))
+            .child(self.render_statusbar(cx))
+            // The title bar's ends, over the tab row's (after it, so they're on top).
+            .child(self.render_title_lead(window, cx))
+            .child(self.render_title_trail(window, cx))
             .children(toasts)
             .children(self.render_context_menu(cx))
             .children(modal)

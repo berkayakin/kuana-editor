@@ -52,7 +52,8 @@ in a Go module with `.lyth` files) and the
 current file's tests. **Run** (⌃R / Shift+F10)
 repeats the last one (run or debugged), **Stop** (⌘F2 / Ctrl+F2) interrupts it. The title bar's
 top right has the same: the last configuration (click it for Run…; the project keeps it for next
-time), Run, Debug and, while something runs, Stop, next to the sidebar and bottom panel toggles.
+time), Run, Debug and, while something runs, Stop, at the end of the tab row. The bottom panel
+toggles are on the activity bar at the window's side.
 
 Each run gets a terminal tab named after it, which stays open with the exit code when it ends and
 shows ▶ while running, ✓ on success and ✕ on failure. Running the same thing again reuses its tab.

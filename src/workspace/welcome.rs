@@ -53,7 +53,7 @@ impl Workspace {
     pub(super) fn render_welcome(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
         // Lay out for the space the welcome screen actually gets.
-        let sidebar = if self.show_sidebar { self.sidebar_width } else { px(0.) };
+        let sidebar = if self.show_sidebar { self.shown_sidebar_width() } else { px(0.) };
         let available = window.viewport_size().width - sidebar;
         let wide = available > px(820.);
 

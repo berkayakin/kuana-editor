@@ -10,7 +10,7 @@ The conventions to follow when changing the code (offsets, background work, sett
 bindings, colors, icons) are in the [contributing guide](../CONTRIBUTING.md).
 
 - `src/main.rs` — app setup: fonts, theme, keymap, menus, windows, command-line paths
-- `src/workspace.rs` — window chrome: title bar, file tree, panes and tabs, problems, status bar,
+- `src/workspace.rs` — window chrome: title bar, activity bar, file tree, panes and tabs, problems, status bar,
   modals and file operations
 - `src/document.rs` — rope buffer, edits, undo history, file I/O
 - `src/editor.rs` — editor view, input handling and the GPU element that paints it

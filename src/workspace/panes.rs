@@ -344,28 +344,6 @@ impl Workspace {
         }
     }
 
-    /// Shows or hides the sidebar, keeping the view it has.
-    pub(super) fn set_sidebar_visible(&mut self, visible: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_sidebar = visible;
-        self.release_hidden_focus(window, cx);
-        if visible && self.sidebar_mode == SidebarMode::Commit {
-            self.refresh_commit_view(cx);
-        }
-        self.save_state(cx);
-        cx.notify();
-    }
-
-    /// The sidebar switch's Files segment.
-    pub(super) fn show_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sidebar_mode == SidebarMode::Files {
-            return;
-        }
-        self.sidebar_mode = SidebarMode::Files;
-        self.release_hidden_focus(window, cx);
-        self.save_state(cx);
-        cx.notify();
-    }
-
     pub(super) fn show_commit(&mut self, _: &ShowCommit, window: &mut Window, cx: &mut Context<Self>) {
         self.show_sidebar = true;
         self.sidebar_mode = SidebarMode::Commit;

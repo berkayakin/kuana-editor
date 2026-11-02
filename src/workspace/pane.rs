@@ -48,6 +48,11 @@ pub(super) struct PaneChrome {
     pub(super) find_bar: Option<Entity<FindBar>>,
     /// The project folder, where breadcrumbs start.
     pub(super) root: Option<PathBuf>,
+    /// Along the window's top, the title bar's ends sit in the tab row: the
+    /// window x where its lead (traffic lights, project, branch) ends and its
+    /// trail (run widget, window buttons) starts. A strip under either keeps
+    /// its tabs clear of them. 0 and infinity elsewhere.
+    pub(super) title_ends: (f32, f32),
 }
 
 /// Where a tab dragged over a pane's content would land: in this pane, or
@@ -277,9 +282,16 @@ impl Pane {
             .zip(&name_widths)
             .map(|(look, (w, _))| (TAB_CHROME + w + if look.errors { TAB_ERROR_DOT } else { 0. }).ceil())
             .collect();
-        // The room for tabs: the pane less the strip's insets (unknown before the first frame).
-        let width = f32::from(self.bounds.get().size.width);
-        let available = if width > 0. { width - 2. * tab_strip_inset(&theme) } else { f32::INFINITY };
+        // The strip's ends: clear of an island's corners, and of the title
+        // bar's lead and trail when they sit over it.
+        let bounds = self.bounds.get();
+        let inset = tab_strip_inset(&theme);
+        let (lead_end, trail_start) = self.chrome.title_ends;
+        let lead = (lead_end + TITLE_END_GAP - f32::from(bounds.left())).max(inset).ceil();
+        let trail = (f32::from(bounds.right()) - trail_start + TITLE_END_GAP).max(inset).ceil();
+        // The room for tabs: the pane less the strip's ends (unknown before the first frame).
+        let width = f32::from(bounds.size.width);
+        let available = if width > 0. { width - lead - trail } else { f32::INFINITY };
         let slots = fit_tabs(&naturals, self.active, available);
         let visible: Vec<usize> = (0..slots.len()).filter(|&i| slots[i] != TabSlot::Hidden).collect();
         let hidden: Vec<PaneItem> = (0..slots.len()).filter(|&i| slots[i] == TabSlot::Hidden).map(|i| self.tabs[i].clone()).collect();
@@ -297,8 +309,8 @@ impl Pane {
             .pt(px(tab_strip_top(&theme)))
             // Clear of the island's rounded corners on both sides, so the first
             // and last tabs' feet sit on its straight top edge.
-            .pl(px(tab_strip_inset(&theme)))
-            .pr(px(tab_strip_inset(&theme)))
+            .pl(px(inset))
+            .pr(px(trail))
             // No scrolling, which would cut the current tab's shape at the edge:
             // like a browser, tabs shrink to fit, down to their icon.
             .overflow_hidden()
@@ -306,6 +318,8 @@ impl Pane {
             .on_drop(cx.listener(|_, dragged: &DraggedTab, _, cx| {
                 cx.emit(PaneEvent::Drop { item: dragged.item.clone(), before: None });
             }))
+            // Room for the title bar's lead, which still moves the window.
+            .when(lead > inset, |el| el.child(window_drag_area("tabs-lead").flex_shrink_0().w(px(lead - inset))))
             .children(visible.iter().enumerate().map(|(pos, &ix)| {
                 let item = &self.tabs[ix];
                 let slot = slots[ix];

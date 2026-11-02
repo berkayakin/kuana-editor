@@ -329,7 +329,7 @@ impl Workspace {
         let theme = Theme::get(cx).clone();
         Some(
             area(&theme)
-                .h(self.problems_height)
+                .h(self.shown_panel_height())
                 .flex_shrink_0()
                 .child(cached(session))
                 .child(self.resize_handle(Edge::Problems, cx)),

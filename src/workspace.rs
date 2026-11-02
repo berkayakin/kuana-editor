@@ -78,6 +78,7 @@ use crate::ui::{
     GAP, area, chrome_bg, soft_shadow, file_icon, layout_gap,
 };
 
+mod activity_bar;
 mod app_menu;
 mod background;
 mod commands;
@@ -629,7 +630,6 @@ const FORMAT_ON_SAVE_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub const TITLEBAR_HEIGHT: f32 = 40.0;
 const STATUSBAR_HEIGHT: f32 = 30.0;
-const TAB_HEIGHT: f32 = 38.0;
 /// The editor tabs' strip on the chrome above each pane; the pane's island
 /// starts 1px above its bottom, so the current tab covers the island's top
 /// border and joins it.
@@ -642,12 +642,12 @@ const TAB_FOOT: f32 = 8.0;
 /// A tab strip's padding at each end: the island's corner radius plus a
 /// foot, so the end tabs' feet land on the island's straight edge.
 const TAB_STRIP_INSET: f32 = crate::ui::ISLAND_RADIUS + TAB_FOOT;
-/// The sidebar's narrowest: room for its two tabs as icons (see
-/// `render_sidebar_tabs`), and for a file tree that's still usable.
+/// Between the title bar's lead or trail and the tabs beside them.
+const TITLE_END_GAP: f32 = 10.0;
+/// The sidebar's narrowest: a file tree that's still usable.
 const SIDEBAR_MIN_WIDTH: f32 = 160.0;
-/// A sidebar tab's padding, icon and gap around its name.
-const SIDEBAR_TAB_CHROME: f32 = 44.0;
-const _: () = assert!(SIDEBAR_MIN_WIDTH - 2. * TAB_STRIP_INSET >= 2. * TAB_ICON_WIDTH);
+/// What a bottom panel leaves the editor above it: its tab strip and a few lines.
+const EDITOR_MIN_HEIGHT: f32 = 140.0;
 
 /// A terminal strip's buttons (+, split, hide), each with its margin.
 const TERMINAL_BUTTON: f32 = 28.0;
@@ -683,6 +683,14 @@ pub struct Workspace {
     /// What each pane reports (see `PaneEvent`), dropped with the pane.
     pane_subscriptions: HashMap<EntityId, Subscription>,
     show_sidebar: bool,
+    /// Where the title bar's lead ends and its trail starts, in window x, as
+    /// last drawn: the top panes' tab strips keep clear of them (`PaneChrome::title_ends`).
+    title_ends: std::rc::Rc<std::cell::Cell<(f32, f32)>>,
+    /// The window's size at the last render: the sidebar and the bottom panels
+    /// show smaller than their saved sizes when it can't spare them.
+    viewport: gpui::Size<Pixels>,
+    /// The activity bar's width (`BarSize`), noted each render like `viewport`.
+    activity_width: f32,
     /// What the bottom area shows; its height is `problems_height`.
     bottom: Option<BottomPanel>,
     /// Height of the bottom panel (Problems or Terminal; one shows at a time).
@@ -1102,6 +1110,9 @@ impl Workspace {
             // Without a project there's nothing to browse; opening one shows
             // the sidebar as it was left (see `set_root`).
             show_sidebar: false,
+            title_ends: Default::default(),
+            viewport: window.viewport_size(),
+            activity_width: activity_bar::BarSize::of(cx).width,
             // One panel at a time; the terminal wins, as it always opened over the others.
             bottom: if state.show_terminal.unwrap_or(false) {
                 Some(BottomPanel::Terminal)
@@ -1624,12 +1635,14 @@ impl Workspace {
         let panes = self.center.panes();
         for pane in &panes {
             let active = *pane == self.active_pane;
+            let at_top = self.center.at_top(pane);
             let chrome = PaneChrome {
                 active,
                 outlined: active && panes.len() > 1,
-                at_top: self.center.at_top(pane),
+                at_top,
                 find_bar: (active && self.show_find).then(|| self.find_bar.clone()),
                 root: self.root.clone(),
+                title_ends: if at_top { self.title_ends.get() } else { (0., f32::INFINITY) },
             };
             pane.update(cx, |p, cx| p.set_chrome(chrome, cx));
         }
@@ -1807,5 +1820,12 @@ mod tests {
         assert_eq!(slots[6], Fixed(88.));
         assert_eq!(slots[5], Compact(64.));
         assert_eq!(slots.iter().filter(|s| **s == Hidden).count(), 5);
+        // A strip narrower than the current tab's least and the menu: the
+        // current tab narrows so both still fit (a narrow window's pane).
+        let slots = fit_tabs(&[150.; 3], 0, 120.);
+        assert_eq!(slots, vec![Fixed(72.), Hidden, Hidden]);
+        assert_eq!(fit_tabs(&[150.], 0, 80.), vec![Fixed(80.)]);
+        // Never below its icon.
+        assert_eq!(fit_tabs(&[150.; 3], 0, 30.)[0], Fixed(TAB_ICON_WIDTH));
     }
 }
