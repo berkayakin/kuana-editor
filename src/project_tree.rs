@@ -469,8 +469,10 @@ impl ProjectTree {
             .flex()
             .flex_col()
             .items_center()
-            // A little above the middle, where the eye lands in a tall sidebar.
-            .pt(px(72.))
+            // Centered like the empty editor beside it, a little above the
+            // middle, where the eye lands.
+            .justify_center()
+            .pb(px(48.))
             .px_4()
             .gap_1()
             .text_size(px(12.))
