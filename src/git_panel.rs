@@ -165,6 +165,12 @@ pub fn change_color(theme: &Theme, change: Change) -> Hsla {
     .into()
 }
 
+/// Whether a commit takes every change to tracked files (Commit All): only
+/// when nothing is chosen, neither staged nor checked. Checking new files
+/// chooses what goes in, so the tracked changes left unstaged stay out.
+fn commits_all(status: &RepoStatus, include: &HashSet<String>) -> bool {
+    status.staged().next().is_none() && include.is_empty()
+}
 
 impl GitPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
@@ -260,7 +266,7 @@ impl GitPanel {
         if !self.can_commit(cx) {
             return;
         }
-        let all = self.status.staged().next().is_none();
+        let all = commits_all(&self.status, &self.include);
         let mut untracked: Vec<String> = self.include.iter().cloned().collect();
         untracked.sort();
         cx.emit(GitPanelEvent::Run(GitOp::Commit {
@@ -669,11 +675,10 @@ impl GitPanel {
         let theme = Theme::get(cx).clone();
         let focused = self.message.read(cx).focus_handle(cx).is_focused(window);
         let can_commit = self.can_commit(cx);
-        let nothing_staged = self.status.staged().next().is_none();
         // All changes to tracked files; unversioned ones only when checked.
         let label = if self.amend {
             "Amend Commit"
-        } else if nothing_staged && self.status.unstaged().next().is_some() {
+        } else if commits_all(&self.status, &self.include) && self.status.unstaged().next().is_some() {
             "Commit All"
         } else {
             "Commit"
@@ -923,5 +928,35 @@ impl Render for GitPanel {
             )
             .child(self.render_commit_box(window, cx))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(rel: &str, staged: Option<Change>, unstaged: Option<Change>) -> FileStatus {
+        FileStatus { path: PathBuf::from(rel), rel: rel.into(), staged, unstaged, blobs: None }
+    }
+
+    #[test]
+    fn checked_new_files_leave_unstaged_changes_out() {
+        let mut status = RepoStatus {
+            files: vec![
+                file("changed.rs", None, Some(Change::Modified)),
+                file("new.rs", None, Some(Change::Untracked)),
+            ],
+            ..RepoStatus::default()
+        };
+        let mut include = HashSet::new();
+        // Nothing chosen: Commit All.
+        assert!(commits_all(&status, &include));
+        // Only the new file checked: just it.
+        include.insert("new.rs".to_string());
+        assert!(!commits_all(&status, &include));
+        // Something staged: what's staged (and checked), never the rest.
+        include.clear();
+        status.files.push(file("staged.rs", Some(Change::Modified), None));
+        assert!(!commits_all(&status, &include));
     }
 }
