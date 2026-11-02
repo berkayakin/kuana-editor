@@ -513,6 +513,27 @@ impl Document {
         self.undo_stack.push(Transaction { id, edits: vec![record], before: selections.to_vec(), after: Vec::new(), at: Instant::now(), kind: EditKind::Other });
     }
 
+    /// Reads the file again, unsaved edits or not (Save's "Reload" when the
+    /// file changed on disk): the lines that changed are one edit, so undo
+    /// brings the unsaved text back, and the text counts as saved after it.
+    /// True when the text changed.
+    pub fn revert(&mut self, selections: &[Selection]) -> std::io::Result<bool> {
+        let path = self.path.clone().ok_or_else(|| std::io::Error::other("document has no path"))?;
+        // Before reading: a write after it is noticed next time.
+        let mtime = mtime(&path);
+        let bytes = std::fs::read(&path)?;
+        let (text, encoding) = encoding::decode(&bytes, Some(self.encoding));
+        let text = encoding::to_lf(text);
+        self.encoding = encoding;
+        self.disk_mtime = mtime;
+        let changed = self.rope != text.as_str();
+        if changed {
+            self.take_changes(Changes::between(&String::from(&self.rope), &text), selections);
+        }
+        self.saved_at = Some(self.history_position());
+        Ok(changed)
+    }
+
     /// Reads the file again as `encoding` (when it was guessed wrong).
     /// Unsaved edits are lost; callers ask first. Nothing to undo after it.
     pub fn reload_with_encoding(&mut self, encoding: TextEncoding) -> std::io::Result<()> {
@@ -2817,6 +2838,41 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         assert!(doc.changed_on_disk(), "a deleted file counts as changed");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Save's "Reload" for a file changed on disk: the file's text replaces
+    /// unsaved edits, as one edit that undo takes back.
+    #[test]
+    fn reverts_unsaved_edits_to_the_file() {
+        let dir = std::env::temp_dir().join(format!("kuana-doc-revert-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.txt");
+        std::fs::write(&path, "one\ntwo\n").unwrap();
+        let mut doc = Document::open(&path).unwrap();
+        doc.edit(vec![(0..3, "mine".into())], &[], EditKind::Typing);
+        std::fs::write(&path, "one\nzwei\n").unwrap();
+        let later = std::time::SystemTime::now() + Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(later).unwrap();
+        assert!(doc.is_dirty() && doc.changed_on_disk());
+
+        assert!(doc.revert(&[]).unwrap());
+        assert_eq!(doc.rope().to_string(), "one\nzwei\n");
+        assert!(!doc.is_dirty() && !doc.changed_on_disk());
+        doc.undo();
+        assert_eq!(doc.rope().to_string(), "mine\ntwo\n");
+        assert!(doc.is_dirty());
+
+        // Unsaved edits that already match the file just count as saved.
+        doc.redo();
+        doc.edit(vec![(0..0, "x".into())], &[], EditKind::Typing);
+        doc.edit(vec![(0..1, String::new())], &[], EditKind::Other);
+        assert!(doc.is_dirty());
+        assert!(!doc.revert(&[]).unwrap());
+        assert!(!doc.is_dirty());
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(doc.revert(&[]).is_err(), "a deleted file can't be read again");
         std::fs::remove_dir_all(&dir).ok();
     }
 

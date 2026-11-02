@@ -400,16 +400,14 @@ impl Workspace {
             "w" | "write" => self.save(&Save, window, cx),
             "q" | "q!" | "quit" | "close" => self.close_tab(&CloseTab, window, cx),
             "wq" | "x" | "wq!" | "x!" => {
+                let changed = self.active_editor(cx).is_some_and(|e| e.read(cx).doc.read(cx).changed_on_disk());
                 self.save(&Save, window, cx);
-                self.close_tab(&CloseTab, window, cx);
-            }
-            "wa" | "wall" => {
-                for editor in self.editors.clone() {
-                    if editor.read(cx).doc.read(cx).is_dirty() && editor.read(cx).doc.read(cx).path.is_some() {
-                        editor.update(cx, |e, cx| e.save(cx)).ok();
-                    }
+                // Saving a file changed on disk asks first; the tab stays for that.
+                if !changed {
+                    self.close_tab(&CloseTab, window, cx);
                 }
             }
+            "wa" | "wall" => self.save_tabs(cx),
             "qa" | "qa!" | "qall" => cx.defer(quit),
             "" => {}
             other => return Err(format!("Not a command Kuana knows: {other}")),

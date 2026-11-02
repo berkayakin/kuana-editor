@@ -109,6 +109,90 @@ impl Workspace {
         }
     }
 
+    /// Before Save writes a tab: None when its file is as it was last read or
+    /// written (write now). Otherwise its file changed on disk (a pull,
+    /// another program), and writing would undo that change, so this asks,
+    /// as Zed and JetBrains do: overwrite it, reload it (dropping the unsaved
+    /// edits; undo brings them back) or leave it. A deleted file can be
+    /// saved again or left.
+    pub(super) fn confirm_overwrite(&mut self, editor: &Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) -> Option<Task<OnDisk>> {
+        let doc = editor.read(cx).doc.read(cx);
+        if !doc.changed_on_disk() {
+            return None;
+        }
+        let name = doc.file_name();
+        let deleted = doc.path.as_deref().is_some_and(|p| !p.exists());
+        // Writing can't be undone, so Cancel comes first (see `ask`).
+        let rx = if deleted {
+            window.prompt(
+                PromptLevel::Warning,
+                &format!("{name} was deleted"),
+                Some("It was deleted on disk since you started editing it. Save it again with your text?"),
+                &["Cancel", "Save"],
+                cx,
+            )
+        } else {
+            window.prompt(
+                PromptLevel::Warning,
+                &format!("{name} changed on disk"),
+                Some("It changed on disk since you started editing it. Overwrite that change with your text, or reload the file? After a reload, Undo brings your text back."),
+                &["Cancel", "Reload", "Overwrite"],
+                cx,
+            )
+        };
+        let editor = editor.clone();
+        Some(cx.spawn_in(window, async move |ws, cx| {
+            let answer = rx.await.ok();
+            ws.update_in(cx, |ws, window, cx| match (deleted, answer) {
+                (true, Some(1)) | (false, Some(2)) => OnDisk::Write,
+                (false, Some(1)) => match editor.update(cx, |e, cx| e.revert(cx)) {
+                    Ok(_) => {
+                        ws.auto_save_warned.remove(&editor.entity_id());
+                        OnDisk::Reloaded
+                    }
+                    Err(err) => {
+                        let _ = window.prompt(PromptLevel::Critical, "Couldn't reload the file", Some(&err.to_string()), &["OK"], cx);
+                        OnDisk::Cancelled
+                    }
+                },
+                _ => OnDisk::Cancelled,
+            })
+            .unwrap_or(OnDisk::Cancelled)
+        }))
+    }
+
+    /// Saves every tab with unsaved edits and a file (before Run and Debug,
+    /// `:wa`, Save All when closing), except those whose file changed on
+    /// disk: writing them would undo that change, so they wait for their own
+    /// Save (which asks) and a toast names them.
+    pub(super) fn save_tabs(&mut self, cx: &mut Context<Self>) {
+        let mut changed = Vec::new();
+        for editor in self.editors.clone() {
+            let doc = editor.read(cx).doc.read(cx);
+            // Another tab of the same document may have saved it already.
+            if !doc.is_dirty() || doc.path.is_none() {
+                continue;
+            }
+            if doc.changed_on_disk() {
+                changed.push(doc.file_name());
+                continue;
+            }
+            if let Err(err) = editor.update(cx, |e, cx| e.save(cx)) {
+                let name = editor.read(cx).doc.read(cx).file_name();
+                self.toast(ToastKind::Error, format!("Couldn't save {name}"), Some(err.to_string()), cx);
+            }
+        }
+        let (title, detail) = match changed.as_slice() {
+            [] => return,
+            [one] => (format!("{one} changed on disk, so it wasn't saved"), "Save it from its tab to overwrite or reload it.".to_string()),
+            many => (
+                format!("{} files changed on disk, so they weren't saved", many.len()),
+                format!("{}. Save each from its tab to overwrite or reload it.", many.join(", ")),
+            ),
+        };
+        self.toast(ToastKind::Error, title, Some(detail), cx);
+    }
+
     /// A save of the text as it is that's still being written finishes
     /// here (written again, now), so closing doesn't ask about it.
     pub(super) fn finish_saving(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
@@ -248,16 +332,9 @@ impl Workspace {
             this.update_in(cx, |ws, window, cx| match answer {
                 0 => {
                     ws.save_background(false, true, cx);
-                    for editor in ws.editors.clone() {
-                        if editor.read(cx).doc.read(cx).is_dirty()
-                            && editor.read(cx).doc.read(cx).path.is_some()
-                            && let Err(err) = editor.update(cx, |e, cx| e.save(cx))
-                        {
-                            let name = editor.read(cx).doc.read(cx).file_name();
-                            ws.toast(ToastKind::Error, format!("Couldn't save {name}"), Some(err.to_string()), cx);
-                        }
-                    }
-                    // Untitled files need a name first; show the first one.
+                    ws.save_tabs(cx);
+                    // Untitled files need a name first, and files changed on
+                    // disk their own Save: show the first one.
                     if let Some(dirty) = ws.editors.iter().find(|t| t.read(cx).doc.read(cx).is_dirty()).cloned() {
                         ws.activate_editor(&dirty, window, cx);
                         if dirty.read(cx).doc.read(cx).path.is_none() {
@@ -390,14 +467,20 @@ impl Workspace {
             cx.spawn_in(window, async move |this, cx| {
                 let Ok(answer) = rx.await else { return };
                 this.update_in(cx, |ws, window, cx| match answer {
-                    0 => {
-                        if editor.read(cx).doc.read(cx).path.is_some() && editor.update(cx, |e, cx| e.save(cx)).is_ok() {
-                            ws.remove_tab(&editor, window, cx);
-                        } else {
-                            ws.activate_editor(&editor, window, cx);
-                            ws.save_as(&SaveAs, window, cx);
-                        }
-                    }
+                    0 => match ws.confirm_overwrite(&editor, window, cx) {
+                        None => ws.save_and_close(&editor, window, cx),
+                        Some(check) => cx
+                            .spawn_in(window, async move |ws, cx| {
+                                let answer = check.await;
+                                ws.update_in(cx, |ws, window, cx| match answer {
+                                    OnDisk::Write => ws.save_and_close(&editor, window, cx),
+                                    OnDisk::Reloaded => ws.remove_tab(&editor, window, cx),
+                                    OnDisk::Cancelled => {}
+                                })
+                                .ok();
+                            })
+                            .detach(),
+                    },
                     1 => ws.remove_tab(&editor, window, cx),
                     _ => {}
                 })
@@ -406,6 +489,17 @@ impl Workspace {
             .detach();
         } else {
             self.remove_tab(&editor, window, cx);
+        }
+    }
+
+    /// The close prompt's Save: writes the tab and closes it, or asks for a
+    /// name when it has none or couldn't be written.
+    fn save_and_close(&mut self, editor: &Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) {
+        if editor.read(cx).doc.read(cx).path.is_some() && editor.update(cx, |e, cx| e.save(cx)).is_ok() {
+            self.remove_tab(editor, window, cx);
+        } else {
+            self.activate_editor(editor, window, cx);
+            self.save_as(&SaveAs, window, cx);
         }
     }
 

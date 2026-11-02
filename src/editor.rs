@@ -1006,19 +1006,7 @@ impl Editor {
                     task.detach();
                 }
                 if let Ok(Some(reload)) = read {
-                    let (before, path) = (editor.doc.read(cx).rope().clone(), editor.doc.read(cx).path.clone());
-                    let changed = editor.reload(cx, |doc, selections| Ok(doc.apply_reload(reload, selections)));
-                    // Local History: the text a change on disk replaced, and the new one.
-                    if let (Ok(true), Some(path)) = (changed, path) {
-                        let after = editor.doc.read(cx).rope().clone();
-                        cx.background_executor()
-                            .spawn(async move {
-                                use crate::local_history::{Kind, record_rope};
-                                record_rope(&path, &before, Kind::BeforeReload);
-                                record_rope(&path, &after, Kind::Reloaded);
-                            })
-                            .detach();
-                    }
+                    let _ = editor.reload_recorded(cx, |doc, selections| Ok(doc.apply_reload(reload, selections)));
                 }
                 // Changed again while it was read.
                 if std::mem::take(&mut editor.reload_again) {
@@ -1027,6 +1015,34 @@ impl Editor {
             })
             .ok();
         }));
+    }
+
+    /// Reads the file again, dropping unsaved edits (undo brings them back):
+    /// Save's "Reload" for a file changed on disk.
+    pub fn revert(&mut self, cx: &mut Context<Self>) -> std::io::Result<bool> {
+        self.reload_recorded(cx, |doc, selections| doc.revert(selections))
+    }
+
+    /// `reload`, keeping the text a change on disk replaced, and the new
+    /// one, in Local History.
+    fn reload_recorded(
+        &mut self,
+        cx: &mut Context<Self>,
+        read: impl FnOnce(&mut Document, &[Selection]) -> std::io::Result<bool>,
+    ) -> std::io::Result<bool> {
+        let (before, path) = (self.doc.read(cx).rope().clone(), self.doc.read(cx).path.clone());
+        let changed = self.reload(cx, read);
+        if let (Ok(true), Some(path)) = (&changed, path) {
+            let after = self.doc.read(cx).rope().clone();
+            cx.background_executor()
+                .spawn(async move {
+                    use crate::local_history::{Kind, record_rope};
+                    record_rope(&path, &before, Kind::BeforeReload);
+                    record_rope(&path, &after, Kind::Reloaded);
+                })
+                .detach();
+        }
+        changed
     }
 
     /// Reads the file again as `encoding`; unsaved edits are dropped.
@@ -6494,6 +6510,36 @@ mod save_tests {
         cx.run_until_parked();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "b a zero one\n");
         editor.read_with(cx, |e, cx| assert!(!e.doc.read(cx).is_dirty() && !e.doc.read(cx).changed_on_disk()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Save's "Reload" for a file changed on disk: the file's text replaces
+    /// the unsaved edits, carets follow it, and undo brings the edits back.
+    #[gpui::test]
+    fn reverts_to_the_file(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("kuana-editor-revert-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.txt");
+        std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        let editor = cx.new(|cx| Editor::new(Document::open(&path).unwrap(), cx));
+        editor.update(cx, |e, cx| {
+            e.replace_ranges(vec![(4..7, "mine".into())], cx);
+            e.set_selections(vec![Selection::cursor(9)], 0, cx);
+        });
+        std::fs::write(&path, "zero\none\ntwo\nthree\n").unwrap();
+        let later = std::time::SystemTime::now() + Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(later).unwrap();
+
+        assert!(editor.update(cx, |e, cx| e.revert(cx)).unwrap());
+        editor.read_with(cx, |e, cx| {
+            let doc = e.doc.read(cx);
+            assert_eq!(doc.rope().to_string(), "zero\none\ntwo\nthree\n");
+            assert!(!doc.is_dirty() && !doc.changed_on_disk());
+            // Still at the start of "three".
+            assert_eq!(e.selections[0].head, 13);
+        });
+        editor.update(cx, |e, cx| e.doc.update(cx, |d, _| d.undo()));
+        editor.read_with(cx, |e, cx| assert_eq!(e.doc.read(cx).rope().to_string(), "one\nmine\nthree\n"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

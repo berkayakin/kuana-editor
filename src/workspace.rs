@@ -321,6 +321,17 @@ fn ask(window: &mut Window, message: &str, detail: &str, action: &str, undoable:
     async move { rx.await == Ok(yes) }
 }
 
+/// What Save does with a file changed on disk since it was read (see
+/// `Workspace::confirm_overwrite`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum OnDisk {
+    /// Write the text over it.
+    Write,
+    /// The file was read again instead; nothing is left to save.
+    Reloaded,
+    Cancelled,
+}
+
 /// Where deleted files go, as the platform calls it.
 fn trash_name() -> &'static str {
     if cfg!(windows) { "Recycle Bin" } else { "Trash" }

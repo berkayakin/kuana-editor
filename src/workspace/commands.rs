@@ -173,6 +173,20 @@ impl Workspace {
             self.save_as(&SaveAs, window, cx);
             return;
         }
+        if let Some(check) = self.confirm_overwrite(&editor, window, cx) {
+            cx.spawn_in(window, async move |this, cx| {
+                if check.await == OnDisk::Write {
+                    this.update_in(cx, |ws, window, cx| ws.format_and_save(editor, window, cx)).ok();
+                }
+            })
+            .detach();
+            return;
+        }
+        self.format_and_save(editor, window, cx);
+    }
+
+    /// Save, once it's clear the file may be written.
+    fn format_and_save(&mut self, editor: Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) {
         // Format on save: only for an explicit Save, like VS Code, so
         // auto-save never reformats mid-typing.
         if editor.read(cx).format_on_save(cx) {

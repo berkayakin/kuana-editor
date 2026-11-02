@@ -9,11 +9,7 @@ impl Workspace {
     /// The editor keeps focus, like JetBrains' Run window.
     pub(super) fn run_target(&mut self, target: RunTarget, window: &mut Window, cx: &mut Context<Self>) {
         // Unsaved edits would make the run disagree with what's on screen.
-        for editor in self.editors.clone() {
-            if editor.read(cx).doc.read(cx).is_dirty() && editor.read(cx).doc.read(cx).path.is_some() {
-                editor.update(cx, |e, cx| e.save(cx)).ok();
-            }
-        }
+        self.save_tabs(cx);
         self.restore_terminals(window, cx);
         // A rerun takes the previous run's place, in whichever group it is.
         let previous =
@@ -113,11 +109,7 @@ impl Workspace {
             return;
         }
         // What's debugged is what's on screen.
-        for editor in self.editors.clone() {
-            if editor.read(cx).doc.read(cx).is_dirty() && editor.read(cx).doc.read(cx).path.is_some() {
-                editor.update(cx, |e, cx| e.save(cx)).ok();
-            }
-        }
+        self.save_tabs(cx);
         if let Some((old, _)) = self.debug.take() {
             old.update(cx, |s, cx| s.stop(cx));
         }
