@@ -794,28 +794,60 @@ pub fn pull_configured(root: &Path, branch: Option<&str>) -> bool {
     set("pull.rebase") || set("pull.ff") || branch.is_some_and(|b| set(&format!("branch.{b}.rebase")))
 }
 
+/// Whether the Git config makes a plain `git pull` rebase (the branch's
+/// setting first, as Git reads them).
+fn pull_rebases(root: &Path, branch: Option<&str>) -> bool {
+    let get = |key: &str| run(root, &["config", "--get", key]).ok().map(|v| v.trim().to_ascii_lowercase());
+    let value = branch.and_then(|b| get(&format!("branch.{b}.rebase"))).or_else(|| get("pull.rebase"));
+    value.is_some_and(|v| !matches!(v.as_str(), "" | "false" | "no" | "off" | "0"))
+}
+
 /// Pulls the current branch's upstream. Without a `strategy`, the user's Git
 /// config decides if it says how; otherwise only a fast-forward happens, and
 /// branches that both have new commits come back as `Diverged`, so nobody gets
 /// a merge commit they didn't choose.
 ///
-/// Local changes don't stop it: when Git refuses to merge or rebase over
-/// them, the pull runs again with `--autostash`, which puts them back on
-/// top afterwards (or leaves them conflicted and kept in a stash).
+/// Local changes don't stop it: when Git refuses to merge over them, the pull
+/// runs again with `--autostash`, which puts them back on top afterwards (or
+/// leaves them conflicted and kept in a stash); a rebase, which refuses any,
+/// stashes them from the start.
 pub fn pull(root: &Path, strategy: Option<PullStrategy>) -> Result<Pulled, String> {
     let head = || run(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).ok().map(|s| s.trim().to_string());
-    let count = |range: &str| run(root, &["rev-list", "--count", range]).ok().and_then(|n| n.trim().parse().ok()).unwrap_or(0);
     let before = head();
+    let first = status(root).ok();
+    let branch = first.as_ref().and_then(|s| s.branch.as_deref());
     let args: &[&str] = match strategy {
         Some(strategy) => strategy.args(),
-        None if pull_configured(root, status(root).ok().and_then(|s| s.branch).as_deref()) => &["--no-edit"],
+        None if pull_configured(root, branch) => &["--no-edit"],
         None => PullStrategy::FfOnly.args(),
     };
+    let rebases = strategy == Some(PullStrategy::Rebase) || strategy.is_none() && pull_rebases(root, branch);
     let pull_with = |extra: &[&str]| run(root, &[["pull"].as_slice(), args, extra].concat());
+    let tracked_changes =
+        |s: &RepoStatus| s.files.iter().any(|f| f.staged.is_some() || f.unstaged.is_some_and(|c| c != Change::Untracked));
+    // Files whose whole change was staged: a stash comes back unstaged.
+    let restage_of = |s: &RepoStatus| -> Vec<String> {
+        s.files
+            .iter()
+            .filter(|f| f.unstaged.is_none() && f.staged.is_some_and(|c| c != Change::Conflicted))
+            .map(|f| f.rel.clone())
+            .collect()
+    };
+    let mut restage: Option<Vec<String>> = None;
+    // Rebasing refuses any local change before it fetches, so it stashes them from the start.
+    if rebases && let Some(s) = first.as_ref().filter(|s| tracked_changes(s)) {
+        restage = Some(restage_of(s));
+        let result = pull_with(&["--autostash"]);
+        if let Err(err) = &result
+            && conflicts_or(root, err.clone()).is_ok()
+        {
+            return Ok(Pulled::Conflicts);
+        }
+        result?;
+        return finish_pull(root, before, restage);
+    }
     let started = SystemTime::now();
     let mut result = pull_with(&[]);
-    // Files whose whole change was staged: a stash comes back unstaged.
-    let mut restage: Option<Vec<String>> = None;
     if let Err(err) = &result {
         if conflicts_or(root, err.clone()).is_ok() {
             return Ok(Pulled::Conflicts);
@@ -835,22 +867,16 @@ pub fn pull(root: &Path, strategy: Option<PullStrategy>) -> Result<Pulled, Strin
                 behind: s.behind,
             });
         }
-        // Git refuses to merge over local changes to the files coming in, and
-        // to rebase over any. Its message is in the user's language, so this
-        // goes by what happened: it fetched, then changed nothing, and there
-        // are changes to tracked files. (A failed fetch isn't tried again.)
+        // Git refuses to merge over local changes to the files coming in. Its
+        // message is in the user's language, so this goes by what happened:
+        // it fetched, then changed nothing, and there are changes to tracked
+        // files. (A failed fetch isn't tried again.)
         if let Ok(s) = &now
-            && s.files.iter().any(|f| f.staged.is_some() || f.unstaged.is_some_and(|c| c != Change::Untracked))
+            && tracked_changes(s)
             && head() == before
             && fetched_since(root, started)
         {
-            restage = Some(
-                s.files
-                    .iter()
-                    .filter(|f| f.unstaged.is_none() && f.staged.is_some_and(|c| c != Change::Conflicted))
-                    .map(|f| f.rel.clone())
-                    .collect(),
-            );
+            restage = Some(restage_of(s));
             result = pull_with(&["--autostash"]);
             if let Err(err) = &result
                 && conflicts_or(root, err.clone()).is_ok()
@@ -861,6 +887,14 @@ pub fn pull(root: &Path, strategy: Option<PullStrategy>) -> Result<Pulled, Strin
         }
     }
     result?;
+    finish_pull(root, before, restage)
+}
+
+/// What a pull that worked did, from `HEAD` before it; files in `restage` are
+/// staged again (an autostash gives changes back unstaged).
+fn finish_pull(root: &Path, before: Option<String>, restage: Option<Vec<String>>) -> Result<Pulled, String> {
+    let head = || run(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).ok().map(|s| s.trim().to_string());
+    let count = |range: &str| run(root, &["rev-list", "--count", range]).ok().and_then(|n| n.trim().parse().ok()).unwrap_or(0);
     let stash_conflicted = match restage {
         Some(rels) => {
             let conflicted: Vec<String> =
@@ -2950,6 +2984,16 @@ u UU N... 100644 100644 100644 100644 f g h conflict.js\0\
         assert_eq!(read("b.txt"), "b mine\n");
         assert!(stashes(&ours).is_empty());
         push(&ours, None, false).unwrap();
+        clean();
+
+        // So does a rebase the Git config asks for.
+        run(&ours, &["config", "pull.rebase", "true"]).unwrap();
+        publish("e.txt", "theirs again\n");
+        write(&ours, "b.txt", "b mine\n");
+        assert_eq!(pull(&ours, None).unwrap(), Pulled::FastForwarded(1));
+        assert_eq!(read("b.txt"), "b mine\n");
+        assert!(stashes(&ours).is_empty());
+        run(&ours, &["config", "--unset", "pull.rebase"]).unwrap();
         clean();
 
         // An untracked file where one comes in: nothing changes.
