@@ -1,0 +1,82 @@
+# taffy 0.9.0 from crates.io (MIT, https://github.com/DioxusLabs/taffy), which
+# GPUI 0.2.2 requires exactly, with one fix: see `Cache::get` in src/tree/cache.rs
+# and Kuana's Cargo.toml `[patch.crates-io]`. Its examples, dev-dependencies and
+# release profile are left out.
+
+[package]
+edition = "2021"
+rust-version = "1.65"
+name = "taffy"
+version = "0.9.0"
+authors = [
+    "Alice Cecile <alice.i.cecile@gmail.com>",
+    "Johnathan Kelley <jkelleyrtp@gmail.com>",
+    "Nico Burns <nico@nicoburns.com>",
+]
+description = "A flexible UI layout library "
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/DioxusLabs/taffy"
+autoexamples = false
+autotests = false
+autobenches = false
+
+[features]
+alloc = ["serde?/alloc"]
+block_layout = []
+calc = []
+content_size = []
+debug = ["std"]
+default = [
+    "std",
+    "taffy_tree",
+    "flexbox",
+    "grid",
+    "block_layout",
+    "calc",
+    "content_size",
+    "detailed_layout_info",
+]
+detailed_layout_info = []
+flexbox = []
+grid = [
+    "alloc",
+    "dep:grid",
+]
+profile = ["std"]
+serde = ["dep:serde"]
+std = [
+    "grid?/std",
+    "serde?/std",
+    "slotmap?/std",
+]
+strict_provenance = []
+taffy_tree = ["dep:slotmap"]
+
+[lib]
+name = "taffy"
+path = "src/lib.rs"
+
+[dependencies.arrayvec]
+version = "0.7"
+default-features = false
+
+[dependencies.document-features]
+version = "0.2.7"
+optional = true
+
+[dependencies.grid]
+version = "0.18.0"
+optional = true
+default-features = false
+
+[dependencies.serde]
+version = "1.0"
+features = ["serde_derive"]
+optional = true
+default-features = false
+
+[dependencies.slotmap]
+version = "1.0.6"
+optional = true
+default-features = false
