@@ -80,6 +80,8 @@ pub enum TreeEvent {
     Move { from: PathBuf, into: PathBuf },
     /// Files from Finder were dropped into a folder.
     CopyIn { paths: Vec<PathBuf>, into: PathBuf },
+    /// The empty project's New File / New Folder: ask for a name in the folder.
+    Create { dir: PathBuf, folder: bool },
     /// ⌘Z / ⇧⌘Z with the tree focused: undo or redo a file operation.
     History { redo: bool },
     /// Escape with no search to end: the keyboard goes back to the editor.
@@ -419,6 +421,88 @@ impl ProjectTree {
 
     fn drop_on_root(&self) -> bool {
         self.drop_target.is_some() && self.drop_target == self.root
+    }
+
+    /// The project folder has been read and lists nothing (what the tree
+    /// hides, `.git` and the like, aside), and no search is showing.
+    fn is_empty_project(&self) -> bool {
+        self.search.is_none() && self.root.as_ref().and_then(|root| self.listings.get(root)).is_some_and(|l| l.is_empty())
+    }
+
+    /// An empty project's tree: what goes in it and how, over the (empty)
+    /// list, which keeps taking drops and right-clicks. A drop here copies
+    /// into the folder, unlike one on a pane, which opens; so it says that,
+    /// and where, while something is dragged over it.
+    fn render_empty(&self, dropping: bool, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let name = self.root.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let action = |id: &'static str, icon: Icon, label: &'static str, folder: bool| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .h(px(26.))
+                .px_2p5()
+                .rounded(px(13.))
+                .cursor_pointer()
+                .text_color(theme.text)
+                .border_1()
+                .border_color(theme.border)
+                .child(icon_el(icon, px(14.), theme.text_muted.into()))
+                .child(label)
+                .hover_fill(theme.elevated, theme.hover)
+                .on_click(cx.listener(move |tree, _: &gpui::ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    if let Some(dir) = tree.root.clone() {
+                        cx.emit(TreeEvent::Create { dir, folder });
+                    }
+                }))
+        };
+        let (title, note): (SharedString, SharedString) = if dropping {
+            ("Drop to copy in".into(), format!("Into {name}").into())
+        } else {
+            ("No files yet".into(), "Create one, or drop files here to copy them into the project.".into())
+        };
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            // A little above the middle, where the eye lands in a tall sidebar.
+            .pt(px(72.))
+            .px_4()
+            .gap_1()
+            .text_size(px(12.))
+            .child(
+                div()
+                    .size(px(40.))
+                    .mb_2()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(if dropping { theme.accent_soft } else { theme.hover })
+                    .child(icon_el(
+                        if dropping { Icon::Download } else { Icon::FolderOpen },
+                        px(20.),
+                        if dropping { theme.accent.into() } else { theme.text_dim.into() },
+                    )),
+            )
+            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme.text).child(title))
+            .child(div().max_w(px(220.)).text_center().text_color(theme.text_dim).child(note))
+            .when(!dropping, |el| {
+                el.child(
+                    div()
+                        .mt_3()
+                        .flex()
+                        .flex_wrap()
+                        .justify_center()
+                        .gap_2()
+                        .child(action("empty-tree-new-file", Icon::FilePlus, "New File", false))
+                        .child(action("empty-tree-new-folder", Icon::FolderPlus, "New Folder", true)),
+                )
+            })
     }
 
     /// How rows look: Git changes, what Git ignores, the open file, a context
@@ -815,6 +899,7 @@ impl Render for ProjectTree {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
         let drop_on_root = self.drop_on_root();
+        let empty = self.is_empty_project();
         // The keyboard's row (in a closed folder, that folder's) is filled while
         // the tree (or its query field) has focus.
         let cursor_row = self.focus.contains_focused(window, cx).then(|| self.selected_row()).flatten();
@@ -946,42 +1031,10 @@ impl Render for ProjectTree {
         )
         .track_scroll(self.scroll.clone())
         .size_full()
-        // Over the tree but not on a row, a drop goes to the project folder;
-        // rows (told later) narrow it to theirs.
-        .on_drag_move(cx.listener(|tree, ev: &DragMoveEvent<DraggedEntry>, _, cx| {
-            let target = ev.bounds.contains(&ev.event.position).then(|| tree.root.clone()).flatten();
-            tree.set_drop_target(target, cx);
-        }))
-        .on_drag_move(cx.listener(|tree, ev: &DragMoveEvent<gpui::ExternalPaths>, _, cx| {
-            let target = ev.bounds.contains(&ev.event.position).then(|| tree.root.clone()).flatten();
-            tree.set_drop_target(target, cx);
-        }))
-        .on_drop(cx.listener(|tree, dragged: &DraggedEntry, _, cx| {
-            tree.set_drop_target(None, cx);
-            if let Some(root) = tree.root.clone() {
-                cx.emit(TreeEvent::Move { from: dragged.path.clone(), into: root });
-            }
-        }))
-        .on_drop(cx.listener(|tree, paths: &gpui::ExternalPaths, _, cx| {
-            cx.stop_propagation();
-            tree.set_drop_target(None, cx);
-            if let Some(root) = tree.root.clone() {
-                cx.emit(TreeEvent::CopyIn { paths: paths.paths().to_vec(), into: root });
-            }
-        }))
         // Puts the first row's text level with the tab labels beside it
         // (GPUI applies a uniform list's own padding twice, so this is 2px).
         .pt(px(1.))
-        .pb_2()
-        // Right-clicking empty space targets the project root.
-        .on_mouse_down(
-            MouseButton::Right,
-            cx.listener(|tree, ev: &MouseDownEvent, _, cx| {
-                if let Some(root) = tree.root.clone() {
-                    cx.emit(TreeEvent::Menu { path: root, is_dir: true, position: ev.position });
-                }
-            }),
-        );
+        .pb_2();
         let search_bar = self.search.as_ref().map(|search| {
             // Counted as the terminal's Find counts.
             let count = match &search.found {
@@ -1042,7 +1095,40 @@ impl Render for ProjectTree {
                     .min_h_0()
                     // A click below the rows ends a search, as one on a row does.
                     .on_click(cx.listener(|tree, _: &gpui::ClickEvent, window, cx| tree.end_search(window, cx)))
+                    // Over the tree but not on a row, a drop goes to the project folder;
+                    // rows (told later) narrow it to theirs.
+                    .on_drag_move(cx.listener(|tree, ev: &DragMoveEvent<DraggedEntry>, _, cx| {
+                        let target = ev.bounds.contains(&ev.event.position).then(|| tree.root.clone()).flatten();
+                        tree.set_drop_target(target, cx);
+                    }))
+                    .on_drag_move(cx.listener(|tree, ev: &DragMoveEvent<gpui::ExternalPaths>, _, cx| {
+                        let target = ev.bounds.contains(&ev.event.position).then(|| tree.root.clone()).flatten();
+                        tree.set_drop_target(target, cx);
+                    }))
+                    .on_drop(cx.listener(|tree, dragged: &DraggedEntry, _, cx| {
+                        tree.set_drop_target(None, cx);
+                        if let Some(root) = tree.root.clone() {
+                            cx.emit(TreeEvent::Move { from: dragged.path.clone(), into: root });
+                        }
+                    }))
+                    .on_drop(cx.listener(|tree, paths: &gpui::ExternalPaths, _, cx| {
+                        cx.stop_propagation();
+                        tree.set_drop_target(None, cx);
+                        if let Some(root) = tree.root.clone() {
+                            cx.emit(TreeEvent::CopyIn { paths: paths.paths().to_vec(), into: root });
+                        }
+                    }))
+                    // Right-clicking empty space targets the project root.
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|tree, ev: &MouseDownEvent, _, cx| {
+                            if let Some(root) = tree.root.clone() {
+                                cx.emit(TreeEvent::Menu { path: root, is_dir: true, position: ev.position });
+                            }
+                        }),
+                    )
                     .child(list)
+                    .when(empty, |el| el.child(self.render_empty(drop_on_root, &theme, cx)))
                     .child(crate::ui::list_scrollbar("file-tree-scrollbar", &self.scroll, cx)),
             )
             // Typing comes in as the platform's text input (see `EntityInputHandler`).

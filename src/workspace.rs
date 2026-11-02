@@ -904,6 +904,10 @@ impl Workspace {
             TreeEvent::Menu { path, is_dir, position } => ws.open_tree_menu(path.clone(), *is_dir, *position, window, cx),
             TreeEvent::Move { from, into } => ws.move_entry(from.clone(), into.clone(), cx),
             TreeEvent::CopyIn { paths, into } => ws.drop_into_tree(paths.clone(), into.clone(), window, cx),
+            TreeEvent::Create { dir, folder } => {
+                let action = if *folder { TreeAction::NewFolder(dir.clone()) } else { TreeAction::NewFile(dir.clone()) };
+                ws.run_tree_action(action, window, cx);
+            }
             TreeEvent::History { redo } => ws.step_file_history(*redo, true, window, cx),
             // With no editor open, the keyboard stays in the tree rather than going nowhere.
             TreeEvent::Leave => {
