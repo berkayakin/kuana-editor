@@ -127,7 +127,9 @@ background fetch never does, and stays quiet instead.
   branch is marked, with a choice of remote when there are several), and the commits to push. Click a commit for its message and files, and a
   file for its diff (closing that tab returns to the dialog). It warns when the remote has commits you
   don't have; **Force push** replaces them only if the remote hasn't moved since your last fetch
-  (`--force-with-lease`). Enter pushes, Esc cancels.
+  (`--force-with-lease`). Tags you made that the remote doesn't have yet (Kuana asks it when
+  the dialog opens) are listed as **Push tags (…)**, checked; they go with the branch, or on their
+  own when there are no new commits. Enter pushes, Esc cancels.
 
 - **Clone:** **Clone Repository…** on the welcome screen, in the File and Git menus, or Find Action
   (also as "Get from Version Control"). Enter an HTTPS or SSH URL (one on the clipboard is

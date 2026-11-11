@@ -741,6 +741,37 @@ pub fn push(root: &Path, set_upstream: Option<(&str, &str)>, force: bool) -> Res
     run(root, &args)
 }
 
+/// The remote the current branch pushes to: its upstream's, else the default.
+pub fn push_remote(root: &Path) -> Option<String> {
+    let branch = run(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()?;
+    run(root, &["config", "--get", &format!("branch.{}.remote", branch.trim())])
+        .ok()
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty() && r != ".")
+        .or_else(|| default_remote(root))
+}
+
+/// Local tags `remote` doesn't have (by name), asking it (`ls-remote`); None
+/// when it can't be asked (offline, no credentials: it never prompts here).
+pub fn unpushed_tags(root: &Path, remote: &str) -> Option<Vec<String>> {
+    let local = run(root, &["tag", "--list"]).ok()?;
+    let local: Vec<&str> = local.lines().map(str::trim).filter(|t| !t.is_empty()).collect();
+    if local.is_empty() {
+        return Some(Vec::new());
+    }
+    let remote = run(root, &["ls-remote", "--tags", "--refs", remote]).ok()?;
+    let theirs: std::collections::HashSet<&str> = remote.lines().filter_map(|l| l.split_once("refs/tags/").map(|(_, name)| name.trim())).collect();
+    Some(local.into_iter().filter(|t| !theirs.contains(t)).map(str::to_string).collect())
+}
+
+/// Pushes these tags to `remote`.
+pub fn push_tags(root: &Path, remote: &str, tags: &[String]) -> Result<String, String> {
+    let refs: Vec<String> = tags.iter().map(|t| format!("refs/tags/{t}")).collect();
+    let mut args = vec!["push", "--porcelain", remote];
+    args.extend(refs.iter().map(String::as_str));
+    run(root, &args)
+}
+
 /// What a push would send: the branch, where it goes, and its new commits.
 #[derive(Clone, Debug)]
 pub struct PushPreview {
@@ -3185,6 +3216,34 @@ u UU N... 100644 100644 100644 100644 f g h conflict.js\0\
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "three\n");
         assert_eq!(stashes(&root).len(), 1);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn pushes_new_tags() {
+        if !is_available() {
+            return;
+        }
+        let root = test_repo("tags");
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        stage(&root, &["a.txt".into()]).unwrap();
+        commit(&root, "first", false).unwrap();
+        let remote = root.with_extension("remote.git");
+        let _ = std::fs::remove_dir_all(&remote);
+        run(&root, &["init", "--bare", "--quiet", remote.to_str().unwrap()]).unwrap();
+        add_remote(&root, "origin", remote.to_str().unwrap()).unwrap();
+        push(&root, Some(("origin", "main")), false).unwrap();
+        assert_eq!(push_remote(&root).as_deref(), Some("origin"));
+        assert_eq!(unpushed_tags(&root, "origin"), Some(Vec::new()));
+        create_tag(&root, "v1.0", "HEAD").unwrap();
+        create_tag(&root, "v1.1", "HEAD").unwrap();
+        assert_eq!(unpushed_tags(&root, "origin"), Some(vec!["v1.0".to_string(), "v1.1".to_string()]));
+        push_tags(&root, "origin", &["v1.0".into()]).unwrap();
+        assert_eq!(unpushed_tags(&root, "origin"), Some(vec!["v1.1".to_string()]));
+        // A remote that can't be asked: unknown, not "none".
+        assert_eq!(unpushed_tags(&root, "/nonexistent/kuana.git"), None);
+        for dir in [&root, &remote] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]
