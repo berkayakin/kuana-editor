@@ -205,6 +205,11 @@ impl Render for BranchPicker {
                                                 BranchPickerEvent::Run(GitOp::DeleteBranch { name: b.name.clone(), force: false })
                                             }))
                                         })
+                                        .when(b.remote, |el| {
+                                            el.child(action("delete-remote", "Delete", "Delete Branch on the Remote", true, |b| {
+                                                BranchPickerEvent::Run(GitOp::DeleteRemoteBranch(b.name.clone()))
+                                            }))
+                                        })
                                 }),
                         };
                         div().w_full().px_1().child(row)

@@ -134,7 +134,8 @@ says what's planned):
   but there's none yet for C/C++, Kotlin or Swift.
 - **Editing**: no semantic highlighting from language servers, no Emmet, no spell checking;
   ESLint runs on open and save, not as you type.
-- **Git**: no interactive rebase; the log shows the latest 3,000 commits.
+- **Git**: commits can be reworded, squashed and dropped, not reordered or split; the log shows
+  the latest 3,000 commits.
 - **Debugger**: no hit counts or exception breakpoint options. **Vim mode**: no registers other
   than the clipboard, macros, marks or `:s`.
 - **Accessibility**: screen readers can't read Kuana yet (a limit of the GPUI framework it's built on).
@@ -149,7 +150,7 @@ support, features. Good places to start:
 - **Make a theme or an extension.** Neither needs any Rust: see [Themes](docs/themes.md) and
   [Extensions](docs/extensions.md).
 - **Pick an open [issue](https://github.com/berkayakin/kuana-editor/issues)**, or take something
-  from the [roadmap](docs/roadmap.md): interactive rebase, Vim registers and macros, semantic
+  from the [roadmap](docs/roadmap.md): reordering commits, Vim registers and macros, semantic
   tokens, a C/C++ extension.
 
 The [contributing guide](CONTRIBUTING.md) covers building, the checks a change has to pass and

@@ -434,6 +434,31 @@ impl Workspace {
                 return;
             }
         }
+        // Rewriting a commit that's on a remote already means a force push.
+        if let (GitOp::UndoCommit | GitOp::EditHistory { .. }, Some(repo)) = (&op, self.repo.clone()) {
+            let sha = match &op {
+                GitOp::EditHistory { sha, .. } => sha.clone(),
+                _ => "HEAD".into(),
+            };
+            cx.spawn_in(window, async move |this, cx| {
+                let pushed = cx.background_executor().spawn(async move { git::is_pushed(&repo, &sha) }).await;
+                this.update_in(cx, |ws, window, cx| {
+                    let drop = matches!(&op, GitOp::EditHistory { edit: git::HistoryEdit::Drop, .. });
+                    if pushed {
+                        let detail = "Changing it here makes your branch differ from the remote's: pushing then needs Force push, which replaces the commit for everyone using that branch.";
+                        ws.confirm_git(op, "This commit is already pushed", detail, "Change It Anyway", false, window, cx);
+                    } else if drop {
+                        let detail = "The commit and its changes leave the branch. Git's reflog keeps it for a while, but Kuana can't undo this.";
+                        ws.confirm_git(op, "Drop this commit?", detail, "Drop", false, window, cx);
+                    } else {
+                        ws.execute_git(op, window, cx);
+                    }
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
         if let Some((message, detail, button, undoable)) = confirmation(&op) {
             self.confirm_git(op, &message, detail, button, undoable, window, cx);
             return;
@@ -596,6 +621,11 @@ impl Workspace {
                         }
                     }
                     Ok(Outcome::Nothing(message)) => ws.toast(ToastKind::Info, message, None, cx),
+                    Ok(Outcome::UndoneCommit { message }) => {
+                        let summary = message.lines().next().unwrap_or_default().to_string();
+                        ws.toast(ToastKind::Success, format!("Undid “{summary}”; its changes are staged"), None, cx);
+                        ws.git_panel.update(cx, |p, cx| p.restore_message(&message, cx));
+                    }
                     Ok(Outcome::PushNext(message)) => {
                         if let Some(message) = message.filter(|m| m != "Already up to date") {
                             ws.toast(ToastKind::Success, message, None, cx);
@@ -663,6 +693,8 @@ impl Workspace {
                     GitOp::Discard(_)
                         | GitOp::ResolveSimple
                         | GitOp::AcceptSide { .. }
+                        | GitOp::UndoCommit
+                        | GitOp::EditHistory { .. }
                         | GitOp::Pull(_)
                         | GitOp::Sync(_)
                         | GitOp::Checkout(_)
@@ -698,6 +730,9 @@ impl Workspace {
                             | GitOp::RemoveRemote(_)
                             | GitOp::EditRemote { .. }
                             | GitOp::DeleteBranch { .. }
+                            | GitOp::DeleteRemoteBranch(_)
+                            | GitOp::UndoCommit
+                            | GitOp::EditHistory { .. }
                             | GitOp::RenameBranch { .. }
                             | GitOp::Stash { .. }
                             | GitOp::CheckoutCommit(_)
@@ -798,6 +833,10 @@ impl Workspace {
 
     pub(super) fn git_pull(&mut self, _: &GitPull, window: &mut Window, cx: &mut Context<Self>) {
         self.run_git(GitOp::Pull(None), window, cx);
+    }
+
+    pub(super) fn git_undo_commit(&mut self, _: &GitUndoCommit, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_git(GitOp::UndoCommit, window, cx);
     }
 
     /// Update Project, then Push… when there are commits to push (one click
@@ -1156,6 +1195,12 @@ fn confirmation(op: &GitOp) -> Option<(String, &'static str, &'static str, bool)
             true,
         )),
         GitOp::DropStash(index) => Some((format!("Drop stash@{{{index}}}?"), "Its changes will be lost.", "Drop", false)),
+        GitOp::DeleteRemoteBranch(name) => Some((
+            format!("Delete {name} on the remote?"),
+            "Everyone using the remote loses the branch; commits no other branch has go with it.",
+            "Delete",
+            false,
+        )),
         GitOp::Reset { sha, mode: git::ResetMode::Hard } => Some((
             format!("Hard reset to {}?", &sha[..sha.len().min(7)]),
             "Commits after it leave the branch, and every uncommitted change is lost. This can't be undone.",
@@ -1184,6 +1229,8 @@ pub(super) enum Outcome {
     KeptStash { message: String, sha: String },
     /// Sync pulled (`message`, if any to show); there are commits to push next.
     PushNext(Option<String>),
+    /// The last commit was undone; its message goes back in the commit box.
+    UndoneCommit { message: String },
 }
 
 /// "1 commit", "3 commits".
@@ -1218,6 +1265,7 @@ pub(super) fn perform_git(dir: &Path, op: GitOp, status: &RepoStatus, auto_resol
             | GitOp::Revert(_)
             | GitOp::Checkout(_)
             | GitOp::CheckoutCommit(_)
+            | GitOp::EditHistory { .. }
     );
     // What the user started may ask for credentials.
     let cancellations = crate::askpass::cancellations();
@@ -1415,6 +1463,16 @@ fn perform(dir: &Path, op: GitOp, status: &RepoStatus) -> Result<Outcome, String
             });
         }
         GitOp::DropStash(index) => git::drop_stash(dir, index).map(|_| Some("Dropped stash".into())),
+        GitOp::UndoCommit => return git::undo_commit(dir).map(|message| Outcome::UndoneCommit { message }),
+        GitOp::DeleteRemoteBranch(name) => git::delete_remote_branch(dir, &name).map(|_| Some(format!("Deleted {name} on the remote"))),
+        GitOp::EditHistory { sha, edit } => {
+            let done = match &edit {
+                git::HistoryEdit::Reword(_) => format!("Reworded {}", short(&sha)),
+                git::HistoryEdit::Squash => format!("Squashed {} into the commit before it", short(&sha)),
+                git::HistoryEdit::Drop => format!("Dropped {}", short(&sha)),
+            };
+            git::edit_history(dir, &sha, &edit).map(|out| stopped(&out, "Rewriting history", done))
+        }
         GitOp::DropKeptStash(sha) => git::drop_stash_sha(dir, &sha).map(|_| Some("Dropped the stash".into())),
         GitOp::ResolveSimple => {
             let conflicted: Vec<String> = git::status(dir)?.conflicted().map(|f| f.rel.clone()).collect();

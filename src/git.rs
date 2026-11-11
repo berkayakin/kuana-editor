@@ -2020,6 +2020,128 @@ pub fn accept_side(root: &Path, rels: &[String], side: Side) -> Result<(), Strin
     Ok(())
 }
 
+// ---- History edits ----------------------------------------------------------------
+
+/// Whether a commit is on a remote branch already: changing it then means a
+/// force push, and rewriting what others may have.
+pub fn is_pushed(root: &Path, sha: &str) -> bool {
+    run(root, &["branch", "--remotes", "--contains", sha]).is_ok_and(|out| !out.trim().is_empty())
+}
+
+/// Undoes the last commit: the branch goes back one commit and its changes
+/// are staged again. Returns the commit's message, to commit again with.
+pub fn undo_commit(root: &Path) -> Result<String, String> {
+    if run(root, &["rev-parse", "--verify", "--quiet", "HEAD^"]).is_err() {
+        return Err("It's the repository's first commit: there's nothing before it to go back to".into());
+    }
+    let message = run(root, &["log", "-1", "--format=%B"])?;
+    run(root, &["reset", "--soft", "HEAD^"])?;
+    Ok(message.trim_end().to_string())
+}
+
+/// Deletes a branch on its remote ("origin/feature": `feature` on `origin`).
+pub fn delete_remote_branch(root: &Path, name: &str) -> Result<(), String> {
+    let remotes = remotes(root)?;
+    let (remote, branch) = remotes
+        .iter()
+        .filter_map(|r| name.strip_prefix(&format!("{}/", r.name)).map(|branch| (r.name.as_str(), branch)))
+        .max_by_key(|(remote, _)| remote.len())
+        .ok_or_else(|| format!("{name} isn't a branch of a remote"))?;
+    run(root, &["push", remote, "--delete", branch]).map(drop)
+}
+
+/// A change to one commit of the current branch's history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HistoryEdit {
+    /// A new first line for its message (the rest stays).
+    Reword(String),
+    /// Joined into the commit before it, both messages kept.
+    Squash,
+    /// Removed, with its changes.
+    Drop,
+}
+
+/// Rewrites the current branch at `sha` without an editor: the reworded or
+/// squashed commit is made anew (`commit-tree`, keeping its author; a squash
+/// takes the later commit's tree and both messages), then the commits after
+/// it are replayed onto it (`rebase --onto`, local changes stashed
+/// meanwhile); a dropped commit's successors are replayed onto its parent.
+/// Ranges with merge commits are refused, since the replay would flatten
+/// them. Only a drop can stop on conflicts ("CONFLICT", like any rebase).
+pub fn edit_history(root: &Path, sha: &str, edit: &HistoryEdit) -> Result<String, String> {
+    if repo_state(root).is_some() {
+        return Err("Finish or abort the operation in progress first".into());
+    }
+    if run(root, &["merge-base", "--is-ancestor", sha, "HEAD"]).is_err() {
+        return Err("The commit isn't on the current branch".into());
+    }
+    let sha = run(root, &["rev-parse", "--verify", sha])?.trim().to_string();
+    let parent = |commit: &str| run(root, &["rev-parse", "--verify", "--quiet", &format!("{commit}^")]).ok().map(|s| s.trim().to_string());
+    // The oldest commit that changes: the squashed one's parent for a squash.
+    let oldest = match edit {
+        HistoryEdit::Squash => parent(&sha).ok_or("It's the first commit: there's no commit before it to squash into")?,
+        _ => sha.clone(),
+    };
+    let range = parent(&oldest).map_or_else(|| "HEAD".to_string(), |base| format!("{base}..HEAD"));
+    if !run(root, &["rev-list", "--merges", &range])?.trim().is_empty() {
+        return Err("There are merge commits after it, which rewriting would flatten".into());
+    }
+    let message_of = |commit: &str| run(root, &["log", "-1", "--format=%B", commit]).map(|m| m.trim_end().to_string());
+    let (onto, from) = match edit {
+        HistoryEdit::Drop => (parent(&sha).ok_or("It's the first commit, which can't be dropped")?, sha.clone()),
+        HistoryEdit::Reword(subject) => {
+            let old = message_of(&sha)?;
+            let body = old.split_once('\n').map_or("", |(_, body)| body);
+            let message = format!("{}\n{body}", subject.trim()).trim_end().to_string() + "\n";
+            if run(root, &["rev-parse", "HEAD"])?.trim() == sha {
+                // The last commit: an amend of its message only (staged changes stay out).
+                run_with_stdin(root, &["commit", "--amend", "--only", "--quiet", "--file", "-"], message.as_bytes())?;
+                return Ok(String::new());
+            }
+            (remake(root, &sha, &sha, &message)?, sha.clone())
+        }
+        HistoryEdit::Squash => {
+            let message = format!("{}\n\n{}\n", message_of(&oldest)?, message_of(&sha)?);
+            (remake(root, &oldest, &sha, &message)?, sha.clone())
+        }
+    };
+    // Replays what came after `from` onto `onto` (none: the branch just moves there).
+    let mut args = merge_config(root);
+    args.extend(["rebase", "--autostash", "--onto", &onto, &from]);
+    run(root, &args).or_else(|e| conflicts_or(root, e))
+}
+
+/// A copy of commit `like` (its parents and author) with `tree_of`'s files
+/// and `message`.
+fn remake(root: &Path, like: &str, tree_of: &str, message: &str) -> Result<String, String> {
+    let author = run(root, &["log", "-1", "--format=%an%x00%ae%x00%ad", "--date=raw", like])?;
+    let mut author = author.trim_end().split('\0');
+    let (name, email, date) = (author.next().unwrap_or(""), author.next().unwrap_or(""), author.next().unwrap_or(""));
+    let parents = run(root, &["rev-list", "--parents", "-n", "1", like])?;
+    let tree = format!("{tree_of}^{{tree}}");
+    let mut args = vec!["commit-tree", tree.as_str()];
+    for parent in parents.split_whitespace().skip(1) {
+        args.extend(["-p", parent]);
+    }
+    let mut child = command(root, &args)
+        .env("GIT_AUTHOR_NAME", name)
+        .env("GIT_AUTHOR_EMAIL", email)
+        .env("GIT_AUTHOR_DATE", date)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("couldn't run git: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(message.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(error_text(&output.stderr, &output.stdout));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 // ---- Remotes ------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3063,6 +3185,76 @@ u UU N... 100644 100644 100644 100644 f g h conflict.js\0\
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "three\n");
         assert_eq!(stashes(&root).len(), 1);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn edits_history() {
+        if !is_available() {
+            return;
+        }
+        let root = test_repo("history");
+        let write = |rel: &str, text: &str| std::fs::write(root.join(rel), text).unwrap();
+        let read = |rel: &str| std::fs::read_to_string(root.join(rel)).unwrap();
+        let commit_file = |rel: &str, text: &str, message: &str| {
+            write(rel, text);
+            stage(&root, &[rel.to_string()]).unwrap();
+            commit(&root, message, false).unwrap();
+            run(&root, &["rev-parse", "HEAD"]).unwrap().trim().to_string()
+        };
+        let subjects = || log(&root, 10, false, None).unwrap().into_iter().map(|e| e.summary).collect::<Vec<_>>();
+        commit_file("a.txt", "a\n", "add a");
+        let b = commit_file("b.txt", "b\n", "add b\n\nwith a body");
+        commit_file("c.txt", "c\n", "add c");
+        commit_file("d.txt", "d\n", "add d");
+        // Uncommitted work survives every edit.
+        write("a.txt", "a, edited\n");
+
+        // Reword an older commit: its body and author stay, the rest is replayed.
+        assert!(!is_pushed(&root, &b));
+        edit_history(&root, &b, &HistoryEdit::Reword("add b, reworded".into())).unwrap();
+        assert_eq!(subjects(), ["add d", "add c", "add b, reworded", "add a"]);
+        assert_eq!(run(&root, &["log", "-1", "--format=%B", "HEAD~2"]).unwrap().trim(), "add b, reworded\n\nwith a body");
+        assert_eq!(run(&root, &["log", "-1", "--format=%an", "HEAD~2"]).unwrap().trim(), "Test");
+
+        // Squash c into b: one commit with both messages and both files.
+        let c = run(&root, &["rev-parse", "HEAD~1"]).unwrap().trim().to_string();
+        edit_history(&root, &c, &HistoryEdit::Squash).unwrap();
+        assert_eq!(subjects(), ["add d", "add b, reworded", "add a"]);
+        assert!(run(&root, &["log", "-1", "--format=%B", "HEAD~1"]).unwrap().contains("add c"));
+        assert_eq!(run(&root, &["ls-tree", "--name-only", "HEAD~1"]).unwrap().lines().collect::<Vec<_>>(), ["a.txt", "b.txt", "c.txt"]);
+
+        // Drop the last commit; reword the new last one (an amend).
+        let d = run(&root, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        edit_history(&root, &d, &HistoryEdit::Drop).unwrap();
+        assert_eq!(subjects(), ["add b, reworded", "add a"]);
+        assert!(!root.join("d.txt").exists());
+        let head = run(&root, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        edit_history(&root, &head, &HistoryEdit::Reword("add b and c".into())).unwrap();
+        assert_eq!(subjects(), ["add b and c", "add a"]);
+        assert_eq!(read("a.txt"), "a, edited\n");
+        assert!(stashes(&root).is_empty());
+        assert!(c != head, "rewritten commits are new ones");
+
+        // Undo the last commit: its changes staged again, its message returned.
+        assert!(undo_commit(&root).unwrap().starts_with("add b and c"));
+        assert_eq!(subjects(), ["add a"]);
+        let staged: Vec<String> = status(&root).unwrap().staged().map(|f| f.rel.clone()).collect();
+        assert_eq!(staged, ["b.txt", "c.txt"]);
+        assert!(undo_commit(&root).is_err(), "the first commit stays");
+
+        // A branch on a remote goes.
+        let remote = root.with_extension("remote.git");
+        let _ = std::fs::remove_dir_all(&remote);
+        run(&root, &["init", "--bare", "--quiet", remote.to_str().unwrap()]).unwrap();
+        add_remote(&root, "origin", remote.to_str().unwrap()).unwrap();
+        run(&root, &["push", "--quiet", "origin", "HEAD:refs/heads/topic"]).unwrap();
+        run(&root, &["fetch", "--quiet", "origin"]).unwrap();
+        assert!(is_pushed(&root, "HEAD"));
+        delete_remote_branch(&root, "origin/topic").unwrap();
+        assert!(run(&root, &["ls-remote", "--heads", "origin"]).unwrap().trim().is_empty());
+        for dir in [&root, &remote] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]
