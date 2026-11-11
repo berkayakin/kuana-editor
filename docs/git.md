@@ -43,16 +43,32 @@ message instead of hanging; use an SSH agent or a credential helper.
   **Include untracked files** to stash those too (checked to start with only when they're all
   there is). Stashes are listed under the changes; hover one to **Pop** (apply and drop),
   **Apply** (keep it) or **Drop** it (after asking). A stash that conflicts leaves the files
-  conflicted and the stash kept. When untracked files from a stash exist again (a build
+  conflicted and the stash kept; after a Pop, once they're resolved, the banner offers to drop it. When untracked files from a stash exist again (a build
   regenerated them), Git would apply the rest and keep the stash, so applying it again would
   repeat that: instead you're asked first, and can move the existing copies to the Trash and
   apply the whole stash. Anything that still applies only in part is reported as such.
 - **Merge conflicts:** a merge or rebase that stops on conflicts shows a banner in the Commit
-  panel with **Abort**. Conflicted files open in the editor, where each conflict is tinted
+  panel with **Abort**. Git merges by lines, so changes to the same or neighboring lines
+  conflict even when they touch different words. Kuana runs merges with the original text in
+  the conflict markers (`zdiff3`) and **resolves simple conflicts** right away: where the two
+  sides changed different words, or made the same change, they're combined, and a file with
+  nothing left is marked resolved; the notification says how many were and how many are left
+  (turn it off with `auto_resolve_conflicts`; **Resolve Simple** in the banner does it on
+  demand). Kuana also turns on Git's rerere (unless your Git config sets it), so a conflict you
+  resolved once, in a rebase you run again, is resolved the same way the next time.
+  Conflicted files open in the editor, where each conflict is tinted
   (current side green, incoming blue) with **Accept Current / Accept Incoming / Accept Both**
-  on its first line (also in the right-click menu and Find Action). Mark a file resolved with
-  ✓ on hover (Kuana asks if markers remain), then **Commit Merge** / **Continue**. The merge
-  message is filled in, and committing is blocked while conflicts remain.
+  on its first line, plus **Accept Combination** when the sides combine (also in the right-click
+  menu and Find Action). Right-click a conflicted file in the Commit panel for **Accept Yours**
+  / **Accept Theirs**, which take one version of the whole file: for binary files, lock files,
+  or a file deleted on one side (taking the deletion moves it to the Trash). Yours is your
+  work: the current branch in a merge, your commit in a rebase, your changes after a pull. Mark
+  a file resolved with ✓ on hover (Kuana asks if markers remain), then **Commit Merge** /
+  **Continue**. The merge message is filled in, and committing is blocked while conflicts
+  remain.
+- **Your changes after a pull:** when local changes don't fit over the commits a pull brings
+  in, the commits still come in and the changes are put back conflicted (and kept in a stash).
+  The banner says so; once the conflicts are resolved it offers **Drop Stash**.
 - **Log** (⌘9 / Alt+9, or its button at the top right): commits of all branches (toggle) with a branch
   graph, branch and tag labels, and a filter by message, author, hash or branch. Select a commit
   for its message, author, date, hash (copy) and changed files; click a file for its diff.

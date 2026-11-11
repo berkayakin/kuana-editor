@@ -143,6 +143,7 @@ actions!(
         AcceptCurrent,
         AcceptIncoming,
         AcceptBoth,
+        AcceptCombination,
         NextChange,
         PreviousChange,
         NextProblem,
@@ -4446,9 +4447,10 @@ impl Editor {
                 // A folded header ends with a `⋯` placeholder (click to unfold).
                 let mut text_end = origin.x + shaped.width;
                 if let Some(c) = conflicts.iter().find(|c| c.start == row) {
-                    // Accept Current · Accept Incoming · Accept Both
+                    // Accept Combination (when the sides combine) · Accept Current · Accept Incoming · Accept Both
                     let mut x = text_end + char_width * 3.;
-                    for resolution in [Resolution::Current, Resolution::Incoming, Resolution::Both] {
+                    let combines = c.merged.is_some().then_some(Resolution::Combination);
+                    for resolution in combines.into_iter().chain([Resolution::Current, Resolution::Incoming, Resolution::Both]) {
                         let label = resolution.label();
                         let line = text_system.shape_line(
                             SharedString::from(label),
@@ -6089,6 +6091,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::accept_current))
             .on_action(cx.listener(Self::accept_incoming))
             .on_action(cx.listener(Self::accept_both))
+            .on_action(cx.listener(Self::accept_combination))
             .on_action(cx.listener(Self::next_change))
             .on_action(cx.listener(Self::previous_change))
             .on_action(cx.listener(Self::next_problem))

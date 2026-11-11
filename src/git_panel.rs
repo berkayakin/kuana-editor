@@ -5,7 +5,7 @@
 use std::{collections::HashSet, ops::Range, path::PathBuf, sync::Arc};
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
+    AnyElement, App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
     IntoElement, MouseButton, MouseDownEvent, Pixels, Point, Render, SharedString, Window, div,
     prelude::*, px, uniform_list, UniformListScrollHandle,
 };
@@ -49,6 +49,15 @@ pub enum GitOp {
     Rebase(String),
     Abort(RepoState),
     Continue(RepoState),
+    /// Combines the conflicts whose sides change different words, in every
+    /// conflicted file (`git::resolve_simple`).
+    ResolveSimple,
+    /// Resolves conflicted files with the user's own version (`yours`) or the
+    /// other one, whole (`git::accept_side`).
+    AcceptSide { rels: Vec<String>, yours: bool },
+    /// Drops the stash with this commit: the one a pull or Pop kept when
+    /// putting changes back conflicted, once they're resolved.
+    DropKeptStash(String),
     AddRemote { name: String, url: String },
     RemoveRemote(String),
     /// Changes a remote's URL and name.
@@ -86,6 +95,7 @@ impl GitOp {
             GitOp::Rebase(_) => "Rebasing…",
             GitOp::Abort(_) => "Aborting…",
             GitOp::Continue(_) => "Continuing…",
+            GitOp::ResolveSimple | GitOp::AcceptSide { .. } => "Resolving…",
             GitOp::Discard(_) => "Discarding…",
             GitOp::Commit { push: true, .. } => "Committing and pushing…",
             GitOp::Commit { .. } => "Committing…",
@@ -100,7 +110,7 @@ impl GitOp {
             GitOp::RenameBranch { .. } => "Renaming branch…",
             GitOp::Stash { .. } => "Stashing…",
             GitOp::Unstash { .. } => "Applying stash…",
-            GitOp::DropStash(_) => "Dropping stash…",
+            GitOp::DropStash(_) | GitOp::DropKeptStash(_) => "Dropping stash…",
             GitOp::CheckoutCommit(_) => "Checking out…",
             GitOp::BranchAt { .. } => "Creating branch…",
             GitOp::TagAt { .. } => "Creating tag…",
@@ -141,6 +151,9 @@ pub struct GitPanel {
     /// they start unchecked: a commit never takes a new file unasked.
     include: HashSet<String>,
     scroll: UniformListScrollHandle,
+    /// The stash (its commit) a pull or Pop kept because putting the changes
+    /// back conflicted: once they're resolved, the banner offers to drop it.
+    kept_stash: Option<String>,
 }
 
 impl EventEmitter<GitPanelEvent> for GitPanel {}
@@ -189,10 +202,19 @@ impl GitPanel {
             menu_target: None,
             include: HashSet::new(),
             scroll: UniformListScrollHandle::new(),
+            kept_stash: None,
         }
     }
 
+    pub fn set_kept_stash(&mut self, sha: Option<String>, cx: &mut Context<Self>) {
+        self.kept_stash = sha;
+        cx.notify();
+    }
+
     pub fn set_repo(&mut self, repo: Option<PathBuf>, project: Option<PathBuf>, cx: &mut Context<Self>) {
+        if repo != self.repo {
+            self.kept_stash = None;
+        }
         self.repo = repo;
         self.project = project;
         cx.notify();
@@ -614,16 +636,14 @@ impl GitPanel {
         )
     }
 
-    /// A stopped merge or rebase: what's left, and Abort / Continue.
-    fn render_state_banner(&self, state: RepoState, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::get(cx).clone();
-        let conflicts = self.status.conflicted().count();
-        let busy = self.busy.is_running();
-        let detail = match conflicts {
-            0 => "conflicts resolved".to_string(),
-            1 => "1 conflict".to_string(),
-            n => format!("{n} conflicts"),
-        };
+    /// The kept stash, while it's still there.
+    fn shown_kept_stash(&self) -> Option<String> {
+        self.kept_stash.clone().filter(|sha| self.stashes.iter().any(|s| &s.sha == sha))
+    }
+
+    /// A box above the changes: an icon, a title with a detail, a hint and buttons.
+    fn banner(&self, title: &'static str, detail: String, hint: Option<&'static str>, buttons: Vec<AnyElement>, cx: &App) -> Div {
+        let theme = Theme::get(cx);
         div()
             .flex()
             .flex_col()
@@ -640,36 +660,90 @@ impl GitPanel {
                     .items_center()
                     .gap_1p5()
                     .child(icon_el(Icon::GitBranch, px(14.), theme.git_conflict.into()))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(state.label()))
-                    .child(div().text_color(theme.text_muted).child(format!("· {detail}"))),
+                    .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(title))
+                    .when(!detail.is_empty(), |el| el.child(div().text_color(theme.text_muted).child(format!("· {detail}")))),
             )
-            .when(conflicts > 0, |el| {
-                el.child(div().text_size(px(12.)).text_color(theme.text_muted).child(
-                    "Open each conflicted file, pick a side on its conflicts, then mark it resolved.",
-                ))
-            })
-            .child(
-                div()
-                    .flex()
-                    .gap_1p5()
-                    .child(crate::ui::text_button("state-abort", "Abort", false, cx).on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(GitPanelEvent::Run(GitOp::Abort(state)));
-                    })))
-                    .when(conflicts == 0 && !busy, |el| {
-                        el.child(crate::ui::text_button("state-continue", if state == RepoState::Merging { "Commit Merge" } else { "Continue" }, true, cx).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                // A merge commit takes the message box's text when there is one.
-                                let message = this.message_text(cx);
-                                let op = if state == RepoState::Merging && !message.is_empty() {
-                                    GitOp::Commit { message, amend: false, all: false, untracked: Vec::new(), push: false }
-                                } else {
-                                    GitOp::Continue(state)
-                                };
-                                cx.emit(GitPanelEvent::Run(op));
-                            }),
-                        ))
-                    }),
-            )
+            .when_some(hint, |el, hint| el.child(div().text_size(px(12.)).text_color(theme.text_muted).child(hint)))
+            .child(div().flex().flex_wrap().gap_1p5().children(buttons))
+    }
+
+    fn conflict_count(&self) -> String {
+        match self.status.conflicted().count() {
+            0 => "conflicts resolved".to_string(),
+            1 => "1 conflicted file".to_string(),
+            n => format!("{n} conflicted files"),
+        }
+    }
+
+    /// Resolve Simple: combines the conflicts whose sides change different words.
+    fn resolve_simple_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        crate::ui::text_button("resolve-simple", "Resolve Simple", false, cx)
+            .tooltip(|_, cx| tooltip_view("Combine the conflicts where both sides changed different words", cx))
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(GitPanelEvent::Run(GitOp::ResolveSimple))))
+            .into_any_element()
+    }
+
+    /// A stopped merge or rebase: what's left, and Abort / Continue.
+    fn render_state_banner(&self, state: RepoState, cx: &mut Context<Self>) -> impl IntoElement {
+        let conflicts = self.status.conflicted().count();
+        let busy = self.busy.is_running();
+        let mut buttons = vec![crate::ui::text_button("state-abort", "Abort", false, cx)
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.emit(GitPanelEvent::Run(GitOp::Abort(state)));
+            }))
+            .into_any_element()];
+        if conflicts > 0 {
+            buttons.push(self.resolve_simple_button(cx));
+        } else if !busy {
+            buttons.push(
+                crate::ui::text_button("state-continue", if state == RepoState::Merging { "Commit Merge" } else { "Continue" }, true, cx)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        // A merge commit takes the message box's text when there is one.
+                        let message = this.message_text(cx);
+                        let op = if state == RepoState::Merging && !message.is_empty() {
+                            GitOp::Commit { message, amend: false, all: false, untracked: Vec::new(), push: false }
+                        } else {
+                            GitOp::Continue(state)
+                        };
+                        cx.emit(GitPanelEvent::Run(op));
+                    }))
+                    .into_any_element(),
+            );
+        }
+        let hint = (conflicts > 0).then_some(
+            "Open each conflicted file, pick a side on its conflicts, then mark it resolved. Right-click a file to take one version whole.",
+        );
+        self.banner(state.label(), self.conflict_count(), hint, buttons, cx)
+    }
+
+    /// Changes put back over new commits (after a pull, or a stash applied)
+    /// that conflicted: no operation stopped, so there's nothing to continue,
+    /// only the files to resolve and then the stash that kept them to drop.
+    fn render_changes_banner(&self, kept: Option<String>, cx: &mut Context<Self>) -> impl IntoElement {
+        let conflicts = self.status.conflicted().count();
+        if conflicts > 0 {
+            let hint = if kept.is_some() {
+                "Putting your changes back stopped on conflicts; they're also kept in a stash. Resolve each file, then mark it resolved."
+            } else {
+                "Resolve each file, then mark it resolved. Right-click a file to take one version whole."
+            };
+            let buttons = vec![self.resolve_simple_button(cx)];
+            return self.banner("Your changes conflict", self.conflict_count(), Some(hint), buttons, cx);
+        }
+        let sha = kept.unwrap_or_default();
+        let buttons = vec![
+            crate::ui::text_button("kept-stash-keep", "Keep It", false, cx)
+                .on_click(cx.listener(|this, _, _, cx| this.set_kept_stash(None, cx)))
+                .into_any_element(),
+            crate::ui::text_button("kept-stash-drop", "Drop Stash", true, cx)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.emit(GitPanelEvent::Run(GitOp::DropKeptStash(sha.clone())));
+                    this.set_kept_stash(None, cx);
+                }))
+                .into_any_element(),
+        ];
+        let hint = "Your changes are back in place. The stash that kept them while they conflicted isn't needed anymore.";
+        self.banner("Conflicts resolved", String::new(), Some(hint), buttons, cx)
     }
 
     fn render_commit_box(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -894,7 +968,17 @@ impl Render for GitPanel {
         };
 
         root
-            .when_some(self.status.state, |el, state| el.child(self.render_state_banner(state, cx)))
+            .map(|el| match self.status.state {
+                Some(state) => el.child(self.render_state_banner(state, cx).into_any_element()),
+                None => {
+                    let kept = self.shown_kept_stash();
+                    if self.status.conflicted().next().is_some() || kept.is_some() {
+                        el.child(self.render_changes_banner(kept, cx).into_any_element())
+                    } else {
+                        el
+                    }
+                }
+            })
             .child(
                 // Progress floats over the list so the rows don't move.
                 div()

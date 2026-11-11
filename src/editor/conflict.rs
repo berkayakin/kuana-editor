@@ -1,11 +1,12 @@
 //! Merge conflicts in the editor: tinted regions, Accept Current / Incoming /
-//! Both labels on each `<<<<<<<` line, and the same as actions at the caret.
+//! Both labels on each `<<<<<<<` line (and Accept Combination when the two
+//! sides change different words), and the same as actions at the caret.
 
 use std::sync::Arc;
 
 use gpui::{App, Context, Window};
 
-use super::{AcceptBoth, AcceptCurrent, AcceptIncoming, EditKind, Editor, EditorLspEvent};
+use super::{AcceptBoth, AcceptCombination, AcceptCurrent, AcceptIncoming, EditKind, Editor, EditorLspEvent};
 use crate::conflict::{self, Conflict, Resolution};
 
 impl Editor {
@@ -28,7 +29,14 @@ impl Editor {
             return;
         };
         let line = |row: usize| self.doc.read(cx).line_start(row);
-        let mut text: String = resolution.kept(&c).into_iter().map(|rows| self.doc.read(cx).slice(line(rows.start)..line(rows.end))).collect();
+        let mut text: String = match (resolution, &c.merged) {
+            (Resolution::Combination, Some(merged)) => merged.clone(),
+            (Resolution::Combination, None) => {
+                cx.emit(EditorLspEvent::Message("Both sides change the same words here: pick one, or edit it".into()));
+                return;
+            }
+            _ => resolution.kept(&c).into_iter().map(|rows| self.doc.read(cx).slice(line(rows.start)..line(rows.end))).collect(),
+        };
         let end = line(c.end + 1);
         // At the end of a file without a final newline, keep it that way.
         if end == self.doc.read(cx).len() && !self.doc.read(cx).rope().to_string().ends_with('\n') && text.ends_with('\n') {
@@ -58,5 +66,9 @@ impl Editor {
 
     pub(super) fn accept_both(&mut self, _: &AcceptBoth, _: &mut Window, cx: &mut Context<Self>) {
         self.resolve_at_caret(Resolution::Both, cx);
+    }
+
+    pub(super) fn accept_combination(&mut self, _: &AcceptCombination, _: &mut Window, cx: &mut Context<Self>) {
+        self.resolve_at_caret(Resolution::Combination, cx);
     }
 }
