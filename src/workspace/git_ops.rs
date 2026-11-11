@@ -55,6 +55,54 @@ impl Workspace {
         .detach();
     }
 
+    /// Asks the user what Git or SSH asks (`askpass`): a password or
+    /// passphrase in a one-line dialog (bullets for secrets), or whether to
+    /// trust a host SSH hasn't seen. Closing the dialog cancels.
+    pub fn answer_question(&mut self, question: crate::askpass::Question, window: &mut Window, cx: &mut Context<Self>) {
+        let prompt = question.prompt.trim().trim_end_matches(':').trim().to_string();
+        if question.confirm || prompt.contains("(yes/no") {
+            // SSH's "The authenticity of host … can't be established …".
+            let detail = prompt.lines().filter(|l| !l.contains("(yes/no")).collect::<Vec<_>>().join("\n");
+            let answer = window.prompt(PromptLevel::Warning, "Connect to a host SSH hasn't seen before?", Some(&detail), &["Connect", "Cancel"], cx);
+            cx.spawn(async move |_, _| {
+                let yes = matches!(answer.await, Ok(0));
+                question.answer(Some(if yes { "yes" } else { "no" }.into()));
+            })
+            .detach();
+            return;
+        }
+        let secret = question.secret();
+        let lower = prompt.to_lowercase();
+        let hint = if secret && lower.contains("github.com") {
+            "GitHub takes a personal access token here, not your account password."
+        } else if lower.contains("passphrase") {
+            "The passphrase of your SSH key. Kuana doesn't keep it; an SSH agent can."
+        } else if secret {
+            "Git asks for it to reach the remote; your credential helper may keep it."
+        } else {
+            "Git asks for it to reach the remote."
+        };
+        self.close_modal(window, cx);
+        let dialog = cx.new(|cx| {
+            let dialog = InputDialog::new(prompt, Icon::Key, hint, "", None, window, cx).allow_empty();
+            if secret { dialog.secret(cx) } else { dialog }
+        });
+        // Answered once; dropped unanswered (another dialog replaced this one), it cancels.
+        let question = std::cell::RefCell::new(Some(question));
+        let subscription = cx.subscribe_in(&dialog, window, move |ws, _, event: &InputDialogEvent, window, cx| {
+            let answer = match event {
+                InputDialogEvent::Confirm(text) => Some(text.clone()),
+                InputDialogEvent::Dismissed => None,
+            };
+            if let Some(question) = question.borrow_mut().take() {
+                question.answer(answer);
+            }
+            ws.close_modal(window, cx);
+        });
+        self.modals.open(Modal::Input(dialog), subscription);
+        cx.notify();
+    }
+
     /// Fetches in the background (`auto_fetch`), every `AUTO_FETCH_EVERY`
     /// while the window is in use, so commits waiting to be pulled show
     /// before you've edited the same lines. Quiet: a failure (offline, no
@@ -1076,7 +1124,14 @@ pub(super) fn perform_git(dir: &Path, op: GitOp, status: &RepoStatus, auto_resol
             | GitOp::Checkout(_)
             | GitOp::CheckoutCommit(_)
     );
-    let outcome = perform(dir, op, status)?;
+    // What the user started may ask for credentials.
+    let cancellations = crate::askpass::cancellations();
+    let outcome = match git::asking(|| perform(dir, op, status)) {
+        Err(_) if crate::askpass::cancellations() > cancellations => {
+            return Ok(Outcome::Nothing("Cancelled: Git didn't get the credentials it asked for".into()));
+        }
+        outcome => outcome?,
+    };
     if !auto_resolve || !may_conflict {
         return Ok(outcome);
     }

@@ -2,6 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod about;
+mod askpass;
 mod autopilot;
 mod python;
 mod assets;
@@ -400,6 +401,10 @@ fn limit_window_zoom() {
 }
 
 fn main() {
+    // Started by Git or SSH to ask for a password: ask the Kuana that ran it.
+    if let Some(code) = askpass::run_if_asked() {
+        std::process::exit(code);
+    }
     theme::move_legacy_config();
     if let Some(config) = theme::config_dir() {
         panic_log::install(config.join("logs"));
@@ -441,6 +446,18 @@ fn main() {
         let _ = open_tx.unbounded_send(urls);
     });
     app.run(move |cx: &mut App| {
+        // Git's questions (passwords, passphrases) asked in a window.
+        if let Some(mut questions) = askpass::serve() {
+            cx.spawn(async move |cx| {
+                use futures::StreamExt as _;
+                while let Some(question) = questions.next().await {
+                    if cx.update(|cx| ask_in_window(question, cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         cx.spawn(async move |cx| {
             use futures::StreamExt as _;
             while let Some(urls) = open_rx.next().await {
@@ -562,6 +579,20 @@ fn main() {
         })
         .detach();
     });
+}
+
+/// Shows a Git or SSH question in the frontmost project window, brought
+/// forward (the operation that asks was started there). Without one, the
+/// question is dropped, which cancels it.
+fn ask_in_window(question: askpass::Question, cx: &mut App) {
+    let window = cx
+        .active_window()
+        .and_then(|w| w.downcast::<workspace::Workspace>())
+        .or_else(|| cx.windows().into_iter().find_map(|w| w.downcast::<workspace::Workspace>()));
+    if let Some(window) = window {
+        cx.activate(true);
+        window.update(cx, |ws, window, cx| ws.answer_question(question, window, cx)).ok();
+    }
 }
 
 /// Opens paths from another app in the frontmost Kuana window (a new one

@@ -170,6 +170,22 @@ fn command(root: &Path, args: &[&str]) -> Command {
     command_in(root, args, crate::trust::is_trusted(root))
 }
 
+thread_local! {
+    /// Whether Git commands started on this thread may ask for credentials.
+    static ASKING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with the Git commands it starts on this thread allowed to ask
+/// for a password or passphrase (and whether to trust a new host) through
+/// Kuana's dialog (`askpass`): for what the user started. Elsewhere they fail
+/// fast instead, so background work never pops up a question.
+pub fn asking<T>(f: impl FnOnce() -> T) -> T {
+    let before = ASKING.replace(true);
+    let result = f();
+    ASKING.set(before);
+    result
+}
+
 /// `git <args>` in `root`, a folder trusted or not.
 fn command_in(root: &Path, args: &[&str], trusted: bool) -> Command {
     let mut cmd = crate::process::command("git");
@@ -207,8 +223,15 @@ fn command_in(root: &Path, args: &[&str], trusted: bool) -> Command {
     for var in REPOSITORY_VARS {
         cmd.env_remove(var);
     }
-    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
-        cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    match ASKING.get().then(crate::askpass::env).flatten() {
+        // SSH may ask too (a passphrase, a new host), through the same program.
+        Some(vars) => {
+            cmd.envs(vars);
+        }
+        None if std::env::var_os("GIT_SSH_COMMAND").is_none() => {
+            cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+        }
+        None => {}
     }
     cmd
 }

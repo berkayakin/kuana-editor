@@ -215,7 +215,7 @@ fn receive(mut stream: TcpStream, token: &str) -> Option<Vec<PathBuf>> {
 }
 
 /// A token another local program can't guess (std's hasher keys are random).
-fn random_token() -> String {
+pub(crate) fn random_token() -> String {
     use std::hash::{BuildHasher, Hasher};
     let state = std::collections::hash_map::RandomState::new();
     (0..2)

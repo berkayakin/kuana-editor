@@ -1,8 +1,12 @@
 # Git
 
 Kuana uses the `git` command line, so your config, credential helpers, SSH keys and hooks
-all apply. Prompts are disabled, so a remote that needs a password fails fast with a
-message instead of hanging; use an SSH agent or a credential helper.
+all apply. When Git or SSH needs something only you can give (a username and password or
+token for an HTTPS remote, your SSH key's passphrase, whether to trust a host SSH hasn't seen
+before), Kuana asks in a dialog, with the password hidden; Escape cancels the operation. Your
+credential helper keeps what works, if you have one; an SSH agent can keep a passphrase. For
+GitHub over HTTPS, the password is a personal access token. Only what you start asks: the
+background fetch never does, and stays quiet instead.
 
 - **Gutter:** green/blue/red bars mark added, changed and deleted lines against `HEAD`,
   updated as you type; staged changes are drawn faded. Click a bar to see the lines it replaced

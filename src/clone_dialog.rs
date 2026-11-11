@@ -113,7 +113,8 @@ impl CloneDialog {
             return;
         }
         let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let job = match git::start_clone(&parent, &self.url_text(cx), &name, self.shallow) {
+        let url = self.url_text(cx);
+        let job = match git::asking(|| git::start_clone(&parent, &url, &name, self.shallow)) {
             Ok(job) => Arc::new(job),
             Err(e) => {
                 self.error = Some(e);
