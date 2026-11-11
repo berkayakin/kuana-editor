@@ -382,9 +382,10 @@ impl Workspace {
         self.git_busy.set(Some(label.into()), |ws: &mut Self| &mut ws.git_busy, cx);
         self.git_panel.update(cx, |p, cx| p.set_busy(Some(label.into()), cx));
         let status = self.git_status.clone();
+        let auto_resolve = Settings::get(cx).auto_resolve_conflicts();
         let op2 = op.clone();
         self.git_op_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { perform_git(&dir, op2, &status) }).await;
+            let result = cx.background_executor().spawn(async move { perform_git(&dir, op2, &status, auto_resolve) }).await;
             this.update_in(cx, |ws, window, cx| {
                 ws.git_busy.set(None, |ws: &mut Self| &mut ws.git_busy, cx);
                 ws.git_panel.update(cx, |p, cx| p.set_busy(None, cx));
@@ -406,6 +407,10 @@ impl Workspace {
                         }
                     }
                     Ok(Outcome::Nothing(message)) => ws.toast(ToastKind::Info, message, None, cx),
+                    Ok(Outcome::KeptStash { message, sha }) => {
+                        ws.toast(ToastKind::Info, message, None, cx);
+                        ws.git_panel.update(cx, |p, cx| p.set_kept_stash(Some(sha), cx));
+                    }
                     Ok(Outcome::Diverged { branch, upstream, ahead, behind }) => match &op {
                         // Nothing says how to combine them (the setting or the Git config): ask, once.
                         GitOp::Pull(None) => ws.choose_pull_strategy(&branch, &upstream, ahead, behind, window, cx),
@@ -460,6 +465,8 @@ impl Workspace {
                 if matches!(
                     op,
                     GitOp::Discard(_)
+                        | GitOp::ResolveSimple
+                        | GitOp::AcceptSide { .. }
                         | GitOp::Pull(_)
                         | GitOp::Checkout(_)
                         | GitOp::Merge(_)
@@ -967,6 +974,9 @@ pub(super) enum Outcome {
     /// Commit & Push committed, then didn't push: it failed with `error`,
     /// or (None) the branch is behind its upstream.
     CommittedNotPushed { summary: String, error: Option<String> },
+    /// Changes put back over new commits (a pull's, a stash popped)
+    /// conflicted; the stash with commit `sha` keeps them until they're resolved.
+    KeptStash { message: String, sha: String },
 }
 
 /// "1 commit", "3 commits".
@@ -985,8 +995,49 @@ fn list_some(names: &[String]) -> String {
     list
 }
 
-/// Runs one Git operation; blocking.
-pub(super) fn perform_git(dir: &Path, op: GitOp, status: &RepoStatus) -> Result<Outcome, String> {
+/// Runs one Git operation; blocking. When it stops on conflicts and
+/// `auto_resolve` is on, the simple ones (each side changing different words)
+/// are combined right away, as JetBrains does.
+pub(super) fn perform_git(dir: &Path, op: GitOp, status: &RepoStatus, auto_resolve: bool) -> Result<Outcome, String> {
+    let may_conflict = matches!(
+        op,
+        GitOp::Merge(_) | GitOp::Rebase(_) | GitOp::Pull(_) | GitOp::Continue(_) | GitOp::Unstash { .. } | GitOp::CherryPick(_) | GitOp::Revert(_)
+    );
+    let outcome = perform(dir, op, status)?;
+    if !auto_resolve || !may_conflict {
+        return Ok(outcome);
+    }
+    let conflicted: Vec<String> = git::status(dir).map(|s| s.conflicted().map(|f| f.rel.clone()).collect()).unwrap_or_default();
+    let done = match git::resolve_simple(dir, &conflicted) {
+        Ok(done) if done.resolved > 0 => done,
+        _ => return Ok(outcome),
+    };
+    let note = match done.left {
+        0 if done.resolved == 1 => "the conflict was simple and is resolved".to_string(),
+        0 => format!("all {} conflicts were simple and are resolved", done.resolved),
+        left => format!("{} resolved automatically, {left} left", conflicts(done.resolved)),
+    };
+    Ok(match outcome {
+        Outcome::Done(Some(message)) => Outcome::Done(Some(format!("{message}; {note}"))),
+        // Changes put back over a pull's commits that all combined: say what that means.
+        Outcome::KeptStash { message, sha } if done.left == 0 => Outcome::KeptStash {
+            message: match message.split_once("; ") {
+                Some((pulled, _)) => format!("{pulled}; your changes touched the same lines and were combined"),
+                None => format!("{message}; {note}"),
+            },
+            sha,
+        },
+        Outcome::KeptStash { message, sha } => Outcome::KeptStash { message: format!("{message}; {note}"), sha },
+        outcome => outcome,
+    })
+}
+
+/// "1 conflict", "3 conflicts".
+fn conflicts(n: usize) -> String {
+    format!("{n} conflict{}", if n == 1 { "" } else { "s" })
+}
+
+fn perform(dir: &Path, op: GitOp, status: &RepoStatus) -> Result<Outcome, String> {
     let push = |dir: &Path, force: bool, remote: Option<String>| -> Result<String, String> {
         let Some(remote) = remote.or_else(|| git::default_remote(dir)) else {
             return Err("No remote is configured. Add one in Git → Manage Remotes….".into());
@@ -1072,10 +1123,13 @@ pub(super) fn perform_git(dir: &Path, op: GitOp, status: &RepoStatus) -> Result<
                 git::Pulled::Merged(n) => Outcome::Done(Some(format!("Pulled {} and merged", commits(n as u64)))),
                 git::Pulled::Rebased(n) => Outcome::Done(Some(format!("Pulled {}, yours rebased on top", commits(n as u64)))),
                 git::Pulled::Conflicts => Outcome::Done(Some("Update stopped on conflicts".into())),
-                git::Pulled::ChangesConflict(n) => Outcome::Done(Some(format!(
-                    "Pulled {}; putting your changes back stopped on conflicts (they're also kept in a stash)",
-                    commits(n as u64)
-                ))),
+                git::Pulled::ChangesConflict { incoming, stash } => {
+                    let message = format!("Pulled {}; putting your changes back stopped on conflicts", commits(incoming as u64));
+                    match stash {
+                        Some(sha) => Outcome::KeptStash { message, sha },
+                        None => Outcome::Done(Some(message)),
+                    }
+                }
                 git::Pulled::Diverged { branch, upstream, ahead, behind } => Outcome::Diverged { branch, upstream, ahead, behind },
             });
         }
@@ -1102,14 +1156,43 @@ pub(super) fn perform_git(dir: &Path, op: GitOp, status: &RepoStatus) -> Result<
             });
         }
         GitOp::Unstash { index, pop } => {
+            let sha = git::stash_sha(dir, index);
             return git::unstash(dir, index, pop).map(|unstashed| match unstashed {
                 git::Unstashed::Applied => Outcome::Done(Some(if pop { "Popped stash".into() } else { "Applied stash".into() })),
-                // Git keeps a stash that didn't apply cleanly.
-                git::Unstashed::Conflicts => Outcome::Done(Some("Applying the stash stopped on conflicts; it's kept".into())),
+                // Git keeps a stash that didn't apply cleanly; a Pop's is
+                // offered for dropping once the conflicts are resolved.
+                git::Unstashed::Conflicts => match sha.filter(|_| pop) {
+                    Some(sha) => Outcome::KeptStash { message: "Popping the stash stopped on conflicts".into(), sha },
+                    None => Outcome::Done(Some("Applying the stash stopped on conflicts; it's kept".into())),
+                },
                 git::Unstashed::Partly { error, not_restored } => Outcome::PartlyApplied { not_restored, error },
             });
         }
         GitOp::DropStash(index) => git::drop_stash(dir, index).map(|_| Some("Dropped stash".into())),
+        GitOp::DropKeptStash(sha) => git::drop_stash_sha(dir, &sha).map(|_| Some("Dropped the stash".into())),
+        GitOp::ResolveSimple => {
+            let conflicted: Vec<String> = git::status(dir)?.conflicted().map(|f| f.rel.clone()).collect();
+            let done = git::resolve_simple(dir, &conflicted)?;
+            return Ok(match (done.resolved, done.left) {
+                (0, 0) => Outcome::Nothing("No conflict markers left; mark the files resolved".into()),
+                (0, _) => Outcome::Nothing("No simple conflicts: the rest change the same words on both sides".into()),
+                (n, 0) => Outcome::Done(Some(format!("Resolved {}", conflicts(n)))),
+                (n, left) => Outcome::Done(Some(format!("Resolved {}; {} left", conflicts(n), conflicts(left)))),
+            });
+        }
+        GitOp::AcceptSide { rels, yours } => {
+            let mine = git::Side::yours(git::repo_state(dir));
+            let side = match (yours, mine) {
+                (true, side) => side,
+                (false, git::Side::Ours) => git::Side::Theirs,
+                (false, git::Side::Theirs) => git::Side::Ours,
+            };
+            let whose = if yours { "yours" } else { "theirs" };
+            git::accept_side(dir, &rels, side).map(|_| match rels.as_slice() {
+                [one] => Some(format!("Resolved {one}: kept {whose}")),
+                many => Some(format!("Resolved {} files: kept {whose}", many.len())),
+            })
+        }
         GitOp::CheckoutCommit(sha) => git::checkout_commit(dir, &sha).map(|_| Some(format!("Checked out {} (detached HEAD)", short(&sha)))),
         GitOp::BranchAt { name, sha } => git::create_branch_at(dir, &name, &sha).map(|_| Some(format!("Created and switched to {name}"))),
         GitOp::TagAt { name, sha } => git::create_tag(dir, &name, &sha).map(|_| Some(format!("Tagged {} as {name}", short(&sha)))),
@@ -1202,7 +1285,7 @@ mod tests {
         let write = |rel: &str, text: &str| std::fs::write(root.join(rel), text).unwrap();
         let commit = |message: &str, amend: bool, untracked: &[&str], status: &RepoStatus| {
             let untracked = untracked.iter().map(|rel| rel.to_string()).collect();
-            perform_git(&root, GitOp::Commit { message: message.into(), amend, all: !amend, untracked, push: true }, status)
+            perform_git(&root, GitOp::Commit { message: message.into(), amend, all: !amend, untracked, push: true }, status, false)
         };
 
         // The first push sets the upstream; a checked file deleted since is left out.

@@ -96,6 +96,9 @@ pub struct Settings {
     /// when both branches have new commits. Unset: as the Git config says,
     /// else asked the first time it happens.
     pub pull_strategy: Option<PullStrategy>,
+    /// Combine simple merge conflicts (each side changing different words)
+    /// as soon as a merge, rebase or pull stops on them (on by default).
+    pub auto_resolve_conflicts: Option<bool>,
     /// The minimap's width in pixels (`minimap_width()`).
     pub minimap_width: Option<f32>,
     /// Where ghost-text suggestions come from (none unless chosen): only the
@@ -456,6 +459,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "project_avatar",
     "compact_activity_bar",
     "pull_strategy",
+    "auto_resolve_conflicts",
     "minimap_width",
     "edit_prediction_provider",
 ];
@@ -610,6 +614,11 @@ impl Settings {
         self.ui_style.unwrap_or_default()
     }
 
+    /// Whether simple merge conflicts are resolved as soon as Git stops on them.
+    pub fn auto_resolve_conflicts(&self) -> bool {
+        self.auto_resolve_conflicts.unwrap_or(true)
+    }
+
     /// Whether the title bar's project chip shows its round initial.
     pub fn project_avatar(&self) -> bool {
         self.project_avatar.unwrap_or(true)
@@ -707,6 +716,7 @@ impl Settings {
             "trust_all_projects" => self.trust_all_projects.is_some(),
             "native_grammars" => self.native_grammars.is_some(),
             "pull_strategy" => self.pull_strategy.is_some(),
+            "auto_resolve_conflicts" => self.auto_resolve_conflicts.is_some(),
             _ => false,
         }
     }
@@ -1122,6 +1132,10 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // instead). Unset, your Git config's pull.rebase / pull.ff decide, else
   // Update Project asks the first time it happens.
   // "pull_strategy": "rebase",
+
+  // When a merge, rebase or pull stops on conflicts, combine the simple ones
+  // right away: those where the two sides changed different words.
+  // "auto_resolve_conflicts": true,
 
   // More entries for Run… (detected ones include cargo, npm scripts, go,
   // make and pytest).

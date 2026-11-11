@@ -69,6 +69,7 @@ impl Workspace {
                     ("Accept Current Change", Box::new(editor::AcceptCurrent) as Box<dyn gpui::Action>),
                     ("Accept Incoming Change", Box::new(editor::AcceptIncoming)),
                     ("Accept Both Changes", Box::new(editor::AcceptBoth)),
+                    ("Accept Combination", Box::new(editor::AcceptCombination)),
                 ] {
                     let (entry, action) = run(MenuEntry::text(label), action);
                     add(entry, action);
@@ -152,7 +153,11 @@ impl Workspace {
         if staged {
             add(MenuEntry::item("Unstage", Icon::Minus), Some(TreeAction::Git(GitOp::Unstage(rels))));
         } else if conflicted {
-            add(MenuEntry::item("Mark as Resolved", Icon::Check), Some(TreeAction::Git(GitOp::Stage(rels))));
+            add(MenuEntry::item("Mark as Resolved", Icon::Check), Some(TreeAction::Git(GitOp::Stage(rels.clone()))));
+            // The whole file from one side: for what the editor can't
+            // resolve (binary files, a file deleted on one side, lock files).
+            add(MenuEntry::item("Accept Yours", Icon::ArrowUp), Some(TreeAction::Git(GitOp::AcceptSide { rels: rels.clone(), yours: true })));
+            add(MenuEntry::item("Accept Theirs", Icon::ArrowDown), Some(TreeAction::Git(GitOp::AcceptSide { rels, yours: false })));
         } else {
             add(MenuEntry::item("Stage", Icon::Plus), Some(TreeAction::Git(GitOp::Stage(rels))));
         }

@@ -99,7 +99,7 @@ impl Page {
             Page::Extensions => "More languages, themes and snippets; Zed's extensions work too",
             Page::Keymap => "A base keymap to start from, and shortcuts for every action on top",
             Page::Terminal => "The terminal's shell and your own Run configurations",
-            Page::Git => "How Update Project brings in other people's commits",
+            Page::Git => "How Update Project brings in other people's commits, and merge conflicts",
             Page::Trust => "Folders whose language servers, formatters and tools Kuana may run",
             Page::Updates => "Getting new versions of Kuana",
         }
@@ -158,10 +158,11 @@ enum Setting {
     NativeGrammars,
     AutoUpdate,
     PullStrategy,
+    AutoResolveConflicts,
 }
 
 impl Setting {
-    const ALL: [Setting; 33] = [
+    const ALL: [Setting; 34] = [
         Setting::Theme,
         Setting::IconTheme,
         Setting::VisualEffects,
@@ -195,6 +196,7 @@ impl Setting {
         Setting::NativeGrammars,
         Setting::AutoUpdate,
         Setting::PullStrategy,
+        Setting::AutoResolveConflicts,
     ];
 
     fn page(self) -> Page {
@@ -213,7 +215,7 @@ impl Setting {
             Setting::Shell | Setting::RunConfigurations => Page::Terminal,
             Setting::TrustAll | Setting::NativeGrammars => Page::Trust,
             Setting::AutoUpdate => Page::Updates,
-            Setting::PullStrategy => Page::Git,
+            Setting::PullStrategy | Setting::AutoResolveConflicts => Page::Git,
         }
     }
 
@@ -239,6 +241,7 @@ impl Setting {
             Setting::TrustAll | Setting::NativeGrammars => "Restricted Mode",
             Setting::AutoUpdate => "Updates",
             Setting::PullStrategy => "Update Project",
+            Setting::AutoResolveConflicts => "Merge Conflicts",
         }
     }
 
@@ -277,6 +280,7 @@ impl Setting {
             Setting::NativeGrammars => "Native extension grammars",
             Setting::AutoUpdate => "Update automatically",
             Setting::PullStrategy => "Pull strategy",
+            Setting::AutoResolveConflicts => "Resolve simple conflicts",
         }
     }
 
@@ -317,6 +321,7 @@ impl Setting {
             Setting::NativeGrammars => "Compile extensions' grammars with your C compiler instead of WebAssembly, which runs them sandboxed. Only for extensions in trusted folders.",
             Setting::AutoUpdate => "Download new versions from GitHub in the background. Restart to Update in the status bar installs them.",
             Setting::PullStrategy => "How incoming commits join yours once both branches have new ones. Until one is picked, your Git config's pull.rebase / pull.ff decide; without them, Update Project asks the first time.",
+            Setting::AutoResolveConflicts => "When a pull, merge or rebase stops on conflicts, combine the ones where the two sides changed different words, and mark files with nothing left resolved.",
         }
     }
 
@@ -356,6 +361,7 @@ impl Setting {
             Setting::NativeGrammars => "extensions grammars tree-sitter native compiler wasm webassembly sandbox",
             Setting::AutoUpdate => "update upgrade version release download",
             Setting::PullStrategy => "git pull update project merge rebase fast-forward ff only diverged branches version control vcs",
+            Setting::AutoResolveConflicts => "git merge conflicts resolve automatically auto smart magic simple combine rebase pull version control vcs",
         }
     }
 
@@ -1505,6 +1511,9 @@ impl Preferences {
                     let keymap = BaseKeymap::ALL[ix];
                     this.set_or_default("base_keymap", keymap.key().into(), BaseKeymap::default().key().into(), cx);
                 })
+            }
+            Setting::AutoResolveConflicts => {
+                self.switch_with_default("pref-auto-resolve-conflicts", "auto_resolve_conflicts", settings.auto_resolve_conflicts, true, cx)
             }
             Setting::PullStrategy => {
                 const ASK: &str = "Ask the first time";
@@ -2670,6 +2679,7 @@ fn setting_key(setting: Setting) -> &'static str {
         Setting::NativeGrammars => "native_grammars",
         Setting::AutoUpdate => "auto_update",
         Setting::PullStrategy => "pull_strategy",
+        Setting::AutoResolveConflicts => "auto_resolve_conflicts",
     }
 }
 

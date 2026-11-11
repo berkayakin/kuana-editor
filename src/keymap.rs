@@ -857,6 +857,7 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Accept Current Change", AcceptCurrent),
         a("Accept Incoming Change", AcceptIncoming),
         a("Accept Both Changes", AcceptBoth),
+        a("Accept Combination", AcceptCombination),
         a("Rollback Lines", RollbackHunk),
         a("Next Change", NextChange),
         a("Previous Change", PreviousChange),

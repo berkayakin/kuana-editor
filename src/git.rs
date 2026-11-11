@@ -9,7 +9,7 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, Mutex, OnceLock, PoisonError},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -685,7 +685,9 @@ fn discard_with(root: &Path, files: &[FileStatus], trash: impl Fn(&Path) -> std:
 }
 
 pub fn commit(root: &Path, message: &str, amend: bool) -> Result<String, String> {
-    let mut args = vec!["commit", "--quiet", "--file", "-"];
+    // A merge commit is where rerere records how its conflicts were resolved.
+    let mut args = merge_config(root);
+    args.extend(["commit", "--quiet", "--file", "-"]);
     if amend {
         args.push("--amend");
     }
@@ -801,8 +803,8 @@ pub enum Pulled {
     Conflicts,
     /// This many commits came in, but putting the local changes back over
     /// them stopped on conflicts: the files are left conflicted and the
-    /// changes kept in a stash.
-    ChangesConflict(usize),
+    /// changes kept in the stash `stash` (its commit), to drop once resolved.
+    ChangesConflict { incoming: usize, stash: Option<String> },
     /// Both branches have commits the other doesn't, and the pull only
     /// fast-forwards: nothing changed.
     Diverged { branch: String, upstream: String, ahead: u32, behind: u32 },
@@ -843,7 +845,8 @@ pub fn pull(root: &Path, strategy: Option<PullStrategy>) -> Result<Pulled, Strin
         None => PullStrategy::FfOnly.args(),
     };
     let rebases = strategy == Some(PullStrategy::Rebase) || strategy.is_none() && pull_rebases(root, branch);
-    let pull_with = |extra: &[&str]| run(root, &[["pull"].as_slice(), args, extra].concat());
+    let config = merge_config(root);
+    let pull_with = |extra: &[&str]| run(root, &[config.as_slice(), &["pull"], args, extra].concat());
     let tracked_changes =
         |s: &RepoStatus| s.files.iter().any(|f| f.staged.is_some() || f.unstaged.is_some_and(|c| c != Change::Untracked));
     // Files whose whole change was staged: a stash comes back unstaged.
@@ -933,7 +936,8 @@ fn finish_pull(root: &Path, before: Option<String>, restage: Option<Vec<String>>
     let Some(before) = before else { return Ok(Pulled::FastForwarded(count("HEAD"))) };
     let incoming = count(&format!("{before}..@{{upstream}}"));
     if stash_conflicted {
-        return Ok(Pulled::ChangesConflict(incoming));
+        let stash = run(root, &["rev-parse", "--verify", "--quiet", "refs/stash"]).ok().map(|s| s.trim().to_string());
+        return Ok(Pulled::ChangesConflict { incoming, stash });
     }
     let parents = run(root, &["rev-list", "--parents", "-n", "1", "HEAD"]).unwrap_or_default();
     let parents: Vec<&str> = parents.split_whitespace().skip(1).collect();
@@ -1793,21 +1797,23 @@ pub fn abort(root: &Path, state: RepoState) -> Result<(), String> {
 
 /// Continues after conflicts are resolved and staged, keeping git's message.
 pub fn continue_op(root: &Path, state: RepoState) -> Result<String, String> {
+    let mut args = merge_config(root);
     match state {
         // A merge continues by committing.
-        RepoState::Merging => run(root, &["commit", "--no-edit"]),
-        _ => run(root, &["-c", "core.editor=true", state.command(), "--continue"]),
+        RepoState::Merging => args.extend(["commit", "--no-edit"]),
+        _ => args.extend(["-c", "core.editor=true", state.command(), "--continue"]),
     }
+    run(root, &args)
 }
 
 /// Merges `branch` into the current branch. Conflicts aren't an error: the
 /// merge stops and `repo_state` reports it.
 pub fn merge(root: &Path, branch: &str) -> Result<String, String> {
-    run(root, &["merge", "--no-edit", branch]).or_else(|e| conflicts_or(root, e))
+    run(root, &[merge_config(root).as_slice(), &["merge", "--no-edit", branch]].concat()).or_else(|e| conflicts_or(root, e))
 }
 
 pub fn rebase(root: &Path, onto: &str) -> Result<String, String> {
-    run(root, &["-c", "core.editor=true", "rebase", onto]).or_else(|e| conflicts_or(root, e))
+    run(root, &[merge_config(root).as_slice(), &["-c", "core.editor=true", "rebase", onto]].concat()).or_else(|e| conflicts_or(root, e))
 }
 
 fn conflicts_or(root: &Path, err: String) -> Result<String, String> {
@@ -1816,6 +1822,124 @@ fn conflicts_or(root: &Path, err: String) -> Result<String, String> {
     } else {
         Err(err)
     }
+}
+
+/// Config for the commands that can stop on conflicts (and for the commits
+/// that end them): conflict markers with the base in them (`zdiff3`, else
+/// `diff3` on Gits before 2.35), which `conflict::merge3` needs; and, unless
+/// the Git config says otherwise, rerere, so a conflict resolved once (in a
+/// rebase that's run again, say) is resolved the same way the next time.
+fn merge_config(root: &Path) -> Vec<&'static str> {
+    static ZDIFF3: OnceLock<bool> = OnceLock::new();
+    let zdiff3 = *ZDIFF3.get_or_init(|| {
+        let out = run(Path::new("."), &["version"]).unwrap_or_default();
+        let version: Vec<u32> = out.split_whitespace().nth(2).unwrap_or("").split('.').take(2).filter_map(|n| n.parse().ok()).collect();
+        version.as_slice() >= [2, 35].as_slice()
+    });
+    let mut args = vec!["-c", if zdiff3 { "merge.conflictStyle=zdiff3" } else { "merge.conflictStyle=diff3" }];
+    if run(root, &["config", "--get", "rerere.enabled"]).is_err() {
+        args.extend(["-c", "rerere.enabled=true", "-c", "rerere.autoUpdate=true"]);
+    }
+    args
+}
+
+/// What `resolve_simple` did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SimpleResolved {
+    /// Conflicts combined.
+    pub resolved: usize,
+    /// Conflicts left for the user.
+    pub left: usize,
+    /// Files with nothing left, marked resolved.
+    pub files: Vec<String>,
+}
+
+/// Combines the conflicts in `rels` whose two sides change different words
+/// (`conflict::resolve_simple`), and marks files with none left resolved.
+/// Files that aren't UTF-8 text are left alone.
+pub fn resolve_simple(root: &Path, rels: &[String]) -> Result<SimpleResolved, String> {
+    let mut done = SimpleResolved::default();
+    for rel in rels {
+        let path = root.join(rel);
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let (resolved, n, left) = crate::conflict::resolve_simple(&text);
+        done.left += left;
+        if n == 0 {
+            continue;
+        }
+        std::fs::write(&path, resolved).map_err(|e| format!("couldn't write {rel}: {e}"))?;
+        done.resolved += n;
+        if left == 0 {
+            done.files.push(rel.clone());
+        }
+    }
+    if !done.files.is_empty() {
+        mark_resolved(root, &done.files)?;
+    }
+    Ok(done)
+}
+
+/// Marks conflicted files resolved: staged, in a merge or rebase; after
+/// changes were put back over new commits (no operation stopped), unstaged
+/// again, as they were before.
+fn mark_resolved(root: &Path, rels: &[String]) -> Result<(), String> {
+    if repo_state(root).is_some() {
+        return stage(root, rels);
+    }
+    let mut args = vec!["--literal-pathspecs", "reset", "--quiet", "--"];
+    args.extend(rels.iter().map(String::as_str));
+    run(root, &args).map(drop)
+}
+
+/// A side of a conflict, in Git's terms: `Ours` is `HEAD` (the branch being
+/// rebased onto, during a rebase), `Theirs` what's merged in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Ours,
+    Theirs,
+}
+
+impl Side {
+    /// Which side holds the user's own work: in a merge, cherry-pick or
+    /// revert the current branch; in a rebase the commit being replayed, and
+    /// for a stash put back over new commits (no operation stopped) the stash.
+    pub fn yours(state: Option<RepoState>) -> Side {
+        match state {
+            Some(RepoState::Merging | RepoState::CherryPicking | RepoState::Reverting) => Side::Ours,
+            Some(RepoState::Rebasing) | None => Side::Theirs,
+        }
+    }
+
+    fn stage(self) -> &'static str {
+        match self {
+            Side::Ours => "2",
+            Side::Theirs => "3",
+        }
+    }
+}
+
+/// Resolves conflicted files by taking one side's whole version; where that
+/// side deleted a file, the file goes to the Trash and is removed from the
+/// index. Works for what the editor can't resolve: binary files, files deleted
+/// on one side, lock files.
+pub fn accept_side(root: &Path, rels: &[String], side: Side) -> Result<(), String> {
+    for rel in rels {
+        // Each unmerged stage that exists: "<mode> <sha> <stage>\t<path>".
+        let out = run(root, &["ls-files", "--unmerged", "-z", "--", &format!(":(literal){rel}")])?;
+        let has_side = out.split('\0').any(|entry| entry.split('\t').next().and_then(|meta| meta.split(' ').nth(2)) == Some(side.stage()));
+        if has_side {
+            let flag = if side == Side::Ours { "--ours" } else { "--theirs" };
+            run(root, &["--literal-pathspecs", "checkout", flag, "--", rel])?;
+            mark_resolved(root, std::slice::from_ref(rel))?;
+        } else {
+            let path = root.join(rel);
+            if path.symlink_metadata().is_ok() {
+                crate::file_history::move_to_trash(&path).map_err(|e| format!("couldn't move {rel} to the Trash: {e}"))?;
+            }
+            run(root, &["--literal-pathspecs", "rm", "--cached", "--quiet", "--", rel])?;
+        }
+    }
+    Ok(())
 }
 
 // ---- Remotes ------------------------------------------------------------------------
@@ -1898,11 +2022,11 @@ pub fn create_tag(root: &Path, name: &str, at: &str) -> Result<(), String> {
 
 /// Like `merge`: conflicts stop it ("CONFLICT"), for Continue / Abort.
 pub fn cherry_pick(root: &Path, sha: &str) -> Result<String, String> {
-    run(root, &["cherry-pick", sha]).or_else(|e| conflicts_or(root, e))
+    run(root, &[merge_config(root).as_slice(), &["cherry-pick", sha]].concat()).or_else(|e| conflicts_or(root, e))
 }
 
 pub fn revert(root: &Path, sha: &str) -> Result<String, String> {
-    run(root, &["revert", "--no-edit", sha]).or_else(|e| conflicts_or(root, e))
+    run(root, &[merge_config(root).as_slice(), &["revert", "--no-edit", sha]].concat()).or_else(|e| conflicts_or(root, e))
 }
 
 /// How much a reset keeps: the changes staged (soft), in the working tree
@@ -1937,17 +2061,20 @@ pub struct Stash {
     /// "On main: message", or "WIP on main: abc123 subject".
     pub message: String,
     pub time: i64,
+    /// Its commit.
+    pub sha: String,
 }
 
 pub fn stashes(root: &Path) -> Vec<Stash> {
-    let Ok(out) = run(root, &["stash", "list", "--format=%gd%x00%gs%x00%ct"]) else { return Vec::new() };
+    let Ok(out) = run(root, &["stash", "list", "--format=%gd%x00%gs%x00%ct%x00%H"]) else { return Vec::new() };
     out.lines()
         .filter_map(|line| {
             let mut parts = line.split('\0');
             let index = parts.next()?.strip_prefix("stash@{")?.strip_suffix('}')?.parse().ok()?;
             let message = parts.next()?.to_string();
             let time = parts.next()?.parse().unwrap_or(0);
-            Some(Stash { index, message, time })
+            let sha = parts.next().unwrap_or_default().to_string();
+            Some(Stash { index, message, time, sha })
         })
         .collect()
 }
@@ -1996,7 +2123,8 @@ pub fn unstash(root: &Path, index: usize, pop: bool) -> Result<Unstashed, String
     let name = format!("stash@{{{index}}}");
     let blockers = stash_blockers(root, index);
     let before = status(root)?.files;
-    let Err(error) = run(root, &["stash", if pop { "pop" } else { "apply" }, &name]) else { return Ok(Unstashed::Applied) };
+    let args = [merge_config(root).as_slice(), &["stash", if pop { "pop" } else { "apply" }, &name]].concat();
+    let Err(error) = run(root, &args) else { return Ok(Unstashed::Applied) };
     let after = status(root)?.files;
     if after.iter().any(|f| f.staged == Some(Change::Conflicted)) {
         Ok(Unstashed::Conflicts)
@@ -2009,6 +2137,17 @@ pub fn unstash(root: &Path, index: usize, pop: bool) -> Result<Unstashed, String
 
 pub fn drop_stash(root: &Path, index: usize) -> Result<(), String> {
     run(root, &["stash", "drop", &format!("stash@{{{index}}}")]).map(drop)
+}
+
+/// The commit of `stash@{index}`, which stays the same as stashes come and go.
+pub fn stash_sha(root: &Path, index: usize) -> Option<String> {
+    run(root, &["rev-parse", "--verify", "--quiet", &format!("stash@{{{index}}}")]).ok().map(|s| s.trim().to_string())
+}
+
+/// Drops the stash whose commit is `sha`, wherever it is in the list now.
+pub fn drop_stash_sha(root: &Path, sha: &str) -> Result<(), String> {
+    let index = stashes(root).into_iter().find(|s| s.sha == sha).map(|s| s.index).ok_or("The stash is no longer there")?;
+    drop_stash(root, index)
 }
 
 // ---- History ------------------------------------------------------------------------
@@ -2849,6 +2988,54 @@ u UU N... 100644 100644 100644 100644 f g h conflict.js\0\
     }
 
     #[test]
+    fn simple_conflicts_and_whole_versions() {
+        if !is_available() {
+            return;
+        }
+        let root = test_repo("conflicts");
+        let write = |rel: &str, text: &str| std::fs::write(root.join(rel), text).unwrap();
+        let read = |rel: &str| std::fs::read_to_string(root.join(rel)).unwrap();
+        let commit_all = |message: &str| {
+            run(&root, &["add", "--all"]).unwrap();
+            commit(&root, message, false).unwrap();
+        };
+        write("code.rs", "let x = 1;\nlet y = 2;\nlet z = 3;\n");
+        write("words.txt", "one\n");
+        write("gone.txt", "base\n");
+        commit_all("base");
+        run(&root, &["switch", "--quiet", "-c", "other"]).unwrap();
+        write("code.rs", "let x = 1;\nlet y = 20;\nlet z = 3;\n");
+        write("words.txt", "theirs\n");
+        std::fs::remove_file(root.join("gone.txt")).unwrap();
+        commit_all("other");
+        run(&root, &["switch", "--quiet", "main"]).unwrap();
+        write("code.rs", "let x = 10;\nlet y = 2;\nlet z = 3;\n");
+        write("words.txt", "ours\n");
+        write("gone.txt", "changed\n");
+        commit_all("main");
+
+        assert_eq!(merge(&root, "other").unwrap(), "CONFLICT");
+        let conflicted = || status(&root).unwrap().conflicted().map(|f| f.rel.clone()).collect::<Vec<_>>();
+        assert_eq!(conflicted(), ["code.rs", "gone.txt", "words.txt"]);
+        // Neighboring lines combine; the same word changed both ways doesn't.
+        let done = resolve_simple(&root, &conflicted()).unwrap();
+        assert_eq!(done, SimpleResolved { resolved: 1, left: 1, files: vec!["code.rs".into()] });
+        assert_eq!(read("code.rs"), "let x = 10;\nlet y = 20;\nlet z = 3;\n");
+        assert!(read("words.txt").contains("<<<<<<<"));
+        // In a merge, yours is the current branch.
+        assert_eq!(Side::yours(repo_state(&root)), Side::Ours);
+        accept_side(&root, &["words.txt".into()], Side::Theirs).unwrap();
+        assert_eq!(read("words.txt"), "theirs\n");
+        // Deleted on their side, kept changed on ours.
+        accept_side(&root, &["gone.txt".into()], Side::Ours).unwrap();
+        assert_eq!(read("gone.txt"), "changed\n");
+        assert!(conflicted().is_empty());
+        continue_op(&root, RepoState::Merging).unwrap();
+        assert_eq!(repo_state(&root), None);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn pull_strategies() {
         if !is_available() {
             return;
@@ -2994,11 +3181,34 @@ u UU N... 100644 100644 100644 100644 f g h conflict.js\0\
         // and kept in a stash.
         publish("a.txt", &lines("theirs", "8"));
         write(&ours, "a.txt", &lines("mine", "8"));
-        assert_eq!(pull(&ours, None).unwrap(), Pulled::ChangesConflict(1));
+        let pulled = pull(&ours, None).unwrap();
+        let stash = stashes(&ours).first().map(|s| s.sha.clone());
+        assert_eq!(pulled, Pulled::ChangesConflict { incoming: 1, stash: stash.clone() });
         assert_eq!(file("a.txt").and_then(|(staged, _)| staged), Some(Change::Conflicted));
         assert!(read("a.txt").contains("<<<<<<<") && read("a.txt").contains("mine"));
         assert_eq!(stashes(&ours).len(), 1);
         assert_eq!(repo_state(&ours), None);
+        // Whole versions: the user's own here is the stash's.
+        assert_eq!(Side::yours(repo_state(&ours)), Side::Theirs);
+        accept_side(&ours, &["a.txt".into()], Side::Theirs).unwrap();
+        assert_eq!(read("a.txt"), lines("mine", "8"));
+        assert!(status(&ours).unwrap().conflicted().next().is_none());
+        drop_stash_sha(&ours, &stash.unwrap()).unwrap();
+        assert!(stashes(&ours).is_empty());
+        clean();
+
+        // Changes to neighboring lines conflict for Git; the base in the
+        // markers lets them combine, and the file is marked resolved.
+        publish("a.txt", &lines("theirs", "8").replace("3\n", "three\n"));
+        write(&ours, "a.txt", &lines("mine", "8"));
+        let pulled = pull(&ours, None).unwrap();
+        assert!(matches!(pulled, Pulled::ChangesConflict { .. }), "{pulled:?}");
+        assert!(read("a.txt").contains("|||||||"), "{}", read("a.txt"));
+        let done = resolve_simple(&ours, &["a.txt".into()]).unwrap();
+        assert_eq!(done, SimpleResolved { resolved: 1, left: 0, files: vec!["a.txt".into()] });
+        assert_eq!(read("a.txt"), lines("mine", "8").replace("3\n", "three\n"));
+        // Unstaged again, as it was before the pull.
+        assert_eq!(file("a.txt"), Some((None, modified)));
         clean();
 
         // Rebasing refuses any local change; it's put back after.

@@ -65,6 +65,7 @@ and theme colors.
 | `trust_all_projects` | `false` | run language servers, formatters and project tools in every folder without asking; see [Project trust](#project-trust) |
 | `native_grammars` | `false` | compile extensions' grammars to native code with your C compiler instead of WebAssembly (only for extensions installed from a folder in a trusted folder) |
 | `auto_update` | `true` | download new releases in the background; see [Releases and updates](install.md#updates) |
+| `auto_resolve_conflicts` | `true` | when a pull, merge or rebase stops on conflicts, combine the simple ones (the two sides changed different words, or made the same change) and mark files with none left resolved; see [Git](git.md) |
 | `pull_strategy` | unset | how Update Project combines incoming commits with yours when both branches have new ones: `"merge"`, `"rebase"` or `"ff_only"` (stop instead); unset, Git's `pull.rebase` / `pull.ff` decide, else the first such pull asks and saves the answer; see [Git](git.md) |
 
 ```jsonc
