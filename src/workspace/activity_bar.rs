@@ -288,7 +288,16 @@ impl Workspace {
                     .child(self.render_view_tab(SidebarMode::Files, cx))
                     .child(self.render_view_tab(SidebarMode::Commit, cx)),
             )
-            .child(div().flex_1().min_h_0())
+            // The free space between the views and the tools moves the window,
+            // as the title bar's would (the bar runs up beside it). Its own
+            // right-click, since on Windows the drag area hides the bar behind it.
+            .child(window_drag_area("activity-free").flex_1().min_h_0().w_full().on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|ws, e: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    ws.open_sidebar_tab_menu(e.position, window, cx);
+                }),
+            ))
             .children(more)
             .children(groups.into_iter().enumerate().flat_map(|(ix, buttons)| {
                 (ix > 0).then(|| sep().into_any_element()).into_iter().chain(buttons)
