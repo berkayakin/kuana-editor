@@ -998,9 +998,9 @@ impl Workspace {
 
     pub(super) fn open_push_modal(&mut self, dialog: Entity<PushDialog>, window: &mut Window, cx: &mut Context<Self>) {
         let subscription = cx.subscribe_in(&dialog, window, |ws, dialog, event: &PushDialogEvent, window, cx| match event {
-            PushDialogEvent::Push { force, remote } => {
+            PushDialogEvent::Push { force, remote, tags } => {
                 ws.close_modal(window, cx);
-                ws.run_git(GitOp::PushNow { force: *force, remote: remote.clone() }, window, cx);
+                ws.run_git(GitOp::PushNow { force: *force, remote: remote.clone(), tags: tags.clone() }, window, cx);
             }
             PushDialogEvent::OpenDiff(source) => {
                 ws.close_modal(window, cx);
@@ -1398,7 +1398,24 @@ fn perform(dir: &Path, op: GitOp, status: &RepoStatus) -> Result<Outcome, String
         }
         // `Push` opens the dialog before it gets here; treat it as a plain push.
         GitOp::Push => push(dir, false, None).map(Some),
-        GitOp::PushNow { force, remote } => push(dir, force, remote).map(Some),
+        GitOp::PushNow { force, remote, tags } => {
+            // The tags go where the branch went.
+            let tag_remote = remote.clone().or_else(|| git::push_remote(dir));
+            // Only tags: the branch is on its remote already.
+            let only_tags = !tags.is_empty() && git::status(dir).is_ok_and(|s| s.upstream.is_some() && s.ahead == 0) && !force;
+            let pushed = if only_tags { String::new() } else { push(dir, force, remote)? };
+            match (tags.as_slice(), tag_remote) {
+                ([], _) => Ok(Some(pushed)),
+                (_, None) => Err("No remote is configured. Add one in Git → Manage Remotes….".into()),
+                (tags, Some(remote)) => git::push_tags(dir, &remote, tags).map(|_| {
+                    let what = match tags {
+                        [one] => format!("tag {one}"),
+                        many => format!("{} tags", many.len()),
+                    };
+                    Some(if only_tags { format!("Pushed {what} to {remote}") } else { format!("{pushed}, with {what}") })
+                }),
+            }
+        }
         GitOp::Sync(strategy) => {
             let pulled = perform(dir, GitOp::Pull(strategy), status)?;
             // Pushes only after a pull that left nothing to sort out.

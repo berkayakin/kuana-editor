@@ -24,8 +24,9 @@ actions!(push_dialog, [ConfirmPush]);
 const ROW_HEIGHT: f32 = 30.;
 
 pub enum PushDialogEvent {
-    /// `remote`: where a branch without an upstream goes.
-    Push { force: bool, remote: Option<String> },
+    /// `remote`: where a branch without an upstream goes; `tags`: tags to
+    /// push with it.
+    Push { force: bool, remote: Option<String>, tags: Vec<String> },
     ManageRemotes,
     OpenDiff(DiffSource),
     Dismissed,
@@ -40,6 +41,10 @@ pub struct PushDialog {
     force: bool,
     /// The remote a new branch is pushed to (origin, else the first).
     remote: Option<String>,
+    /// Local tags the remote doesn't have (None: still asking, or it couldn't be asked).
+    tags: Option<Vec<String>>,
+    /// Whether they go with the push (on when there are any).
+    push_tags: bool,
     focus_handle: FocusHandle,
     scroll: UniformListScrollHandle,
     details_scroll: gpui::ScrollHandle,
@@ -64,6 +69,23 @@ impl PushDialog {
                 cx.notify();
             })
             .ok();
+            // Then which tags are new to the remote: that asks it, so after the commits show.
+            let Ok(remote) = this.update(cx, |this, _| this.remote.clone()) else { return };
+            let root = this.update(cx, |this, _| this.repo.clone()).ok();
+            let tags = cx
+                .background_executor()
+                .spawn(async move {
+                    let root = root?;
+                    let remote = git::push_remote(&root).or(remote)?;
+                    git::unpushed_tags(&root, &remote)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.push_tags = tags.as_ref().is_some_and(|t| !t.is_empty());
+                this.tags = tags;
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
         Self {
@@ -73,6 +95,8 @@ impl PushDialog {
             details: None,
             force: false,
             remote: None,
+            tags: None,
+            push_tags: false,
             focus_handle,
             scroll: UniformListScrollHandle::new(),
             details_scroll: gpui::ScrollHandle::new(),
@@ -113,17 +137,23 @@ impl PushDialog {
         cx.notify();
     }
 
-    /// A push would do something: there's a remote, and new commits or a
-    /// new branch to create there.
+    /// The tags going with the push.
+    fn tags_to_push(&self) -> Vec<String> {
+        self.tags.clone().filter(|_| self.push_tags).unwrap_or_default()
+    }
+
+    /// A push would do something: there's a remote, and new commits, a new
+    /// branch to create there or tags to send.
     fn can_push(&self) -> bool {
-        matches!(&self.preview, Some(Ok(p)) if p.has_remote && (!p.commits.is_empty() || p.upstream.is_none()))
+        let tags = !self.tags_to_push().is_empty();
+        matches!(&self.preview, Some(Ok(p)) if p.has_remote && (!p.commits.is_empty() || p.upstream.is_none() || tags))
     }
 
     fn confirm(&mut self, cx: &mut Context<Self>) {
         if matches!(&self.preview, Some(Ok(p)) if !p.has_remote) {
             cx.emit(PushDialogEvent::ManageRemotes);
         } else if self.can_push() {
-            cx.emit(PushDialogEvent::Push { force: self.force, remote: self.remote.clone() });
+            cx.emit(PushDialogEvent::Push { force: self.force, remote: self.remote.clone(), tags: self.tags_to_push() });
         }
     }
 
@@ -315,7 +345,10 @@ impl Render for PushDialog {
             None => div().flex_1().p_4().text_color(theme.text_dim).child("Looking for commits to push…").into_any_element(),
             Some(Err(e)) => div().flex_1().p_4().text_color(theme.error).child(e.clone()).into_any_element(),
             Some(Ok(p)) if commits.is_empty() => {
-                let text = if p.upstream.is_some() {
+                let tags = self.tags.as_ref().is_some_and(|t| !t.is_empty());
+                let text = if p.upstream.is_some() && tags {
+                    "No new commits; the remote doesn't have some of your tags yet."
+                } else if p.upstream.is_some() {
                     "Everything is pushed: there are no new commits."
                 } else {
                     "No new commits; pushing creates the branch on the remote."
@@ -382,8 +415,36 @@ impl Render for PushDialog {
                 format!("{} commit{} to push", p.commits.len(), if p.commits.len() == 1 { "" } else { "s" }),
                 theme.text_dim.into(),
             )),
+            Some(Ok(_)) if !self.tags_to_push().is_empty() => Some(("Only tags to push".into(), theme.text_dim.into())),
             _ => None,
         };
+        // New tags: listed on a checkbox, on to start with.
+        let tags_box = self.tags.clone().filter(|t| !t.is_empty()).map(|tags| {
+            let on = self.push_tags;
+            let shown: Vec<&str> = tags.iter().take(3).map(String::as_str).collect();
+            let label = match tags.len() {
+                n if n > 3 => format!("Push tags ({}, +{})", shown.join(", "), n - 3),
+                _ => format!("Push tags ({})", shown.join(", ")),
+            };
+            let tip = format!("Tags the remote doesn't have yet: {}", tags.join(", "));
+            div()
+                .id("push-tags")
+                .flex()
+                .items_center()
+                .gap_1()
+                .min_w_0()
+                .flex_shrink()
+                .cursor_pointer()
+                .text_size(px(12.5))
+                .text_color(theme.text_muted)
+                .tooltip(move |_, cx| tooltip_view(tip.clone(), cx))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.push_tags = !this.push_tags;
+                    cx.notify();
+                }))
+                .child(icon_el(if on { Icon::SquareCheck } else { Icon::Square }, px(15.), if on { theme.accent.into() } else { theme.text_dim.into() }))
+                .child(div().min_w_0().truncate().child(label))
+        });
         let can_push = self.can_push();
         let no_remote = matches!(&preview, Some(Ok(p)) if !p.has_remote);
         let force = self.force;
@@ -404,6 +465,7 @@ impl Render for PushDialog {
                     .text_size(px(12.))
                     .when_some(note, |el, (text, color)| el.text_color(color).child(text)),
             )
+            .children(tags_box)
             .child(
                 div()
                     .id("push-force")

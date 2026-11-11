@@ -36,7 +36,8 @@ pub enum GitOp {
     Push,
     /// Pushes the current branch (from the Push dialog); one without an
     /// upstream goes to `remote` (else the default remote).
-    PushNow { force: bool, remote: Option<String> },
+    /// `tags`: tags to push after the branch.
+    PushNow { force: bool, remote: Option<String>, tags: Vec<String> },
     /// Pulls with this strategy, else the `pull_strategy` setting's.
     Pull(Option<git::PullStrategy>),
     /// Pulls (as `Pull`), then opens the Push dialog when there are commits
