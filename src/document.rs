@@ -246,6 +246,9 @@ pub struct Document {
     tickets: (u64, u64),
     /// What the last save taken writes: the version, encoding and line ends.
     last_save: Option<(u64, TextEncoding, bool)>,
+    /// Shown, never changed: edits and undo do nothing (the Merge view's
+    /// versions of a file).
+    read_only: bool,
 }
 
 impl Document {
@@ -315,6 +318,14 @@ impl Document {
         Self::with_text(text, path, false, None)
     }
 
+    /// Text to look at, not change (`read_only`), colored as `language`.
+    pub fn read_only(text: String, language: Language) -> Self {
+        let mut doc = Self::from_text(text, None);
+        doc.read_only = true;
+        doc.set_language(language);
+        doc
+    }
+
     /// `budget`: parse for at most this long here, the rest in the background.
     fn with_text(text: String, path: Option<PathBuf>, large: bool, budget: Option<Duration>) -> Self {
         // Normalize to LF internally; remember the style for saving.
@@ -378,6 +389,7 @@ impl Document {
             writes: Arc::default(),
             tickets: (0, 0),
             last_save: None,
+            read_only: false,
         }
     }
 
@@ -719,6 +731,10 @@ impl Document {
         kind: EditKind,
     ) -> Vec<Range<usize>> {
         let count = edits.len();
+        // Nothing changes; each edit's range comes back empty where it starts.
+        if self.read_only {
+            return edits.iter().map(|(range, _)| self.clip(range.start)..self.clip(range.start)).collect();
+        }
         let mut edits: Vec<(usize, Range<usize>, String)> = edits
             .into_iter()
             .enumerate()
@@ -849,6 +865,9 @@ impl Document {
     /// `make_at_once`): thousands of carets' typing is as many edits as
     /// carets, and what follows the text moves once.
     pub fn undo(&mut self) -> Option<Vec<Selection>> {
+        if self.read_only {
+            return None;
+        }
         let t = self.undo_stack.pop()?;
         // Its records undone, the last first.
         let undone: Vec<Replaced> = t.edits.iter().rev().map(|r| Replaced { start: r.start, old: &r.new, new: &r.old }).collect();
@@ -859,6 +878,9 @@ impl Document {
     }
 
     pub fn redo(&mut self) -> Option<Vec<Selection>> {
+        if self.read_only {
+            return None;
+        }
         let t = self.redo_stack.pop()?;
         let redone: Vec<Replaced> = t.edits.iter().map(|r| Replaced { start: r.start, old: &r.old, new: &r.new }).collect();
         self.make_at_once(&redone);
@@ -2238,6 +2260,16 @@ mod tests {
         assert_eq!(doc.code_lenses().iter().map(|l| l.line_start).collect::<Vec<_>>(), [17, 27]);
         doc.edit(vec![(17..27, String::new())], &[], EditKind::Other);
         assert_eq!(doc.code_lenses().iter().map(|l| l.line_start).collect::<Vec<_>>(), [17]);
+    }
+
+    #[test]
+    fn a_read_only_document_ignores_edits() {
+        let mut doc = Document::read_only("one\ntwo\n".into(), Language::PlainText);
+        let ranges = doc.edit(vec![(4..7, "2".into()), (0..0, "x".into())], &[], EditKind::Other);
+        assert_eq!(ranges, [4..4, 0..0]);
+        assert_eq!(doc.rope().to_string(), "one\ntwo\n");
+        assert_eq!(doc.version(), 0);
+        assert!(doc.undo().is_none() && doc.redo().is_none());
     }
 
     #[test]

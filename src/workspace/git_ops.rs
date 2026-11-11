@@ -55,6 +55,101 @@ impl Workspace {
         .detach();
     }
 
+    /// Opens a conflicted file in the Merge view: its tab's editor in the
+    /// middle, the versions from the index's conflict stages around it
+    /// (base 1, ours 2, theirs 3; yours is the user's side, `Side::yours`).
+    pub(super) fn show_merge(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(repo) = self.repo.clone() else { return };
+        let Some(rel) = path.strip_prefix(&repo).ok().map(|r| r.to_string_lossy().replace('\\', "/")) else { return };
+        let read_rel = rel.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let stages = cx
+                .background_executor()
+                .spawn(async move {
+                    let stage = |n: u8| git::blob_bytes(&repo, &format!(":{n}:{read_rel}"));
+                    let yours = git::Side::yours(git::repo_state(&repo));
+                    (stage(1), stage(2), stage(3), yours)
+                })
+                .await;
+            this.update_in(cx, |ws, window, cx| ws.open_merge(path, rel, stages, window, cx)).ok();
+        })
+        .detach();
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn open_merge(
+        &mut self,
+        path: PathBuf,
+        rel: String,
+        (base, ours, theirs, yours): (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, git::Side),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if ours.is_none() && theirs.is_none() {
+            self.toast(ToastKind::Info, format!("{rel} isn't conflicted"), None, cx);
+            return;
+        }
+        let binary = [&base, &ours, &theirs].into_iter().flatten().any(|b| crate::encoding::looks_binary(&b[..b.len().min(8000)]));
+        if binary {
+            let detail = "Right-click it in the Commit panel for Accept Yours or Accept Theirs.".to_string();
+            self.toast(ToastKind::Info, format!("{rel} is a binary file"), Some(detail), cx);
+            return;
+        }
+        let text = |b: Option<Vec<u8>>| b.map(|b| String::from_utf8_lossy(&b).into_owned());
+        let (base, ours, theirs) = (text(base).unwrap_or_default(), text(ours), text(theirs));
+        // Each side as the markers name it ("HEAD", a branch, "Stashed changes").
+        if path.exists() {
+            self.open_path(path.clone(), window, cx);
+        }
+        let Some(file) = self.tab_for(&path, cx) else {
+            // Gone from the working tree (deleted on one side): only a whole side resolves it.
+            self.toast(ToastKind::Info, format!("{rel} was deleted on one side"), Some("Right-click it in the Commit panel for Accept Yours or Accept Theirs.".into()), cx);
+            return;
+        };
+        let labels = crate::conflict::parse(&file.read(cx).doc.read(cx).rope().to_string())
+            .first()
+            .map(|c| (c.ours_label.clone(), c.theirs_label.clone()))
+            .unwrap_or_default();
+        let (ours, theirs) = (
+            crate::merge_view::Version { text: ours, label: labels.0 },
+            crate::merge_view::Version { text: theirs, label: labels.1 },
+        );
+        let (mine, other) = match yours {
+            git::Side::Ours => (ours, theirs),
+            git::Side::Theirs => (theirs, ours),
+        };
+        self.close_modal(window, cx);
+        let view = cx.new(|cx| crate::merge_view::MergeView::new(rel.clone(), &file, base, mine, other, window, cx));
+        let subscription = cx.subscribe_in(&view, window, move |ws, _, event: &crate::merge_view::MergeViewEvent, window, cx| match event {
+            crate::merge_view::MergeViewEvent::Close => ws.close_modal(window, cx),
+            crate::merge_view::MergeViewEvent::AcceptDeletion { yours } => {
+                ws.close_modal(window, cx);
+                ws.run_git(GitOp::AcceptSide { rels: vec![rel.clone()], yours: *yours }, window, cx);
+            }
+            crate::merge_view::MergeViewEvent::Apply => {
+                // Saved first: marking it resolved reads the file (and asks if markers remain).
+                let saving = file.update(cx, |e, cx| e.save_in_background(cx));
+                let rel = rel.clone();
+                cx.spawn_in(window, async move |this, cx| {
+                    let saved = saving.await;
+                    this.update_in(cx, |ws, window, cx| match saved {
+                        Ok(()) => {
+                            ws.close_modal(window, cx);
+                            ws.run_git(GitOp::Stage(vec![rel]), window, cx);
+                        }
+                        Err(err) => {
+                            let _ = window.prompt(PromptLevel::Critical, "Couldn't save file", Some(&err.to_string()), &["OK"], cx);
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        });
+        self.modals.open(Modal::Merge(view), subscription);
+        cx.notify();
+    }
+
     /// Asks the user what Git or SSH asks (`askpass`): a password or
     /// passphrase in a one-line dialog (bullets for secrets), or whether to
     /// trust a host SSH hasn't seen. Closing the dialog cancels.

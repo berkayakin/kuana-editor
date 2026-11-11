@@ -399,6 +399,8 @@ enum TreeAction {
     CollapseAll,
     Git(GitOp),
     ShowDiff(FileStatus, bool),
+    /// Opens a conflicted file in the Merge view.
+    Merge(PathBuf),
     AddToGitignore(String),
     /// The commits touching this repository-relative path.
     ShowHistory(String),
@@ -628,6 +630,7 @@ enum Modal {
     Remotes(Entity<RemotesDialog>),
     Trust(Entity<crate::trust_dialog::TrustDialog>),
     Connection(Entity<ConnectionDialog>),
+    Merge(Entity<crate::merge_view::MergeView>),
 }
 
 /// The modal over the workspace, if any, with its subscription: they're
@@ -943,6 +946,7 @@ impl Workspace {
             GitPanelEvent::Stash => ws.git_stash(&GitStash, window, cx),
             GitPanelEvent::OpenDiff { file, staged } => ws.open_diff(file.clone(), *staged, window, cx),
             GitPanelEvent::OpenFile(path) => ws.open_path(path.clone(), window, cx),
+            GitPanelEvent::OpenMerge(path) => ws.show_merge(path.clone(), window, cx),
             GitPanelEvent::Menu { file, staged, position } => ws.open_git_file_menu(file.clone(), *staged, *position, window, cx),
         });
         let tree = cx.new(ProjectTree::new);

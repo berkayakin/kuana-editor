@@ -64,7 +64,14 @@ background fetch never does, and stays quiet instead.
   (turn it off with `auto_resolve_conflicts`; **Resolve Simple** in the banner does it on
   demand). Kuana also turns on Git's rerere (unless your Git config sets it), so a conflict you
   resolved once, in a rebase you run again, is resolved the same way the next time.
-  Conflicted files open in the editor, where each conflict is tinted
+  Click a conflicted file in the Commit panel (or right-click → **Merge…**) for the **Merge
+  view**: yours on the left, theirs on the right and the result between them, scrolling
+  together line by line, with what each side changed from the common version marked in its
+  gutter. The result is the file itself, editable as in its tab and with the same undo; the
+  header steps through the conflicts left (↑ / ↓), resolves the simple ones, takes **Accept
+  Yours** / **Accept Theirs** for the whole file, and **Apply** saves it and marks it resolved
+  (Escape or Cancel closes it; edits stay in the file's tab).
+  Conflicted files also open in the editor, where each conflict is tinted
   (current side green, incoming blue) with **Accept Current / Accept Incoming / Accept Both**
   on its first line, plus **Accept Combination** when the sides combine (also in the right-click
   menu and Find Action). Right-click a conflicted file in the Commit panel for **Accept Yours**

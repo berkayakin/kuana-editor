@@ -26,7 +26,7 @@ Making what's there dependable on every platform before adding more.
 
 - **Editing**: semantic highlighting from language servers, Emmet, spell checking in comments,
   strings and Markdown, ESLint as you type (through its language server).
-- **Git**: a three-way merge editor, interactive rebase, deleting remote branches, the whole log
+- **Git**: interactive rebase, deleting remote branches, the whole log
   instead of the latest 3,000 commits.
 - **Debugger**: hit counts, exception breakpoint options, attaching to a debugpy or Node inspector
   port, debug adapters from extensions.

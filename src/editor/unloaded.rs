@@ -87,6 +87,12 @@ impl Editor {
         Some(self.line_at_row((self.scroll.y / layout.line_height).floor() as usize, cx))
     }
 
+    /// Scrolls so `line` is at the top of the view (on the next frame).
+    pub fn scroll_line_to_top(&mut self, line: usize, cx: &mut Context<Self>) {
+        self.scroll_to_line = Some(line);
+        cx.notify();
+    }
+
     /// Puts a restored tab's caret back, and its view where it was (else
     /// the caret in view).
     pub(super) fn restore_view(&mut self, cursor: usize, top_line: Option<usize>, cx: &mut Context<Self>) {

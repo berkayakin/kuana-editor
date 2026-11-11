@@ -46,6 +46,7 @@ mod local_history;
 mod lint;
 mod lsp;
 mod markdown_preview;
+mod merge_view;
 mod onboarding;
 mod pane_item;
 mod paths;

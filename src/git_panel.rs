@@ -132,6 +132,8 @@ pub enum GitPanelEvent {
     Stash,
     OpenDiff { file: FileStatus, staged: bool },
     OpenFile(PathBuf),
+    /// A conflicted file: open the Merge view.
+    OpenMerge(PathBuf),
     /// A file's row was right-clicked (`staged`: in the Staged section).
     Menu { file: FileStatus, staged: bool, position: Point<Pixels> },
 }
@@ -433,8 +435,10 @@ impl GitPanel {
                 )
                 .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
                     this.selected = Some((f.rel.clone(), staged));
-                    // A conflict is resolved in the editor, not read in a diff.
-                    if (e.click_count() >= 2 || conflicted) && !deleted {
+                    // A conflict is resolved in the Merge view, not read in a diff.
+                    if conflicted {
+                        cx.emit(GitPanelEvent::OpenMerge(f.path.clone()));
+                    } else if e.click_count() >= 2 && !deleted {
                         cx.emit(GitPanelEvent::OpenFile(f.path.clone()));
                     } else {
                         cx.emit(GitPanelEvent::OpenDiff { file: f.clone(), staged });
@@ -715,7 +719,7 @@ impl GitPanel {
             );
         }
         let hint = (conflicts > 0).then_some(
-            "Open each conflicted file, pick a side on its conflicts, then mark it resolved. Right-click a file to take one version whole.",
+            "Click a conflicted file to merge it: yours, the result and theirs side by side. Right-click a file to take one version whole.",
         );
         self.banner(state.label(), self.conflict_count(), hint, buttons, cx)
     }
@@ -727,9 +731,9 @@ impl GitPanel {
         let conflicts = self.status.conflicted().count();
         if conflicts > 0 {
             let hint = if kept.is_some() {
-                "Putting your changes back stopped on conflicts; they're also kept in a stash. Resolve each file, then mark it resolved."
+                "Putting your changes back stopped on conflicts; they're also kept in a stash. Click a conflicted file to merge it."
             } else {
-                "Resolve each file, then mark it resolved. Right-click a file to take one version whole."
+                "Click a conflicted file to merge it. Right-click a file to take one version whole."
             };
             let buttons = vec![self.resolve_simple_button(cx)];
             return self.banner("Your changes conflict", self.conflict_count(), Some(hint), buttons, cx);
