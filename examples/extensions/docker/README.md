@@ -1,7 +1,7 @@
 # Docker: a sample Kuana extension
 
 A Docker containers view on Kuana's activity bar, built with Kuana's extension UI API
-(see [Views, commands and panels](../../../docs/extensions.md#views-commands-and-panels)):
+(see [Writing view extensions](../../../docs/extension-ui.md)):
 
 - the containers on this machine, running ones first (green), each with its image, ports and status;
 - a click shows its logs in a panel; right-click for Show Logs, Inspect (the JSON opens in a tab),

@@ -57,7 +57,7 @@ and theme colors.
 | `project_avatar` | `true` | the round initial before the project's name in the title bar; Settings → Appearance → Layout |
 | `compact_activity_bar` | `false` | a narrower activity bar beside the sidebar, with smaller buttons and icons (the title bar's buttons' size), leaving more room for the sidebar and editor; Settings → Appearance → Layout |
 | `language_servers` | | per language: `false` turns its server off, `["cmd", "args"]` replaces it |
-| `extensions` | | per extension, by id: settings its code reads (see [Views, commands and panels](extensions.md#views-commands-and-panels)), as the extension documents them |
+| `extensions` | | per extension, by id: settings its code reads (see [Writing view extensions](extension-ui.md#settings)), as the extension documents them |
 | `lsp` | | per server, by id (Kuana's, e.g. `typescript`, or Zed's, e.g. `vtsls`, `basedpyright`): `settings` (what it asks for through `workspace/configuration`; a change is sent to it), `initialization_options` (applied when it restarts) and `binary` (`{ "path", "arguments" }`) |
 | `terminal_shell` | login shell | the terminal's shell and arguments, e.g. `["/opt/homebrew/bin/fish", "--login"]` |
 | `run_configurations` | | `[{ "name", "command", "cwd" }]` added to Run…; see [Run and test](run-and-debug.md#run-and-test) |
