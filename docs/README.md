@@ -9,6 +9,7 @@
 - [Git](git.md): gutter, staging, diffs, log, branches, merge conflicts
 - [Databases](database.md): Oracle connections, browsing schemas, compiling PL/SQL, running SQL
 - [Extensions](extensions.md): Zed-format extensions for languages, themes and icons
+- [Writing view extensions](extension-ui.md): views, commands and panels of your own, step by step
 - [Themes](themes.md): built-in themes and making your own
 - [Settings and project trust](settings.md): every option, `.editorconfig`, Restricted Mode
 - [Roadmap](roadmap.md): what's planned, and what isn't there yet

@@ -113,6 +113,7 @@ read what it [doesn't do yet](#known-limitations).
 | [Git](docs/git.md) | Everything Git |
 | [Databases](docs/database.md) | Oracle connections, browsing, compiling PL/SQL, running SQL |
 | [Extensions](docs/extensions.md) | Installing and writing extensions |
+| [Writing view extensions](docs/extension-ui.md) | Views, commands and panels of your own |
 | [Themes](docs/themes.md) | Built-in themes and making your own |
 | [Settings](docs/settings.md) | Every option, `.editorconfig`, project trust |
 | [Roadmap](docs/roadmap.md) | What's planned, and what isn't there yet |
