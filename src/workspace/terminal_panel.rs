@@ -344,10 +344,9 @@ impl TerminalPanel {
             .top_0()
             .left_0()
             .right_0()
-            .h(px(TAB_STRIP_HEIGHT))
+            .map(|el| tab_strip(el, &theme))
             .flex()
             .items_end()
-            .pt(px(tab_strip_top(&theme)))
             .pl(px(inset))
             // The buttons' own margins make up the rest.
             .pr(px((inset - 6.).max(2.)))

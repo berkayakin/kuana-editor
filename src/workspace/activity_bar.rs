@@ -651,6 +651,10 @@ fn view_tab_shape(right: bool, bar: BarSize, theme: &Theme) -> AnyElement {
                 gpui::Corners { top_left: radius, bottom_left: radius, ..Default::default() }
             };
             window.paint_quad(gpui::fill(Bounds::from_corners(point(left, top), point(right_x, bottom)), island).corner_radii(corners));
+            // A pixel further into the island: at fractional scales part of its
+            // border's column lies past the tab's snapped edge (see `tab_shape`).
+            let (inner_from, inner_to) = if right { (left - one, left) } else { (right_x, right_x + one) };
+            window.paint_quad(gpui::fill(Bounds::from_corners(point(inner_from, top), point(inner_to, bottom)), island));
             // The outline stops a foot short of the island; the feet's curves continue it.
             let (from, to) = if right { (left + r, right_x) } else { (left, right_x - r) };
             window.paint_quad(gpui::quad(

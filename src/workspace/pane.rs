@@ -302,11 +302,10 @@ impl Pane {
             .top_0()
             .left_0()
             .right_0()
-            .h(px(TAB_STRIP_HEIGHT))
+            .map(|el| tab_strip(el, &theme))
             .flex()
             .flex_row()
             .items_end()
-            .pt(px(tab_strip_top(&theme)))
             // Clear of the island's rounded corners on both sides, so the first
             // and last tabs' feet sit on its straight top edge.
             .pl(px(inset))
