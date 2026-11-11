@@ -318,6 +318,17 @@ impl Pane {
             .on_drop(cx.listener(|_, dragged: &DraggedTab, _, cx| {
                 cx.emit(PaneEvent::Drop { item: dragged.item.clone(), before: None });
             }))
+            // ⌥-drag moves the window from anywhere on the strip, tabs included,
+            // for when they leave little free space. Caught before the tabs
+            // hear the press, so it neither activates nor drags one.
+            .when(self.chrome.at_top && !cfg!(windows), |el| {
+                el.capture_any_mouse_down(|event, window, cx| {
+                    if event.button == MouseButton::Left && event.modifiers.alt && event.click_count == 1 {
+                        cx.stop_propagation();
+                        super::title_bar::move_window_with_pointer(window);
+                    }
+                })
+            })
             // Room for the title bar's lead, which still moves the window.
             .when(lead > inset, |el| el.child(window_drag_area("tabs-lead").flex_shrink_0().w(px(lead - inset))))
             .children(visible.iter().enumerate().map(|(pos, &ix)| {

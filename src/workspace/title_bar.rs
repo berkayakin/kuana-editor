@@ -34,6 +34,21 @@ pub fn window_drag_area(id: impl Into<gpui::ElementId>) -> Stateful<Div> {
         })
 }
 
+/// Moves the window with the pointer from a left mouse down being handled, on
+/// top of whatever is there (a modifier-drag over tabs). macOS and Linux;
+/// Windows has no call for it in GPUI.
+pub fn move_window_with_pointer(window: &Window) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = window;
+        drag_window();
+    }
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    window.start_window_move();
+    #[cfg(target_os = "windows")]
+    let _ = window;
+}
+
 /// Moves the key window with the pointer, from the mouse down being handled.
 #[cfg(target_os = "macos")]
 fn drag_window() {

@@ -464,6 +464,10 @@ fn edge_sheen(theme: &Theme, joint: Option<SideJoint>) -> impl IntoElement {
             let view = window.viewport_size();
             let width = f32::from(view.width).max(1.);
             let edges = SheenEdge::of(bounds, width, f32::from(view.height), joint);
+            // No edge long enough: nothing to draw or to follow the pointer for.
+            if edges.iter().all(Option::is_none) {
+                return;
+            }
             let drawn = edges.map(|edge| edge.map(|edge| edge.shape(window.mouse_position(), width, lit.a)));
             for (edge, shape) in edges.iter().zip(&drawn) {
                 let (Some(edge), Some(shape)) = (edge, shape) else { continue };
@@ -509,6 +513,10 @@ fn edge_sheen(theme: &Theme, joint: Option<SideJoint>) -> impl IntoElement {
 
 /// How near the pointer has to come to an edge to draw its sheen.
 const SHEEN_REACH: f32 = 96.;
+/// An edge's straight part shorter than this has no sheen: squeezed into a
+/// short side (a low bottom panel, a narrow sidebar) it reads as a smudge
+/// rather than a reflection, and isn't worth following the pointer for.
+const SHEEN_MIN_EDGE: f32 = 160.;
 /// Sheens follow the pointer at up to 30 frames a second: smooth enough for a
 /// soft glow, at a fraction of the display's rate.
 const SHEEN_FRAME: Duration = Duration::from_millis(33);
@@ -612,8 +620,8 @@ impl SheenShape {
 }
 
 impl SheenEdge {
-    /// The edges of an island (its border box) that have a straight part, in
-    /// a window `width` × `height`. A side with a tab joined to it starts
+    /// The edges of an island (its border box) whose straight part is at
+    /// least `SHEEN_MIN_EDGE` long, in a window `width` × `height`. A side with a tab joined to it starts
     /// under the tab: above it the edge is the tab's to draw.
     fn of(bounds: gpui::Bounds<Pixels>, width: f32, height: f32, joint: Option<SideJoint>) -> [Option<SheenEdge>; 3] {
         let (left, top) = (f32::from(bounds.left()), f32::from(bounds.top()));
@@ -627,13 +635,13 @@ impl SheenEdge {
             let (start, end) = (top + r.max(joined), bottom - r);
             let band = height * (0.62 - 0.5 * (at / width).clamp(0., 1.));
             let along = 0.7 * ((band - start) / (end - start)).clamp(0., 1.) + 0.3 * wobble(at, salt);
-            (end > start).then_some(SheenEdge { side, at, start, end, seed: at, salt, along, facing })
+            (end - start >= SHEEN_MIN_EDGE).then_some(SheenEdge { side, at, start, end, seed: at, salt, along, facing })
         };
         let (start, end) = (left + r, right - r);
         [
             side(SheenSide::Left, left, 0., 1.),
             side(SheenSide::Right, right - 1., 5., 0.55),
-            (end > start).then_some(SheenEdge {
+            (end - start >= SHEEN_MIN_EDGE).then_some(SheenEdge {
                 side: SheenSide::Bottom,
                 at: bottom - 1.,
                 start,
@@ -1201,6 +1209,17 @@ mod tests {
         // A tab on the right joins the right side.
         let [left, right, _] = SheenEdge::of(bounds, 1400., 875., Some(SideJoint { right: true, below: 112. }));
         assert_eq!((left.unwrap().start, right.unwrap().start), (37. + ISLAND_RADIUS, 37. + 112.));
+    }
+
+    /// Short edges have no sheen, each axis on its own: a low, wide panel
+    /// keeps its bottom's, a small island none.
+    #[test]
+    fn short_edges_have_no_sheen() {
+        let wide_low = gpui::Bounds::from_corners(gpui::point(px(0.), px(600.)), gpui::point(px(900.), px(700.)));
+        let [left, right, bottom] = SheenEdge::of(wide_low, 1400., 875., None);
+        assert!(left.is_none() && right.is_none() && bottom.is_some());
+        let small = gpui::Bounds::from_corners(gpui::point(px(0.), px(0.)), gpui::point(px(150.), px(150.)));
+        assert!(SheenEdge::of(small, 1400., 875., None).iter().all(Option::is_none));
     }
 
     #[test]
