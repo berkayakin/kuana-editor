@@ -393,6 +393,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::git_push))
             .on_action(cx.listener(Self::git_pull))
             .on_action(cx.listener(Self::git_sync))
+            .on_action(cx.listener(Self::git_undo_commit))
             .on_action(cx.listener(Self::git_fetch))
             .on_action(cx.listener(Self::git_branches))
             .on_action(cx.listener(Self::git_stash))

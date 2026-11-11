@@ -41,7 +41,8 @@ background fetch never does, and stays quiet instead.
   menu) to switch to a local or remote branch, or type a new name to create one. Hover another branch
   for **Merge** (into the current one) and **Rebase** (the current one onto it), and a local one
   for **Rename** and **Delete** (Kuana says when a branch has commits no other branch has, and
-  deletes it anyway only if you confirm). Switching keeps your uncommitted changes: when Git
+  deletes it anyway only if you confirm); a remote one for **Delete** on the remote itself (after
+  asking). Switching keeps your uncommitted changes: when Git
   refuses because they touch files the switch changes, Kuana stashes them, switches and puts them
   back over the other branch's version (JetBrains' smart checkout), staged where they were. Changes
   that clash with that version are left conflicted, simple conflicts resolved, and kept in a stash
@@ -91,6 +92,14 @@ background fetch never does, and stays quiet instead.
   Branch…** or **New Tag…** there, **Cherry-Pick** it onto the current branch, **Revert** it, or
   **Reset Here** soft (changes kept staged), mixed (kept unstaged) or hard (discarded, after
   asking). A cherry-pick or revert that conflicts stops like a merge, with Abort / Continue.
+- **Changing history:** on a commit of the current branch, the log's right-click menu also has
+  **Undo Commit** (the last one: the branch goes back a commit, its changes staged again and its
+  message back in the commit box; also **Undo Last Commit** in the Git menu and Find Action),
+  **Reword…** (a new first line; the rest of the message and the author stay), **Squash into
+  Previous Commit** (one commit with both messages) and **Drop Commit…**. The commits after it are
+  replayed on top, your uncommitted changes set aside meanwhile; only a drop can stop on
+  conflicts, resolved like a rebase's. A commit that's already pushed asks first, since the
+  branch then needs Force push. Branches with merge commits after the commit aren't rewritten.
   Questions about something that can't be undone (a hard reset, rolling back, dropping a stash,
   deleting a branch with commits no other branch has) have **Cancel** as the default: Return
   doesn't confirm them.

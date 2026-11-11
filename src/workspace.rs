@@ -245,6 +245,8 @@ actions!(
         GitPull,
         /// Update Project, then Push… when there are commits to push.
         GitSync,
+        /// The last commit undone, its changes staged again.
+        GitUndoCommit,
         GitFetch,
         GitBranches,
         GitStash,
@@ -434,6 +436,8 @@ enum GitPrompt {
     TagAt(String),
     /// The stash's message (optional).
     Stash,
+    /// A commit's new first line.
+    Reword { sha: String, subject: String },
 }
 
 /// The panels the bottom area shows, one at a time.

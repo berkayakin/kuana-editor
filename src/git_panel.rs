@@ -58,6 +58,12 @@ pub enum GitOp {
     /// Resolves conflicted files with the user's own version (`yours`) or the
     /// other one, whole (`git::accept_side`).
     AcceptSide { rels: Vec<String>, yours: bool },
+    /// Undoes the last commit, its changes staged again (its message back in the box).
+    UndoCommit,
+    /// Deletes a branch on its remote ("origin/feature").
+    DeleteRemoteBranch(String),
+    /// Rewrites one commit of the current branch (reword, squash, drop).
+    EditHistory { sha: String, edit: git::HistoryEdit },
     /// Drops the stash with this commit: the one a pull or Pop kept when
     /// putting changes back conflicted, once they're resolved.
     DropKeptStash(String),
@@ -110,7 +116,9 @@ impl GitOp {
             GitOp::CreateBranch(_) => "Creating branch…",
             GitOp::Init => "Initializing…",
             GitOp::AddRemote { .. } | GitOp::RemoveRemote(_) | GitOp::EditRemote { .. } => "Updating remotes…",
-            GitOp::DeleteBranch { .. } => "Deleting branch…",
+            GitOp::DeleteBranch { .. } | GitOp::DeleteRemoteBranch(_) => "Deleting branch…",
+            GitOp::UndoCommit => "Undoing commit…",
+            GitOp::EditHistory { .. } => "Rewriting history…",
             GitOp::RenameBranch { .. } => "Renaming branch…",
             GitOp::Stash { .. } => "Stashing…",
             GitOp::Unstash { .. } => "Applying stash…",
@@ -270,6 +278,15 @@ impl GitPanel {
         self.amend = false;
         self.include.clear();
         self.message.update(cx, |m, cx| m.set_text("", cx));
+        cx.notify();
+    }
+
+    /// Puts an undone commit's message back in the box, to commit again with.
+    pub fn restore_message(&mut self, message: &str, cx: &mut Context<Self>) {
+        if self.message_text(cx).is_empty() {
+            self.message.update(cx, |m, cx| m.set_text(message, cx));
+        }
+        self.amend = false;
         cx.notify();
     }
 

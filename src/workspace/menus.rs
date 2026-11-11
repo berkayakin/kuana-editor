@@ -213,6 +213,21 @@ impl Workspace {
             add(MenuEntry::item("Cherry-Pick", Icon::Plus), Some(TreeAction::Git(GitOp::CherryPick(sha.clone()))));
         }
         add(MenuEntry::item("Revert Commit", Icon::Undo), Some(TreeAction::Git(GitOp::Revert(sha.clone()))));
+        // History edits (the commit must be on the current branch; Kuana says so if not).
+        add(MenuEntry::Separator, None);
+        if is_head {
+            add(MenuEntry::item("Undo Commit", Icon::Undo), Some(TreeAction::Git(GitOp::UndoCommit)));
+        }
+        add(
+            MenuEntry::item("Reword…", Icon::Pencil),
+            Some(TreeAction::AskGit(GitPrompt::Reword { sha: sha.clone(), subject: entry.summary.clone() })),
+        );
+        if entry.parents.len() == 1 {
+            let edit = git::HistoryEdit::Squash;
+            add(MenuEntry::item("Squash into Previous Commit", Icon::ChevronsDownUp), Some(TreeAction::Git(GitOp::EditHistory { sha: sha.clone(), edit })));
+        }
+        let edit = git::HistoryEdit::Drop;
+        add(MenuEntry::item("Drop Commit…", Icon::Trash).danger(), Some(TreeAction::Git(GitOp::EditHistory { sha: sha.clone(), edit })));
         if !is_head {
             add(MenuEntry::Separator, None);
             let reset = |mode| Some(TreeAction::Git(GitOp::Reset { sha: sha.clone(), mode }));
@@ -341,6 +356,13 @@ impl Workspace {
             }
             PendingInput::Git(GitPrompt::TagAt(sha)) => ("New Tag", Icon::Tag, format!("At {}", &sha[..sha.len().min(7)]), String::new(), None),
             PendingInput::Git(GitPrompt::Stash) => ("Stash Changes", Icon::Archive, "A message (optional)".into(), String::new(), None),
+            PendingInput::Git(GitPrompt::Reword { sha, subject }) => (
+                "Reword Commit",
+                Icon::Pencil,
+                format!("The first line of {}'s message; the rest stays", &sha[..sha.len().min(7)]),
+                subject.clone(),
+                Some(0..subject.len()),
+            ),
         };
         self.close_modal(window, cx);
         let stash = matches!(pending, PendingInput::Git(GitPrompt::Stash));
@@ -459,6 +481,8 @@ impl Workspace {
                 GitPrompt::RenameBranch(from) => GitOp::RenameBranch { from, to: self.branch_name(name)? },
                 GitPrompt::BranchAt(sha) => GitOp::BranchAt { name: self.branch_name(name)?, sha },
                 GitPrompt::TagAt(sha) => GitOp::TagAt { name: name.to_string(), sha },
+                GitPrompt::Reword { subject, .. } if subject == name => return Ok(()),
+                GitPrompt::Reword { sha, .. } => GitOp::EditHistory { sha, edit: git::HistoryEdit::Reword(name.to_string()) },
             };
             self.pending_input = None;
             self.close_modal(window, cx);
