@@ -30,6 +30,8 @@ pub struct InputDialog {
     allow_empty: bool,
     /// A checkbox under the field: its label and whether it's checked.
     option: Option<(SharedString, bool)>,
+    /// A password: shown as bullets, and taken as typed (spaces included).
+    secret: bool,
 }
 
 impl EventEmitter<InputDialogEvent> for InputDialog {}
@@ -60,12 +62,13 @@ impl InputDialog {
             }
         })
         .detach();
-        Self { title: title.into(), icon, hint: hint.into(), input, error: None, allow_empty: false, option: None }
+        Self { title: title.into(), icon, hint: hint.into(), input, error: None, allow_empty: false, option: None, secret: false }
     }
 
     /// A password field: what's typed shows as bullets.
-    pub fn secret(self, cx: &mut Context<Self>) -> Self {
+    pub fn secret(mut self, cx: &mut Context<Self>) -> Self {
         self.input.update(cx, |e, cx| e.set_masked(true, cx));
+        self.secret = true;
         self
     }
 
@@ -91,7 +94,8 @@ impl InputDialog {
     }
 
     fn on_enter(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
-        let text = self.input.read(cx).text(cx).trim().to_string();
+        let text = self.input.read(cx).text(cx);
+        let text = if self.secret { text } else { text.trim().to_string() };
         if text.is_empty() && !self.allow_empty {
             self.set_error("Enter a name".into(), cx);
         } else {
