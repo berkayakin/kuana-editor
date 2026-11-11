@@ -847,16 +847,7 @@ pub fn pull(root: &Path, strategy: Option<PullStrategy>) -> Result<Pulled, Strin
     let rebases = strategy == Some(PullStrategy::Rebase) || strategy.is_none() && pull_rebases(root, branch);
     let config = merge_config(root);
     let pull_with = |extra: &[&str]| run(root, &[config.as_slice(), &["pull"], args, extra].concat());
-    let tracked_changes =
-        |s: &RepoStatus| s.files.iter().any(|f| f.staged.is_some() || f.unstaged.is_some_and(|c| c != Change::Untracked));
-    // Files whose whole change was staged: a stash comes back unstaged.
-    let restage_of = |s: &RepoStatus| -> Vec<String> {
-        s.files
-            .iter()
-            .filter(|f| f.unstaged.is_none() && f.staged.is_some_and(|c| c != Change::Conflicted))
-            .map(|f| f.rel.clone())
-            .collect()
-    };
+    let restage_of = wholly_staged;
     let mut restage: Option<Vec<String>> = None;
     // Rebasing refuses any local change before it fetches, so it stashes them from the start.
     if rebases && let Some(s) = first.as_ref().filter(|s| tracked_changes(s)) {
@@ -912,6 +903,17 @@ pub fn pull(root: &Path, strategy: Option<PullStrategy>) -> Result<Pulled, Strin
     }
     result?;
     finish_pull(root, before, restage)
+}
+
+/// Whether tracked files have changes, staged or not.
+fn tracked_changes(s: &RepoStatus) -> bool {
+    s.files.iter().any(|f| f.staged.is_some() || f.unstaged.is_some_and(|c| c != Change::Untracked))
+}
+
+/// Files whose whole change is staged: a stash gives them back unstaged, so
+/// they're staged again after.
+fn wholly_staged(s: &RepoStatus) -> Vec<String> {
+    s.files.iter().filter(|f| f.unstaged.is_none() && f.staged.is_some_and(|c| c != Change::Conflicted)).map(|f| f.rel.clone()).collect()
 }
 
 /// What a pull that worked did, from `HEAD` before it; files in `restage` are
@@ -994,15 +996,68 @@ pub fn branches(root: &Path) -> Result<Vec<Branch>, String> {
         .collect())
 }
 
-pub fn checkout(root: &Path, branch: &Branch) -> Result<(), String> {
-    if branch.remote {
-        // Check out a local tracking branch for the remote one.
-        let local = branch.name.split_once('/').map_or(branch.name.as_str(), |(_, n)| n);
-        run(root, &["switch", "--track", "-c", local, &branch.name])
-            .or_else(|_| run(root, &["switch", local]))
-            .map(drop)
-    } else {
-        run(root, &["switch", &branch.name]).map(drop)
+pub fn checkout(root: &Path, branch: &Branch) -> Result<Switched, String> {
+    switch_carrying(root, || {
+        if branch.remote {
+            // Check out a local tracking branch for the remote one.
+            let local = branch.name.split_once('/').map_or(branch.name.as_str(), |(_, n)| n);
+            run(root, &["switch", "--track", "-c", local, &branch.name]).or_else(|_| run(root, &["switch", local])).map(drop)
+        } else {
+            run(root, &["switch", &branch.name]).map(drop)
+        }
+    })
+}
+
+/// What switching branches (or to a commit) did with the local changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Switched {
+    /// Git switched; local changes, if any, simply came along.
+    Done,
+    /// Git refused over local changes to files the switch changes: they were
+    /// stashed, the switch made, and they were put back over the new version.
+    Carried,
+    /// Putting them back conflicted: the files are left conflicted and the
+    /// changes kept in the stash `stash` (its commit), as after a pull.
+    ChangesConflict { stash: Option<String> },
+}
+
+/// Runs `switch`. When Git refuses because local changes would be
+/// overwritten (JetBrains' smart checkout), stashes the changes to tracked
+/// files, switches and puts them back, merged with the other version like a
+/// pull's. That's judged by what happened, since Git's messages are
+/// localized: it failed, `HEAD` didn't move, tracked files have changes.
+/// Untracked files in the way still stop it (they'd be overwritten).
+fn switch_carrying(root: &Path, switch: impl Fn() -> Result<(), String>) -> Result<Switched, String> {
+    let head = || run(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).ok();
+    let before = head();
+    let Err(error) = switch() else { return Ok(Switched::Done) };
+    let Ok(first) = status(root) else { return Err(error) };
+    if !tracked_changes(&first) || head() != before || repo_state(root).is_some() {
+        return Err(error);
+    }
+    let restage = wholly_staged(&first);
+    if !stash(root, Some("Kuana: changes carried to another branch"), false)? {
+        return Err(error);
+    }
+    let put_back = |restage: &[String]| -> Result<Unstashed, String> {
+        let unstashed = unstash(root, 0, true)?;
+        let conflicted: Vec<String> = status(root).map(|s| s.conflicted().map(|f| f.rel.clone()).collect()).unwrap_or_default();
+        let restage: Vec<String> = restage.iter().filter(|rel| !conflicted.contains(rel)).cloned().collect();
+        if !restage.is_empty() {
+            let _ = stage(root, &restage);
+        }
+        Ok(unstashed)
+    };
+    if let Err(again) = switch() {
+        // Something else stops it: the changes go back where they were.
+        put_back(&restage)?;
+        return Err(again);
+    }
+    let sha = stash_sha(root, 0);
+    match put_back(&restage)? {
+        Unstashed::Applied => Ok(Switched::Carried),
+        Unstashed::Conflicts => Ok(Switched::ChangesConflict { stash: sha }),
+        Unstashed::Partly { error, .. } => Err(format!("Switched, but putting your changes back stopped ({error}); they're kept in a stash")),
     }
 }
 
@@ -2008,8 +2063,8 @@ pub fn valid_branch_name(root: &Path, name: &str) -> bool {
     run(root, &["check-ref-format", "--branch", name]).is_ok()
 }
 
-pub fn checkout_commit(root: &Path, sha: &str) -> Result<(), String> {
-    run(root, &["switch", "--detach", sha]).map(drop)
+pub fn checkout_commit(root: &Path, sha: &str) -> Result<Switched, String> {
+    switch_carrying(root, || run(root, &["switch", "--detach", sha]).map(drop))
 }
 
 pub fn create_branch_at(root: &Path, name: &str, at: &str) -> Result<(), String> {
@@ -2984,6 +3039,64 @@ u UU N... 100644 100644 100644 100644 f g h conflict.js\0\
         }
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "three\n");
         assert_eq!(stashes(&root).len(), 1);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn checkout_carries_local_changes() {
+        if !is_available() {
+            return;
+        }
+        let root = test_repo("smart-checkout");
+        let write = |rel: &str, text: &str| std::fs::write(root.join(rel), text).unwrap();
+        let read = |rel: &str| std::fs::read_to_string(root.join(rel)).unwrap();
+        let lines = |second: &str, last: &str| format!("1\n{second}\n3\n4\n5\n6\n7\n{last}\n");
+        let commit_all = |message: &str| {
+            run(&root, &["add", "--all"]).unwrap();
+            commit(&root, message, false).unwrap();
+        };
+        let branch = |name: &str| Branch { name: name.into(), remote: false, current: false };
+        let file = |rel: &str| status(&root).unwrap().files.into_iter().find(|f| f.rel == rel).map(|f| (f.staged, f.unstaged));
+        write("a.txt", &lines("2", "8"));
+        write("b.txt", "b\n");
+        commit_all("base");
+        run(&root, &["switch", "--quiet", "-c", "other"]).unwrap();
+        write("a.txt", &lines("two", "8"));
+        commit_all("other");
+        run(&root, &["switch", "--quiet", "main"]).unwrap();
+
+        // Changes Git can carry by itself (a file the switch doesn't touch).
+        write("b.txt", "b mine\n");
+        assert_eq!(checkout(&root, &branch("other")).unwrap(), Switched::Done);
+        assert_eq!(read("b.txt"), "b mine\n");
+        run(&root, &["switch", "--quiet", "main"]).unwrap();
+
+        // A file the switch changes: Git refuses, Kuana carries it over,
+        // staged when it was.
+        write("a.txt", &lines("2", "mine"));
+        stage(&root, &["a.txt".into()]).unwrap();
+        assert_eq!(checkout(&root, &branch("other")).unwrap(), Switched::Carried);
+        assert_eq!(status(&root).unwrap().branch.as_deref(), Some("other"));
+        assert_eq!(read("a.txt"), lines("two", "mine"));
+        assert_eq!(file("a.txt"), Some((Some(Change::Modified), None)));
+        assert!(stashes(&root).is_empty());
+
+        // Back to main, where the same line differs: conflicted, kept in a stash.
+        write("a.txt", &lines("deux", "mine"));
+        let switched = checkout(&root, &branch("main")).unwrap();
+        let stash = stashes(&root).first().map(|s| s.sha.clone());
+        assert_eq!(switched, Switched::ChangesConflict { stash });
+        assert_eq!(status(&root).unwrap().branch.as_deref(), Some("main"));
+        assert!(read("a.txt").contains("<<<<<<<"));
+        run(&root, &["checkout", "--quiet", "HEAD", "--", "a.txt"]).unwrap();
+        run(&root, &["stash", "clear"]).unwrap();
+
+        // A switch that fails for another reason leaves the changes as they were.
+        write("a.txt", &lines("2", "mine"));
+        assert!(checkout(&root, &branch("no-such-branch")).is_err());
+        assert_eq!(read("a.txt"), lines("2", "mine"));
+        assert_eq!(file("a.txt"), Some((None, Some(Change::Modified))));
+        assert!(stashes(&root).is_empty());
         std::fs::remove_dir_all(&root).ok();
     }
 

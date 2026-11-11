@@ -55,6 +55,51 @@ impl Workspace {
         .detach();
     }
 
+    /// Fetches in the background (`auto_fetch`), every `AUTO_FETCH_EVERY`
+    /// while the window is in use, so commits waiting to be pulled show
+    /// before you've edited the same lines. Quiet: a failure (offline, no
+    /// credentials) shows nothing, and it waits while a Git operation runs.
+    pub(super) fn start_auto_fetch(window: &mut Window, cx: &mut Context<Self>) {
+        const AUTO_FETCH_EVERY: Duration = Duration::from_secs(180);
+        cx.spawn_in(window, async move |this, cx| {
+            let mut last: Option<(PathBuf, Instant)> = None;
+            loop {
+                cx.background_executor().timer(Duration::from_secs(20)).await;
+                let Ok(target) = this.update_in(cx, |ws, window, cx| ws.auto_fetch_target(window, cx)) else { break };
+                let Some(repo) = target else { continue };
+                if last.as_ref().is_some_and(|(r, at)| *r == repo && at.elapsed() < AUTO_FETCH_EVERY) {
+                    continue;
+                }
+                last = Some((repo.clone(), Instant::now()));
+                let dir = repo.clone();
+                let fetched = cx.background_executor().spawn(async move { git::fetch(&dir).is_ok() }).await;
+                let shown = this.update(cx, |ws, cx| {
+                    if fetched && ws.repo.as_ref() == Some(&repo) {
+                        ws.refresh_git(cx);
+                    }
+                });
+                if shown.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The repository to fetch in the background now, if any: the setting is
+    /// on, the window is in use, the project is trusted, it has a remote, and
+    /// no Git operation is running or stopped halfway.
+    fn auto_fetch_target(&self, window: &Window, cx: &App) -> Option<PathBuf> {
+        let repo = self.repo.as_ref()?;
+        let ready = Settings::get(cx).auto_fetch()
+            && window.is_window_active()
+            && self.git_remote.is_some()
+            && !self.git_busy.is_running()
+            && self.git_status.state.is_none()
+            && crate::trust::is_trusted(repo);
+        ready.then(|| repo.clone())
+    }
+
     /// Reads all of `git status` again in the background: a project
     /// opened, `.git` changed (HEAD, the index, refs), a Git operation ran.
     pub(super) fn refresh_git(&mut self, cx: &mut Context<Self>) {
@@ -376,6 +421,7 @@ impl Workspace {
         // Without a strategy of its own, a pull takes the setting's.
         let op = match op {
             GitOp::Pull(None) => GitOp::Pull(Settings::get(cx).pull_strategy),
+            GitOp::Sync(None) => GitOp::Sync(Settings::get(cx).pull_strategy),
             op => op,
         };
         let label = op.busy_label();
@@ -407,13 +453,20 @@ impl Workspace {
                         }
                     }
                     Ok(Outcome::Nothing(message)) => ws.toast(ToastKind::Info, message, None, cx),
+                    Ok(Outcome::PushNext(message)) => {
+                        if let Some(message) = message.filter(|m| m != "Already up to date") {
+                            ws.toast(ToastKind::Success, message, None, cx);
+                        }
+                        ws.show_push(window, cx);
+                    }
                     Ok(Outcome::KeptStash { message, sha }) => {
                         ws.toast(ToastKind::Info, message, None, cx);
                         ws.git_panel.update(cx, |p, cx| p.set_kept_stash(Some(sha), cx));
                     }
                     Ok(Outcome::Diverged { branch, upstream, ahead, behind }) => match &op {
                         // Nothing says how to combine them (the setting or the Git config): ask, once.
-                        GitOp::Pull(None) => ws.choose_pull_strategy(&branch, &upstream, ahead, behind, window, cx),
+                        GitOp::Pull(None) => ws.choose_pull_strategy(&branch, &upstream, ahead, behind, false, window, cx),
+                        GitOp::Sync(None) => ws.choose_pull_strategy(&branch, &upstream, ahead, behind, true, window, cx),
                         _ => {
                             let detail = format!(
                                 "{branch} has {} that {upstream} doesn't. Merge or rebase it from Branches…, or change the pull strategy in Settings → Git.",
@@ -446,7 +499,7 @@ impl Workspace {
                     Err(err) => {
                         let title = match &op {
                             GitOp::Push | GitOp::PushNow { .. } => "Push failed",
-                            GitOp::Pull(_) => "Update failed",
+                            GitOp::Pull(_) | GitOp::Sync(_) => "Update failed",
                             GitOp::Fetch => "Fetch failed",
                             GitOp::Commit { .. } => "Commit failed",
                             GitOp::Checkout(_) | GitOp::CreateBranch(_) | GitOp::CheckoutCommit(_) | GitOp::BranchAt { .. } => {
@@ -468,6 +521,7 @@ impl Workspace {
                         | GitOp::ResolveSimple
                         | GitOp::AcceptSide { .. }
                         | GitOp::Pull(_)
+                        | GitOp::Sync(_)
                         | GitOp::Checkout(_)
                         | GitOp::Merge(_)
                         | GitOp::Rebase(_)
@@ -489,6 +543,7 @@ impl Workspace {
                         GitOp::Commit { .. }
                             | GitOp::Fetch
                             | GitOp::Pull(_)
+                            | GitOp::Sync(_)
                             | GitOp::Push
                             | GitOp::PushNow { .. }
                             | GitOp::Checkout(_)
@@ -602,10 +657,17 @@ impl Workspace {
         self.run_git(GitOp::Pull(None), window, cx);
     }
 
+    /// Update Project, then Push… when there are commits to push (one click
+    /// for a branch that's both behind and ahead).
+    pub(super) fn git_sync(&mut self, _: &GitSync, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_git(GitOp::Sync(None), window, cx);
+    }
+
     /// A pull found commits on both sides and nothing that says how to
     /// combine them: asks (like JetBrains' first Update Project), saves the
     /// answer as the pull strategy and pulls with it.
-    fn choose_pull_strategy(&mut self, branch: &str, upstream: &str, ahead: u32, behind: u32, window: &mut Window, cx: &mut Context<Self>) {
+    #[allow(clippy::too_many_arguments)]
+    fn choose_pull_strategy(&mut self, branch: &str, upstream: &str, ahead: u32, behind: u32, then_push: bool, window: &mut Window, cx: &mut Context<Self>) {
         let message = format!("{branch} and {upstream} both have new commits");
         let detail = format!(
             "{upstream} has {} that {branch} doesn't, and {branch} has {} of its own. Merge them with a merge commit, or rebase yours on top of the incoming ones?\n\nThe answer is kept as the pull strategy (Settings → Git).",
@@ -629,7 +691,7 @@ impl Workspace {
                 if !problems.is_empty() {
                     ws.report_config_problems(problems, cx);
                 }
-                ws.run_git(GitOp::Pull(Some(strategy)), window, cx);
+                ws.run_git(if then_push { GitOp::Sync(Some(strategy)) } else { GitOp::Pull(Some(strategy)) }, window, cx);
             })
             .ok();
         })
@@ -977,6 +1039,8 @@ pub(super) enum Outcome {
     /// Changes put back over new commits (a pull's, a stash popped)
     /// conflicted; the stash with commit `sha` keeps them until they're resolved.
     KeptStash { message: String, sha: String },
+    /// Sync pulled (`message`, if any to show); there are commits to push next.
+    PushNext(Option<String>),
 }
 
 /// "1 commit", "3 commits".
@@ -1001,7 +1065,16 @@ fn list_some(names: &[String]) -> String {
 pub(super) fn perform_git(dir: &Path, op: GitOp, status: &RepoStatus, auto_resolve: bool) -> Result<Outcome, String> {
     let may_conflict = matches!(
         op,
-        GitOp::Merge(_) | GitOp::Rebase(_) | GitOp::Pull(_) | GitOp::Continue(_) | GitOp::Unstash { .. } | GitOp::CherryPick(_) | GitOp::Revert(_)
+        GitOp::Merge(_)
+            | GitOp::Rebase(_)
+            | GitOp::Pull(_)
+            | GitOp::Sync(_)
+            | GitOp::Continue(_)
+            | GitOp::Unstash { .. }
+            | GitOp::CherryPick(_)
+            | GitOp::Revert(_)
+            | GitOp::Checkout(_)
+            | GitOp::CheckoutCommit(_)
     );
     let outcome = perform(dir, op, status)?;
     if !auto_resolve || !may_conflict {
@@ -1038,6 +1111,18 @@ fn conflicts(n: usize) -> String {
 }
 
 fn perform(dir: &Path, op: GitOp, status: &RepoStatus) -> Result<Outcome, String> {
+    // A switch whose local changes came along, through a stash when Git refused.
+    let switched = |switched: git::Switched, done: String| match switched {
+        git::Switched::Done => Outcome::Done(Some(done)),
+        git::Switched::Carried => Outcome::Done(Some(format!("{done}; your changes came along"))),
+        git::Switched::ChangesConflict { stash } => {
+            let message = format!("{done}; putting your changes back stopped on conflicts");
+            match stash {
+                Some(sha) => Outcome::KeptStash { message, sha },
+                None => Outcome::Done(Some(message)),
+            }
+        }
+    };
     let push = |dir: &Path, force: bool, remote: Option<String>| -> Result<String, String> {
         let Some(remote) = remote.or_else(|| git::default_remote(dir)) else {
             return Err("No remote is configured. Add one in Git → Manage Remotes….".into());
@@ -1116,6 +1201,17 @@ fn perform(dir: &Path, op: GitOp, status: &RepoStatus) -> Result<Outcome, String
         // `Push` opens the dialog before it gets here; treat it as a plain push.
         GitOp::Push => push(dir, false, None).map(Some),
         GitOp::PushNow { force, remote } => push(dir, force, remote).map(Some),
+        GitOp::Sync(strategy) => {
+            let pulled = perform(dir, GitOp::Pull(strategy), status)?;
+            // Pushes only after a pull that left nothing to sort out.
+            let now = git::status(dir).ok();
+            let clean = git::repo_state(dir).is_none() && now.as_ref().is_some_and(|s| s.conflicted().next().is_none());
+            let ahead = now.as_ref().filter(|s| s.upstream.is_some()).map_or(0, |s| s.ahead);
+            return Ok(match pulled {
+                Outcome::Done(message) if clean && ahead > 0 => Outcome::PushNext(message),
+                outcome => outcome,
+            });
+        }
         GitOp::Pull(strategy) => {
             return git::pull(dir, strategy).map(|pulled| match pulled {
                 git::Pulled::UpToDate => Outcome::Done(Some("Already up to date".into())),
@@ -1134,7 +1230,7 @@ fn perform(dir: &Path, op: GitOp, status: &RepoStatus) -> Result<Outcome, String
             });
         }
         GitOp::Fetch => git::fetch(dir).map(|_| Some("Fetched all remotes".into())),
-        GitOp::Checkout(branch) => git::checkout(dir, &branch).map(|_| Some(format!("Switched to {}", branch.name))),
+        GitOp::Checkout(branch) => return git::checkout(dir, &branch).map(|s| switched(s, format!("Switched to {}", branch.name))),
         GitOp::CreateBranch(name) => git::create_branch(dir, &name).map(|_| Some(format!("Created and switched to {name}"))),
         GitOp::Init => git::init(dir).map(|_| Some("Initialized a Git repository".into())),
         GitOp::AddRemote { name, url } => git::add_remote(dir, &name, &url).map(|_| Some(format!("Added remote {name}"))),
@@ -1193,7 +1289,9 @@ fn perform(dir: &Path, op: GitOp, status: &RepoStatus) -> Result<Outcome, String
                 many => Some(format!("Resolved {} files: kept {whose}", many.len())),
             })
         }
-        GitOp::CheckoutCommit(sha) => git::checkout_commit(dir, &sha).map(|_| Some(format!("Checked out {} (detached HEAD)", short(&sha)))),
+        GitOp::CheckoutCommit(sha) => {
+            return git::checkout_commit(dir, &sha).map(|s| switched(s, format!("Checked out {} (detached HEAD)", short(&sha))));
+        }
         GitOp::BranchAt { name, sha } => git::create_branch_at(dir, &name, &sha).map(|_| Some(format!("Created and switched to {name}"))),
         GitOp::TagAt { name, sha } => git::create_tag(dir, &name, &sha).map(|_| Some(format!("Tagged {} as {name}", short(&sha)))),
         GitOp::CherryPick(sha) => git::cherry_pick(dir, &sha).map(|out| stopped(&out, "Cherry-pick", format!("Cherry-picked {}", short(&sha)))),

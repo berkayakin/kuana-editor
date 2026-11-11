@@ -243,6 +243,8 @@ actions!(
         ToggleExtensionOutput,
         GitPush,
         GitPull,
+        /// Update Project, then Push… when there are commits to push.
+        GitSync,
         GitFetch,
         GitBranches,
         GitStash,
@@ -1144,6 +1146,7 @@ impl Workspace {
             }
         })
         .detach();
+        Self::start_auto_fetch(window, cx);
         // Git status follows the project watcher (and window activation); a
         // poll is only the fallback for a folder that couldn't be watched.
         cx.spawn_in(window, async move |this, cx| {

@@ -39,6 +39,9 @@ pub enum GitOp {
     PushNow { force: bool, remote: Option<String> },
     /// Pulls with this strategy, else the `pull_strategy` setting's.
     Pull(Option<git::PullStrategy>),
+    /// Pulls (as `Pull`), then opens the Push dialog when there are commits
+    /// to push and the pull left nothing to resolve.
+    Sync(Option<git::PullStrategy>),
     Fetch,
     Checkout(Branch),
     CreateBranch(String),
@@ -101,6 +104,7 @@ impl GitOp {
             GitOp::Commit { .. } => "Committing…",
             GitOp::Push | GitOp::PushNow { .. } => "Pushing…",
             GitOp::Pull(_) => "Pulling…",
+            GitOp::Sync(_) => "Syncing…",
             GitOp::Fetch => "Fetching…",
             GitOp::Checkout(_) => "Checking out…",
             GitOp::CreateBranch(_) => "Creating branch…",

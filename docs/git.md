@@ -37,7 +37,11 @@ message instead of hanging; use an SSH agent or a credential helper.
   menu) to switch to a local or remote branch, or type a new name to create one. Hover another branch
   for **Merge** (into the current one) and **Rebase** (the current one onto it), and a local one
   for **Rename** and **Delete** (Kuana says when a branch has commits no other branch has, and
-  deletes it anyway only if you confirm).
+  deletes it anyway only if you confirm). Switching keeps your uncommitted changes: when Git
+  refuses because they touch files the switch changes, Kuana stashes them, switches and puts them
+  back over the other branch's version (JetBrains' smart checkout), staged where they were. Changes
+  that clash with that version are left conflicted, simple conflicts resolved, and kept in a stash
+  until you've resolved them, as after a pull. Untracked files in the way still stop a switch.
 - **Stash:** **Stash Changes…** (the archive button on the Commit panel's first section, the Git
   menu, Find Action) stashes the changes to tracked files, with an optional message; check
   **Include untracked files** to stash those too (checked to start with only when they're all
@@ -82,6 +86,13 @@ message instead of hanging; use an SSH agent or a credential helper.
   **Show History** (editor right-click menu, Git menu) lists one file's commits, following renames.
 - **Push / Pull / Fetch:** from the Commit panel, the keyboard, or Find Action. Pushing a
   new branch sets its upstream. Results appear as notifications.
+- **Fetching in the background:** every few minutes while the window is in use, Kuana fetches
+  from the remotes, so the commits waiting to be pulled show in the title bar (↓) before you edit
+  the same lines. Only in trusted projects, never while a Git operation runs, and quietly: being
+  offline or lacking credentials shows nothing. Turn it off with `auto_fetch` (Settings → Git).
+- **Sync** (the title bar's ↑↓ counts when you're both ahead and behind, the Git menu, Find
+  Action): Update Project, then the Push dialog when there are commits to push and the update
+  left nothing to resolve.
 - **Update Project** (pull) fast-forwards when only the remote has new commits. When both your
   branch and its upstream have new commits, the **pull strategy** decides: **Merge** (a merge
   commit), **Rebase** (yours replayed on top of the incoming ones) or **Fast-forward only**

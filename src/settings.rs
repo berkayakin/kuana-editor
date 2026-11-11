@@ -99,6 +99,9 @@ pub struct Settings {
     /// Combine simple merge conflicts (each side changing different words)
     /// as soon as a merge, rebase or pull stops on them (on by default).
     pub auto_resolve_conflicts: Option<bool>,
+    /// Fetch from the remotes every few minutes while the window is in use,
+    /// so incoming commits show early (on by default).
+    pub auto_fetch: Option<bool>,
     /// The minimap's width in pixels (`minimap_width()`).
     pub minimap_width: Option<f32>,
     /// Where ghost-text suggestions come from (none unless chosen): only the
@@ -460,6 +463,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "compact_activity_bar",
     "pull_strategy",
     "auto_resolve_conflicts",
+    "auto_fetch",
     "minimap_width",
     "edit_prediction_provider",
 ];
@@ -614,6 +618,11 @@ impl Settings {
         self.ui_style.unwrap_or_default()
     }
 
+    /// Whether Git fetches in the background.
+    pub fn auto_fetch(&self) -> bool {
+        self.auto_fetch.unwrap_or(true)
+    }
+
     /// Whether simple merge conflicts are resolved as soon as Git stops on them.
     pub fn auto_resolve_conflicts(&self) -> bool {
         self.auto_resolve_conflicts.unwrap_or(true)
@@ -717,6 +726,7 @@ impl Settings {
             "native_grammars" => self.native_grammars.is_some(),
             "pull_strategy" => self.pull_strategy.is_some(),
             "auto_resolve_conflicts" => self.auto_resolve_conflicts.is_some(),
+            "auto_fetch" => self.auto_fetch.is_some(),
             _ => false,
         }
     }
@@ -1136,6 +1146,10 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // When a merge, rebase or pull stops on conflicts, combine the simple ones
   // right away: those where the two sides changed different words.
   // "auto_resolve_conflicts": true,
+
+  // Fetch from the remotes every few minutes while the window is in use, so
+  // commits waiting to be pulled show in the title bar early.
+  // "auto_fetch": true,
 
   // More entries for Run… (detected ones include cargo, npm scripts, go,
   // make and pytest).
