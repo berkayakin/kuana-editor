@@ -278,6 +278,7 @@ impl Workspace {
     }
 
     pub(super) fn extensions_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_extension_views(cx);
         for editor in self.editors.clone() {
             if editor.update(cx, |e, cx| e.refresh_language(cx)) {
                 self.lsp.update(cx, |s, cx| s.register(&editor, cx));

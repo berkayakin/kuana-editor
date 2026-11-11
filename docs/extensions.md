@@ -166,5 +166,88 @@ completion labels) isn't run.
 Icon themes are chosen with `icon_theme` (Settings → Appearance → Icon theme); without one, Kuana uses
 its built-in Charmed Icons.
 
+## Views, commands and panels
+
+Beyond Zed's format, an extension can add to Kuana's UI: **views** on the activity bar (a tree of
+items, like Files or Database), **commands** (in Find Action, view toolbars, tree items' right-click
+menus and the editor's right-click menu), and **panels** in the bottom area that show text or a table.
+Kuana draws all of it in its own style; the extension's code only supplies the items and runs the
+commands. A complete example is [`examples/extensions/docker`](../examples/extensions/docker): a
+Docker containers view with Start, Stop, Show Logs and Inspect.
+
+The extension declares what it adds in a `[kuana]` table of its `extension.toml`. Zed ignores it, so
+the extension still works in Zed for everything else:
+
+```toml
+[kuana]
+api = "0.1"                       # the interface version its code is built for
+permissions = ["process"]         # network, process, workspace-files
+
+[kuana.views.containers]
+title = "Containers"
+icon = "icons/container.svg"      # an SVG in the extension, or one of Kuana's icon names
+when = "always"                   # or "file:compose.yaml" (in the project), "language:Go" (an open file)
+
+[kuana.commands.refresh]
+title = "Refresh"
+icon = "refresh-cw"
+
+[kuana.commands.logs]
+title = "Show Logs"
+
+[[kuana.menus]]
+place = "view-toolbar:containers" # view-toolbar:<view>, view-item:<view> or editor
+command = "refresh"
+
+[[kuana.menus]]
+place = "view-item:containers"
+command = "logs"
+when = "kind == 'running' || kind == 'stopped'"   # editor menus: language == 'YAML'
+
+[kuana.panels.logs]
+title = "Container Logs"
+```
+
+Its code is `kuana.wasm` beside `extension.toml`: a WebAssembly component (a Rust `cdylib` built
+with `cargo build --release --target wasm32-wasip2`) for the `extension` world in
+[`kuana.wit`](../src/extensions/kuana-wit/kuana.wit). Copy that file into your extension and
+generate bindings with [`wit-bindgen`](https://crates.io/crates/wit-bindgen). The code exports:
+
+- `children(view, parent)`: a view's items, the roots or an item's children (asked when it opens).
+  Each item has a stable id, a label, an optional detail, icon, tone (`success` colors it green,
+  `error` red, `muted` dims it), a `kind` that menus match, whether it has children, and a command
+  run when it's clicked.
+- `run-command(command, target)`: runs a command, on a tree item's id, or on the current file's path
+  for an editor menu. An error it returns is shown to the user.
+- `activate()`, before anything else, and `file-saved(path)`, after the user saves a file in the
+  extension's work folder.
+
+And calls Kuana back: `refresh` a view, `show-panel` (lines of text or a table), `open-file`,
+`notify`, `ask-input` (a text or password prompt), `confirm`, `settings` (its `extensions.<id>` entry
+in settings.json), `project-root`, `secret-get` / `secret-set` (the system keychain, its own keys
+only) and `set-diagnostics` (problems shown in a file, and in Problems).
+
+The code runs in the same sandbox as Zed extensions' code: one folder of its own
+(`~/.config/kuana/extensions/work/<id>/`, its current directory), and limits on computing time,
+memory and how long a call takes. Anything more needs a permission it declares, and Kuana asks the
+user the first time the code uses one:
+
+| Permission | Lets the code | Calls |
+| --- | --- | --- |
+| `process` | run programs, in trusted projects only | `run-process`, `run-in-terminal` |
+| `network` | make HTTP requests | `http-request` |
+| `workspace-files` | read the open project's files | `read-project-file`, project paths in `open-file` |
+
+Answers are remembered; Settings → Extensions shows an extension's permissions with a **Revoke**
+link. Run `kuana extension check <folder>` to check the `[kuana]` table and load the code.
+
+Commands can be bound to keys in `keymap.json`, by the extension's id and the command's:
+
+```json
+{ "bindings": { "cmd-shift-d": ["workspace::RunExtensionCommand", { "extension": "docker-view", "command": "refresh" }] } }
+```
+
+`workspace::ToggleExtensionView` (`{ "view": "docker-view/containers" }`) shows or hides a view.
+
 Kuana reads Zed's extension format for compatibility; it isn't affiliated with or endorsed by Zed
 Industries. Extensions come from their authors' repositories, under their own licenses.

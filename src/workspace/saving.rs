@@ -508,6 +508,7 @@ impl Workspace {
     pub(super) fn remove_tab(&mut self, editor: &Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.editors.iter().position(|t| t == editor) else { return };
         self.editors.remove(ix);
+        self.refresh_extension_views(cx);
         let sibling = self.siblings(editor, cx).into_iter().next();
         if let Some(sibling) = &sibling {
             // The document stays open in another tab: it takes over.

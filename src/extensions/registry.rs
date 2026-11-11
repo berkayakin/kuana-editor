@@ -317,6 +317,7 @@ mod tests {
             problems: Vec::new(),
             installers: Vec::new(),
             adapters: Vec::new(),
+            ui: None,
         };
         let x = listed("x", "", &[]);
         assert_eq!(installed(&x, &[info("0.9.0")]), Installed::Elsewhere);

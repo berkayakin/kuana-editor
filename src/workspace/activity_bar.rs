@@ -183,6 +183,7 @@ impl Workspace {
             SidebarMode::Files => 0.,
             SidebarMode::Commit => 1.,
             SidebarMode::Database => 2.,
+            mode @ SidebarMode::Extension(_) => 3. + self.extension_modes().iter().position(|m| *m == mode).unwrap_or(0) as f32,
         };
         let bar = BarSize::of(cx);
         let top = TAB_STRIP_INSET + index * (bar.row + bar.gap(Theme::get(cx)));
@@ -288,7 +289,8 @@ impl Workspace {
                     .gap(px(gap))
                     .child(self.render_view_tab(SidebarMode::Files, cx))
                     .child(self.render_view_tab(SidebarMode::Commit, cx))
-                    .child(self.render_view_tab(SidebarMode::Database, cx)),
+                    .child(self.render_view_tab(SidebarMode::Database, cx))
+                    .children(self.extension_modes().to_vec().into_iter().map(|mode| self.render_view_tab(mode, cx))),
             )
             // The free space between the views and the tools moves the window,
             // as the title bar's would (the bar runs up beside it). Its own
@@ -337,6 +339,11 @@ impl Workspace {
         if self.has_results {
             tools.push(tool("toggle-results", Icon::TextSearch, "Find", self.shows(BottomPanel::Results), Group::Panel, 5, Box::new(ToggleResults), |ws, window, cx| {
                 ws.toggle_results(&ToggleResults, window, cx)
+            }));
+        }
+        if self.has_ext_panel {
+            tools.push(tool("toggle-ext-panel", Icon::Puzzle, "Extension Output", self.shows(BottomPanel::Extension), Group::Panel, 3, Box::new(ToggleExtensionOutput), |ws, window, cx| {
+                ws.toggle_extension_panel(window, cx)
             }));
         }
         if self.has_db_results {
@@ -447,16 +454,20 @@ impl Workspace {
             theme.background = crate::ui::drop_lift(&theme).1.into();
         }
         let right = self.sidebar_on_right(cx);
-        let (id, icon) = match mode {
-            SidebarMode::Files => ("activity-files", Icon::Folder),
-            SidebarMode::Commit => ("activity-commit", Icon::GitBranch),
-            SidebarMode::Database => ("activity-database", Icon::Database),
+        let (id, icon): (SharedString, SharedString) = match mode {
+            SidebarMode::Files => ("activity-files".into(), Icon::Folder.path().into()),
+            SidebarMode::Commit => ("activity-commit".into(), Icon::GitBranch.path().into()),
+            SidebarMode::Database => ("activity-database".into(), Icon::Database.path().into()),
+            SidebarMode::Extension(slot) => {
+                let icon = mode.extension_look().map_or_else(|| SharedString::from(Icon::Puzzle.path()), |(_, icon)| icon);
+                (format!("activity-ext-{slot}").into(), icon)
+            }
         };
         let changes = if mode == SidebarMode::Commit { self.git_status.files.len() } else { 0 };
         let bar = BarSize::of(cx);
         let (rest, hover): (Hsla, Hsla) = if on { (theme.accent.into(), theme.accent.into()) } else { (theme.text_dim.into(), theme.text.into()) };
         let tab = div()
-            .id(id)
+            .id(id.clone())
             .relative()
             .flex()
             .flex_shrink_0()
@@ -470,10 +481,19 @@ impl Workspace {
                 SidebarMode::Files => ws.toggle_sidebar(&ToggleSidebar, window, cx),
                 SidebarMode::Commit => ws.toggle_commit(&ToggleCommit, window, cx),
                 SidebarMode::Database => ws.toggle_database(&ToggleDatabase, window, cx),
+                SidebarMode::Extension(_) => ws.toggle_extension_mode(mode, window, cx),
             }))
             .map(|el| match mode {
                 SidebarMode::Files => el.tooltip(|window, cx| status_tooltip("Files", &ToggleSidebar, window, cx)),
                 SidebarMode::Database => el.tooltip(|window, cx| status_tooltip("Database", &ToggleDatabase, window, cx)),
+                SidebarMode::Extension(_) => {
+                    let title = mode.extension_look().map_or_else(|| SharedString::from("Extension"), |(title, _)| title);
+                    let action = mode.extension_key().map(|view| ToggleExtensionView { view });
+                    el.tooltip(move |window, cx| match &action {
+                        Some(action) => status_tooltip(&title, action, window, cx),
+                        None => tooltip_view(title.clone(), cx),
+                    })
+                }
                 SidebarMode::Commit => {
                     // The count as it is now, also while the tooltip is shown.
                     let workspace = cx.entity();
@@ -517,19 +537,19 @@ impl Workspace {
             .relative()
             .size(px(size))
             .flex_shrink_0()
-            .child(svg().path(icon.path()).size(px(size)).text_color(rest))
+            .child(svg().path(icon.clone()).size(px(size)).text_color(rest))
             // A resting tab's icon brightens on hover.
             .when(!on, |el| {
                 el.child(
                     svg()
-                        .path(icon.path())
+                        .path(icon.clone())
                         .size(px(size))
                         .absolute()
                         .top_0()
                         .left_0()
                         .text_color(hover)
                         .invisible()
-                        .group_hover(id, |s| s.visible()),
+                        .group_hover(id.clone(), |s| s.visible()),
                 )
             })
             // Uncommitted changes, so they show from the Files view too.
@@ -538,7 +558,7 @@ impl Workspace {
         // The same elements selected or not, so the glide keeps its state. A
         // resting tab is a plain button: a rounded fill on hover.
         let fill: Hsla = if on { Hsla::from(theme.hover).alpha(0.) } else { theme.hover.into() };
-        tab.group(id).child(button_fill(SharedString::from(format!("{id}-fill")), (Hsla::from(theme.hover).alpha(0.), fill), bar, &theme, glyph))
+        tab.group(id.clone()).child(button_fill(SharedString::from(format!("{id}-fill")), (Hsla::from(theme.hover).alpha(0.), fill), bar, &theme, glyph))
     }
 
     /// An activity bar button, built like a resting view tab: a row as tall

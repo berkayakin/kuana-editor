@@ -79,7 +79,16 @@ impl Workspace {
             Arc::new(self.items(cx).iter().filter(|t| t.is_file()).filter_map(|t| t.path(cx)).collect())
         };
         let recent = if mode == PickerMode::Projects { self.recent_projects.clone() } else { self.recent.clone() };
-        let (root, actions) = (self.root.clone(), self.actions.clone());
+        let (root, mut actions) = (self.root.clone(), self.actions.clone());
+        // Extensions' commands and views, as installed now.
+        if mode == PickerMode::Actions {
+            let extra = Self::extension_action_entries();
+            if !extra.is_empty() {
+                let mut all: Vec<ActionEntry> = actions.iter().map(|a| ActionEntry { name: a.name, action: a.action.boxed_clone() }).collect();
+                all.extend(extra);
+                actions = Arc::new(all);
+            }
+        }
         let picker = cx.new(|cx| Picker::new(mode, root, files, recent, actions, window, cx));
         let subscription = cx.subscribe_in(&picker, window, |ws, _, event: &PickerEvent, window, cx| match event {
             PickerEvent::OpenFile(path) => {

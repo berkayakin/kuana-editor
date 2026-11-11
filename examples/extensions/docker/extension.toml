@@ -1,0 +1,76 @@
+id = "docker-view"
+name = "Docker"
+version = "0.1.0"
+schema_version = 1
+description = "A Docker containers view: start, stop, logs and inspect. A sample of Kuana's extension UI API."
+authors = ["Berkay Akin"]
+repository = "https://github.com/berkayakin/kuana-editor"
+
+[kuana]
+api = "0.1"
+permissions = ["process"]
+
+[kuana.views.containers]
+title = "Containers"
+icon = "icons/container.svg"
+
+[kuana.commands.refresh]
+title = "Refresh"
+icon = "refresh-cw"
+
+[kuana.commands.table]
+title = "Show All as a Table"
+icon = "table"
+
+[kuana.commands.logs]
+title = "Show Logs"
+
+[kuana.commands.inspect]
+title = "Inspect"
+
+[kuana.commands.start]
+title = "Start"
+icon = "play"
+
+[kuana.commands.stop]
+title = "Stop"
+icon = "stop"
+
+[kuana.commands.compose-up]
+title = "Docker Compose Up"
+
+[[kuana.menus]]
+place = "view-toolbar:containers"
+command = "refresh"
+
+[[kuana.menus]]
+place = "view-toolbar:containers"
+command = "table"
+
+[[kuana.menus]]
+place = "view-item:containers"
+command = "logs"
+when = "kind == 'running' || kind == 'stopped'"
+
+[[kuana.menus]]
+place = "view-item:containers"
+command = "inspect"
+when = "kind == 'running' || kind == 'stopped'"
+
+[[kuana.menus]]
+place = "view-item:containers"
+command = "stop"
+when = "kind == 'running'"
+
+[[kuana.menus]]
+place = "view-item:containers"
+command = "start"
+when = "kind == 'stopped'"
+
+[[kuana.menus]]
+place = "editor"
+command = "compose-up"
+when = "language == 'YAML'"
+
+[kuana.panels.logs]
+title = "Container Logs"

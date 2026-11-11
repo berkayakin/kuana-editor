@@ -77,6 +77,10 @@ impl Workspace {
             div().flex_1().min_h_0().child(cached(&self.git_panel)).into_any_element()
         } else if self.sidebar_mode == SidebarMode::Database {
             div().flex_1().min_h_0().child(cached(&self.database)).into_any_element()
+        } else if let SidebarMode::Extension(slot) = self.sidebar_mode
+            && let Some(view) = self.render_extension_sidebar(slot)
+        {
+            view
         } else if self.root.is_some() {
             div().flex_1().min_h_0().child(cached(&self.tree)).into_any_element()
         } else {

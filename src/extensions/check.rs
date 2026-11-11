@@ -30,7 +30,7 @@ pub struct Finding {
 }
 
 const MANIFEST_KEYS: &[&str] =
-    &["id", "name", "version", "schema_version", "description", "authors", "repository", "grammars", "language_servers", "debug_adapters"];
+    &["id", "name", "version", "schema_version", "description", "authors", "repository", "grammars", "language_servers", "debug_adapters", "kuana"];
 /// Zed's, for things Kuana doesn't run (code, AI features).
 const ZED_MANIFEST_KEYS: &[&str] =
     &["lib", "slash_commands", "context_servers", "indexed_docs_providers", "snippets", "capabilities", "agent_servers", "themes", "icon_themes", "languages"];
@@ -98,6 +98,23 @@ pub fn check(dir: &Path) -> Vec<Finding> {
         match super::wasm::check(dir, &info.id) {
             Ok(()) => add(Level::Note, "extension.wasm: its code loads".into()),
             Err(err) => add(Level::Error, format!("extension.wasm: {err}")),
+        }
+    }
+    // Kuana's own UI contributions and their code (`[kuana]`, kuana.wasm).
+    if let Some(ui) = &info.ui {
+        let parts = [("view", ui.views.len()), ("command", ui.commands.len()), ("panel", ui.panels.len())]
+            .iter()
+            .filter(|(_, n)| *n > 0)
+            .map(|(what, n)| format!("{n} {what}{}", if *n == 1 { "" } else { "s" }))
+            .collect::<Vec<_>>();
+        if !parts.is_empty() {
+            add(Level::Note, format!("[kuana]: {}", parts.join(", ")));
+        }
+        if ui.code.is_some() {
+            match super::ui_host::check(ui) {
+                Ok(()) => add(Level::Note, "kuana.wasm: its code loads and activates".into()),
+                Err(err) => add(Level::Error, format!("kuana.wasm: {err}")),
+            }
         }
     }
     let mut names: Vec<&String> = grammars.keys().collect();

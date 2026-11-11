@@ -2326,6 +2326,20 @@ impl Preferences {
             provides.push("snippets".into());
         }
         provides.extend(extension.servers.iter().map(|s| format!("server: {s}")));
+        // Its views (Kuana's extension UI), and what its code may do.
+        let mut permissions_line = None;
+        if let Some(ui) = &extension.ui {
+            provides.extend(ui.views.iter().map(|v| format!("view: {}", v.title)));
+            if !ui.permissions.is_empty() {
+                let granted = crate::extensions::permissions::granted(&ui.extension);
+                let words: Vec<String> = ui
+                    .permissions
+                    .iter()
+                    .map(|p| format!("{} ({})", p.key(), if granted.contains(p) { "allowed" } else { "asks first" }))
+                    .collect();
+                permissions_line = Some((format!("Permissions: {}", words.join(", ")), !granted.is_empty(), ui.extension.clone()));
+            }
+        }
         let status: Option<(Hsla, String)> = if !extension.building.is_empty() {
             Some((theme.text_dim.into(), format!("Building the {} grammar…", extension.building.join(", "))))
         } else {
@@ -2356,6 +2370,31 @@ impl Preferences {
                         el.child(div().text_size(px(12.5)).text_color(theme.text_muted).child(extension.description.clone()))
                     })
                     .when(!provides.is_empty(), |el| el.child(div().text_size(px(12.)).text_color(theme.text_dim).child(provides.join(" · "))))
+                    .when_some(permissions_line, |el, (text, revocable, id)| {
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_size(px(12.))
+                                .text_color(theme.text_dim)
+                                .child(text)
+                                .when(revocable, |el| {
+                                    el.child(
+                                        div()
+                                            .id(("ext-revoke", ix))
+                                            .text_color(theme.accent)
+                                            .cursor_pointer()
+                                            .hover(|s| s.underline())
+                                            .child("Revoke")
+                                            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                                                crate::extensions::permissions::revoke(&id);
+                                                cx.notify();
+                                            })),
+                                    )
+                                }),
+                        )
+                    })
                     .when_some(status, |el, (color, text)| {
                         el.child(
                             div()

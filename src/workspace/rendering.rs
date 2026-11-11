@@ -387,6 +387,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::run_sql_script))
             .on_action(cx.listener(Self::new_sql_script))
             .on_action(cx.listener(Self::submit_in_editor))
+            .on_action(cx.listener(Self::run_extension_command_action))
+            .on_action(cx.listener(Self::toggle_extension_view_action))
+            .on_action(cx.listener(Self::toggle_extension_output))
             .on_action(cx.listener(Self::git_push))
             .on_action(cx.listener(Self::git_pull))
             .on_action(cx.listener(Self::git_fetch))
@@ -497,7 +500,8 @@ impl Render for Workspace {
                             .when(self.shows(BottomPanel::Terminal), |el| el.child(terminal_panel.unwrap()))
                             .when(self.shows(BottomPanel::GitLog), |el| el.child(self.render_git_log_panel(cx)))
                             .when(self.shows(BottomPanel::Debug), |el| el.children(self.render_debug_panel(cx)))
-                            .when(self.shows(BottomPanel::Database), |el| el.child(self.render_database_results(cx))),
+                            .when(self.shows(BottomPanel::Database), |el| el.child(self.render_database_results(cx)))
+                            .when(self.shows(BottomPanel::Extension), |el| el.child(self.render_extension_panel(cx))),
                     )
                     .when(sidebar_right, |el| el.child(self.render_sidebar_block(window, cx))),
             ))
