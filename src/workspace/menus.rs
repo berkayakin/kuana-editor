@@ -140,6 +140,9 @@ impl Workspace {
             actions.push(action.map(MenuAction::Tree));
         };
 
+        if conflicted {
+            add(MenuEntry::item("Merge…", Icon::GitCompare), Some(TreeAction::Merge(file.path.clone())));
+        }
         add(MenuEntry::item("Show Diff", Icon::GitCompare), Some(TreeAction::ShowDiff(file.clone(), staged)));
         if !deleted {
             add(MenuEntry::item("Open File", Icon::File), Some(TreeAction::Open(file.path.clone())));
@@ -299,6 +302,7 @@ impl Workspace {
             }
             TreeAction::Git(op) => self.run_git(op, window, cx),
             TreeAction::ShowDiff(file, staged) => self.open_diff(file, staged, window, cx),
+            TreeAction::Merge(path) => self.show_merge(path, window, cx),
             TreeAction::AddToGitignore(rel) => self.add_to_gitignore(rel, cx),
             TreeAction::ShowHistory(rel) => self.show_history_of(rel, window, cx),
             TreeAction::LocalHistory(path) => self.show_local_history_of(path, window, cx),
@@ -1002,6 +1006,7 @@ impl Workspace {
             Modal::Remotes(r) => r.clone().into_any_element(),
             Modal::Trust(t) => t.clone().into_any_element(),
             Modal::Connection(c) => c.clone().into_any_element(),
+            Modal::Merge(m) => m.clone().into_any_element(),
         };
         let top = modal_top(window);
         // Deferred above the other deferred layers (resize handles), so they
