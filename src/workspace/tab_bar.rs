@@ -172,6 +172,13 @@ pub(super) fn tab_strip_inset(theme: &Theme) -> f32 {
     if theme.classic { 0. } else { TAB_STRIP_INSET }
 }
 
+/// A tab strip's height and top room. It reaches 1px below its tabs (a bottom
+/// padding, so they stay put), so the strip's clip keeps the current tab's
+/// cover of the island's border at fractional scales (`tab_shape`).
+pub(super) fn tab_strip<E: Styled>(el: E, theme: &Theme) -> E {
+    el.h(px(TAB_STRIP_HEIGHT + 1.)).pt(px(tab_strip_top(theme))).pb(px(1.))
+}
+
 /// The bottom margin that centers a strip's buttons (24–26pt) on its tabs.
 pub(super) fn strip_button_margin(theme: &Theme) -> f32 {
     4. + (TAB_STRIP_TOP - tab_strip_top(theme)) / 2.
@@ -235,6 +242,11 @@ pub(super) fn tab_shape(
                     let (top, bottom) = (snap(bounds.top()), snap(bounds.bottom()));
                     let corners = gpui::Corners { top_left: radius, top_right: radius, ..Default::default() };
                     window.paint_quad(gpui::fill(Bounds::from_corners(point(left, top), point(right, bottom)), island).corner_radii(corners));
+                    // The island's 1px border is a device pixel and a half at 150%,
+                    // while layout rounds to whole ones: half a row of it can lie past
+                    // the tab's bottom, a faint line under the tab. Covered, over the
+                    // island's padding (`tab_strip` keeps it inside the strip's clip).
+                    window.paint_quad(gpui::fill(Bounds::from_corners(point(left, bottom), point(right, bottom + px(1.))), island));
                     window.paint_quad(
                         gpui::quad(
                             Bounds::from_corners(point(left, top), point(right, bottom - r)),
