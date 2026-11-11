@@ -986,6 +986,7 @@ impl Workspace {
             Modal::Push(p) => p.clone().into_any_element(),
             Modal::Remotes(r) => r.clone().into_any_element(),
             Modal::Trust(t) => t.clone().into_any_element(),
+            Modal::Connection(c) => c.clone().into_any_element(),
         };
         let top = modal_top(window);
         // Deferred above the other deferred layers (resize handles), so they

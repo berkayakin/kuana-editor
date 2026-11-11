@@ -30,6 +30,12 @@ libloading = "0.8"
 # Checks that an update's manifest was signed by the release workflow.
 minisign-verify = "0.3"
 nucleo-matcher = "0.3.1"
+# The Database view's Oracle connections: Oracle's own pure-Rust driver (no Oracle
+# Client libraries; TLS through rustls). Pinned while it's a beta.
+oracledb = "=26.0.0-beta.5"
+# Saved database passwords, in the system's keychain (Keychain, Credential
+# Manager; on Linux the kernel keyring, which forgets them on restart).
+keyring = { version = "3.6", features = ["apple-native", "windows-native", "linux-native"] }
 oxc_allocator = "0.139.0"
 oxc_ast = "0.139.0"
 oxc_diagnostics = "0.139.0"

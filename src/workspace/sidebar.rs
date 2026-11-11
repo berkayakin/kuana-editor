@@ -75,6 +75,8 @@ impl Workspace {
 
         let body: AnyElement = if self.sidebar_mode == SidebarMode::Commit {
             div().flex_1().min_h_0().child(cached(&self.git_panel)).into_any_element()
+        } else if self.sidebar_mode == SidebarMode::Database {
+            div().flex_1().min_h_0().child(cached(&self.database)).into_any_element()
         } else if self.root.is_some() {
             div().flex_1().min_h_0().child(cached(&self.tree)).into_any_element()
         } else {

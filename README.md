@@ -59,6 +59,7 @@ Updates are signed.
 | **Editing** | Multi-cursor, syntax-aware Extend Selection, column selection, folding, sticky scroll, breadcrumbs, snippets (VS Code format), [Vim mode](docs/editing.md#vim-mode), Markdown preview, GitHub Copilot's suggestions as [ghost text](docs/editing.md#edit-predictions) (off until you turn them on) |
 | **Git** | Gutter changes with inline diffs, staging single changes, side-by-side diffs with word highlights, a commit graph with commit actions (cherry-pick, revert, reset, tag), inline blame, branches, stashes, remotes, merge conflicts resolved in the editor; see [Git](docs/git.md) |
 | **Run & debug** | ▶ next to every test and `main` (Rust, Go, Python, JS/TS), [test results](docs/run-and-debug.md#test-results) as a tree with ✓ / ✕ in the gutter and Rerun Failed, a [debugger](docs/run-and-debug.md#debugging) with conditional breakpoints and logpoints, errors from a run's output in Problems |
+| **Databases** | An [Oracle Database](docs/database.md) view: browse tables, packages, procedures and functions, edit and compile PL/SQL with errors in place, run SQL with results in a grid; no Oracle Client needed |
 | **Terminal** | Your login shell in tabs and splits, full colors and mouse support, Find in scrollback, ⌘-click paths to open them |
 | **Linting** | Built-in rules for JavaScript/TypeScript (oxc), HTML and Markdown, syntax errors for the rest, plus your project's ESLint |
 | **Projects** | Multiple windows, hot exit (unsaved edits survive a quit), [Local History](docs/editing.md#local-history) of every file, shared [project settings](docs/settings.md#project-settings), live file watching, file operations you can undo, image preview, any text encoding |
@@ -110,6 +111,7 @@ read what it [doesn't do yet](#known-limitations).
 | [Editing, panes and windows](docs/editing.md) | Splits, tabs, Vim mode, snippets, Copilot's suggestions, projects |
 | [Terminal, run and debug](docs/run-and-debug.md) | Terminal, running tests, the debugger |
 | [Git](docs/git.md) | Everything Git |
+| [Databases](docs/database.md) | Oracle connections, browsing, compiling PL/SQL, running SQL |
 | [Extensions](docs/extensions.md) | Installing and writing extensions |
 | [Themes](docs/themes.md) | Built-in themes and making your own |
 | [Settings](docs/settings.md) | Every option, `.editorconfig`, project trust |

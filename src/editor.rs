@@ -313,6 +313,8 @@ pub struct Editor {
     pub doc: Entity<Document>,
     mode: EditorMode,
     placeholder: SharedString,
+    /// A password field: shows a bullet per character and copies nothing.
+    masked: bool,
     search_matches: SearchMatches,
     active_match: Option<usize>,
     /// Selections before each ExtendSelection, for ShrinkSelection.
@@ -509,6 +511,7 @@ impl Editor {
             waiting_view: None,
             mode: EditorMode::Full,
             placeholder: SharedString::default(),
+            masked: false,
             search_matches: SearchMatches::default(),
             active_match: None,
             expand_stack: Vec::new(),
@@ -748,6 +751,13 @@ impl Editor {
         this
     }
 
+    /// A one-line password field (`masked`).
+    pub fn password(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
+        let mut this = Self::single_line(placeholder, cx);
+        this.masked = true;
+        this
+    }
+
     pub fn multi_line(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
         let mut this = Self::single_line(placeholder, cx);
         this.mode = EditorMode::MultiLine;
@@ -765,7 +775,8 @@ impl Editor {
     }
 
     fn submit(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_chromeless() {
+        // In SQL files it runs the statement (the workspace hears it).
+        if self.is_chromeless() || self.doc.read(cx).path.as_deref().is_some_and(crate::database::is_sql_path) {
             cx.propagate();
         } else {
             self.newline_below(&NewlineBelow, window, cx);
@@ -1679,7 +1690,7 @@ impl Editor {
             let col = at - start;
             inlays.insert(inlays.partition_point(|i| i.0 < col), (col, ghost, false, false));
         }
-        let dl = DisplayLine::window(&text, from, self.tab_size, &inlays);
+        let dl = if self.masked { DisplayLine::masked(&text, from) } else { DisplayLine::window(&text, from, self.tab_size, &inlays) };
         (text, dl)
     }
 
@@ -3018,11 +3029,17 @@ impl Editor {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if self.masked {
+            return;
+        }
         let (text, whole_lines) = self.copy_text(cx);
         cx.write_to_clipboard(self.clipboard_item(text, whole_lines, cx));
     }
 
     fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
+        if self.masked {
+            return;
+        }
         let (text, whole_lines) = self.copy_text(cx);
         cx.write_to_clipboard(self.clipboard_item(text, whole_lines, cx));
         if whole_lines {
@@ -5256,6 +5273,19 @@ impl DisplayLine {
         insert(first + text.len(), &mut out, &mut col);
         map.push(before);
         Self { text: out, start: from, map: Some(map), inlays: spans, controls }
+    }
+
+    /// A password's text: a bullet per character, each mapping to its bytes.
+    pub fn masked(text: &str, from: wrap::Resume) -> Self {
+        let base = from.ix as usize;
+        let mut out = String::with_capacity(text.chars().count() * 3);
+        let mut map = Vec::with_capacity(text.len() + 1);
+        for ch in text.chars() {
+            map.extend(std::iter::repeat_n(base + out.len(), ch.len_utf8()));
+            out.push('•');
+        }
+        map.push(base + out.len());
+        Self { text: out, start: from, map: Some(map), inlays: Vec::new(), controls: Vec::new() }
     }
 
     /// The buffer columns it shows: the line's, or a window's.

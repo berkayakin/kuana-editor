@@ -46,6 +46,11 @@ use crate::{
     git_panel::{GitOp, GitPanel, GitPanelEvent},
     problems_panel::{ProblemsEvent, ProblemsPanel},
     results_panel::{ResultsEvent, ResultsPanel},
+    database::{
+        dialog::{ConnectionDialog, ConnectionDialogEvent},
+        results::{QueryResults, QueryResultsEvent},
+        view::{DatabaseEvent, DatabaseView},
+    },
     project::{Applied, ProjectSnapshot, project_ignore},
     project_tree::{ProjectTree, TreeEvent},
     find_bar::{FindBar, FindBarEvent},
@@ -85,6 +90,7 @@ mod commands;
 mod file_tree;
 mod git_ops;
 mod copilot;
+mod database;
 mod language_servers;
 mod line_endings;
 mod local_history;
@@ -221,6 +227,16 @@ actions!(
         ReloadThemes,
         ShowCommit,
         ToggleCommit,
+        /// The Database view in the sidebar.
+        ToggleDatabase,
+        NewDatabaseConnection,
+        /// The Database panel (query results) in the bottom area.
+        ToggleDatabaseResults,
+        /// Runs the SQL statement at the caret (or the selection) against the file's connection.
+        RunSqlStatement,
+        /// Runs the whole SQL file.
+        RunSqlScript,
+        NewSqlScript,
         GitPush,
         GitPull,
         GitFetch,
@@ -268,6 +284,8 @@ enum CloseIntent {
 enum SidebarMode {
     Files,
     Commit,
+    /// Database connections and their objects (`crate::database::view`).
+    Database,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -417,6 +435,8 @@ enum BottomPanel {
     Terminal,
     GitLog,
     Debug,
+    /// SQL results (`crate::database::results`).
+    Database,
 }
 
 /// Ctrl+Tab going through a pane's tabs in the order they were last used,
@@ -519,6 +539,8 @@ enum MenuAction {
     OpenFile(PathBuf),
     /// Status bar: save the files changed without a tab.
     SaveBackground,
+    /// Anything else, run on the workspace (the Database view's menus).
+    Call(std::rc::Rc<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>),
 }
 
 /// What a terminal tab's (or its output's) menu does with it.
@@ -566,6 +588,7 @@ impl Clone for MenuAction {
             MenuAction::TerminalTab(action, terminal) => MenuAction::TerminalTab(*action, terminal.clone()),
             MenuAction::OpenFile(path) => MenuAction::OpenFile(path.clone()),
             MenuAction::SaveBackground => MenuAction::SaveBackground,
+            MenuAction::Call(call) => MenuAction::Call(call.clone()),
         }
     }
 }
@@ -594,6 +617,7 @@ enum Modal {
     Push(Entity<PushDialog>),
     Remotes(Entity<RemotesDialog>),
     Trust(Entity<crate::trust_dialog::TrustDialog>),
+    Connection(Entity<ConnectionDialog>),
 }
 
 /// The modal over the workspace, if any, with its subscription: they're
@@ -744,6 +768,16 @@ pub struct Workspace {
     last_shift_tap: Option<Instant>,
     sidebar_mode: SidebarMode,
     git_panel: Entity<GitPanel>,
+    /// The Database view.
+    database: Entity<DatabaseView>,
+    /// The Database panel: the last SQL run's results.
+    db_results: Entity<QueryResults>,
+    /// The last SQL run: its editor and its statements' ranges (Output's rows go to them).
+    db_run: Option<database::SqlRun>,
+    /// The Database panel has something to show (read in render instead of the panel).
+    has_db_results: bool,
+    /// The connection chosen for a SQL file (in the status bar, or the one its last run used).
+    sql_connections: HashMap<PathBuf, String>,
     /// The Files view.
     tree: Entity<ProjectTree>,
     /// The shells in the bottom area.
@@ -968,6 +1002,11 @@ impl Workspace {
                 ws.hide_results(window, cx);
             }
         });
+        let database = cx.new(DatabaseView::new);
+        let database_subscription = cx.subscribe_in(&database, window, |ws, _, event: &DatabaseEvent, window, cx| ws.on_database_event(event, window, cx));
+        let db_results = cx.new(QueryResults::new);
+        let db_results_subscription =
+            cx.subscribe_in(&db_results, window, |ws, _, event: &QueryResultsEvent, window, cx| ws.on_query_results_event(event, window, cx));
         let git_log = cx.new(GitLog::new);
         let log_subscription = cx.subscribe_in(&git_log, window, |ws, _, event: &GitLogEvent, window, cx| match event {
             GitLogEvent::OpenDiff(source) => {
@@ -1155,8 +1194,17 @@ impl Workspace {
             actions: Arc::new(keymap::action_entries()),
             shift_down: false,
             last_shift_tap: None,
-            sidebar_mode: if state.sidebar_mode.as_deref() == Some("commit") { SidebarMode::Commit } else { SidebarMode::Files },
+            sidebar_mode: match state.sidebar_mode.as_deref() {
+                Some("commit") => SidebarMode::Commit,
+                Some("database") => SidebarMode::Database,
+                _ => SidebarMode::Files,
+            },
             git_panel,
+            database,
+            db_results,
+            db_run: None,
+            has_db_results: false,
+            sql_connections: HashMap::new(),
             tree,
             terminals,
             problems,
@@ -1211,6 +1259,8 @@ impl Workspace {
                 log_subscription,
                 problems_subscription,
                 results_subscription,
+                database_subscription,
+                db_results_subscription,
                 tree_subscription,
                 terminals_subscription,
                 activation,

@@ -7,6 +7,7 @@
 - [Editing, panes and windows](editing.md): splits and tabs, Vim mode, snippets, Copilot's suggestions, projects, hot exit
 - [Terminal, run and debug](run-and-debug.md): the terminal, running tests, the debugger
 - [Git](git.md): gutter, staging, diffs, log, branches, merge conflicts
+- [Databases](database.md): Oracle connections, browsing schemas, compiling PL/SQL, running SQL
 - [Extensions](extensions.md): Zed-format extensions for languages, themes and icons
 - [Themes](themes.md): built-in themes and making your own
 - [Settings and project trust](settings.md): every option, `.editorconfig`, Restricted Mode

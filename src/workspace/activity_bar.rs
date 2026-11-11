@@ -182,6 +182,7 @@ impl Workspace {
         let index = match self.sidebar_mode {
             SidebarMode::Files => 0.,
             SidebarMode::Commit => 1.,
+            SidebarMode::Database => 2.,
         };
         let bar = BarSize::of(cx);
         let top = TAB_STRIP_INSET + index * (bar.row + bar.gap(Theme::get(cx)));
@@ -286,7 +287,8 @@ impl Workspace {
                     .w_full()
                     .gap(px(gap))
                     .child(self.render_view_tab(SidebarMode::Files, cx))
-                    .child(self.render_view_tab(SidebarMode::Commit, cx)),
+                    .child(self.render_view_tab(SidebarMode::Commit, cx))
+                    .child(self.render_view_tab(SidebarMode::Database, cx)),
             )
             // The free space between the views and the tools moves the window,
             // as the title bar's would (the bar runs up beside it). Its own
@@ -335,6 +337,11 @@ impl Workspace {
         if self.has_results {
             tools.push(tool("toggle-results", Icon::TextSearch, "Find", self.shows(BottomPanel::Results), Group::Panel, 5, Box::new(ToggleResults), |ws, window, cx| {
                 ws.toggle_results(&ToggleResults, window, cx)
+            }));
+        }
+        if self.has_db_results {
+            tools.push(tool("toggle-db-results", Icon::Table, "Query Results", self.shows(BottomPanel::Database), Group::Panel, 3, Box::new(ToggleDatabaseResults), |ws, window, cx| {
+                ws.toggle_database_results(&ToggleDatabaseResults, window, cx)
             }));
         }
         if self.repo.is_some() {
@@ -443,6 +450,7 @@ impl Workspace {
         let (id, icon) = match mode {
             SidebarMode::Files => ("activity-files", Icon::Folder),
             SidebarMode::Commit => ("activity-commit", Icon::GitBranch),
+            SidebarMode::Database => ("activity-database", Icon::Database),
         };
         let changes = if mode == SidebarMode::Commit { self.git_status.files.len() } else { 0 };
         let bar = BarSize::of(cx);
@@ -461,9 +469,11 @@ impl Workspace {
             .on_click(cx.listener(move |ws, _, window, cx| match mode {
                 SidebarMode::Files => ws.toggle_sidebar(&ToggleSidebar, window, cx),
                 SidebarMode::Commit => ws.toggle_commit(&ToggleCommit, window, cx),
+                SidebarMode::Database => ws.toggle_database(&ToggleDatabase, window, cx),
             }))
             .map(|el| match mode {
                 SidebarMode::Files => el.tooltip(|window, cx| status_tooltip("Files", &ToggleSidebar, window, cx)),
+                SidebarMode::Database => el.tooltip(|window, cx| status_tooltip("Database", &ToggleDatabase, window, cx)),
                 SidebarMode::Commit => {
                     // The count as it is now, also while the tooltip is shown.
                     let workspace = cx.entity();

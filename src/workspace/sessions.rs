@@ -278,6 +278,7 @@ impl Workspace {
         let sidebar_mode = match self.sidebar_mode {
             SidebarMode::Files => "files",
             SidebarMode::Commit => "commit",
+            SidebarMode::Database => "database",
         };
         // What this window shows; what's shared with other windows (zoom,
         // recent projects, placement) stays as the others left it.
