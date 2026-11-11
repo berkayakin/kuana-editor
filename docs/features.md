@@ -69,6 +69,10 @@ Everything Kuana does, in one list. Each area has its own page with the details.
 - Breadcrumbs under the tabs (folders, file, then the definitions around the caret; click one to go
   there) and sticky scroll: the header lines of the functions and classes you've scrolled into stay
   pinned at the top of the editor (up to four; click one to jump to it)
+- Databases: an Oracle Database view (no Oracle Client needed) with your schema's tables, views,
+  packages, procedures, functions, triggers and types; source opens in tabs and compiles on Save with
+  errors in place; ⌘↩ / Ctrl+Enter runs the SQL at the caret into a results grid with DBMS_OUTPUT
+  and Commit / Rollback (see [Databases](database.md))
 - Git: clone, init, gutter change markers with rollback, inline blame, file status colors, a Commit panel
   (stage, discard, commit, amend, push), staging single changes, side-by-side diffs with changed words
   highlighted, a log with a branch graph and file history, merge/rebase with conflict resolution in

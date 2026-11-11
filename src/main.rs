@@ -13,6 +13,7 @@ mod conflict;
 mod contrast;
 mod context_menu;
 mod dap;
+mod database;
 mod debugger;
 mod diff_view;
 mod document;

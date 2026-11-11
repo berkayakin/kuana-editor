@@ -380,6 +380,13 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::reload_themes))
             .on_action(cx.listener(Self::show_commit))
             .on_action(cx.listener(Self::toggle_commit))
+            .on_action(cx.listener(Self::toggle_database))
+            .on_action(cx.listener(Self::new_database_connection))
+            .on_action(cx.listener(Self::toggle_database_results))
+            .on_action(cx.listener(Self::run_sql_statement))
+            .on_action(cx.listener(Self::run_sql_script))
+            .on_action(cx.listener(Self::new_sql_script))
+            .on_action(cx.listener(Self::submit_in_editor))
             .on_action(cx.listener(Self::git_push))
             .on_action(cx.listener(Self::git_pull))
             .on_action(cx.listener(Self::git_fetch))
@@ -489,7 +496,8 @@ impl Render for Workspace {
                             .when(self.shows(BottomPanel::Results), |el| el.child(self.render_results(cx)))
                             .when(self.shows(BottomPanel::Terminal), |el| el.child(terminal_panel.unwrap()))
                             .when(self.shows(BottomPanel::GitLog), |el| el.child(self.render_git_log_panel(cx)))
-                            .when(self.shows(BottomPanel::Debug), |el| el.children(self.render_debug_panel(cx))),
+                            .when(self.shows(BottomPanel::Debug), |el| el.children(self.render_debug_panel(cx)))
+                            .when(self.shows(BottomPanel::Database), |el| el.child(self.render_database_results(cx))),
                     )
                     .when(sidebar_right, |el| el.child(self.render_sidebar_block(window, cx))),
             ))

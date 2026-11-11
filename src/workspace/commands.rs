@@ -224,6 +224,10 @@ impl Workspace {
                 match saved {
                     Ok(()) => {
                         ws.auto_save_warned.remove(&id);
+                        // A database object's file compiles into its database.
+                        if let Some(editor) = ws.editors.iter().find(|e| e.entity_id() == id).cloned() {
+                            ws.database_saved(&editor, window, cx);
+                        }
                         ws.check_config(cx);
                         // The session may hold the text as unsaved.
                         ws.schedule_session_save(cx);

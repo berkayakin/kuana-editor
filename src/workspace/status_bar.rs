@@ -191,6 +191,14 @@ impl Workspace {
                         .into_any_element(),
                 );
             }
+            if let Some(label) = self.sql_connection_label(e.doc.read(cx).path.as_deref(), cx) {
+                let path = e.doc.read(cx).path.clone();
+                right.push(
+                    menu_item("sql-connection", label, "Database connection for this file's SQL")
+                        .on_click(cx.listener(move |ws, event: &ClickEvent, window, cx| ws.open_sql_connection_menu(path.clone(), event.position(), window, cx)))
+                        .into_any_element(),
+                );
+            }
             if e.doc.read(cx).language == Language::Python
                 && self.root.is_some()
                 && let Some(dir) = e.doc.read(cx).path.as_deref().and_then(Path::parent)

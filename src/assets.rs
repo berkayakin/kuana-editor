@@ -13,6 +13,13 @@ macro_rules! icons {
 }
 
 static ICONS: &[(&str, &[u8])] = icons![
+    "database",
+    "table",
+    "package",
+    "function",
+    "bolt",
+    "key",
+    "view-column",
     "braces",
     "chevron-down",
     "chevron-right",
@@ -132,6 +139,13 @@ impl AssetSource for Assets {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
+    Database,
+    Table,
+    Package,
+    Function,
+    Bolt,
+    Key,
+    ViewColumn,
     ChevronDown,
     ChevronRight,
     CircleAlert,
@@ -214,6 +228,13 @@ pub enum Icon {
 impl Icon {
     pub fn path(self) -> &'static str {
         match self {
+            Icon::Database => "icons/database.svg",
+            Icon::Table => "icons/table.svg",
+            Icon::Package => "icons/package.svg",
+            Icon::Function => "icons/function.svg",
+            Icon::Bolt => "icons/bolt.svg",
+            Icon::Key => "icons/key.svg",
+            Icon::ViewColumn => "icons/view-column.svg",
             Icon::ChevronDown => "icons/chevron-down.svg",
             Icon::ChevronRight => "icons/chevron-right.svg",
             Icon::CircleAlert => "icons/circle-alert.svg",

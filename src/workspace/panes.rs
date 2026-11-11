@@ -339,6 +339,7 @@ impl Workspace {
         let hidden = |mode| !self.show_sidebar || self.sidebar_mode != mode;
         if (hidden(SidebarMode::Files) && self.tree.focus_handle(cx).contains_focused(window, cx))
             || (hidden(SidebarMode::Commit) && self.git_panel.focus_handle(cx).contains_focused(window, cx))
+            || (hidden(SidebarMode::Database) && self.database.focus_handle(cx).contains_focused(window, cx))
         {
             self.focus_active(window, cx);
         }
