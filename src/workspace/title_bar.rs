@@ -329,7 +329,12 @@ impl Workspace {
             (a, 0) => format!("{} to push", commits(a)),
             (a, b) => format!("{} to push, {b} to pull", commits(a)),
         };
-        let (label, action): (&str, &dyn gpui::Action) = if ahead > 0 { ("Push…", &GitPush) } else { ("Update Project", &GitPull) };
+        // Behind and ahead: a push would be refused, so pull first, then push.
+        let (label, action): (&str, &dyn gpui::Action) = match (ahead, behind) {
+            (0, _) => ("Update Project", &GitPull),
+            (_, 0) => ("Push…", &GitPush),
+            _ => ("Sync: Update Project, then Push…", &GitSync),
+        };
         let tip = match binding_label(action, window) {
             Some(keys) => format!("{tip}. {label} ({keys})"),
             None => format!("{tip}. {label}"),
@@ -360,10 +365,10 @@ impl Workspace {
                 .hover(|st| st.text_color(theme.text))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |ws, _, window, cx| {
-                    if ahead > 0 {
-                        ws.git_push(&GitPush, window, cx)
-                    } else {
-                        ws.git_pull(&GitPull, window, cx)
+                    match (ahead, behind) {
+                        (0, _) => ws.git_pull(&GitPull, window, cx),
+                        (_, 0) => ws.git_push(&GitPush, window, cx),
+                        _ => ws.git_sync(&GitSync, window, cx),
                     }
                 }))
                 .tooltip(move |_, cx| tooltip_view(tip.clone(), cx))

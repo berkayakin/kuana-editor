@@ -91,7 +91,7 @@ use crate::{
     workspace::{
         CheckForUpdates, CloseTab, CloseWindow, DecreaseFontSize, FileStructure, Find, IncreaseFontSize, OpenSettings, OpenExtensions, ProjectTrust,
         ResetFontSize, Rerun, RunConfiguration, SplitDown, SplitRight, StopRun, ShowFileHistory, ToggleGitLog, ToggleTerminal, FindAction, FindInFiles, GitBranches, GitStash, ManageRemotes, GitClone, GitFetch,
-        GitInit, GitPull, GitPush, GoToFile, GoToLine, MinimizeWindow, ZoomWindow, NewFile, NewWindow, NextTab, OpenFile,
+        GitInit, GitPull, GitPush, GitSync, GoToFile, GoToLine, MinimizeWindow, ZoomWindow, NewFile, NewWindow, NextTab, OpenFile,
         OpenFolder, OpenFolderInThisWindow, OpenRemote, PrevTab, Quit, RecentFiles, RecentProjects,
         Replace, ReplaceInFiles, Save, SaveAs, SearchEverywhere, SelectTheme, ShowCommit,
         ToggleProblems, ToggleResults, ToggleSidebar, WelcomeSetup, GoToSymbol, InstallShellCommand,
@@ -245,6 +245,7 @@ fn menus_for(mac: bool) -> Vec<Menu> {
                 MenuItem::action("Commit…", ShowCommit),
                 MenuItem::action("Update Project…", GitPull),
                 MenuItem::action("Push…", GitPush),
+                MenuItem::action("Sync", GitSync),
                 MenuItem::action("Fetch", GitFetch),
                 MenuItem::separator(),
                 MenuItem::action("Branches…", GitBranches),

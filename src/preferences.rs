@@ -158,11 +158,12 @@ enum Setting {
     NativeGrammars,
     AutoUpdate,
     PullStrategy,
+    AutoFetch,
     AutoResolveConflicts,
 }
 
 impl Setting {
-    const ALL: [Setting; 34] = [
+    const ALL: [Setting; 35] = [
         Setting::Theme,
         Setting::IconTheme,
         Setting::VisualEffects,
@@ -196,6 +197,7 @@ impl Setting {
         Setting::NativeGrammars,
         Setting::AutoUpdate,
         Setting::PullStrategy,
+        Setting::AutoFetch,
         Setting::AutoResolveConflicts,
     ];
 
@@ -215,7 +217,7 @@ impl Setting {
             Setting::Shell | Setting::RunConfigurations => Page::Terminal,
             Setting::TrustAll | Setting::NativeGrammars => Page::Trust,
             Setting::AutoUpdate => Page::Updates,
-            Setting::PullStrategy | Setting::AutoResolveConflicts => Page::Git,
+            Setting::PullStrategy | Setting::AutoFetch | Setting::AutoResolveConflicts => Page::Git,
         }
     }
 
@@ -240,7 +242,7 @@ impl Setting {
             Setting::RunConfigurations => "Run configurations",
             Setting::TrustAll | Setting::NativeGrammars => "Restricted Mode",
             Setting::AutoUpdate => "Updates",
-            Setting::PullStrategy => "Update Project",
+            Setting::PullStrategy | Setting::AutoFetch => "Update Project",
             Setting::AutoResolveConflicts => "Merge Conflicts",
         }
     }
@@ -281,6 +283,7 @@ impl Setting {
             Setting::AutoUpdate => "Update automatically",
             Setting::PullStrategy => "Pull strategy",
             Setting::AutoResolveConflicts => "Resolve simple conflicts",
+            Setting::AutoFetch => "Fetch in the background",
         }
     }
 
@@ -321,6 +324,7 @@ impl Setting {
             Setting::NativeGrammars => "Compile extensions' grammars with your C compiler instead of WebAssembly, which runs them sandboxed. Only for extensions in trusted folders.",
             Setting::AutoUpdate => "Download new versions from GitHub in the background. Restart to Update in the status bar installs them.",
             Setting::PullStrategy => "How incoming commits join yours once both branches have new ones. Until one is picked, your Git config's pull.rebase / pull.ff decide; without them, Update Project asks the first time.",
+            Setting::AutoFetch => "Every few minutes while the window is in use, so commits waiting to be pulled show in the title bar before you edit the same lines. Only in trusted projects; failures stay quiet.",
             Setting::AutoResolveConflicts => "When a pull, merge or rebase stops on conflicts, combine the ones where the two sides changed different words, and mark files with nothing left resolved.",
         }
     }
@@ -361,6 +365,7 @@ impl Setting {
             Setting::NativeGrammars => "extensions grammars tree-sitter native compiler wasm webassembly sandbox",
             Setting::AutoUpdate => "update upgrade version release download",
             Setting::PullStrategy => "git pull update project merge rebase fast-forward ff only diverged branches version control vcs",
+            Setting::AutoFetch => "git fetch auto automatic background periodic remote incoming commits behind pull refresh version control vcs",
             Setting::AutoResolveConflicts => "git merge conflicts resolve automatically auto smart magic simple combine rebase pull version control vcs",
         }
     }
@@ -1512,6 +1517,7 @@ impl Preferences {
                     this.set_or_default("base_keymap", keymap.key().into(), BaseKeymap::default().key().into(), cx);
                 })
             }
+            Setting::AutoFetch => self.switch_with_default("pref-auto-fetch", "auto_fetch", settings.auto_fetch, true, cx),
             Setting::AutoResolveConflicts => {
                 self.switch_with_default("pref-auto-resolve-conflicts", "auto_resolve_conflicts", settings.auto_resolve_conflicts, true, cx)
             }
@@ -2680,6 +2686,7 @@ fn setting_key(setting: Setting) -> &'static str {
         Setting::AutoUpdate => "auto_update",
         Setting::PullStrategy => "pull_strategy",
         Setting::AutoResolveConflicts => "auto_resolve_conflicts",
+        Setting::AutoFetch => "auto_fetch",
     }
 }
 
