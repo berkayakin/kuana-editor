@@ -116,8 +116,25 @@ pub fn load_fonts(cx: &App) {
 
 pub struct Assets;
 
+/// Whether `name` is one of Kuana's icons (`assets/icons/<name>.svg`).
+pub fn has_icon(name: &str) -> bool {
+    let path = format!("icons/{name}.svg");
+    ICONS.iter().any(|(p, _)| *p == path)
+}
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        // An extension's own icon (`extensions::contrib`): read from its
+        // folder, and only from the extensions folder.
+        if let Some(file) = path.strip_prefix(crate::extensions::contrib::FILE_ICON_PREFIX) {
+            // By its path as written (an extension installed from a folder
+            // is a link to it): in the extensions folder, with no `..`.
+            let file = std::path::Path::new(file);
+            let inside = crate::extensions::extensions_dir().is_some_and(|dir| {
+                file.starts_with(&dir) && !file.components().any(|c| c == std::path::Component::ParentDir)
+            });
+            return Ok(inside.then(|| std::fs::read(file).ok()).flatten().map(Cow::Owned));
+        }
         Ok(ICONS
             .iter()
             .chain(IMAGES)

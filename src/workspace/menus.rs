@@ -7,6 +7,10 @@ impl Workspace {
 
     pub(super) fn open_editor_menu(&mut self, editor: Entity<Editor>, position: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         self.close_modal(window, cx);
+        let ext_entries = {
+            let doc = editor.read(cx).doc.read(cx);
+            self.extension_editor_entries(doc.path.as_deref(), doc.language.name())
+        };
         let e = editor.read(cx);
         let path = e.doc.read(cx).path.clone();
         let has_change = e.has_change_at_cursor(cx);
@@ -97,6 +101,12 @@ impl Workspace {
         let wrap_entry = if soft_wrap { MenuEntry::item("Soft-Wrap", Icon::Check) } else { MenuEntry::text("Soft-Wrap") };
         let (entry, action) = run(wrap_entry, Box::new(editor::ToggleSoftWrap));
         add(entry, action);
+        if !ext_entries.is_empty() {
+            add(MenuEntry::Separator, None);
+            for (entry, action) in ext_entries {
+                add(entry, action);
+            }
+        }
         if let Some(path) = path {
             add(MenuEntry::Separator, None);
             add(MenuEntry::item("Copy Path", Icon::Clipboard), Some(MenuAction::Tree(TreeAction::CopyPath(path.clone()))));

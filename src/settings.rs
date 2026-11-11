@@ -56,6 +56,9 @@ pub struct Settings {
     /// Per language: `"language_server"`, a command reading stdin and writing
     /// stdout (`["black", "-q", "-"]`), or `false` to never format.
     pub formatters: HashMap<String, serde_json::Value>,
+    /// Per extension, by id: settings its code reads (`settings()` in Kuana's
+    /// extension interface), as the extension documents them.
+    pub extensions: Option<HashMap<String, serde_json::Value>>,
     /// The terminal's shell and arguments; the login shell by default.
     pub terminal_shell: Option<Vec<String>>,
     /// Extra entries for Run…: a name, a shell command and an optional
@@ -437,6 +440,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "languages",
     "language_servers",
     "lsp",
+    "extensions",
     "formatters",
     "terminal_shell",
     "run_configurations",
@@ -1094,6 +1098,11 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   //   "basedpyright": { "settings": { "basedpyright.analysis": { "typeCheckingMode": "strict" } } },
   //   "rust-analyzer": { "initialization_options": { "check": { "command": "clippy" } } },
   //   "gopls": { "binary": { "path": "/opt/go/bin/gopls" } }
+  // },
+
+  // Per extension (by id): settings its code reads, as it documents them.
+  // "extensions": {
+  //   "docker-view": { "context": "colima" }
   // },
 
   // Reformat Code uses the project's own formatter (e.g. its Prettier), then

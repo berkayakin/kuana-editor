@@ -91,6 +91,7 @@ mod file_tree;
 mod git_ops;
 mod copilot;
 mod database;
+mod extension_ui;
 mod language_servers;
 mod line_endings;
 mod local_history;
@@ -125,6 +126,7 @@ use self::{
     windows::*,
 };
 pub use self::{
+    extension_ui::{ToggleExtensionView, handle_extension_request},
     sessions::update_recent_projects,
     title_bar::{window_controls, window_drag_area},
     windows::{modal_max_height, open_window, placement_bounds, placement_of, quit},
@@ -237,6 +239,8 @@ actions!(
         /// Runs the whole SQL file.
         RunSqlScript,
         NewSqlScript,
+        /// Extensions' panels (their output) in the bottom area.
+        ToggleExtensionOutput,
         GitPush,
         GitPull,
         GitFetch,
@@ -286,6 +290,8 @@ enum SidebarMode {
     Commit,
     /// Database connections and their objects (`crate::database::view`).
     Database,
+    /// A view an extension adds (`extension_ui`), by its slot.
+    Extension(u16),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -437,6 +443,8 @@ enum BottomPanel {
     Debug,
     /// SQL results (`crate::database::results`).
     Database,
+    /// Extensions' panels (`crate::extension_panel`).
+    Extension,
 }
 
 /// Ctrl+Tab going through a pane's tabs in the order they were last used,
@@ -778,6 +786,17 @@ pub struct Workspace {
     has_db_results: bool,
     /// The connection chosen for a SQL file (in the status bar, or the one its last run used).
     sql_connections: HashMap<PathBuf, String>,
+    /// Extensions' views made so far, by slot (`extension_ui`).
+    ext_views: HashMap<u16, Entity<crate::extension_view::ExtensionView>>,
+    ext_view_subscriptions: Vec<Subscription>,
+    /// The extension views the activity bar shows (their `when` holds).
+    ext_modes: Vec<SidebarMode>,
+    /// Extensions' bottom panels.
+    ext_panels: Entity<crate::extension_panel::ExtensionPanels>,
+    /// They have something to show (read in render instead of the panel).
+    has_ext_panel: bool,
+    /// Problems extensions reported, by file.
+    ext_problems: extension_ui::ProblemMap,
     /// The Files view.
     tree: Entity<ProjectTree>,
     /// The shells in the bottom area.
@@ -1004,6 +1023,8 @@ impl Workspace {
         });
         let database = cx.new(DatabaseView::new);
         let database_subscription = cx.subscribe_in(&database, window, |ws, _, event: &DatabaseEvent, window, cx| ws.on_database_event(event, window, cx));
+        let ext_panels = cx.new(crate::extension_panel::ExtensionPanels::new);
+        let ext_panels_subscription = cx.subscribe_in(&ext_panels, window, |ws, _, event, window, cx| ws.on_extension_panels_event(event, window, cx));
         let db_results = cx.new(QueryResults::new);
         let db_results_subscription =
             cx.subscribe_in(&db_results, window, |ws, _, event: &QueryResultsEvent, window, cx| ws.on_query_results_event(event, window, cx));
@@ -1090,6 +1111,7 @@ impl Workspace {
             for tab in ws.editors.clone() {
                 tab.update(cx, |e, cx| e.apply_settings(cx));
             }
+            ws.extension_callers_changed(cx);
             ws.lsp.update(cx, |s, cx| s.settings_changed(cx));
             cx.notify();
         });
@@ -1197,7 +1219,8 @@ impl Workspace {
             sidebar_mode: match state.sidebar_mode.as_deref() {
                 Some("commit") => SidebarMode::Commit,
                 Some("database") => SidebarMode::Database,
-                _ => SidebarMode::Files,
+                Some(other) => extension_ui::restore_extension_mode(other).unwrap_or(SidebarMode::Files),
+                None => SidebarMode::Files,
             },
             git_panel,
             database,
@@ -1205,6 +1228,12 @@ impl Workspace {
             db_run: None,
             has_db_results: false,
             sql_connections: HashMap::new(),
+            ext_views: HashMap::new(),
+            ext_view_subscriptions: Vec::new(),
+            ext_modes: Vec::new(),
+            ext_panels,
+            has_ext_panel: false,
+            ext_problems: HashMap::new(),
             tree,
             terminals,
             problems,
@@ -1261,6 +1290,7 @@ impl Workspace {
                 results_subscription,
                 database_subscription,
                 db_results_subscription,
+                ext_panels_subscription,
                 tree_subscription,
                 terminals_subscription,
                 activation,
@@ -1473,6 +1503,8 @@ impl Workspace {
     /// What starts once a tab's text is there (when it opens, or when a
     /// restored tab is first shown): breakpoints, language server, Git changes.
     fn file_opened(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
+        self.apply_extension_problems(editor, cx);
+        self.refresh_extension_views(cx);
         let statuses = self.test_statuses.clone();
         editor.update(cx, |e, cx| e.set_test_statuses(statuses, cx));
         // Another editor of the document has what's per document already

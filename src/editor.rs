@@ -751,6 +751,12 @@ impl Editor {
         this
     }
 
+    /// Shows a bullet per character and copies nothing (a password field).
+    pub fn set_masked(&mut self, masked: bool, cx: &mut Context<Self>) {
+        self.masked = masked;
+        cx.notify();
+    }
+
     /// A one-line password field (`masked`).
     pub fn password(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
         let mut this = Self::single_line(placeholder, cx);

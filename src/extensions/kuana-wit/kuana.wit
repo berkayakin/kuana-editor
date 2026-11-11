@@ -1,0 +1,135 @@
+// Kuana's own extension interface: views in the activity bar, trees whose
+// items come from the extension's code, commands, bottom panels and editor
+// hooks. An extension's `kuana.wasm` (a WebAssembly component built for
+// `wasm32-wasip2`) targets the `extension` world below; Kuana draws
+// everything, the code only answers with data.
+//
+// Licensed under MIT OR Apache-2.0, like Kuana, so extensions can copy it.
+
+package kuana:extension@0.1.0;
+
+interface types {
+    /// How an item, icon or message is colored (the theme picks the color).
+    enum tone {
+        normal,
+        muted,
+        success,
+        warning,
+        error,
+    }
+
+    /// One row of a view's tree.
+    record tree-item {
+        /// Stable across refreshes: Kuana keeps expansion and selection by it.
+        id: string,
+        label: string,
+        /// Dim text after the label.
+        detail: option<string>,
+        /// One of Kuana's icon names (`database`, `table`, `folder`, …) or a
+        /// path to an SVG in the extension's folder.
+        icon: option<string>,
+        tone: tone,
+        /// Matched by menus' `when = "kind == '…'"`.
+        kind: option<string>,
+        /// Whether it has children (asked for when it's opened).
+        expandable: bool,
+        /// A command run when it's clicked or Enter is pressed on it.
+        command: option<string>,
+    }
+
+    /// A table: column names and rows of cells (none: NULL / empty).
+    record table {
+        columns: list<string>,
+        rows: list<list<option<string>>>,
+    }
+
+    variant panel-content {
+        /// Lines of text (monospaced).
+        text(list<string>),
+        table(table),
+    }
+
+    enum severity {
+        error,
+        warning,
+        info,
+    }
+
+    /// A problem in a file: 1-based line and column, in characters.
+    record diagnostic {
+        line: u32,
+        column: u32,
+        /// Where it ends on its line (the word at `column` when none).
+        end-column: option<u32>,
+        severity: severity,
+        message: string,
+    }
+
+    record process-output {
+        /// The exit code (-1 when the program was ended by a signal).
+        status: s32,
+        stdout: string,
+        stderr: string,
+    }
+
+    record http-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+}
+
+/// What Kuana does for the code. Calls that need a permission declared in
+/// `[kuana] permissions` fail with an error until the user allows it.
+interface host {
+    use types.{tone, panel-content, diagnostic, process-output, http-response};
+
+    /// Reads a view's items again: `item`'s children, or the whole view.
+    refresh: func(view: string, item: option<string>);
+    /// Shows content in one of the extension's panels (`[kuana.panels.<id>]`)
+    /// in the bottom area, with an optional title for this content.
+    show-panel: func(panel: string, title: option<string>, content: panel-content);
+    /// Opens a file in a tab, at a 1-based line: a path in the extension's
+    /// work folder, or in the project (with `workspace-files`).
+    open-file: func(path: string, line: option<u32>) -> result<_, string>;
+    /// A notification (`tone` picks its color: success, error, or info).
+    notify: func(tone: tone, message: string, detail: option<string>);
+    /// Asks the user for a line of text (`secret`: a password field). None
+    /// when they cancel.
+    ask-input: func(prompt: string, initial: string, secret: bool) -> option<string>;
+    /// Asks the user to confirm an action (`action` names its button).
+    confirm: func(message: string, detail: string, action: string) -> bool;
+    /// The extension's settings: `extensions.<id>` in settings.json, as JSON.
+    settings: func() -> string;
+    /// The open project's folder, if any.
+    project-root: func() -> option<string>;
+    /// A value the extension keeps in the system keychain (its own keys only).
+    secret-get: func(key: string) -> option<string>;
+    /// Keeps a value in the keychain (none: removes it).
+    secret-set: func(key: string, value: option<string>) -> result<_, string>;
+    /// Replaces the extension's problems for a file (a path as for `open-file`).
+    set-diagnostics: func(path: string, diagnostics: list<diagnostic>);
+    /// Runs a shell command in a terminal tab the user sees (`process`).
+    run-in-terminal: func(title: string, command: string) -> result<_, string>;
+    /// Runs a program and waits for it (`process`; trusted projects only).
+    run-process: func(program: string, args: list<string>, cwd: option<string>) -> result<process-output, string>;
+    /// An HTTP request (`network`).
+    http-request: func(method: string, url: string, headers: list<tuple<string, string>>, body: option<list<u8>>) -> result<http-response, string>;
+    /// Reads a file in the open project (`workspace-files`).
+    read-project-file: func(path: string) -> result<string, string>;
+}
+
+world extension {
+    use types.{tree-item};
+    import host;
+
+    /// Called once, before anything else.
+    export activate: func() -> result<_, string>;
+    /// A view's items: the roots (no `parent`), or an item's children.
+    export children: func(view: string, parent: option<string>) -> result<list<tree-item>, string>;
+    /// Runs a command: `target` is the tree item's id when it was run on one
+    /// (its menu, or a click), the file's path from the editor's menu.
+    export run-command: func(command: string, target: option<string>) -> result<_, string>;
+    /// The user saved (an explicit Save) a file in the extension's work folder.
+    export file-saved: func(path: string) -> result<_, string>;
+}

@@ -49,7 +49,10 @@ use crate::{
 /// inserting: `line_comments` (the first) and `block_comment`, as
 /// `["/*", "*/"]` or Zed's newer `{ start = "/*", end = "*/" }`.
 pub mod check;
+pub mod contrib;
+pub mod permissions;
 pub mod registry;
+pub mod ui_host;
 pub mod wasm;
 
 pub(crate) fn comment_tokens(config: &Table) -> (Option<String>, Option<(String, String)>) {
@@ -140,6 +143,8 @@ pub struct ExtensionInfo {
     installers: Vec<&'static crate::lsp::install::Installer>,
     /// Debug adapters it declares (`[debug_adapters.<id>]`).
     adapters: Vec<&'static crate::debugger::launch::ExtensionAdapter>,
+    /// Views, commands, menus and panels it adds (`[kuana]`, see `contrib`).
+    pub ui: Option<std::sync::Arc<contrib::Contributions>>,
 }
 
 /// A language an extension adds.
@@ -586,7 +591,7 @@ fn stamp(dir: &Path) -> Vec<(PathBuf, Option<SystemTime>)> {
         files.sort();
         files
     };
-    let mut paths = vec![dir.join("extension.toml")];
+    let mut paths = vec![dir.join("extension.toml"), dir.join("kuana.wasm")];
     for language in files(dir.join("languages")) {
         paths.extend(files(language));
     }
@@ -615,6 +620,7 @@ fn read_extension(dir: &Path) -> Read {
         problems: Vec::new(),
         installers: Vec::new(),
         adapters: Vec::new(),
+        ui: None,
     };
     let manifest = match read_toml(&dir.join("extension.toml")) {
         Ok(manifest) => manifest,
@@ -629,6 +635,10 @@ fn read_extension(dir: &Path) -> Read {
     info.version = text("version").unwrap_or_default();
     info.description = text("description").unwrap_or_default();
     info.authors = strings(manifest.get("authors"));
+    if let Some((ui, problems)) = contrib::parse(&manifest, &info.id, &info.name, dir) {
+        info.problems.extend(problems);
+        info.ui = Some(std::sync::Arc::new(ui));
+    }
     info.themes = std::fs::read_dir(dir.join("themes"))
         .map(|entries| entries.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "json")).count())
         .unwrap_or(0);
@@ -943,8 +953,16 @@ pub fn uninstall(path: &Path) -> Result<(), String> {
     }
     if let Some(id) = id {
         wasm::forget(&id);
+        ui_host::forget(&id);
+        permissions::revoke(&id);
     }
     Ok(())
+}
+
+/// The UI contributions of every installed extension (`[kuana]`), in the
+/// extensions' order.
+pub fn contributions() -> Vec<std::sync::Arc<contrib::Contributions>> {
+    REGISTRY.read().unwrap().extensions.iter().filter_map(|e| e.ui.clone()).collect()
 }
 
 // ---- Grammars ----------------------------------------------------------------------

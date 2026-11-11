@@ -276,9 +276,10 @@ impl Workspace {
         let (show_problems, show_terminal, show_git_log) =
             (self.shows(BottomPanel::Problems), self.shows(BottomPanel::Terminal), self.shows(BottomPanel::GitLog));
         let sidebar_mode = match self.sidebar_mode {
-            SidebarMode::Files => "files",
-            SidebarMode::Commit => "commit",
-            SidebarMode::Database => "database",
+            SidebarMode::Files => "files".to_string(),
+            SidebarMode::Commit => "commit".to_string(),
+            SidebarMode::Database => "database".to_string(),
+            mode @ SidebarMode::Extension(_) => mode.extension_key().map_or_else(|| "files".to_string(), |key| format!("extension:{key}")),
         };
         // What this window shows; what's shared with other windows (zoom,
         // recent projects, placement) stays as the others left it.
@@ -294,7 +295,7 @@ impl Workspace {
             state.problems_height = Some(problems_height);
             state.show_problems = Some(show_problems);
             state.show_terminal = Some(show_terminal);
-            state.sidebar_mode = Some(sidebar_mode.into());
+            state.sidebar_mode = Some(sidebar_mode.clone());
             state.show_git_log = Some(show_git_log);
         });
         self.state_task = Some(crate::state::write_soon(cx));

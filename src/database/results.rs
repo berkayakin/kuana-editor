@@ -2,19 +2,16 @@
 //! is a tab with its rows in a grid (a row number column, then the columns,
 //! scrolling both ways), and Output lists every statement with its outcome,
 //! time and DBMS_OUTPUT lines. Commit and Rollback act on the connection the
-//! run used; ⌘C / Ctrl+C copies the selected cell.
+//! run used. The grid is a `GridTable` (⌘C / Ctrl+C copies its selected cell).
 
-use std::{ops::Range, time::Duration};
+use std::time::Duration;
 
-use gpui::{
-    App, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, Render, ScrollHandle, SharedString,
-    UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
-};
+use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, Render, ScrollHandle, SharedString, Window, div, prelude::*, px};
 
 use super::oracle::{Executed, Grid, Outcome};
 use crate::{
     assets::Icon,
-    editor::Copy,
+    grid::GridTable,
     theme::Theme,
     ui::{HoverFill, icon_el, tooltip_view},
 };
@@ -41,21 +38,14 @@ pub struct QueryResults {
     entries: Vec<Entry>,
     /// The tab shown: a query's entry index, or None for Output.
     tab: Option<usize>,
-    /// The selected cell: (row, column) of the shown grid.
-    cell: Option<(usize, usize)>,
-    /// Column widths of the shown grid.
-    widths: Vec<f32>,
-    scroll: UniformListScrollHandle,
-    hscroll: ScrollHandle,
+    /// The shown query's rows.
+    table: Option<Entity<GridTable>>,
     output_scroll: ScrollHandle,
     /// DML ran since the last commit or rollback.
     pub uncommitted: bool,
 }
 
 impl EventEmitter<QueryResultsEvent> for QueryResults {}
-
-const ROW: f32 = 24.;
-const NUMBER_WIDTH: f32 = 48.;
 
 impl QueryResults {
     pub fn new(cx: &mut Context<Self>) -> Self {
@@ -64,10 +54,7 @@ impl QueryResults {
             connection: None,
             entries: Vec::new(),
             tab: None,
-            cell: None,
-            widths: Vec::new(),
-            scroll: UniformListScrollHandle::new(),
-            hscroll: ScrollHandle::new(),
+            table: None,
             output_scroll: ScrollHandle::new(),
             uncommitted: false,
         }
@@ -81,8 +68,7 @@ impl QueryResults {
         self.connection = Some(connection);
         self.entries = statements.into_iter().map(|sql| Entry { sql: one_line(&sql), done: None }).collect();
         self.tab = None;
-        self.cell = None;
-        self.widths.clear();
+        self.table = None;
         cx.notify();
     }
 
@@ -96,7 +82,7 @@ impl QueryResults {
         entry.done = Some(executed);
         // The first query's rows show as they come; Output when nothing else does.
         if query && self.tab.is_none() {
-            self.show_tab(Some(ix));
+            self.show_tab(Some(ix), cx);
         }
         cx.notify();
     }
@@ -119,32 +105,9 @@ impl QueryResults {
         }
     }
 
-    fn show_tab(&mut self, tab: Option<usize>) {
+    fn show_tab(&mut self, tab: Option<usize>, cx: &mut Context<Self>) {
         self.tab = tab;
-        self.cell = None;
-        self.widths = self.grid().map(column_widths).unwrap_or_default();
-        self.scroll = UniformListScrollHandle::new();
-        self.hscroll = ScrollHandle::new();
-    }
-
-    fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(grid) = self.grid() else { return };
-        let text = match self.cell {
-            Some((row, column)) => grid.rows.get(row).and_then(|r| r.get(column)).cloned().flatten().unwrap_or_default(),
-            None => return,
-        };
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-    }
-
-    /// The shown grid as tab-separated text, with its header.
-    fn copy_all(&self, cx: &mut App) {
-        let Some(grid) = self.grid() else { return };
-        let mut text = grid.columns.join("\t");
-        for row in &grid.rows {
-            text.push('\n');
-            text.push_str(&row.iter().map(|v| v.as_deref().unwrap_or("").replace(['\t', '\n'], " ")).collect::<Vec<_>>().join("\t"));
-        }
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.table = self.grid().cloned().map(|grid| cx.new(|cx| GridTable::new(grid.columns, grid.types, grid.numeric, grid.rows, cx)));
     }
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -177,119 +140,10 @@ impl QueryResults {
                 .when(failed, |el| el.child(icon_el(Icon::CircleAlert, px(12.), theme.error.into())))
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.show_tab(tab);
+                    this.show_tab(tab, cx);
                     cx.notify();
                 }))
         }))
-    }
-
-    fn render_grid(&self, grid: &Grid, focused: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let theme = Theme::get(cx).clone();
-        let total: f32 = NUMBER_WIDTH + self.widths.iter().sum::<f32>();
-        let header = div()
-            .flex()
-            .flex_shrink_0()
-            .h(px(ROW + 2.))
-            .border_b_1()
-            .border_color(theme.border_subtle)
-            .bg(theme.panel)
-            .child(div().w(px(NUMBER_WIDTH)).flex_shrink_0())
-            .children(grid.columns.iter().zip(&self.widths).zip(&grid.types).enumerate().map(|(i, ((name, width), ty))| {
-                let tip = format!("{name}  {ty}");
-                div()
-                    .id(("db-col", i))
-                    .w(px(*width))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .px_2()
-                    .border_l_1()
-                    .border_color(theme.border_subtle)
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text_muted)
-                    .tooltip(move |_, cx| tooltip_view(tip.clone(), cx))
-                    .child(div().truncate().child(name.clone()))
-            }));
-        let rows = grid.rows.len();
-        let list = uniform_list(
-            "db-grid",
-            rows,
-            cx.processor(move |this, range: Range<usize>, _, cx| {
-                let Some(grid) = this.grid() else { return Vec::new() };
-                let theme = Theme::get(cx).clone();
-                range.filter(|&r| r < grid.rows.len()).map(|r| this.render_grid_row(grid, r, focused, &theme, cx)).collect()
-            }),
-        )
-        .track_scroll(self.scroll.clone())
-        .flex_1()
-        .min_h_0()
-        .w(px(total));
-        div()
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .child(
-                div()
-                    .id("db-grid-h")
-                    .size_full()
-                    .overflow_x_scroll()
-                    .track_scroll(&self.hscroll)
-                    .child(div().flex().flex_col().h_full().w(px(total)).child(header).child(list)),
-            )
-            .child(crate::ui::list_scrollbar("db-grid-scrollbar", &self.scroll, cx))
-            .into_any_element()
-    }
-
-    fn render_grid_row(&self, grid: &Grid, r: usize, focused: bool, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let row = &grid.rows[r];
-        div()
-            .id(("db-grid-row", r))
-            .flex()
-            .h(px(ROW))
-            .w_full()
-            .row_hover(theme.hover)
-            .child(
-                div()
-                    .w(px(NUMBER_WIDTH))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .pr_2()
-                    .text_size(px(11.5))
-                    .text_color(theme.text_dim)
-                    .child((r + 1).to_string()),
-            )
-            .children(row.iter().zip(&self.widths).enumerate().map(|(c, (value, width))| {
-                let selected = self.cell == Some((r, c));
-                let numeric = grid.numeric.get(c).copied().unwrap_or(false);
-                div()
-                    .id(("db-cell", r * 10_000 + c))
-                    .w(px(*width))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .when(numeric, |el| el.justify_end())
-                    .px_2()
-                    .border_l_1()
-                    .border_color(Hsla::from(theme.border_subtle).alpha(0.6))
-                    .font_family(theme.mono_font.clone())
-                    .text_size(px(12.))
-                    .when(selected, |el| {
-                        el.bg(if focused { theme.accent_soft } else { theme.active }).border_1().border_color(Hsla::from(theme.accent).alpha(0.6))
-                    })
-                    .map(|el| match value {
-                        Some(text) => el.text_color(theme.text).child(div().truncate().child(first_line(text))),
-                        None => el.text_color(theme.text_dim).child("(null)"),
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        window.focus(&this.focus);
-                        this.cell = Some((r, c));
-                        cx.notify();
-                    }))
-            }))
-            .into_any_element()
     }
 
     fn render_output(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -380,31 +234,6 @@ impl QueryResults {
     }
 }
 
-/// Widths that fit a grid's header and first rows, within limits.
-fn column_widths(grid: &Grid) -> Vec<f32> {
-    const CHAR: f32 = 7.4;
-    (0..grid.columns.len())
-        .map(|c| {
-            let longest = grid
-                .rows
-                .iter()
-                .take(200)
-                .map(|r| r.get(c).and_then(|v| v.as_deref()).map_or(6, |v| first_line(v).chars().count()))
-                .chain([grid.columns[c].chars().count() + 1])
-                .max()
-                .unwrap_or(4);
-            (longest as f32 * CHAR + 18.).clamp(56., 380.)
-        })
-        .collect()
-}
-
-fn first_line(text: &str) -> String {
-    match text.find(['\n', '\r']) {
-        Some(i) => format!("{}…", &text[..i]),
-        None => text.to_string(),
-    }
-}
-
 fn one_line(sql: &str) -> String {
     let text = sql.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.chars().count() > 200 { format!("{}…", text.chars().take(199).collect::<String>()) } else { text }
@@ -423,9 +252,8 @@ impl Focusable for QueryResults {
 impl Render for QueryResults {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
-        let focused = self.focus.contains_focused(window, cx);
         let running = self.entries.iter().any(|e| e.done.is_none());
-        let has_grid = self.grid().is_some();
+        let has_grid = self.table.is_some();
         let header = crate::ui::panel_header(&theme)
             .child(div().flex_shrink_0().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_muted).child("DATABASE"))
             .children(self.connection.as_ref().map(|(_, name)| {
@@ -438,7 +266,11 @@ impl Render for QueryResults {
                 el.child(
                     crate::ui::icon_button("db-copy-all", Icon::Copy, theme.text_dim.into(), cx)
                         .tooltip(|_, cx| tooltip_view("Copy All Rows (tab-separated)", cx))
-                        .on_click(cx.listener(|this, _, _, cx| this.copy_all(cx))),
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(table) = &this.table {
+                                GridTable::copy_all(table, cx);
+                            }
+                        })),
                 )
             })
             .when(self.uncommitted, |el| {
@@ -456,16 +288,14 @@ impl Render for QueryResults {
                 .child(format!("Run SQL from a .sql file{keys} (the statement at the caret, or the selection) to see its results here."))
                 .into_any_element()
         } else {
-            match self.grid() {
-                Some(grid) if grid.columns.is_empty() => div().p_3().text_color(theme.text_dim).child("No columns").into_any_element(),
-                Some(grid) => self.render_grid(grid, focused, cx),
+            match &self.table {
+                Some(table) => div().flex_1().min_h_0().child(table.clone()).into_any_element(),
                 None => self.render_output(cx),
             }
         };
         div()
             .key_context("QueryResults")
             .track_focus(&self.focus)
-            .on_action(cx.listener(Self::copy))
             .flex()
             .flex_col()
             .size_full()

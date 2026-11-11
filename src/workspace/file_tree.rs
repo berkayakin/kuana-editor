@@ -42,6 +42,8 @@ impl Workspace {
         crate::python::set_choice(&root, venv);
         self.venv_shown.take();
         self.root = Some(root.clone());
+        self.refresh_extension_views(cx);
+        self.extension_callers_changed(cx);
         self.show_sidebar = SessionState::load().show_sidebar.unwrap_or(true);
         self.tree.update(cx, |t, cx| t.set_root(Some(root), expanded, cx));
         self.refresh_file_index(cx);

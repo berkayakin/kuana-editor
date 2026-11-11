@@ -227,6 +227,7 @@ impl Workspace {
                         // A database object's file compiles into its database.
                         if let Some(editor) = ws.editors.iter().find(|e| e.entity_id() == id).cloned() {
                             ws.database_saved(&editor, window, cx);
+                            ws.extension_file_saved(&editor, cx);
                         }
                         ws.check_config(cx);
                         // The session may hold the text as unsaved.

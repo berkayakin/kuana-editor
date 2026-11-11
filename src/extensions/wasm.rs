@@ -312,7 +312,7 @@ fn json_answer(answer: Result<Option<String>, String>) -> Result<Option<Value>, 
 
 /// A command the code returned: absolute, or relative to its work folder.
 /// A bare name the folder doesn't have is looked up on PATH.
-fn program_path(work: &Path, command: &str) -> PathBuf {
+pub(super) fn program_path(work: &Path, command: &str) -> PathBuf {
     let path = Path::new(command);
     if path.is_absolute() {
         return path.to_path_buf();
@@ -380,7 +380,7 @@ const FUEL: u64 = 10_000_000_000;
 /// How large an extension's memory may grow.
 const MEMORY: usize = 512 << 20;
 
-static ENGINE: LazyLock<Engine> = LazyLock::new(|| {
+pub(super) static ENGINE: LazyLock<Engine> = LazyLock::new(|| {
     let mut config = wasmtime::Config::new();
     config.wasm_component_model(true).consume_fuel(true);
     Engine::new(&config).expect("wasmtime's default configuration")
@@ -454,7 +454,7 @@ fn abandon(id: &str, generation: u64) {
 
 /// Ready after `duration` (an error if there's no timer thread). One thread
 /// keeps every deadline; there are only as many as calls under way.
-fn after(duration: Duration) -> futures::channel::oneshot::Receiver<()> {
+pub(super) fn after(duration: Duration) -> futures::channel::oneshot::Receiver<()> {
     type Timer = (Instant, futures::channel::oneshot::Sender<()>);
     static TIMERS: LazyLock<Mutex<mpsc::Sender<Timer>>> = LazyLock::new(|| {
         let (add, added) = mpsc::channel::<Timer>();
@@ -591,14 +591,14 @@ impl State {
 }
 
 /// That `path` really is in `work` (no link leads out).
-fn check_real(work: &Path, path: &Path, named: &str) -> Result<(), String> {
+pub(super) fn check_real(work: &Path, path: &Path, named: &str) -> Result<(), String> {
     let real = |p: &Path| std::fs::canonicalize(p).map_err(|e| format!("{}: {e}", p.display()));
     if real(path)?.starts_with(real(work)?) { Ok(()) } else { Err(format!("{named} is outside the extension's folder")) }
 }
 
 /// `path` (relative to `base`, or absolute in it) inside `base`, unless `..`
 /// leads out.
-fn inside(base: &Path, path: &str) -> Result<PathBuf, String> {
+pub(crate) fn inside(base: &Path, path: &str) -> Result<PathBuf, String> {
     let given = Path::new(path);
     let relative = match given.strip_prefix(base) {
         Ok(rest) => rest,
@@ -772,7 +772,7 @@ impl zed::extension::process::Host for State {
 
 /// `command`'s output, or an error once it has run for `timeout` (it's
 /// ended then, with what it started).
-fn output_within(mut command: std::process::Command, timeout: Duration) -> Result<std::process::Output, String> {
+pub(super) fn output_within(mut command: std::process::Command, timeout: Duration) -> Result<std::process::Output, String> {
     // Its own process group, so ending it reaches what it started too.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
@@ -880,6 +880,44 @@ fn release(value: &Value) -> Option<GithubRelease> {
         Some(GithubReleaseAsset { name: asset["name"].as_str()?.to_string(), download_url: asset["browser_download_url"].as_str()?.to_string() })
     });
     Some(GithubRelease { version: value["tag_name"].as_str()?.to_string(), assets: assets.collect() })
+}
+
+/// An HTTP request for Kuana's own extension interface (`ui_host`): the
+/// status, the last response's headers and the body.
+pub(super) fn http(method: &str, url: &str, headers: Vec<(String, String)>, body: Option<Vec<u8>>) -> Result<(u16, Vec<(String, String)>, Vec<u8>), String> {
+    let method = match method.to_ascii_uppercase().as_str() {
+        "GET" => HttpMethod::Get,
+        "HEAD" => HttpMethod::Head,
+        "POST" => HttpMethod::Post,
+        "PUT" => HttpMethod::Put,
+        "DELETE" => HttpMethod::Delete,
+        "OPTIONS" => HttpMethod::Options,
+        "PATCH" => HttpMethod::Patch,
+        other => return Err(format!("{other} isn't an HTTP method Kuana sends")),
+    };
+    let request = HttpRequest { method, url: url.to_string(), headers, body, redirect_policy: RedirectPolicy::FollowLimit(10) };
+    let header_path = header_file()?;
+    let result = (|| {
+        let mut command = curl(&request, &header_path)?;
+        // The status code after the body, on a line of its own.
+        command.args(["--write-out", "\n%{http_code}"]);
+        let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("couldn't run curl: {e}"))?;
+        send_body(&mut child, request.body)?;
+        let output = child.wait_with_output().map_err(|e| format!("curl failed: {e}"))?;
+        if !output.status.success() {
+            return Err(curl_error(&output.stderr));
+        }
+        let mut body = output.stdout;
+        let split = body.iter().rposition(|&b| b == b'\n').unwrap_or(0);
+        let status = String::from_utf8_lossy(&body[split..]).trim().parse::<u16>().unwrap_or(0);
+        body.truncate(split);
+        if request.method == HttpMethod::Head {
+            body.clear();
+        }
+        Ok((status, read_headers(&header_path), body))
+    })();
+    std::fs::remove_file(&header_path).ok();
+    result
 }
 
 impl zed::extension::http_client::Host for State {

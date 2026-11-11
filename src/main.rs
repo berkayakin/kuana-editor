@@ -21,6 +21,8 @@ mod document_diff;
 mod document_store;
 mod downloads;
 mod editor;
+mod extension_panel;
+mod extension_view;
 mod extensions;
 mod editorconfig;
 mod encoding;
@@ -28,6 +30,7 @@ mod file_history;
 mod file_icons;
 mod find_bar;
 mod fold;
+mod grid;
 mod format;
 mod git;
 mod git_log;
@@ -471,6 +474,18 @@ fn main() {
         // Before the theme, which may come from an extension, and before any
         // file opens, whose language may too.
         extensions::reload(cx);
+        // What extensions' code asks of the UI while it runs (extensions::ui_host).
+        if let Some(mut requests) = extensions::ui_host::take_requests() {
+            cx.spawn(async move |cx| {
+                use futures::StreamExt;
+                while let Some(request) = requests.next().await {
+                    if cx.update(|cx| workspace::handle_extension_request(request, cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         theme::init(cx);
         updater::init(cx);
         state::init(cx);

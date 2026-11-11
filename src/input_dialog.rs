@@ -63,6 +63,12 @@ impl InputDialog {
         Self { title: title.into(), icon, hint: hint.into(), input, error: None, allow_empty: false, option: None }
     }
 
+    /// A password field: what's typed shows as bullets.
+    pub fn secret(self, cx: &mut Context<Self>) -> Self {
+        self.input.update(cx, |e, cx| e.set_masked(true, cx));
+        self
+    }
+
     pub fn allow_empty(mut self) -> Self {
         self.allow_empty = true;
         self
