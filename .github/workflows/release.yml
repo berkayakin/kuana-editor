@@ -1,15 +1,16 @@
 # Builds Kuana for macOS, Windows and Linux when a version tag is pushed
 # (`git tag v0.2.0 && git push origin v0.2.0`) and publishes a GitHub Release.
 #
-# The release stays a draft while the builds upload. Then `smoke` starts each
-# build and drives it through its main areas (smoke.yml), and only when that
-# passes `publish` writes `latest.json` (version, archive names and SHA-256s),
-# signs it with minisign (repository secret MINISIGN_SECRET_KEY) and publishes
-# the release. Kuana's updater (src/updater.rs) only installs what that
-# signature vouches for, so a build that doesn't start never reaches it.
+# The release stays a draft while the builds upload and `test` runs the tagged
+# commit's tests. Then `smoke` starts each build and drives it through its main
+# areas (smoke.yml), and only when both pass `publish` writes `latest.json`
+# (version, archive names and SHA-256s), signs it with minisign (repository
+# secret MINISIGN_SECRET_KEY) and publishes the release. Kuana's updater
+# (src/updater.rs) only installs what that signature vouches for, so a build
+# that doesn't start never reaches it.
 # A platform whose build fails is left out of the release; the rest ship.
-# A failed smoke test leaves the draft unpublished: re-run the failed jobs
-# when the runner was at fault, and `publish` follows.
+# Failed tests or a failed smoke test leave the draft unpublished: re-run the
+# failed jobs when the runner was at fault, and `publish` follows.
 #
 # Builds use Cargo.toml's `dist` profile (thin LTO, one codegen unit; slower
 # to build than --release), so binaries are in target/[<triple>/]dist.
@@ -64,6 +65,34 @@ jobs:
           prerelease=""
           case "$TAG" in *-*) prerelease="--prerelease" ;; esac
           gh release create "$TAG" --draft --verify-tag --notes-file "${{ steps.notes.outputs.changelog }}" --title "Kuana ${TAG#v}" $prerelease
+
+  # The tagged commit's tests, as ci.yml runs them, while the builds are made:
+  # `publish` waits for them, so a tag on a commit that fails them stays a draft.
+  test:
+    needs: create
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install GPUI's build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config clang cmake libfontconfig-dev libfreetype-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev \
+            libvulkan-dev libasound2-dev libssl-dev libzstd-dev
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94"
+      # Without KUANA_RELEASE, which is for the builds: the tests run as CI's do,
+      # in a Kuana that neither updates itself nor insists on being the only one.
+      - run: env -u KUANA_RELEASE cargo test --locked
 
   macos:
     needs: create
@@ -283,8 +312,8 @@ jobs:
       artifacts: true
 
   publish:
-    needs: [create, macos, windows, linux, smoke]
-    if: ${{ !cancelled() && needs.create.result == 'success' && needs.smoke.result == 'success' }}
+    needs: [create, test, macos, windows, linux, smoke]
+    if: ${{ !cancelled() && needs.create.result == 'success' && needs.test.result == 'success' && needs.smoke.result == 'success' }}
     runs-on: ubuntu-24.04
     env:
       VERSION: ${{ needs.create.outputs.version }}
