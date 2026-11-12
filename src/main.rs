@@ -494,6 +494,8 @@ fn main() {
         // Before the theme, which may come from an extension, and before any
         // file opens, whose language may too.
         extensions::reload(cx);
+        // Registry extensions update by themselves, as in Zed.
+        extensions::updates::init(cx);
         // What extensions' code asks of the UI while it runs (extensions::ui_host).
         if let Some(mut requests) = extensions::ui_host::take_requests() {
             cx.spawn(async move |cx| {
