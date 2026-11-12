@@ -229,7 +229,11 @@ impl Workspace {
     /// window's edge gap when the block is on the right.
     pub(super) fn editor_left(&self, cx: &App) -> f32 {
         let theme = Theme::get(cx);
-        if self.sidebar_on_right(cx) || !self.has_sidebar_block(cx) {
+        if self.sidebar_on_right(cx) {
+            // After the second sidebar, which is on the left then.
+            let second = self.second_shown().map_or(0., |(_, width)| f32::from(width) + crate::ui::layout_gap(theme));
+            second + if theme.classic { 0. } else { GAP }
+        } else if !self.has_sidebar_block(cx) {
             if theme.classic { 0. } else { GAP }
         } else {
             self.sidebar_block_width(self.show_sidebar, cx) + crate::ui::layout_gap(theme)
@@ -409,6 +413,13 @@ impl Workspace {
             tools.push(tool("toggle-sidebar", icon, "Sidebar", self.show_sidebar, Group::Panel, 0, Box::new(ToggleSidebar), |ws, window, cx| {
                 ws.toggle_current_sidebar_view(window, cx)
             }));
+            // And the second sidebar, while views are on it.
+            if !self.second_views().is_empty() {
+                let icon = if self.sidebar_on_right(cx) { Icon::PanelLeft } else { Icon::PanelRight };
+                tools.push(tool("toggle-second-sidebar", icon, "Second Sidebar", self.second_open().is_some(), Group::Panel, 2, Box::new(ToggleSecondSidebar), |ws, window, cx| {
+                    ws.toggle_second_sidebar(&ToggleSecondSidebar, window, cx)
+                }));
+            }
         }
         tools.extend([
             tool("toggle-terminal", Icon::Terminal, "Terminal", self.shows(BottomPanel::Terminal), Group::Panel, 0, Box::new(ToggleTerminal), |ws, window, cx| {
@@ -531,7 +542,11 @@ impl Workspace {
     /// hides the sidebar, like VS Code's and JetBrains' tool window buttons.
     fn render_view_tab(&self, mode: SidebarMode, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let mut theme = crate::ui::chrome_theme(Theme::get(cx));
-        let on = self.show_sidebar && self.sidebar_mode == mode;
+        // A view moved to the second sidebar keeps its place here as that
+        // view's button: lit while it shows there (not in a window too narrow
+        // for it), never joined to this island.
+        let lit = self.second_shown().is_some_and(|(shown, _)| shown == mode);
+        let on = self.show_sidebar && self.sidebar_mode == mode && !self.in_second(mode);
         // Lit with the tree's island while a drag targets the project folder.
         if on && mode == SidebarMode::Files && self.tree_root_drop {
             theme.background = crate::ui::drop_lift(&theme).1.into();
@@ -548,7 +563,7 @@ impl Workspace {
         };
         let changes = if mode == SidebarMode::Commit { self.git_status.files.len() } else { 0 };
         let bar = BarSize::of(cx);
-        let (rest, hover): (Hsla, Hsla) = if on { (theme.accent.into(), theme.accent.into()) } else { (theme.text_dim.into(), theme.text.into()) };
+        let (rest, hover): (Hsla, Hsla) = if on || lit { (theme.accent.into(), theme.accent.into()) } else { (theme.text_dim.into(), theme.text.into()) };
         let tab = div()
             .id(id.clone())
             .relative()
@@ -560,13 +575,19 @@ impl Workspace {
             .h(px(bar.row))
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, cx.listener(move |ws, e: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                ws.open_view_menu(mode, e.position, window, cx);
+            }))
             .on_click(cx.listener(move |ws, _, window, cx| match mode {
                 SidebarMode::Files => ws.toggle_sidebar(&ToggleSidebar, window, cx),
                 SidebarMode::Commit => ws.toggle_commit(&ToggleCommit, window, cx),
                 SidebarMode::Database => ws.toggle_database(&ToggleDatabase, window, cx),
                 SidebarMode::Extension(_) => ws.toggle_extension_mode(mode, window, cx),
             }))
-            .map(|el| match mode {
+            // No tooltip while a menu is open: a right-click's opens under the
+            // pointer, where the tooltip would cover it.
+            .when(self.context_menu.is_none(), |el| match mode {
                 SidebarMode::Files => el.tooltip(|window, cx| status_tooltip("Files", &ToggleSidebar, window, cx)),
                 SidebarMode::Database => el.tooltip(|window, cx| status_tooltip("Database", &ToggleDatabase, window, cx)),
                 SidebarMode::Extension(_) => {
@@ -641,7 +662,10 @@ impl Workspace {
         // The same elements selected or not, so the glide keeps its state. A
         // resting tab is a plain button: a rounded fill on hover.
         let fill: Hsla = if on { Hsla::from(theme.hover).alpha(0.) } else { theme.hover.into() };
-        tab.group(id.clone()).child(button_fill(SharedString::from(format!("{id}-fill")), (Hsla::from(theme.hover).alpha(0.), fill), bar, &theme, glyph))
+        // One showing in the second sidebar is lit like an open panel's button.
+        let fills: (Hsla, Hsla) =
+            if lit { (theme.accent_soft.into(), Hsla::from(theme.accent).alpha(0.24)) } else { (Hsla::from(theme.hover).alpha(0.), fill) };
+        tab.group(id.clone()).child(button_fill(SharedString::from(format!("{id}-fill")), fills, bar, &theme, glyph))
     }
 
     /// An activity bar button, built like a resting view tab: a row as tall

@@ -34,6 +34,25 @@ impl SidebarMode {
         }
     }
 
+    /// Its name in `state.json`; none for an extension's view that's gone.
+    pub(super) fn saved_name(self) -> Option<String> {
+        match self {
+            SidebarMode::Files => Some("files".into()),
+            SidebarMode::Commit => Some("commit".into()),
+            SidebarMode::Database => Some("database".into()),
+            SidebarMode::Extension(_) => self.extension_key().map(|key| format!("extension:{key}")),
+        }
+    }
+
+    pub(super) fn from_saved(saved: &str) -> Option<SidebarMode> {
+        match saved {
+            "files" => Some(SidebarMode::Files),
+            "commit" => Some(SidebarMode::Commit),
+            "database" => Some(SidebarMode::Database),
+            other => super::extension_ui::restore_extension_mode(other),
+        }
+    }
+
     /// The action that shows or hides this view, for its shortcut.
     fn toggle_action(self) -> Box<dyn gpui::Action> {
         match self {
@@ -74,7 +93,8 @@ impl Workspace {
         let edge = crate::ui::island_edge(&theme);
         let changes = self.git_status.files.len();
         let count = (changes > 0).then(|| if changes > 99 { "99+".to_string() } else { changes.to_string() });
-        let modes: Vec<SidebarMode> = SidebarMode::ALL.into_iter().chain(self.extension_modes().iter().copied()).collect();
+        // A view moved to the second sidebar isn't one of its tabs.
+        let modes = self.sidebar_views();
         let mut names: Vec<String> = modes.iter().map(|m| m.label().to_string()).collect();
         names.push(count.clone().unwrap_or_default());
         let measured = measure_tab_names(&names, window, &theme);
@@ -112,20 +132,28 @@ impl Workspace {
                 .when(on, |el| el.font_weight(FontWeight::MEDIUM));
             tab_shape(tab, on, ix > 0 && ix - 1 == current, separator, group.clone(), edge, &theme)
                 .on_click(cx.listener(move |ws, _, window, cx| ws.select_sidebar_view(mode, window, cx)))
-                .tooltip(move |window, cx| {
-                    let action = mode.toggle_action();
-                    let keys = binding_label(&*action, window);
-                    crate::ui::entity_tooltip_view(
-                        &workspace,
-                        move |ws, _| {
-                            let label = match (mode, ws.git_status.files.len()) {
-                                (SidebarMode::Commit, changes) if changes > 0 => format!("Commit ({changes} changed)"),
-                                _ => mode.label().to_string(),
-                            };
-                            with_keys(&label, keys.as_deref())
-                        },
-                        cx,
-                    )
+                .on_mouse_down(MouseButton::Right, cx.listener(move |ws, e: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    ws.open_view_menu(mode, e.position, window, cx);
+                }))
+                // Not while a menu is open: a right-click's opens under the
+                // pointer, where the tooltip would cover it.
+                .when(self.context_menu.is_none(), |el| {
+                    el.tooltip(move |window, cx| {
+                        let action = mode.toggle_action();
+                        let keys = binding_label(&*action, window);
+                        crate::ui::entity_tooltip_view(
+                            &workspace,
+                            move |ws, _| {
+                                let label = match (mode, ws.git_status.files.len()) {
+                                    (SidebarMode::Commit, changes) if changes > 0 => format!("Commit ({changes} changed)"),
+                                    _ => mode.label().to_string(),
+                                };
+                                with_keys(&label, keys.as_deref())
+                            },
+                            cx,
+                        )
+                    })
                 })
                 .child(gpui::svg().path(mode.icon_path()).size(px(14.)).flex_shrink_0().text_color(if on { theme.accent } else { theme.text_dim }))
                 .when(named, |el| el.child(div().when(!on, |el| el.group_hover(group.clone(), |s| s.text_color(theme.text))).child(mode.label())))
@@ -157,8 +185,8 @@ impl Workspace {
 
     /// Shows `mode` in the sidebar; its tab doesn't hide the sidebar when
     /// it's current, unlike an activity bar view tab.
-    fn select_sidebar_view(&mut self, mode: SidebarMode, window: &mut Window, cx: &mut Context<Self>) {
-        if self.show_sidebar && self.sidebar_mode == mode {
+    pub(super) fn select_sidebar_view(&mut self, mode: SidebarMode, window: &mut Window, cx: &mut Context<Self>) {
+        if self.view_shown(mode) {
             return;
         }
         // Each view's toggle shows it when it isn't the one showing.

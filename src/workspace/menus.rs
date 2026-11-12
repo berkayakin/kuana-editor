@@ -872,8 +872,7 @@ impl Workspace {
         if !self.root.as_deref().is_some_and(|r| path.starts_with(r)) {
             return;
         }
-        self.show_sidebar = true;
-        self.sidebar_mode = SidebarMode::Files;
+        self.set_view_shown(SidebarMode::Files, true);
         self.tree.update(cx, |t, cx| t.reveal_and_scroll(&path, cx));
         self.save_state(cx);
         self.schedule_session_save(cx);
@@ -938,7 +937,7 @@ impl Workspace {
                     ws.move_to_trash(&path, window, cx);
                 }
                 // The alert took the keyboard: back to the tree, where ⌘Z undoes it.
-                if ws.show_sidebar && ws.sidebar_mode == SidebarMode::Files {
+                if ws.view_shown(SidebarMode::Files) {
                     window.focus(&ws.tree.focus_handle(cx));
                 }
             })

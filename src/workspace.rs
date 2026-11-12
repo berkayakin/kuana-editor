@@ -105,6 +105,7 @@ mod rendering;
 mod running;
 mod saving;
 mod sessions;
+mod second_sidebar;
 mod sidebar;
 mod sidebar_tabs;
 mod status_bar;
@@ -156,6 +157,7 @@ actions!(
         RecentTabBack,
         ToggleSidebar,
         ToggleSidebarPosition,
+        ToggleSecondSidebar,
         /// Switches the window between the Modern and Classic layouts (`ui_style`).
         ToggleClassicLayout,
         ToggleProblems,
@@ -373,6 +375,8 @@ enum Edge {
     Problems,
     /// The file tree's right edge.
     Sidebar,
+    /// The second sidebar's edge toward the editor.
+    SecondSidebar,
     /// The boundary after member `ix` of a split of the editor area.
     Split { split: SplitId, axis: Axis, ix: usize },
 }
@@ -792,6 +796,12 @@ pub struct Workspace {
     shift_down: bool,
     last_shift_tap: Option<Instant>,
     sidebar_mode: SidebarMode,
+    /// The views moved to the second sidebar, on the editor's other side
+    /// (`second_sidebar.rs`); the sidebar's tabs still list them.
+    moved_views: Vec<SidebarMode>,
+    /// The view the second sidebar shows; none while it's closed.
+    second_view: Option<SidebarMode>,
+    second_width: Pixels,
     git_panel: Entity<GitPanel>,
     /// The Database view.
     database: Entity<DatabaseView>,
@@ -1241,12 +1251,10 @@ impl Workspace {
             actions: Arc::new(keymap::action_entries()),
             shift_down: false,
             last_shift_tap: None,
-            sidebar_mode: match state.sidebar_mode.as_deref() {
-                Some("commit") => SidebarMode::Commit,
-                Some("database") => SidebarMode::Database,
-                Some(other) => extension_ui::restore_extension_mode(other).unwrap_or(SidebarMode::Files),
-                None => SidebarMode::Files,
-            },
+            sidebar_mode: state.sidebar_mode.as_deref().and_then(SidebarMode::from_saved).unwrap_or(SidebarMode::Files),
+            moved_views: second_sidebar::restore_moved(&state.second_sidebar_views),
+            second_view: state.second_sidebar_view.as_deref().and_then(SidebarMode::from_saved),
+            second_width: px(state.second_sidebar_width.unwrap_or(280.).clamp(SIDEBAR_MIN_WIDTH, 4000.)),
             git_panel,
             database,
             db_results,

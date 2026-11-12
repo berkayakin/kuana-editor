@@ -80,7 +80,7 @@ impl Workspace {
     /// needs to keep a pane's width in a narrow window (not below the
     /// sidebar's own minimum). The saved width comes back as the window grows.
     pub(super) fn shown_sidebar_width(&self) -> Pixels {
-        let editor = px(self.activity_width + 2. * GAP + MIN_PANE_WIDTH);
+        let editor = px(self.activity_width + 2. * GAP + MIN_PANE_WIDTH + self.second_reserve());
         self.sidebar_width.min(self.viewport.width - editor).max(px(SIDEBAR_MIN_WIDTH))
     }
 
@@ -97,6 +97,7 @@ impl Workspace {
         let id: gpui::SharedString = match edge {
             Edge::Problems => "resize-problems".into(),
             Edge::Sidebar => "resize-sidebar".into(),
+            Edge::SecondSidebar => "resize-second-sidebar".into(),
             Edge::Split { split, ix, .. } => format!("resize-split-{split:?}-{ix}").into(),
         };
         let theme = Theme::get(cx);
@@ -111,6 +112,11 @@ impl Workspace {
                 handle.top_0().bottom_0().left(beyond_area).w(px(GAP)).cursor(CursorStyle::ResizeLeftRight)
             }
             Edge::Sidebar => handle.top_0().bottom_0().right(beyond_area).w(px(GAP)).cursor(CursorStyle::ResizeLeftRight),
+            // The second sidebar is on the other side: its gap is on the sidebar's.
+            Edge::SecondSidebar if self.sidebar_on_right(cx) => {
+                handle.top_0().bottom_0().right(beyond_area).w(px(GAP)).cursor(CursorStyle::ResizeLeftRight)
+            }
+            Edge::SecondSidebar => handle.top_0().bottom_0().left(beyond_area).w(px(GAP)).cursor(CursorStyle::ResizeLeftRight),
             // In the gap after a split member's slot: beside it (below the tab
             // strip's room, which stays the window's drag area along the top),
             // or across under it.
@@ -132,6 +138,7 @@ impl Workspace {
                     // From the size shown, which a small window may have cut.
                     Edge::Problems => (e.position.y, ws.shown_panel_height()),
                     Edge::Sidebar => (e.position.x, ws.shown_sidebar_width()),
+                    Edge::SecondSidebar => (e.position.x, ws.shown_second_width().unwrap_or(ws.second_width)),
                     // A double click evens the split out (as VS Code's sashes do).
                     Edge::Split { split, .. } if e.click_count == 2 => {
                         ws.center.even_out(split);
@@ -200,7 +207,7 @@ impl Workspace {
     fn resize_tracker(&self, resize: Resize, cx: &Context<Self>) -> impl IntoElement {
         let cursor = match resize.edge {
             Edge::Problems => CursorStyle::ResizeUpDown,
-            Edge::Sidebar => CursorStyle::ResizeLeftRight,
+            Edge::Sidebar | Edge::SecondSidebar => CursorStyle::ResizeLeftRight,
             Edge::Split { axis: Axis::Row, .. } => CursorStyle::ResizeLeftRight,
             Edge::Split { axis: Axis::Column, .. } => CursorStyle::ResizeUpDown,
         };
@@ -236,10 +243,17 @@ impl Workspace {
             Edge::Sidebar => {
                 // Leave the editor a pane's width. On the right, dragging left
                 // (toward the editor) widens it.
-                let max = (viewport.width - px(self.activity_width + 2. * GAP + MIN_PANE_WIDTH)).max(px(SIDEBAR_MIN_WIDTH));
+                let max = (viewport.width - px(self.activity_width + 2. * GAP + MIN_PANE_WIDTH + self.second_reserve())).max(px(SIDEBAR_MIN_WIDTH));
                 let delta = event.position.x - resize.start;
                 let delta = if self.sidebar_on_right(cx) { -delta } else { delta };
                 self.sidebar_width = (resize.size + delta).clamp(px(SIDEBAR_MIN_WIDTH), max);
+            }
+            Edge::SecondSidebar => {
+                // What the sidebar and a pane's width leave it; it widens toward the editor.
+                let max = self.second_room().max(px(SIDEBAR_MIN_WIDTH));
+                let delta = event.position.x - resize.start;
+                let delta = if self.sidebar_on_right(cx) { delta } else { -delta };
+                self.second_width = (resize.size + delta).clamp(px(SIDEBAR_MIN_WIDTH), max);
             }
             Edge::Split { split, axis, ix } => {
                 let delta = match axis {
@@ -299,6 +313,7 @@ impl Render for Workspace {
             self.problems.update(cx, |p, cx| p.set_editor(active, cx));
         }
         self.load_shown_tabs(cx);
+        self.make_shown_extension_views(window, cx);
         self.update_window_title(window, cx);
         // A drag that ended without a drop (Escape, left the window) leaves no highlight.
         if !cx.has_active_drag() && self.tree.read(cx).has_drop_target() {
@@ -314,6 +329,8 @@ impl Render for Workspace {
         let panes = self.render_panes(window, cx).into_any_element();
         let sidebar_right = self.sidebar_on_right(cx);
         let sidebar_block = self.has_sidebar_block(cx);
+        // The second sidebar, on the editor's other side.
+        let mut second = self.second_shown().map(|(mode, width)| self.render_second_sidebar(mode, width, cx));
         let title_row = self.has_title_row(cx);
 
         div()
@@ -332,6 +349,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::recent_tab_back))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_sidebar_position))
+            .on_action(cx.listener(Self::toggle_second_sidebar))
             .on_action(cx.listener(Self::toggle_classic_layout))
             .on_action(cx.listener(Self::toggle_problems))
             .on_action(cx.listener(Self::toggle_results))
@@ -498,6 +516,7 @@ impl Render for Workspace {
                     // The activity bar and the sidebar keep their full height on
                     // either side; the bottom panels stay under the editor area.
                     .when(sidebar_block && !sidebar_right, |el| el.child(self.render_sidebar_block(window, cx)))
+                    .when(sidebar_right, |el| el.children(second.take()))
                     .child(
                         div()
                             .flex()
@@ -514,6 +533,7 @@ impl Render for Workspace {
                             .when(self.shows(BottomPanel::Database), |el| el.child(self.render_database_results(cx)))
                             .when(self.shows(BottomPanel::Extension), |el| el.child(self.render_extension_panel(cx))),
                     )
+                    .when(!sidebar_right, |el| el.children(second.take()))
                     .when(sidebar_block && sidebar_right, |el| el.child(self.render_sidebar_block(window, cx))),
             ))
             .child(self.render_statusbar(cx))

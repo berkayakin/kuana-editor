@@ -275,12 +275,10 @@ impl Workspace {
         let show_sidebar = self.show_sidebar;
         let (show_problems, show_terminal, show_git_log) =
             (self.shows(BottomPanel::Problems), self.shows(BottomPanel::Terminal), self.shows(BottomPanel::GitLog));
-        let sidebar_mode = match self.sidebar_mode {
-            SidebarMode::Files => "files".to_string(),
-            SidebarMode::Commit => "commit".to_string(),
-            SidebarMode::Database => "database".to_string(),
-            mode @ SidebarMode::Extension(_) => mode.extension_key().map_or_else(|| "files".to_string(), |key| format!("extension:{key}")),
-        };
+        let sidebar_mode = self.sidebar_mode.saved_name().unwrap_or_else(|| "files".to_string());
+        let moved: Vec<String> = self.moved_views.iter().filter_map(|m| m.saved_name()).collect();
+        let second_view = self.second_view.and_then(|m| m.saved_name());
+        let second_width = f32::from(self.second_width);
         // What this window shows; what's shared with other windows (zoom,
         // recent projects, placement) stays as the others left it.
         SessionState::change_soon("layout", cx.entity_id().as_u64(), move |state| {
@@ -296,6 +294,9 @@ impl Workspace {
             state.show_problems = Some(show_problems);
             state.show_terminal = Some(show_terminal);
             state.sidebar_mode = Some(sidebar_mode.clone());
+            state.second_sidebar_views = moved.clone();
+            state.second_sidebar_view = second_view.clone();
+            state.second_sidebar_width = Some(second_width);
             state.show_git_log = Some(show_git_log);
         });
         self.state_task = Some(crate::state::write_soon(cx));

@@ -73,14 +73,28 @@ impl Workspace {
                 .children(self.render_git_toolbar(cx))
         });
 
-        let body: AnyElement = if self.sidebar_mode == SidebarMode::Commit {
+        let body = self.render_view_body(self.sidebar_mode, cx);
+
+        crate::ui::area_joined(&theme, self.view_tab_joint(cx))
+            .w(self.shown_sidebar_width())
+            .flex_shrink_0()
+            .h_full()
+            .children(header)
+            .child(body)
+            // Deferred so the grab area sits above the editor it overlaps.
+            .child(gpui::deferred(self.resize_handle(Edge::Sidebar, cx)))
+    }
+
+    /// A view's content, for whichever sidebar shows it.
+    pub(super) fn render_view_body(&self, mode: SidebarMode, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::get(cx).clone();
+        if mode == SidebarMode::Commit {
             div().flex_1().min_h_0().child(cached(&self.git_panel)).into_any_element()
-        } else if self.sidebar_mode == SidebarMode::Database {
+        } else if mode == SidebarMode::Database {
             div().flex_1().min_h_0().child(cached(&self.database)).into_any_element()
-        } else if let SidebarMode::Extension(slot) = self.sidebar_mode
-            && let Some(view) = self.render_extension_sidebar(slot)
-        {
-            view
+        } else if let SidebarMode::Extension(slot) = mode {
+            // Its view is made when it first shows (`make_shown_extension_views`).
+            self.render_extension_sidebar(slot).unwrap_or_else(|| div().flex_1().into_any_element())
         } else if self.root.is_some() {
             div().flex_1().min_h_0().child(cached(&self.tree)).into_any_element()
         } else {
@@ -98,16 +112,7 @@ impl Workspace {
                     ws.git_clone(&GitClone, window, cx)
                 }))
                 .into_any_element()
-        };
-
-        crate::ui::area_joined(&theme, self.view_tab_joint(cx))
-            .w(self.shown_sidebar_width())
-            .flex_shrink_0()
-            .h_full()
-            .children(header)
-            .child(body)
-            // Deferred so the grab area sits above the editor it overlaps.
-            .child(gpui::deferred(self.resize_handle(Edge::Sidebar, cx)))
+        }
     }
 
     /// Whether the sidebar sits right of the editor area (`sidebar_dock`).
@@ -142,7 +147,7 @@ impl Workspace {
 
     /// The activity bar's right-click menu: move the sidebar to the other side.
     pub(super) fn open_sidebar_tab_menu(&mut self, position: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let label = if self.sidebar_on_right(cx) { "Move to Left" } else { "Move to Right" };
+        let label = if self.sidebar_on_right(cx) { "Move Sidebar to Left" } else { "Move Sidebar to Right" };
         let icon = if self.sidebar_on_right(cx) { Icon::PanelLeft } else { Icon::PanelRight };
         let entries = vec![MenuEntry::item(label, icon)];
         let actions = vec![Some(MenuAction::Run(Box::new(ToggleSidebarPosition)))];
