@@ -15,7 +15,11 @@ use std::{
 use gpui::{App, Global, Hsla, Rgba, SharedString, rgba};
 use serde::Deserialize;
 
-use crate::{settings::Settings, state::SessionState, syntax::Highlight};
+use crate::{
+    settings::Settings,
+    state::SessionState,
+    syntax::{Highlight, Severity},
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Appearance {
@@ -326,6 +330,17 @@ impl Theme {
             }
         }
         let s = &self.syntax;
+        if h.base() == Highlight::None
+            && let Some(severity) = Highlight::severity(h.name())
+        {
+            return match severity {
+                Severity::Error => self.error,
+                Severity::Warning => self.warning,
+                Severity::Info => self.info,
+                Severity::Hint => s.comment,
+            }
+            .into();
+        }
         match h.base() {
             Highlight::None | Highlight::Variable => s.plain,
             Highlight::Keyword => s.keyword,
@@ -1039,6 +1054,11 @@ mod tests {
         assert_eq!(color("link_uri"), Hsla::from(theme.syntax.property));
         assert_eq!(color("selector.class"), Hsla::from(theme.syntax.property));
         assert_eq!(color("selector.pseudo"), Hsla::from(theme.syntax.attribute));
+        // Severity names (a log's levels, TODO comments) take the diagnostic colors.
+        assert_eq!(color("error"), Hsla::from(theme.error));
+        assert_eq!(color("warning"), Hsla::from(theme.warning));
+        assert_eq!(color("hint.info"), Hsla::from(theme.info));
+        assert_eq!(color("hint"), Hsla::from(theme.syntax.comment));
         // A misspelled base name is still reported.
         assert!(errors.iter().any(|e| e.contains("keywrd") && e.contains("keyword")), "{errors:?}");
     }

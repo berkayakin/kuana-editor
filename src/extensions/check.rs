@@ -33,7 +33,7 @@ const MANIFEST_KEYS: &[&str] =
     &["id", "name", "version", "schema_version", "description", "authors", "repository", "grammars", "language_servers", "debug_adapters", "kuana"];
 /// Zed's, for things Kuana doesn't run (code, AI features).
 const ZED_MANIFEST_KEYS: &[&str] =
-    &["lib", "slash_commands", "context_servers", "indexed_docs_providers", "snippets", "capabilities", "agent_servers", "themes", "icon_themes", "languages"];
+    &["lib", "slash_commands", "context_servers", "indexed_docs_providers", "snippets", "capabilities", "agent_servers", "themes", "icon_themes", "languages", "debug_locators"];
 const LANGUAGE_KEYS: &[&str] = &[
     "name", "grammar", "path_suffixes", "line_comments", "line_comment", "block_comment", "tab_size", "hard_tabs", "formatter", "language_id",
     "brackets", "decrease_indent_pattern", "decrease_indent_patterns",
@@ -44,12 +44,15 @@ const ZED_LANGUAGE_KEYS: &[&str] = &[
     "collapsed_placeholder", "documentation", "documentation_comment",
     "wrap_characters", "jsx_tag_auto_close", "hidden", "auto_indent_using_last_non_empty_line", "auto_indent_on_paste", "overrides",
     "soft_wrap", "ignored_import_segments", "import_path_strip_regex", "debuggers", "rewrap_prefixes", "unordered_list", "ordered_list",
-    "task_list", "libraries", "modeline_aliases",
+    "task_list", "libraries", "modeline_aliases", "kernel_language_names",
 ];
 
 /// Captures with no color by design (spell-checking regions, predicates' helpers).
 fn uncolored(capture: &str) -> bool {
-    capture.starts_with('_') || matches!(capture, "spell" | "nospell" | "none" | "conceal")
+    capture.starts_with('_')
+        || matches!(capture, "spell" | "nospell" | "none" | "conceal")
+        // Colored by the theme's diagnostic colors (`Theme::highlight_color`).
+        || crate::syntax::Highlight::severity(capture).is_some()
 }
 
 pub fn check(dir: &Path) -> Vec<Finding> {
