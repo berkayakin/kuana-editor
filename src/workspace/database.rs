@@ -27,6 +27,25 @@ pub(super) struct SqlRun {
     ranges: Vec<Range<usize>>,
 }
 
+/// A run that asked for a connection's password: it goes on once the
+/// connection dialog connects.
+pub(super) struct SqlWaiting {
+    connection: String,
+    editor: WeakEntity<Editor>,
+    scope: SqlScope,
+}
+
+/// What a run sends.
+#[derive(Clone, Copy)]
+pub(super) enum SqlScope {
+    /// The selection's statements, else the statement at the caret.
+    Caret,
+    /// The whole file.
+    Script,
+    /// The statement at an offset (its gutter ▶).
+    At(usize),
+}
+
 /// Diagnostics lists the database fills on a document (by "server" name).
 const COMPILE_PROBLEMS: &str = "oracle";
 const RUN_PROBLEMS: &str = "oracle-run";
@@ -78,6 +97,8 @@ impl Workspace {
     /// The connection dialog, in a window of its own over this one; what it
     /// connects comes back here (`connection_entered`).
     fn open_connection_dialog(&mut self, id: Option<String>, ask: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        // A run waits for the dialog it opened, not a later one.
+        self.sql_waiting = None;
         let config = id.and_then(|id| self.db_model(cx).read(cx).config(&id).cloned());
         let display = window.display(cx).map(|d| d.id());
         let Some(this) = window.window_handle().downcast::<Workspace>() else { return };
@@ -101,18 +122,28 @@ impl Workspace {
         if let Err(err) = model.update(cx, |m, cx| m.save(config, password.clone(), cx)) {
             self.toast(ToastKind::Error, "Couldn't save the connection", Some(err), cx);
         }
-        self.show_database_view(window, cx);
-        self.connect_database(id, password, window, cx);
+        let waiting = self.sql_waiting.take().filter(|w| w.connection == id);
+        if waiting.is_none() {
+            self.show_database_view(window, cx);
+        }
+        self.connect_database(id, password, waiting, window, cx);
     }
 
-    /// Connects `id`, asking for its password when there's none to use.
-    fn connect_database(&mut self, id: String, password: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    /// Connects `id`, asking for its password when there's none to use;
+    /// then a run that was waiting for it goes on, in its editor.
+    fn connect_database(&mut self, id: String, password: Option<String>, then: Option<SqlWaiting>, window: &mut Window, cx: &mut Context<Self>) {
         let model = self.db_model(cx);
         let task = model.update(cx, |m, cx| m.connect(&id, password, cx));
         cx.spawn_in(window, async move |ws, cx| {
             let result = task.await;
             ws.update_in(cx, |ws, window, cx| match result {
-                Ok(()) => ws.database.update(cx, |v, cx| v.expand_connection(&id, cx)),
+                Ok(()) => {
+                    ws.database.update(cx, |v, cx| v.expand_connection(&id, cx));
+                    if let Some((editor, scope)) = then.and_then(|w| Some((w.editor.upgrade()?, w.scope))) {
+                        window.focus(&editor.focus_handle(cx));
+                        ws.run_sql(editor, scope, window, cx);
+                    }
+                }
                 Err(err) if err == NEEDS_PASSWORD => ws.open_connection_dialog(Some(id), Some(err), window, cx),
                 Err(err) if err == "Cancelled" => {}
                 Err(err) => {
@@ -128,7 +159,7 @@ impl Workspace {
     pub(super) fn on_database_event(&mut self, event: &DatabaseEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             DatabaseEvent::NewConnection => self.open_connection_dialog(None, None, window, cx),
-            DatabaseEvent::Connect(id) => self.connect_database(id.clone(), None, window, cx),
+            DatabaseEvent::Connect(id) => self.connect_database(id.clone(), None, None, window, cx),
             DatabaseEvent::Open { connection, owner, object, body, at } => {
                 self.open_db_object(connection.clone(), owner.clone(), object.clone(), *body, at.clone(), window, cx)
             }
@@ -297,17 +328,36 @@ impl Workspace {
     /// ⌘↩ / Ctrl+Enter: the editor passes it on in SQL files (`Editor::submit`).
     pub(super) fn submit_in_editor(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
         match self.active_editor(cx) {
-            Some(editor) if editor.focus_handle(cx).is_focused(window) && sql_editor(&editor, cx) => self.run_sql(false, window, cx),
+            Some(editor) if editor.focus_handle(cx).is_focused(window) && sql_editor(&editor, cx) => self.run_sql(editor, SqlScope::Caret, window, cx),
             _ => cx.propagate(),
         }
     }
 
     pub(super) fn run_sql_statement(&mut self, _: &RunSqlStatement, window: &mut Window, cx: &mut Context<Self>) {
-        self.run_sql(false, window, cx);
+        if let Some(editor) = self.active_editor(cx) {
+            self.run_sql(editor, SqlScope::Caret, window, cx);
+        }
     }
 
     pub(super) fn run_sql_script(&mut self, _: &RunSqlScript, window: &mut Window, cx: &mut Context<Self>) {
-        self.run_sql(true, window, cx);
+        if let Some(editor) = self.active_editor(cx) {
+            self.run_sql(editor, SqlScope::Script, window, cx);
+        }
+    }
+
+    /// Whether an editor's gutter shows a ▶ per statement: in SQL files
+    /// other than an object's (saving compiles those) while a connection exists.
+    pub(super) fn sync_sql_gutter(&self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
+        let has_connections = !self.db_model(cx).read(cx).connections.is_empty();
+        let runs = has_connections
+            && editor.read(cx).doc.read(cx).path.as_deref().is_some_and(|p| database::is_sql_path(p) && database::object_of(p).is_none());
+        editor.update(cx, |e, cx| e.set_sql_runs(runs, cx));
+    }
+
+    pub(super) fn sync_sql_gutters(&mut self, cx: &mut Context<Self>) {
+        for editor in self.editors.clone() {
+            self.sync_sql_gutter(&editor, cx);
+        }
     }
 
     /// New SQL Script: a scratch file for the selected (or only) connection.
@@ -330,7 +380,7 @@ impl Workspace {
 
     /// The connection a file's SQL runs on: an object's or a script's own,
     /// else the one chosen for it, else the Database view's selected one, else
-    /// the only one connected.
+    /// the only one connected, else the only one there is.
     fn sql_connection(&self, path: Option<&Path>, cx: &App) -> Option<String> {
         if let Some(path) = path {
             if let Some(object) = database::object_of(path) {
@@ -349,12 +399,15 @@ impl Workspace {
             return Some(id);
         }
         let connected = model.connected();
-        (connected.len() == 1).then(|| connected[0].id.clone())
+        match (&connected[..], &model.connections[..]) {
+            ([only], _) => Some(only.id.clone()),
+            ([], [only]) => Some(only.id.clone()),
+            _ => None,
+        }
     }
 
-    /// Runs the statement at the caret, the selection, or (`whole`) the file.
-    fn run_sql(&mut self, whole: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.active_editor(cx) else { return };
+    /// Runs an editor's statements: see `SqlScope`.
+    pub(super) fn run_sql(&mut self, editor: Entity<Editor>, scope: SqlScope, window: &mut Window, cx: &mut Context<Self>) {
         let path = editor.read(cx).doc.read(cx).path.clone();
         let model = self.db_model(cx);
         let Some(id) = self.sql_connection(path.as_deref(), cx) else {
@@ -375,8 +428,11 @@ impl Workspace {
             cx.spawn_in(window, async move |ws, cx| {
                 let result = task.await;
                 ws.update_in(cx, |ws, window, cx| match result {
-                    Ok(()) => ws.run_sql(whole, window, cx),
-                    Err(err) if err == NEEDS_PASSWORD => ws.open_connection_dialog(Some(id), Some(err), window, cx),
+                    Ok(()) => ws.run_sql(editor, scope, window, cx),
+                    Err(err) if err == NEEDS_PASSWORD => {
+                        ws.open_connection_dialog(Some(id.clone()), Some(err), window, cx);
+                        ws.sql_waiting = Some(SqlWaiting { connection: id, editor: editor.downgrade(), scope });
+                    }
                     Err(err) => ws.toast(ToastKind::Error, "Couldn't connect", Some(err), cx),
                 })
                 .ok();
@@ -386,12 +442,17 @@ impl Workspace {
         };
         let text = editor.read(cx).text(cx);
         let selection = editor.read(cx).primary_selection().range();
-        // The selection's statements (as typed), else the file's, else the caret's.
-        let (base, script_text) = if !whole && !selection.is_empty() { (selection.start, text[selection.clone()].to_string()) } else { (0, text.clone()) };
+        // The selection's statements (as typed), else the file's, else one.
+        let selected = matches!(scope, SqlScope::Caret) && !selection.is_empty();
+        let (base, script_text) = if selected { (selection.start, text[selection.clone()].to_string()) } else { (0, text.clone()) };
         let mut statements = script::split(&script_text);
-        if !whole && selection.is_empty() {
-            let caret = editor.read(cx).primary_selection().head;
-            statements = script::at(&statements, &script_text, caret).map(|ix| vec![statements[ix].clone()]).unwrap_or_default();
+        let one = match scope {
+            SqlScope::Caret if !selected => Some(editor.read(cx).primary_selection().head),
+            SqlScope::At(at) => Some(at),
+            _ => None,
+        };
+        if let Some(at) = one {
+            statements = script::at(&statements, &script_text, at).map(|ix| vec![statements[ix].clone()]).unwrap_or_default();
         }
         statements.retain(|s| s.kind != script::Kind::SqlPlus);
         if statements.is_empty() {
@@ -489,7 +550,7 @@ impl Workspace {
                     add(MenuEntry::item("Disconnect", Icon::Stop), Some(Rc::new(move |ws, _, cx| ws.db_model(cx).update(cx, |m, cx| m.disconnect(&i, cx)))));
                 } else {
                     let i = id.clone();
-                    add(MenuEntry::item("Connect", Icon::Play), Some(Rc::new(move |ws, window, cx| ws.connect_database(i.clone(), None, window, cx))));
+                    add(MenuEntry::item("Connect", Icon::Play), Some(Rc::new(move |ws, window, cx| ws.connect_database(i.clone(), None, None, window, cx))));
                     let i = id.clone();
                     add(MenuEntry::item("New SQL Script", Icon::FilePlus), Some(Rc::new(move |ws, window, cx| ws.new_script_for(i.clone(), window, cx))));
                 }
@@ -638,7 +699,7 @@ impl Workspace {
                     ws.sql_connections.insert(path.clone(), id.clone());
                 }
                 if !ws.db_model(cx).read(cx).is_connected(&id) {
-                    ws.connect_database(id.clone(), None, window, cx);
+                    ws.connect_database(id.clone(), None, None, window, cx);
                 }
                 cx.notify();
             }))));

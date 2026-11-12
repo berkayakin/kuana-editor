@@ -27,6 +27,15 @@ impl Workspace {
         let run = |entry: MenuEntry, action: Box<dyn gpui::Action>| {
             (entry.shortcut(binding_label(&*action, window)), Some(MenuAction::Run(action)))
         };
+        // In SQL files running comes first, as ⌘↩ does it.
+        if path.as_deref().is_some_and(crate::database::is_sql_path) {
+            // ⌘↩ is Submit's key, which the editor hands on in SQL files.
+            let shortcut = binding_label(&editor::Submit, window);
+            add(MenuEntry::item("Run Statement", Icon::Play).shortcut(shortcut), Some(MenuAction::Run(Box::new(RunSqlStatement))));
+            let (entry, action) = run(MenuEntry::text("Run Script"), Box::new(RunSqlScript));
+            add(entry, action);
+            add(MenuEntry::Separator, None);
+        }
         // Code intelligence first, as in VS Code and JetBrains.
         for (label, action) in [
             ("Go to Declaration", Box::new(editor::GoToDeclaration) as Box<dyn gpui::Action>),
@@ -655,6 +664,7 @@ impl Workspace {
                 self.documents.update(cx, |s, cx| s.add(&doc, cx));
                 self.lsp.update(cx, |s, cx| s.moved(path, &editor, cx));
                 self.load_diff_base(&editor, cx);
+                self.sync_sql_gutter(&editor, cx);
             }
         }
         // Changed without a tab: saved later, it goes to the new place.

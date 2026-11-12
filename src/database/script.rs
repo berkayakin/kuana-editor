@@ -222,6 +222,19 @@ fn skip_string(script: &str, at: usize) -> usize {
     bytes.len()
 }
 
+/// Where each statement sent to the database starts (its first word, past
+/// comments): the gutter's ▶ goes on that line, and `at` finds it again.
+pub fn starts(script: &str) -> Vec<usize> {
+    split(script)
+        .into_iter()
+        .filter(|s| s.kind != Kind::SqlPlus)
+        .map(|s| {
+            let text = &script[s.range.clone()];
+            s.range.start + text.len() - skip_trivia(text).len()
+        })
+        .collect()
+}
+
 /// The statement to run for a caret at `offset`: the one it's in, else the
 /// one ending before it on its line or above (blank lines and comments
 /// between), else the next one.
@@ -268,6 +281,20 @@ mod tests {
                 ("delete from t".into(), Kind::Sql),
             ]
         );
+    }
+
+    #[test]
+    fn starts_are_first_words_past_comments() {
+        let script = "set serveroutput on\n-- the users\nselect 1 from dual;\n\n/* all */ select 2\nfrom dual;\nbegin\n  null;\nend;\n/\n";
+        let found = starts(script);
+        let words: Vec<&str> = found.iter().map(|&at| &script[at..at + 6]).collect();
+        assert_eq!(words, ["select", "select", "begin\n"]);
+        // Each finds its own statement again (what its ▶ runs).
+        let statements = split(script);
+        for &start in &found {
+            let ix = at(&statements, script, start).unwrap();
+            assert!(statements[ix].range.contains(&start));
+        }
     }
 
     #[test]

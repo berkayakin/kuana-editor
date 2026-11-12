@@ -17,7 +17,7 @@ mod unloaded;
 mod vim;
 
 pub use lsp::EditorLspEvent;
-pub use run::{EditorBreakpointMenu, EditorBreakpointsChanged, EditorRunEvent};
+pub use run::{EditorBreakpointMenu, EditorBreakpointsChanged, EditorRunEvent, EditorRunSql};
 pub use sticky::Crumb;
 pub use unloaded::{EditorLoaded, Unloaded};
 
@@ -306,9 +306,12 @@ struct LayoutSnapshot {
     wrap_width: Pixels,
 }
 
-/// The run targets and test results `Editor::shown_run_rows` was made from,
-/// and its rows.
-type RunRows = (Option<(Arc<Vec<crate::run::RunTarget>>, Arc<crate::test_run::Statuses>)>, Arc<Vec<(usize, Option<crate::test_run::TestStatus>)>>);
+/// The run targets, SQL statements and test results `Editor::shown_run_rows`
+/// was made from, and its rows.
+type RunRows = (
+    Option<(Arc<Vec<crate::run::RunTarget>>, Arc<Vec<(usize, usize)>>, Arc<crate::test_run::Statuses>)>,
+    Arc<Vec<(usize, Option<crate::test_run::TestStatus>)>>,
+);
 
 pub struct Editor {
     pub doc: Entity<Document>,
@@ -457,6 +460,10 @@ pub struct Editor {
     gutter_hovered: bool,
     /// Runnable targets for a version and path (gutter ▶).
     run_targets: derived::Derived<(u64, Option<std::path::PathBuf>, crate::syntax::Language), Vec<crate::run::RunTarget>>,
+    /// The workspace runs this SQL file's statements (see `set_sql_runs`).
+    sql_runs: bool,
+    /// Each SQL statement's first row and offset, for a version (gutter ▶).
+    sql_statements: derived::Derived<u64, Vec<(usize, usize)>>,
     /// Merge conflicts for a version.
     conflicts: derived::Derived<u64, Vec<crate::conflict::Conflict>>,
     /// Accept labels on screen last frame: (bounds, conflict start row, choice).
@@ -593,6 +600,8 @@ impl Editor {
             sticky_spans: (None, Arc::default()),
             gutter_hovered: false,
             run_targets: derived::Derived::new(),
+            sql_runs: false,
+            sql_statements: derived::Derived::new(),
             conflicts: derived::Derived::new(),
             conflict_hits: Vec::new(),
             lens_hits: Vec::new(),
@@ -2220,12 +2229,18 @@ impl Editor {
     /// the run targets drawn (found again when they or the results change).
     fn shown_run_rows(&mut self, cx: &mut Context<Self>) -> Arc<Vec<(usize, Option<crate::test_run::TestStatus>)>> {
         let targets = self.shown_run_targets(cx);
-        let current = self.run_rows.0.as_ref().is_some_and(|(t, s)| Arc::ptr_eq(t, &targets) && Arc::ptr_eq(s, &self.test_statuses));
+        let sql = self.shown_sql_statements(cx);
+        let current = self
+            .run_rows
+            .0
+            .as_ref()
+            .is_some_and(|(t, q, s)| Arc::ptr_eq(t, &targets) && Arc::ptr_eq(q, &sql) && Arc::ptr_eq(s, &self.test_statuses));
         if !current {
             let statuses = self.test_statuses.clone();
             let mut rows: Vec<_> = targets
                 .iter()
                 .filter_map(|t| Some((t.row?, t.test.as_ref().and_then(|test| crate::test_run::status_of(test, &statuses)))))
+                .chain(sql.iter().map(|&(row, _)| (row, None)))
                 .collect();
             rows.sort_unstable_by_key(|(row, _)| *row);
             // One mark per row: an extension's tasks can share one (a test,
@@ -2239,7 +2254,7 @@ impl Editor {
                 }
                 true
             });
-            self.run_rows = (Some((targets, statuses)), Arc::new(rows));
+            self.run_rows = (Some((targets, sql, statuses)), Arc::new(rows));
         }
         self.run_rows.1.clone()
     }
@@ -3241,6 +3256,12 @@ impl Editor {
                     && let Some(target) = self.run_target_at(row, cx)
                 {
                     cx.emit(EditorRunEvent { target, debug: false, menu_at: Some(event.position) });
+                    return;
+                }
+                if seg == 0
+                    && let Some(at) = self.sql_statement_at(row, cx)
+                {
+                    cx.emit(EditorRunSql { at });
                     return;
                 }
             }
@@ -7431,6 +7452,40 @@ mod frame_tests {
         let held = scroll(cx);
         cx.simulate_mouse_move(left, None, gpui::Modifiers::none());
         assert_eq!(scroll(cx), held, "done with the button up");
+    }
+
+    /// A SQL script gets a ▶ on each statement's first line once the
+    /// workspace says it runs; clicking one asks to run that statement.
+    #[gpui::test]
+    fn sql_statements_get_a_run_mark(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::blank_for_tests()));
+        let text = "-- users\nselect 1\nfrom dual;\n\nset serveroutput on\nbegin\n  null;\nend;\n/\n".to_string();
+        let (editor, cx) = cx.add_window_view(|_, cx| Editor::new(Document::from_text(text.clone(), Some("/tmp/a.sql".into())), cx));
+        let redraw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            })
+        };
+        let marks = |cx: &mut VisualTestContext| editor.update(cx, |e, _| e.run_rows.1.iter().map(|(row, _)| *row).collect::<Vec<_>>());
+        redraw(cx);
+        assert!(marks(cx).is_empty(), "not until the workspace says so");
+        editor.update(cx, |e, cx| e.set_sql_runs(true, cx));
+        redraw(cx);
+        redraw(cx);
+        assert_eq!(marks(cx), [1, 5]);
+
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let seen = asked.clone();
+        cx.update(|_, cx| cx.subscribe(&editor, move |_, e: &EditorRunSql, _| seen.borrow_mut().push(e.at)).detach());
+        let (bounds, line_height) = editor.update(cx, |e, _| e.layout.as_ref().map(|l| (l.bounds, l.line_height)).unwrap());
+        let gutter = |row: f32| point(bounds.left() + px(8.), bounds.top() + line_height * (row + 0.5));
+        for row in [5., 1., 3.] {
+            cx.simulate_mouse_down(gutter(row), MouseButton::Left, gpui::Modifiers::none());
+            cx.simulate_mouse_up(gutter(row), MouseButton::Left, gpui::Modifiers::none());
+        }
+        assert_eq!(*asked.borrow(), [text.find("begin").unwrap(), text.find("select").unwrap()], "row 3 has no statement");
     }
 
     /// The time per frame (the fastest of a few) of an editor `make` sets up.
