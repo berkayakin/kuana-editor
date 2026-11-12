@@ -463,6 +463,7 @@ fn context_kind(words: &[String]) -> Option<&'static str> {
             "fn" | "func" | "function" | "def" | "defp" | "fun" | "sub" | "proc" => "function",
             "defmacro" | "defmacrop" | "macro" | "macro_rules!" => "macro",
             "struct" => "struct",
+            "union" => "union",
             "class" | "object" | "record" => "class",
             "enum" => "enum",
             "interface" | "protocol" => "interface",
