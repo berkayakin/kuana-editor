@@ -561,7 +561,30 @@ fn clean_inline_markdown(text: &str) -> String {
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            '*' | '`' => {}
+            // An inline code span is kept as written: clangd's
+            // `const Node * head` has stars that aren't emphasis.
+            '`' => {
+                let mut ticks = 1;
+                while chars.peek() == Some(&'`') {
+                    chars.next();
+                    ticks += 1;
+                }
+                let rest: String = chars.clone().collect();
+                let fence = "`".repeat(ticks);
+                if let Some(close) = rest.find(&fence) {
+                    let code = &rest[..close];
+                    // CommonMark drops one space on each side when both have one.
+                    let code = match code.strip_prefix(' ').and_then(|c| c.strip_suffix(' ')) {
+                        Some(inner) if !inner.trim().is_empty() => inner,
+                        _ => code,
+                    };
+                    out.push_str(code);
+                    for _ in 0..rest[..close + ticks].chars().count() {
+                        chars.next();
+                    }
+                }
+            }
+            '*' => {}
             '\\' if chars.peek().is_some_and(|n| n.is_ascii_punctuation()) => out.push(chars.next().unwrap()),
             // [text](url) → text
             '[' => {
@@ -785,6 +808,15 @@ mod tests {
             [
                 HoverBlock { code: true, text: "fn f(a: u8)".into() },
                 HoverBlock { code: false, text: "Does things with a.".into() }
+            ]
+        );
+        // clangd's: stars in code spans stay, a heading's hashes go.
+        let clangd = json!({ "contents": { "kind": "markdown", "value": "### function `list_len`  \nprovided by `\"list.h\"`  \n\n---\n- `const Node * head (aka const struct Node *)`\n- ``a ` b``" } });
+        assert_eq!(
+            hover_blocks(&clangd),
+            [
+                HoverBlock { code: false, text: "function list_len  \nprovided by \"list.h\"".into() },
+                HoverBlock { code: false, text: "- const Node * head (aka const struct Node *)\n- a ` b".into() }
             ]
         );
         let help = json!({ "signatures": [{ "label": "f(a: u8, b: u8)", "parameters": [{ "label": [2, 7] }, { "label": "b: u8" }] }], "activeParameter": 1 });
