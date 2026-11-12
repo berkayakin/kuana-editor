@@ -208,6 +208,8 @@ actions!(
         ReplaceInFiles,
         SearchEverywhere,
         GoToFile,
+        /// C/C++: the header for a source, or the source for a header.
+        SwitchHeaderSource,
         RecentFiles,
         FindAction,
         GoToLine,

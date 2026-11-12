@@ -365,6 +365,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::replace_in_files))
             .on_action(cx.listener(Self::search_everywhere))
             .on_action(cx.listener(Self::go_to_file))
+            .on_action(cx.listener(Self::switch_header_source))
             .on_action(cx.listener(Self::recent_files))
             .on_action(cx.listener(Self::find_action))
             .on_action(cx.listener(Self::go_to_line))

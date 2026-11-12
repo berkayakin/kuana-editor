@@ -464,4 +464,94 @@ impl Workspace {
         self.shift_down = false;
         self.last_shift_tap = None;
     }
+
+    /// Switch Header/Source (C, C++, Objective-C): clangd's answer, else the
+    /// project's file with the same name and the paired extension.
+    pub(super) fn switch_header_source(&mut self, _: &SwitchHeaderSource, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor(cx) else { return };
+        let Some(path) = editor.read(cx).doc.read(cx).path.clone() else { return };
+        if counterpart_kind(&path).is_none() {
+            self.toast(ToastKind::Info, "Not a C or C++ file", Some("Switch Header/Source pairs headers (.h, .hpp…) with sources (.c, .cpp…).".into()), cx);
+            return;
+        }
+        let asked = editor.read(cx).clangd_counterpart(cx);
+        let files = self.project.openable();
+        cx.spawn_in(window, async move |this, cx| {
+            let from_clangd = match asked {
+                Some(task) => task.await,
+                None => None,
+            };
+            let found = from_clangd.or_else(|| counterpart(&path, &files));
+            this.update_in(cx, |ws, window, cx| match found {
+                Some(found) => ws.open_path(found, window, cx),
+                None => {
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    ws.toast(ToastKind::Info, "No header or source found", Some(format!("Found no file paired with {name}")), cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+const SOURCE_EXTENSIONS: &[&str] = &["c", "cc", "cpp", "cxx", "c++", "cp", "cppm", "ixx", "m", "mm", "cu"];
+const HEADER_EXTENSIONS: &[&str] = &["h", "hh", "hpp", "hxx", "h++", "inl", "ipp", "tpp", "txx", "cuh"];
+
+/// Whether `path` is a C-family source (true) or header (false).
+fn counterpart_kind(path: &std::path::Path) -> Option<bool> {
+    let ext = path.extension()?.to_string_lossy().to_lowercase();
+    if SOURCE_EXTENSIONS.contains(&ext.as_str()) {
+        Some(true)
+    } else if HEADER_EXTENSIONS.contains(&ext.as_str()) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// The header for a source or the source for a header: a file with the same
+/// stem and an extension of the other kind, in the same folder first, else
+/// the one in `files` sharing the most of `path`'s folders (`include/a.h`
+/// for `src/a.cpp`).
+pub(crate) fn counterpart(path: &std::path::Path, files: &[PathBuf]) -> Option<PathBuf> {
+    let source = counterpart_kind(path)?;
+    let wanted = if source { HEADER_EXTENSIONS } else { SOURCE_EXTENSIONS };
+    let stem = path.file_stem()?;
+    let dir = path.parent()?;
+    let beside = wanted.iter().map(|ext| dir.join(stem).with_extension(ext)).find(|p| p.is_file());
+    if beside.is_some() {
+        return beside;
+    }
+    let shared = |p: &std::path::Path| p.components().zip(path.components()).take_while(|(a, b)| a == b).count();
+    files
+        .iter()
+        .filter(|f| f.file_stem() == Some(stem) && f.extension().is_some_and(|e| wanted.contains(&e.to_string_lossy().to_lowercase().as_str())))
+        .max_by_key(|f| shared(f))
+        .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn headers_pair_with_sources() {
+        let dir = std::env::temp_dir().join(format!("kuana-counterpart-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("include/app")).unwrap();
+        std::fs::create_dir_all(dir.join("other")).unwrap();
+        for f in ["src/list.c", "src/list.h", "src/shape.cpp", "include/app/shape.hpp", "other/shape.h"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        let files: Vec<PathBuf> = ["src/list.c", "src/list.h", "src/shape.cpp", "include/app/shape.hpp", "other/shape.h"].iter().map(|f| dir.join(f)).collect();
+        // Beside it first.
+        assert_eq!(counterpart(&dir.join("src/list.c"), &files), Some(dir.join("src/list.h")));
+        assert_eq!(counterpart(&dir.join("src/list.h"), &files), Some(dir.join("src/list.c")));
+        // Elsewhere: the one sharing most of its folders.
+        assert_eq!(counterpart(&dir.join("include/app/shape.hpp"), &files), Some(dir.join("src/shape.cpp")));
+        assert!(counterpart(&dir.join("src/shape.cpp"), &files).is_some_and(|p| p.ends_with("shape.hpp") || p.ends_with("shape.h")));
+        assert_eq!(counterpart(&dir.join("README.md"), &files), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

@@ -15,6 +15,7 @@ The table below is the JetBrains keymap.
 | --- | --- | --- |
 | Search Everywhere | Double ⇧ | Double Shift |
 | Go to File | ⌘⇧O | Ctrl+Shift+N |
+| Switch Header/Source (C, C++) | ⌃⌘↑ | Alt+F10 |
 | Recent Files | ⌘E | Ctrl+E |
 | Find Action | ⌘⇧A | Ctrl+Shift+A |
 | Go to Line:Column | ⌘L | Ctrl+G |
