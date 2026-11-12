@@ -92,6 +92,10 @@ pub struct Settings {
     pub project_avatar: Option<bool>,
     /// A narrower activity bar with smaller buttons and icons (`true`).
     pub compact_activity_bar: Option<bool>,
+    /// Where the tool buttons (Run, the panels' toggles, Search, Settings…)
+    /// sit: on the activity bar beside the sidebar, or in the title bar
+    /// (`ToolsLocation`).
+    pub tools_location: Option<ToolsLocation>,
     /// How Update Project (pull) combines incoming commits with local ones
     /// when both branches have new commits. Unset: as the Git config says,
     /// else asked the first time it happens.
@@ -291,6 +295,29 @@ impl UiStyle {
     }
 }
 
+/// Where the tool buttons sit. On the activity bar (VS Code's) the sidebar's
+/// views are vertical tabs at its top and the tabs share the window's top row
+/// with the title bar's ends; in the title bar, it's a row of its own above
+/// the tab row and the sidebar's views are tabs like the editor's.
+#[derive(Deserialize, JsonSchema, Default, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolsLocation {
+    #[default]
+    ActivityBar,
+    TitleBar,
+}
+
+impl ToolsLocation {
+    pub const ALL: [ToolsLocation; 2] = [ToolsLocation::ActivityBar, ToolsLocation::TitleBar];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            ToolsLocation::ActivityBar => "activity_bar",
+            ToolsLocation::TitleBar => "title_bar",
+        }
+    }
+}
+
 /// Auto-save modes, named like VS Code's `files.autoSave`. Every mode but
 /// `off` also saves when the window loses focus, a tab is closed and on quit.
 #[derive(Deserialize, JsonSchema, Default, Clone, Copy, PartialEq, Eq, Debug)]
@@ -461,6 +488,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "ui_style",
     "project_avatar",
     "compact_activity_bar",
+    "tools_location",
     "pull_strategy",
     "auto_resolve_conflicts",
     "auto_fetch",
@@ -638,6 +666,20 @@ impl Settings {
         self.compact_activity_bar.unwrap_or(false)
     }
 
+    /// Where the tool buttons sit (the activity bar unless set).
+    pub fn tools_location(&self) -> ToolsLocation {
+        self.tools_location.unwrap_or_default()
+    }
+
+    /// Writes where the tool buttons sit; the default (the activity bar) removes the key.
+    pub fn set_tools_location(location: ToolsLocation) -> std::io::Result<()> {
+        if location == ToolsLocation::default() {
+            Self::remove("tools_location")
+        } else {
+            Self::set("tools_location", location.key().into())
+        }
+    }
+
     /// Writes the layout style; the default (Modern) removes the key.
     pub fn set_ui_style(style: UiStyle) -> std::io::Result<()> {
         if style == UiStyle::default() {
@@ -719,6 +761,7 @@ impl Settings {
             "ui_style" => self.ui_style.is_some(),
             "project_avatar" => self.project_avatar.is_some(),
             "compact_activity_bar" => self.compact_activity_bar.is_some(),
+            "tools_location" => self.tools_location.is_some(),
             "terminal_shell" => self.terminal_shell.is_some(),
             "run_configurations" => !self.run_configurations.is_empty(),
             "auto_update" => self.auto_update.is_some(),
@@ -1098,6 +1141,12 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // A narrower activity bar beside the sidebar, with smaller buttons and icons
   // (the title bar's buttons' size), for more room.
   // "compact_activity_bar": false,
+  // Where the tool buttons (Run, Debug, the panels' toggles, Search,
+  // Extensions, Settings) sit: "activity_bar" (a column beside the sidebar,
+  // its views as vertical tabs, the tabs in the window's top row) or
+  // "title_bar" (a title bar row of their own, the tabs under it, the
+  // sidebar's views as tabs like the editor's).
+  // "tools_location": "activity_bar",
 
   // Per-language overrides, by the name shown in the status bar.
   // "languages": {
@@ -1526,6 +1575,15 @@ mod tests {
         assert!(avatar("{}"));
         assert!(!avatar(r#"{"project_avatar": false}"#));
         assert!(Settings::unknown_keys(r#"{"project_avatar": false}"#).is_empty());
+    }
+
+    #[test]
+    fn reads_the_tools_location() {
+        let location = |json: &str| Settings::parse(json).unwrap().tools_location();
+        assert_eq!(location("{}"), ToolsLocation::ActivityBar);
+        assert_eq!(location(r#"{"tools_location": "title_bar"}"#), ToolsLocation::TitleBar);
+        assert_eq!(location(r#"{"tools_location": "activity_bar"}"#), ToolsLocation::ActivityBar);
+        assert!(Settings::unknown_keys(r#"{"tools_location": "title_bar"}"#).is_empty());
     }
 
     #[test]

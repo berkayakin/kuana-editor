@@ -25,7 +25,7 @@ use crate::{
     format,
     git::PullStrategy,
     lsp::servers,
-    settings::{self, AutoSave, BaseKeymap, EditPredictionProvider, RunConfiguration, Settings, ShowWhitespace, SidebarDock, UiStyle, VisualEffects},
+    settings::{self, AutoSave, BaseKeymap, EditPredictionProvider, RunConfiguration, Settings, ShowWhitespace, SidebarDock, ToolsLocation, UiStyle, VisualEffects},
     syntax::Language,
     theme::{self, Appearance, Theme, ThemeRegistry},
     workspace::Find,
@@ -130,6 +130,7 @@ enum Setting {
     VisualEffects,
     UiStyle,
     SidebarDock,
+    ToolsLocation,
     ProjectAvatar,
     CompactActivityBar,
     BaseKeymap,
@@ -163,12 +164,13 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Setting; 35] = [
+    const ALL: [Setting; 36] = [
         Setting::Theme,
         Setting::IconTheme,
         Setting::VisualEffects,
         Setting::UiStyle,
         Setting::SidebarDock,
+        Setting::ToolsLocation,
         Setting::ProjectAvatar,
         Setting::CompactActivityBar,
         Setting::BaseKeymap,
@@ -203,7 +205,7 @@ impl Setting {
 
     fn page(self) -> Page {
         match self {
-            Setting::Theme | Setting::IconTheme | Setting::VisualEffects | Setting::UiStyle | Setting::SidebarDock | Setting::ProjectAvatar | Setting::CompactActivityBar => Page::Appearance,
+            Setting::Theme | Setting::IconTheme | Setting::VisualEffects | Setting::UiStyle | Setting::SidebarDock | Setting::ToolsLocation | Setting::ProjectAvatar | Setting::CompactActivityBar => Page::Appearance,
             Setting::BaseKeymap => Page::Keymap,
             Setting::FontFamily | Setting::FontSize | Setting::LineHeight => Page::Editor,
             Setting::TabSize | Setting::HardTabs | Setting::SoftWrap => Page::Editor,
@@ -226,7 +228,7 @@ impl Setting {
             Setting::Theme => "Theme",
             Setting::IconTheme => "File icons",
             Setting::VisualEffects => "Effects",
-            Setting::UiStyle | Setting::SidebarDock | Setting::ProjectAvatar | Setting::CompactActivityBar => "Layout",
+            Setting::UiStyle | Setting::SidebarDock | Setting::ToolsLocation | Setting::ProjectAvatar | Setting::CompactActivityBar => "Layout",
             Setting::BaseKeymap => "Keymap",
             Setting::FontFamily | Setting::FontSize | Setting::LineHeight => "Font",
             Setting::TabSize | Setting::HardTabs => "Indentation",
@@ -254,6 +256,7 @@ impl Setting {
             Setting::VisualEffects => "Visual effects",
             Setting::UiStyle => "Style",
             Setting::SidebarDock => "Sidebar position",
+            Setting::ToolsLocation => "Tool buttons",
             Setting::ProjectAvatar => "Project avatar",
             Setting::CompactActivityBar => "Compact activity bar",
             Setting::BaseKeymap => "Base keymap",
@@ -294,6 +297,7 @@ impl Setting {
             Setting::VisualEffects => "Reduced uses solid colors instead of gradients; Minimal also drops shadows, glows and animations.",
             Setting::UiStyle => "Modern floats rounded islands with browser-like tabs; Classic puts square areas side by side, separated by lines.",
             Setting::SidebarDock => "Which side of the editor the Files and Commit views sit on.",
+            Setting::ToolsLocation => "Run, the panels' toggles, Search and Settings: on a bar beside the sidebar, or in a title bar of their own above the tabs, the sidebar's views then tabs like the editor's.",
             Setting::ProjectAvatar => "The round initial before the project's name in the title bar.",
             Setting::CompactActivityBar => "A narrower bar beside the sidebar, with smaller buttons and icons, for more room.",
             Setting::BaseKeymap => "The shortcuts Kuana starts from. Your own changes below stay on top of any of them.",
@@ -337,6 +341,7 @@ impl Setting {
             Setting::VisualEffects => "reduce simple simplify plain flat minimal gradient shadow glow animation transition motion effects decoration",
             Setting::UiStyle => "style classic modern islands gaps padding borders separators lines tabs chrome flat simple compact layout look",
             Setting::SidebarDock => "sidebar side dock left right position move layout file tree project panel git commit",
+            Setting::ToolsLocation => "tool buttons activity bar title bar header toolbar icons run debug search settings extensions panel toggles location top",
             Setting::ProjectAvatar => "project avatar monogram initial letter circle badge icon title bar header name chip hide show",
             Setting::CompactActivityBar => "compact activity bar icons size large small big narrow buttons left panel sidebar tools space room",
             Setting::BaseKeymap => "keymap shortcuts key bindings vscode vs code jetbrains intellij webstorm sublime zed",
@@ -395,6 +400,7 @@ enum Menu {
     VisualEffects,
     UiStyle,
     SidebarDock,
+    ToolsLocation,
     PullStrategy,
     EditPredictions,
     LanguageServer,
@@ -1483,6 +1489,14 @@ impl Preferences {
                 self.dropdown(Menu::SidebarDock, sidebar_dock_label(current).into(), px(200.), options, cx, move |this, ix, _, cx| {
                     this.menu = None;
                     this.write(Settings::set_sidebar_dock(SidebarDock::ALL[ix]), cx);
+                })
+            }
+            Setting::ToolsLocation => {
+                let current = settings.tools_location();
+                let options = ToolsLocation::ALL.iter().map(|l| (tools_location_label(*l).into(), *l == current)).collect();
+                self.dropdown(Menu::ToolsLocation, tools_location_label(current).into(), px(200.), options, cx, move |this, ix, _, cx| {
+                    this.menu = None;
+                    this.write(Settings::set_tools_location(ToolsLocation::ALL[ix]), cx);
                 })
             }
             Setting::ProjectAvatar => self.switch_with_default("pref-project-avatar", "project_avatar", settings.project_avatar, true, cx),
@@ -2664,6 +2678,7 @@ fn setting_key(setting: Setting) -> &'static str {
         Setting::VisualEffects => "visual_effects",
         Setting::UiStyle => "ui_style",
         Setting::SidebarDock => "sidebar_dock",
+        Setting::ToolsLocation => "tools_location",
         Setting::ProjectAvatar => "project_avatar",
         Setting::CompactActivityBar => "compact_activity_bar",
         Setting::SoftWrap => "soft_wrap",
@@ -2701,6 +2716,13 @@ fn sidebar_dock_label(dock: SidebarDock) -> &'static str {
     match dock {
         SidebarDock::Left => "Left",
         SidebarDock::Right => "Right",
+    }
+}
+
+fn tools_location_label(location: ToolsLocation) -> &'static str {
+    match location {
+        ToolsLocation::ActivityBar => "Activity bar",
+        ToolsLocation::TitleBar => "Title bar",
     }
 }
 

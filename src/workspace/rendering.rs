@@ -292,7 +292,7 @@ impl Focusable for Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.viewport = window.viewport_size();
-        self.activity_width = activity_bar::BarSize::of(cx).width;
+        self.activity_width = activity_bar::BarSize::shown_width(cx);
         // The Problems panel lists the active file's diagnostics.
         if self.shows(BottomPanel::Problems) {
             let active = self.active_editor(cx);
@@ -313,6 +313,8 @@ impl Render for Workspace {
         let terminal_panel = self.shows(BottomPanel::Terminal).then(|| self.render_terminal_panel(cx).into_any_element());
         let panes = self.render_panes(window, cx).into_any_element();
         let sidebar_right = self.sidebar_on_right(cx);
+        let sidebar_block = self.has_sidebar_block(cx);
+        let title_row = self.has_title_row(cx);
 
         div()
             .id("workspace")
@@ -447,6 +449,9 @@ impl Render for Workspace {
             .text_color(theme.text)
             .font_family(theme.ui_font.clone())
             .text_size(px(theme.ui_font_size))
+            // With the tools in the title bar, a row of its own above the tab
+            // row (`title_tools.rs`); otherwise its ends lie over the tab row (below).
+            .when(title_row, |el| el.child(self.render_title_row(window, cx)))
             .when_some(self.onboarding.as_ref().map(|(o, _)| o.clone()), |el, onboarding| {
                 el.child(
                     div()
@@ -475,10 +480,14 @@ impl Render for Workspace {
                     // Classic: the areas cover this but for 1px gaps between
                     // them and a line above the status bar, the separators.
                     // Modern: the window's edge on the side away from the
-                    // activity bar keeps the islands' gap.
+                    // activity bar keeps the islands' gap, and both do with no
+                    // block on the sidebar's side (tools in the title bar,
+                    // sidebar hidden).
                     .map(|el| {
                         if theme.classic {
                             el.pb(px(1.)).bg(crate::ui::separator(&theme))
+                        } else if !sidebar_block {
+                            el.px(px(GAP))
                         } else if sidebar_right {
                             el.pl(px(GAP))
                         } else {
@@ -488,7 +497,7 @@ impl Render for Workspace {
                     .gap(px(layout_gap(&theme)))
                     // The activity bar and the sidebar keep their full height on
                     // either side; the bottom panels stay under the editor area.
-                    .when(!sidebar_right, |el| el.child(self.render_sidebar_block(window, cx)))
+                    .when(sidebar_block && !sidebar_right, |el| el.child(self.render_sidebar_block(window, cx)))
                     .child(
                         div()
                             .flex()
@@ -505,12 +514,11 @@ impl Render for Workspace {
                             .when(self.shows(BottomPanel::Database), |el| el.child(self.render_database_results(cx)))
                             .when(self.shows(BottomPanel::Extension), |el| el.child(self.render_extension_panel(cx))),
                     )
-                    .when(sidebar_right, |el| el.child(self.render_sidebar_block(window, cx))),
+                    .when(sidebar_block && sidebar_right, |el| el.child(self.render_sidebar_block(window, cx))),
             ))
             .child(self.render_statusbar(cx))
             // The title bar's ends, over the tab row's (after it, so they're on top).
-            .child(self.render_title_lead(window, cx))
-            .child(self.render_title_trail(window, cx))
+            .when(!title_row, |el| el.child(self.render_title_lead(window, cx)).child(self.render_title_trail(window, cx)))
             .children(toasts)
             .children(self.render_context_menu(cx))
             .children(modal)

@@ -60,6 +60,8 @@ impl Workspace {
             .flex_shrink_0()
             .items_center()
             .gap(px(2.))
+            // Over the title bar's drag area: see `render_title_lead`.
+            .when(cfg!(windows), |el| el.occlude())
             .child(
                 self.bar_button(
                     "app-menu",

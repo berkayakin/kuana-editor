@@ -2,7 +2,10 @@
 //! sidebar's views (Files, Commit) are vertical tabs at its top, the current
 //! one shaped like the editor's current tab turned on its side and joined to
 //! the sidebar's island; under them the bottom panels' toggles; at its foot
-//! Search Everywhere, Extensions and Settings.
+//! Search Everywhere, Extensions and Settings. With `tools_location` set to
+//! the title bar there's no bar: the tools are at the title bar's end
+//! (`title_tools.rs`) and the views tabs along the sidebar's top
+//! (`sidebar_tabs.rs`).
 
 use super::*;
 use gpui::svg;
@@ -41,6 +44,11 @@ impl BarSize {
         if Settings::get(cx).compact_activity_bar() { Self::COMPACT } else { Self::FULL }
     }
 
+    /// The bar's width on screen: none with the tools in the title bar.
+    pub(super) fn shown_width(cx: &App) -> f32 {
+        if tools_in_title_bar(cx) { 0. } else { Self::of(cx).width }
+    }
+
     /// How far a selected view's icon moves toward the island: from the
     /// buttons' line (the bar's middle) to its tab's middle, the tab starting
     /// a gap (`width - button`) / 2 off the window's edge.
@@ -66,17 +74,24 @@ impl BarSize {
 const SEPARATOR: f32 = 1.0;
 const SEPARATOR_MARGIN: f32 = 6.0;
 
-/// One of the activity bar's buttons other than the views.
-struct Tool {
-    id: &'static str,
-    icon: Icon,
-    label: &'static str,
+/// Whether the tool buttons are in the title bar (`tools_location`), with no
+/// activity bar.
+pub(super) fn tools_in_title_bar(cx: &App) -> bool {
+    Settings::get(cx).tools_location() == crate::settings::ToolsLocation::TitleBar
+}
+
+/// One of the activity bar's buttons other than the views (or the title
+/// bar's, `title_tools.rs`).
+pub(super) struct Tool {
+    pub(super) id: &'static str,
+    pub(super) icon: Icon,
+    pub(super) label: &'static str,
     /// Its panel or page shows.
-    on: bool,
+    pub(super) on: bool,
     /// Its group at the bar's foot, between separators.
-    group: Group,
+    pub(super) group: Group,
     /// Its icon's own color (Run, Stop: what they do), else the bar's.
-    tint: Option<Hsla>,
+    pub(super) tint: Option<Hsla>,
     /// Its tooltip, with `action`'s shortcut, when it says more than `label`
     /// (the run configuration).
     tip: Option<String>,
@@ -84,13 +99,13 @@ struct Tool {
     /// them all (the rest go to its More menu).
     priority: u8,
     /// For its shortcut in the tooltip and the More menu.
-    action: Box<dyn gpui::Action>,
-    run: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
+    pub(super) action: Box<dyn gpui::Action>,
+    pub(super) run: fn(&mut Workspace, &mut Window, &mut Context<Workspace>),
 }
 
 /// The groups of buttons at the bar's foot, in order.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Group {
+pub(super) enum Group {
     /// Run, Debug and, while something runs, Stop, for the selected run
     /// configuration (the last one launched); like JetBrains' run widget.
     Run,
@@ -104,7 +119,7 @@ enum Group {
 /// views and the separator), each taking `button` (a row and the gap after
 /// it), in their places' order: as many as fit by priority, with a More
 /// button for the rest.
-fn fit_tools(tools: &[Tool], room: f32, button: f32) -> Vec<usize> {
+pub(super) fn fit_tools(tools: &[Tool], room: f32, button: f32) -> Vec<usize> {
     let fits = |n: usize| room / button >= n as f32;
     let mut order: Vec<usize> = (0..tools.len()).collect();
     if !fits(tools.len()) {
@@ -123,18 +138,28 @@ impl Workspace {
     pub(super) fn render_sidebar_block(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
         let right = self.sidebar_on_right(cx);
-        // Classic: a separator line between the bar and the sidebar.
-        let bar_room = BarSize::of(cx).width + if theme.classic && self.show_sidebar { 1. } else { 0. };
-        let width = bar_room + if self.show_sidebar { f32::from(self.shown_sidebar_width()) } else { 0. };
+        let bar_room = self.bar_room(self.show_sidebar, cx);
+        let width = self.sidebar_block_width(self.show_sidebar, cx);
         div()
+            .relative()
             .flex()
             .flex_col()
             .flex_shrink_0()
             .w(px(width))
             .h_full()
             // The tab row's part above it: the project and branch, beside the
-            // title bar's lead or trail that sits over it; the rest moves the window.
-            .child(tab_room(self.render_sidebar_room(width, window, cx), &theme))
+            // title bar's lead or trail that sits over it; the rest moves the
+            // window. Under a title bar row, the views' tabs (after the island,
+            // so the current one paints over its edge).
+            .child(
+                tab_room(self.render_sidebar_room(width, window, cx), &theme)
+                    // Classic without the sidebar: over the separator line
+                    // beside the bar, which would run up the tab row (under the
+                    // traffic lights) since nothing in the row sits beside it.
+                    .when(theme.classic && !self.show_sidebar, |el| {
+                        el.w(px(width + 1.)).map(|el| if right { el.ml(px(-1.)) } else { el })
+                    }),
+            )
             .child(
                 div()
                     .relative()
@@ -144,14 +169,71 @@ impl Workspace {
                     .map(|el| if right { el.pr(px(bar_room)) } else { el.pl(px(bar_room)) })
                     .when(self.show_sidebar, |el| el.child(self.render_sidebar(cx)))
                     // After the island, so the current view's tab paints over its edge.
-                    .child(
-                        self.render_activity_bar(cx)
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .map(|el| if right { el.right_0() } else { el.left_0() }),
-                    ),
+                    .when(!tools_in_title_bar(cx), |el| {
+                        el.child(
+                            self.render_activity_bar(cx)
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .map(|el| if right { el.right_0() } else { el.left_0() }),
+                        )
+                    }),
             )
+            .when(tools_in_title_bar(cx) && self.show_sidebar, |el| {
+                el.child(
+                    self.render_sidebar_tabs(window, cx)
+                        .absolute()
+                        .top_0()
+                        .map(|el| if right { el.right(px(bar_room)) } else { el.left(px(bar_room)) }),
+                )
+            })
+    }
+
+    /// The room before the sidebar's island on the window's side: the
+    /// activity bar (Classic: with a separator line between it and the
+    /// sidebar), or with the tools in the title bar the window edge's gap.
+    fn bar_room(&self, sidebar: bool, cx: &App) -> f32 {
+        let theme = Theme::get(cx);
+        if tools_in_title_bar(cx) {
+            return if theme.classic { 0. } else { GAP };
+        }
+        BarSize::of(cx).width + if theme.classic && sidebar { 1. } else { 0. }
+    }
+
+    /// Whether the sidebar's side of the window has a block: always with the
+    /// activity bar, only while the sidebar shows without it.
+    pub(super) fn has_sidebar_block(&self, cx: &App) -> bool {
+        self.show_sidebar || !tools_in_title_bar(cx)
+    }
+
+    /// The sidebar block's width, with the sidebar shown or not. Without it,
+    /// the bar's own margin (its buttons are centered on it) is the space
+    /// before the editor's island, so the block gives the row's gap back and
+    /// the bar reaches over it (Classic's gap is the separator line, which stays).
+    pub(super) fn sidebar_block_width(&self, sidebar: bool, cx: &App) -> f32 {
+        let theme = Theme::get(cx);
+        let bar_room = self.bar_room(sidebar, cx);
+        if sidebar {
+            bar_room + f32::from(self.shown_sidebar_width())
+        } else if tools_in_title_bar(cx) {
+            0.
+        } else if theme.classic {
+            bar_room
+        } else {
+            bar_room - crate::ui::layout_gap(theme)
+        }
+    }
+
+    /// Where the editor area starts, in window x, as the main row lays it out
+    /// (`render`): after the sidebar block and the row's gap, or past the
+    /// window's edge gap when the block is on the right.
+    pub(super) fn editor_left(&self, cx: &App) -> f32 {
+        let theme = Theme::get(cx);
+        if self.sidebar_on_right(cx) || !self.has_sidebar_block(cx) {
+            if theme.classic { 0. } else { GAP }
+        } else {
+            self.sidebar_block_width(self.show_sidebar, cx) + crate::ui::layout_gap(theme)
+        }
     }
 
     /// The tab row above the sidebar block, `width` wide: room for the title
@@ -159,6 +241,10 @@ impl Workspace {
     /// chips while the sidebar shows, and free space that moves the window.
     fn render_sidebar_room(&self, width: f32, window: &Window, cx: &mut Context<Self>) -> Div {
         let theme = Theme::get(cx);
+        // Under a title bar row the chips are in it and the views' tabs take this row.
+        if tools_in_title_bar(cx) {
+            return div();
+        }
         let right = self.sidebar_on_right(cx);
         let (lead_end, trail_start) = self.title_ends.get();
         // Docked left the block starts at the window's edge, docked right it ends there.
@@ -171,14 +257,17 @@ impl Workspace {
             .w_full()
             .pt(px(super::title_bar::chip_top(theme)))
             .child(window_drag_area("sidebar-room-lead").flex_shrink_0().w(px(lead)))
-            .when(self.show_sidebar, |el| el.children(self.render_title_chips(room, window, cx)))
+            .when(self.show_sidebar, |el| el.children(self.render_title_chips(room, false, window, cx)))
             .child(window_drag_area("sidebar-room").flex_1().min_w_0())
             .child(window_drag_area("sidebar-room-trail").flex_shrink_0().w(px(trail)))
     }
 
     /// Where the current view's tab joins the sidebar's island, so the
-    /// island's edge light starts under it.
-    pub(super) fn view_tab_joint(&self, cx: &App) -> crate::ui::SideJoint {
+    /// island's edge light starts under it; none without the activity bar.
+    pub(super) fn view_tab_joint(&self, cx: &App) -> Option<crate::ui::SideJoint> {
+        if tools_in_title_bar(cx) {
+            return None;
+        }
         let index = match self.sidebar_mode {
             SidebarMode::Files => 0.,
             SidebarMode::Commit => 1.,
@@ -187,7 +276,7 @@ impl Workspace {
         };
         let bar = BarSize::of(cx);
         let top = TAB_STRIP_INSET + index * (bar.row + bar.gap(Theme::get(cx)));
-        crate::ui::SideJoint { right: self.sidebar_on_right(cx), below: top + bar.row + TAB_FOOT }
+        Some(crate::ui::SideJoint { right: self.sidebar_on_right(cx), below: top + bar.row + TAB_FOOT })
     }
 
     fn render_activity_bar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -195,7 +284,11 @@ impl Workspace {
         // Its buttons are centered on it: as far from the window's edge as
         // from the island's (its width = a button and two gaps).
         let bar = BarSize::of(cx);
-        let sep = || div().flex_shrink_0().w(px(18.)).h(px(SEPARATOR)).my(px(SEPARATOR_MARGIN)).bg(theme.border);
+        // Classic: across the bar, a separator line like those between its tabs.
+        let sep = || {
+            let line = div().flex_shrink_0().h(px(SEPARATOR)).my(px(SEPARATOR_MARGIN));
+            if theme.classic { line.w_full().bg(crate::ui::separator(&theme)) } else { line.w(px(18.)).bg(theme.border) }
+        };
         let top = if theme.classic { 0. } else { TAB_STRIP_INSET };
         // The bar's height: under the tab row, above the status bar.
         let height = f32::from(self.viewport.height) - (TAB_STRIP_HEIGHT - 1.) - STATUSBAR_HEIGHT - if theme.classic { 1. } else { 0. };
@@ -227,22 +320,8 @@ impl Workspace {
         let button = |ix: usize, cx: &mut Context<Self>| {
             let tool = &tools[ix];
             let run = tool.run;
-            let (label, action, tip) = (tool.label, tool.action.boxed_clone(), tool.tip.clone());
-            self.activity_button(tool.id, tool.icon, tool.on, tool.tint, cx, move |ws, _, window, cx| run(ws, window, cx))
-                .map(|el| match (tool.id, tip) {
-                    // Its shortcut is a double Shift, which no binding holds.
-                    ("search-everywhere", _) => el.tooltip(|_, cx| tooltip_view(format!("Search Everywhere ({})", double_shift_label()), cx)),
-                    (_, Some(tip)) => el.tooltip(move |window, cx| status_tooltip(&tip, &*action, window, cx)),
-                    _ => el.tooltip(move |window, cx| status_tooltip(label, &*action, window, cx)),
-                })
-                // Run and Debug go by the selected configuration: right-click picks another.
-                .when(tool.group == Group::Run && tool.id != "stop-run", |el| {
-                    el.on_mouse_down(MouseButton::Right, cx.listener(|ws, _, window, cx| {
-                        cx.stop_propagation();
-                        ws.run_configuration(&RunConfiguration, window, cx);
-                    }))
-                })
-                .into_any_element()
+            let el = self.activity_button(tool.id, tool.icon, tool.on, tool.tint, cx, move |ws, _, window, cx| run(ws, window, cx));
+            with_tool_tooltip(el, tool, cx).into_any_element()
         };
         let group = |group: Group, cx: &mut Context<Self>| -> Vec<AnyElement> {
             shown.iter().filter(|&&ix| tools[ix].group == group).map(|&ix| button(ix, cx)).collect()
@@ -251,13 +330,10 @@ impl Workspace {
         let groups: Vec<Vec<AnyElement>> =
             [Group::Run, Group::Panel, Group::Window].into_iter().map(|g| group(g, cx)).filter(|g| !g.is_empty()).collect();
         let more = (!hidden.is_empty()).then(|| {
-            let entries: Vec<(&'static str, Icon, Box<dyn gpui::Action>)> =
-                hidden.iter().map(|&ix| (tools[ix].label, tools[ix].icon, tools[ix].action.boxed_clone())).collect();
+            let entries = more_entries(&tools, &hidden);
             let lit = hidden.iter().any(|&ix| tools[ix].on);
             self.activity_button("activity-more", Icon::More, lit, None, cx, move |ws, event, window, cx| {
-                let items = entries.iter().map(|(label, icon, _)| MenuEntry::item(*label, *icon)).collect();
-                let actions = entries.iter().map(|(_, _, action)| Some(MenuAction::Run(action.boxed_clone()))).collect();
-                ws.show_context_menu(items, actions, event.position(), None, window, cx);
+                ws.show_more_tools(&entries, event.position(), window, cx)
             })
             // No tooltip: it would cover the menu it opens, under the pointer.
         });
@@ -313,7 +389,7 @@ impl Workspace {
     /// only while there's something for them: results, a repository, a debug
     /// session), then Search Everywhere, Extensions and Settings (lit while its
     /// page shows).
-    fn activity_tools(&self, cx: &App) -> Vec<Tool> {
+    pub(super) fn activity_tools(&self, cx: &App) -> Vec<Tool> {
         let tool = |id, icon, label, on, group, priority, action: Box<dyn gpui::Action>, run| Tool {
             id,
             icon,
@@ -327,6 +403,13 @@ impl Workspace {
             run,
         };
         let mut tools = self.run_tools(cx);
+        // Without the activity bar's view tabs, the sidebar needs a way back.
+        if tools_in_title_bar(cx) {
+            let icon = if self.sidebar_on_right(cx) { Icon::PanelRight } else { Icon::PanelLeft };
+            tools.push(tool("toggle-sidebar", icon, "Sidebar", self.show_sidebar, Group::Panel, 0, Box::new(ToggleSidebar), |ws, window, cx| {
+                ws.toggle_current_sidebar_view(window, cx)
+            }));
+        }
         tools.extend([
             tool("toggle-terminal", Icon::Terminal, "Terminal", self.shows(BottomPanel::Terminal), Group::Panel, 0, Box::new(ToggleTerminal), |ws, window, cx| {
                 // Lit, it hides the panel even while the editor has the keyboard.
@@ -606,6 +689,46 @@ impl Workspace {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(on_click))
             .child(button_fill(SharedString::from(format!("{id}-fill")), (fill, fill_hover), bar, &theme, glyph))
+    }
+}
+
+/// What the More button lists: the tools that didn't fit (`hidden`).
+pub(super) type MoreEntries = Vec<(&'static str, Icon, Box<dyn gpui::Action>)>;
+
+pub(super) fn more_entries(tools: &[Tool], hidden: &[usize]) -> MoreEntries {
+    hidden.iter().map(|&ix| (tools[ix].label, tools[ix].icon, tools[ix].action.boxed_clone())).collect()
+}
+
+impl Workspace {
+    /// The More button's menu, under the pointer at `position`.
+    pub(super) fn show_more_tools(&mut self, entries: &MoreEntries, position: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let items = entries.iter().map(|(label, icon, _)| MenuEntry::item(*label, *icon)).collect();
+        let actions = entries.iter().map(|(_, _, action)| Some(MenuAction::Run(action.boxed_clone()))).collect();
+        self.show_context_menu(items, actions, position, None, window, cx);
+    }
+}
+
+/// A tool button's tooltip (its label or tip, with its shortcut) and, for
+/// Run and Debug, the right-click that picks another run configuration.
+pub(super) fn with_tool_tooltip<E>(el: E, tool: &Tool, cx: &mut Context<Workspace>) -> E
+where
+    E: StatefulInteractiveElement + InteractiveElement,
+{
+    let (label, action, tip) = (tool.label, tool.action.boxed_clone(), tool.tip.clone());
+    let el = match (tool.id, tip) {
+        // Its shortcut is a double Shift, which no binding holds.
+        ("search-everywhere", _) => el.tooltip(|_, cx| tooltip_view(format!("Search Everywhere ({})", double_shift_label()), cx)),
+        (_, Some(tip)) => el.tooltip(move |window, cx| status_tooltip(&tip, &*action, window, cx)),
+        _ => el.tooltip(move |window, cx| status_tooltip(label, &*action, window, cx)),
+    };
+    // Run and Debug go by the selected configuration: right-click picks another.
+    if tool.group == Group::Run && tool.id != "stop-run" {
+        el.on_mouse_down(MouseButton::Right, cx.listener(|ws, _, window, cx| {
+            cx.stop_propagation();
+            ws.run_configuration(&RunConfiguration, window, cx);
+        }))
+    } else {
+        el
     }
 }
 
