@@ -492,6 +492,32 @@ fn set_building(extension: &str, grammar: &str, building: bool) {
 }
 
 /// Replaces the registry with what's on disk now. Returns the grammars to
+/// A server an extension's manifest lists for a language.
+struct Offered {
+    language: String,
+    spec: &'static ServerSpec,
+    extension: String,
+}
+
+/// Each language's servers from extensions. A language extension's server
+/// may list other languages too (Swift's sourcekit-lsp: C, C++ and
+/// Objective-C); where another extension defines such a language and brings
+/// its own server (C/C++'s clangd), only that one runs, so completions and
+/// problems don't come twice. Servers of extensions without languages of
+/// their own (Emmet, Tailwind, ESLint) still run beside the language's.
+fn servers_by_language<'a>(offered: Vec<Offered>, languages_of: impl Fn(&str) -> &'a [String]) -> HashMap<String, Vec<&'static ServerSpec>> {
+    let own = |o: &Offered| languages_of(&o.extension).contains(&o.language);
+    let has_own_server = |language: &str| offered.iter().any(|o| o.language == language && own(o));
+    let mut servers: HashMap<String, Vec<&'static ServerSpec>> = HashMap::new();
+    for o in &offered {
+        let spills_over = !own(o) && !languages_of(&o.extension).is_empty();
+        if !(spills_over && has_own_server(&o.language)) {
+            servers.entry(o.language.clone()).or_default().push(o.spec);
+        }
+    }
+    servers
+}
+
 /// build (with their extension's id).
 fn load() -> Vec<(String, Grammar)> {
     let mut dirs: Vec<PathBuf> = extensions_dir()
@@ -503,7 +529,7 @@ fn load() -> Vec<(String, Grammar)> {
     let mut cache = READ_CACHE.lock().unwrap();
     let mut extensions = Vec::new();
     let mut defs: Vec<&'static LanguageDef> = Vec::new();
-    let mut servers: HashMap<String, Vec<&'static ServerSpec>> = HashMap::new();
+    let mut offered: Vec<Offered> = Vec::new();
     let mut jobs = Vec::new();
     for dir in &dirs {
         let (mut info, languages, ext_servers, grammars) = read_cached(&mut cache, dir);
@@ -513,12 +539,11 @@ fn load() -> Vec<(String, Grammar)> {
                 jobs.push((info.id.clone(), grammar.clone()));
             }
         }
-        for (language, spec) in ext_servers {
-            servers.entry(language).or_default().push(spec);
-        }
+        offered.extend(ext_servers.into_iter().map(|(language, spec)| Offered { language, spec, extension: info.id.clone() }));
         defs.extend(languages);
         extensions.push(info);
     }
+    let servers = servers_by_language(offered, |id| extensions.iter().find(|e| e.id == id).map_or(&[][..], |e| &e.languages[..]));
     cache.retain(|dir, _| dirs.contains(dir));
     drop(cache);
     for (id, grammar) in &jobs {
@@ -1203,6 +1228,47 @@ mod tests {
     pub(super) fn write(path: PathBuf, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+
+    /// Swift's sourcekit-lsp lists C; with C/C++'s clangd there, only clangd
+    /// runs for C. Emmet, an extension without languages, still joins HTML.
+    #[test]
+    fn a_language_extensions_server_leaves_another_extensions_language_alone() {
+        static SOURCEKIT: ServerSpec = ServerSpec { id: "swift:sourcekit-lsp", ..crate::lsp::servers::SPEC };
+        static CLANGD: ServerSpec = ServerSpec { id: "c-cpp:clangd", ..crate::lsp::servers::SPEC };
+        static EMMET: ServerSpec = ServerSpec { id: "emmet:emmet", ..crate::lsp::servers::SPEC };
+        let offer = |language: &str, spec, extension: &str| Offered { language: language.into(), spec, extension: extension.into() };
+        let languages: HashMap<&str, Vec<String>> = [
+            ("swift", vec!["Swift".to_string()]),
+            ("c-cpp", vec!["C".to_string(), "C++".to_string()]),
+            ("emmet", vec![]),
+        ]
+        .into();
+        let ids = |offered| {
+            let servers = servers_by_language(offered, |id| &languages[id][..]);
+            let mut out: Vec<(String, Vec<&str>)> = servers.into_iter().map(|(l, s)| (l, s.iter().map(|s| s.id).collect())).collect();
+            out.sort();
+            out
+        };
+        let all = vec![
+            offer("Swift", &SOURCEKIT, "swift"),
+            offer("C", &SOURCEKIT, "swift"),
+            offer("Objective-C", &SOURCEKIT, "swift"),
+            offer("C", &CLANGD, "c-cpp"),
+            offer("HTML", &EMMET, "emmet"),
+        ];
+        assert_eq!(
+            ids(all),
+            [
+                ("C".to_string(), vec!["c-cpp:clangd"]),
+                ("HTML".to_string(), vec!["emmet:emmet"]),
+                ("Objective-C".to_string(), vec!["swift:sourcekit-lsp"]),
+                ("Swift".to_string(), vec!["swift:sourcekit-lsp"]),
+            ]
+        );
+        // Without C/C++'s server, sourcekit-lsp serves C.
+        let without = vec![offer("C", &SOURCEKIT, "swift")];
+        assert_eq!(ids(without), [("C".to_string(), vec!["swift:sourcekit-lsp"])]);
     }
 
     #[test]
