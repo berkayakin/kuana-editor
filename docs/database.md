@@ -59,14 +59,20 @@ reads it from the database again, unless its tab has unsaved edits.
 ## Running SQL
 
 In any `.sql` file (and `.pks`, `.pkb`, `.prc`, `.fnc`, `.trg` and the like), **⌘↩ / Ctrl+Enter**
-runs the statement at the caret. With text selected, it runs the selection. **Run SQL Script**
-(Find Action) runs the whole file. Statements end with `;`. PL/SQL blocks and `CREATE … PACKAGE` and
+runs the statement at the caret. With text selected, it runs the selection. **Run SQL Script** runs
+the whole file. Both are also at the top of the editor's right-click menu and in Find Action.
+
+Once you have a connection, each statement in a script gets a green **▶** in the gutter, on its
+first line; click it to run that statement. Object files don't get one, since saving them compiles.
+
+Statements end with `;`. PL/SQL blocks and `CREATE … PACKAGE` and
 similar units end with a line holding only `/`, as in SQL*Plus and SQL Developer. SQL*Plus commands
 such as `SET SERVEROUTPUT ON` and `PROMPT` are skipped, and `EXEC proc(…)` runs as a block.
 
 The file's connection is shown in the status bar; click it to choose another. An object's file and a
 **New SQL Script** keep their own connection. Any other file uses the one selected in the Database
-view, or the only one connected.
+view, else the only one connected, else your only connection. If that connection needs its
+password, Kuana asks for it, then runs what you asked for.
 
 Results show in the **Database** panel at the bottom:
 

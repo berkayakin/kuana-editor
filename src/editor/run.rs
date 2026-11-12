@@ -23,6 +23,13 @@ pub struct EditorRunEvent {
 
 impl gpui::EventEmitter<EditorRunEvent> for Editor {}
 
+/// A SQL statement's ▶ was clicked: run the statement at `at` (its first word).
+pub struct EditorRunSql {
+    pub at: usize,
+}
+
+impl gpui::EventEmitter<EditorRunSql> for Editor {}
+
 /// This file's breakpoints changed (a running debug session needs them).
 pub struct EditorBreakpointsChanged;
 
@@ -97,6 +104,49 @@ impl Editor {
             Some(target) => cx.emit(EditorRunEvent { target, debug: true, menu_at: None }),
             None => cx.emit(EditorLspEvent::Message("Nothing to debug here".into())),
         }
+    }
+
+    // ---- SQL statements --------------------------------------------------------------
+
+    /// Whether the gutter shows a ▶ per SQL statement: the workspace says so
+    /// for SQL scripts while a database connection exists.
+    pub fn set_sql_runs(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.sql_runs != on {
+            self.sql_runs = on;
+            cx.notify();
+        }
+    }
+
+    /// Each statement's first row and offset: the last ones found (see `Derived`).
+    pub(super) fn shown_sql_statements(&mut self, cx: &mut Context<Self>) -> Arc<Vec<(usize, usize)>> {
+        if !self.sql_runs {
+            return Arc::default();
+        }
+        let (key, job) = self.sql_job(cx);
+        self.sql_statements.schedule(key, job, |e| &mut e.sql_statements, cx);
+        self.sql_statements.last()
+    }
+
+    fn sql_job(&self, cx: &App) -> (u64, impl FnOnce() -> Vec<(usize, usize)> + Send + 'static) {
+        let rope = self.doc.read(cx).rope().clone();
+        let job = move || {
+            let mut rows: Vec<(usize, usize)> =
+                crate::database::script::starts(&rope.to_string()).into_iter().map(|at| (rope.byte_to_line(at), at)).collect();
+            // One ▶ per line: it runs the line's first statement.
+            rows.dedup_by_key(|(row, _)| *row);
+            rows
+        };
+        (self.doc.read(cx).version(), job)
+    }
+
+    /// The statement whose ▶ is on `row` (by the current text).
+    pub(super) fn sql_statement_at(&mut self, row: usize, cx: &App) -> Option<usize> {
+        if !self.sql_runs {
+            return None;
+        }
+        let (key, job) = self.sql_job(cx);
+        let statements = self.sql_statements.now(key, job);
+        statements.iter().find(|(r, _)| *r == row).map(|&(_, at)| at)
     }
 
     // ---- Breakpoints ---------------------------------------------------------------

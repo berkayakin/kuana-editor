@@ -402,6 +402,7 @@ impl Workspace {
                             // The store finds the document by its new path.
                             let doc = editor.read(cx).doc.clone();
                             ws.documents.update(cx, |s, cx| s.add(&doc, cx));
+                            ws.sync_sql_gutters(cx);
                             match &current {
                                 Some(old) => ws.lsp.update(cx, |s, cx| s.moved(old, editor, cx)),
                                 None => ws.lsp.update(cx, |s, cx| s.register(editor, cx)),

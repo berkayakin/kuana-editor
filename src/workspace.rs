@@ -37,7 +37,7 @@ use crate::{
     extensions,
     editor::{
         self, Cancel, Editor, EditorBreakpointMenu, EditorBreakpointsChanged, EditorContextMenu, EditorEvent, EditorGitEvent, EditorLoaded,
-        EditorLspEvent, EditorPreviewToggle, EditorRunEvent, GitFile, ToggleMarkdownPreview, Unloaded,
+        EditorLspEvent, EditorPreviewToggle, EditorRunEvent, EditorRunSql, GitFile, ToggleMarkdownPreview, Unloaded,
     },
     image_view::ImageView,
     markdown_preview::{MarkdownPreview, PreviewEvent},
@@ -799,6 +799,8 @@ pub struct Workspace {
     db_results: Entity<QueryResults>,
     /// The last SQL run: its editor and its statements' ranges (Output's rows go to them).
     db_run: Option<database::SqlRun>,
+    /// A run waiting for the connection dialog's password (see `run_sql`).
+    sql_waiting: Option<database::SqlWaiting>,
     /// The Database panel has something to show (read in render instead of the panel).
     has_db_results: bool,
     /// The connection chosen for a SQL file (in the status bar, or the one its last run used).
@@ -1041,6 +1043,9 @@ impl Workspace {
         });
         let database = cx.new(DatabaseView::new);
         let database_subscription = cx.subscribe_in(&database, window, |ws, _, event: &DatabaseEvent, window, cx| ws.on_database_event(event, window, cx));
+        // SQL files' ▶ marks show while a connection exists.
+        let db_model = database.read(cx).model().clone();
+        let db_model_subscription = cx.observe(&db_model, |ws, _, cx| ws.sync_sql_gutters(cx));
         let ext_panels = cx.new(crate::extension_panel::ExtensionPanels::new);
         let ext_panels_subscription = cx.subscribe_in(&ext_panels, window, |ws, _, event, window, cx| ws.on_extension_panels_event(event, window, cx));
         let db_results = cx.new(QueryResults::new);
@@ -1246,6 +1251,7 @@ impl Workspace {
             database,
             db_results,
             db_run: None,
+            sql_waiting: None,
             has_db_results: false,
             sql_connections: HashMap::new(),
             ext_views: HashMap::new(),
@@ -1309,6 +1315,7 @@ impl Workspace {
                 problems_subscription,
                 results_subscription,
                 database_subscription,
+                db_model_subscription,
                 db_results_subscription,
                 ext_panels_subscription,
                 tree_subscription,
@@ -1473,6 +1480,9 @@ impl Workspace {
         subscriptions.push(cx.subscribe_in(editor, window, |ws, _, event: &EditorRunEvent, window, cx| {
             ws.on_run_event(event, window, cx);
         }));
+        subscriptions.push(cx.subscribe_in(editor, window, |ws, editor, event: &EditorRunSql, window, cx| {
+            ws.run_sql(editor.clone(), database::SqlScope::At(event.at), window, cx);
+        }));
         subscriptions.push(cx.subscribe(editor, |ws, editor, _: &EditorBreakpointsChanged, cx| {
             ws.breakpoints_changed(&editor, cx);
         }));
@@ -1500,6 +1510,7 @@ impl Workspace {
             self.file_opened(editor, cx);
         }
         self.editors.push(editor.clone());
+        self.sync_sql_gutter(editor, cx);
         // A preview of its document may be open (a split of the file).
         self.sync_previewed(cx);
     }
