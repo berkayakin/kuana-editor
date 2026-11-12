@@ -117,6 +117,14 @@ pub struct SessionState {
     pub show_terminal: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sidebar_mode: Option<String>,
+    /// The views moved to the second sidebar, on the editor's other side.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub second_sidebar_views: Vec<String>,
+    /// The view the second sidebar shows (none: it's closed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub second_sidebar_view: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub second_sidebar_width: Option<f32>,
     /// Editor font zoom in points, added to the configured size.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_zoom: Option<f32>,

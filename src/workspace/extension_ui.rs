@@ -281,8 +281,10 @@ impl Workspace {
         if let SidebarMode::Extension(slot) = self.sidebar_mode
             && !keep.contains(&slot)
         {
-            self.sidebar_mode = SidebarMode::Files;
+            self.sidebar_mode = self.first_sidebar_view();
         }
+        // A moved view whose extension went leaves the second sidebar.
+        self.moved_views.retain(|mode| !matches!(mode, SidebarMode::Extension(slot) if !keep.contains(slot)));
         if modes != self.ext_modes {
             self.ext_modes = modes;
             cx.notify();
@@ -312,6 +314,19 @@ impl Workspace {
         Some(entity)
     }
 
+    /// Makes the views of the extension views that show, in either sidebar:
+    /// one restored from the last session has none until now.
+    pub(super) fn make_shown_extension_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let shown = [self.show_sidebar.then_some(self.sidebar_mode), self.second_open()];
+        for mode in shown.into_iter().flatten() {
+            if let SidebarMode::Extension(slot) = mode
+                && !self.ext_views.contains_key(&slot)
+            {
+                self.extension_view(slot, window, cx);
+            }
+        }
+    }
+
     /// The project moved or settings changed: the views' code is told.
     pub(super) fn extension_callers_changed(&mut self, cx: &mut Context<Self>) {
         for entity in self.ext_views.values().cloned().collect::<Vec<_>>() {
@@ -323,12 +338,11 @@ impl Workspace {
     /// Shows an extension's view, or hides the sidebar when it's showing.
     pub(super) fn toggle_extension_mode(&mut self, mode: SidebarMode, window: &mut Window, cx: &mut Context<Self>) {
         let SidebarMode::Extension(slot) = mode else { return };
-        if self.show_sidebar && self.sidebar_mode == mode {
-            self.show_sidebar = false;
+        if self.view_shown(mode) {
+            self.set_view_shown(mode, false);
             self.focus_active(window, cx);
         } else if let Some(view) = self.extension_view(slot, window, cx) {
-            self.show_sidebar = true;
-            self.sidebar_mode = mode;
+            self.set_view_shown(mode, true);
             window.focus(&view.focus_handle(cx));
         }
         self.save_state(cx);

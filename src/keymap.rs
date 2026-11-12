@@ -29,7 +29,7 @@ use crate::{
         DebugConfiguration, Resume, PauseProgram, StepOver, StepInto, StepOut, ToggleDebugPanel, AttachToProcess, AddConditionalBreakpoint,
         AddLogpoint, OpenExtensions, ReloadExtensions, ProjectTrust, UndoFileChange, RedoFileChange, OpenProjectSettings,
         ToggleResults, NextResult, PreviousResult, RerunFailedTests, ShowLocalHistory,
-        ToggleAutoSave, ToggleSidebar, ToggleSidebarPosition, ToggleClassicLayout, CheckForUpdates, WelcomeSetup, GoToSymbol, SplitTerminal, RenameTerminal, SelectOpenedFile, InstallShellCommand,
+        ToggleAutoSave, ToggleSidebar, ToggleSidebarPosition, ToggleSecondSidebar, ToggleClassicLayout, CheckForUpdates, WelcomeSetup, GoToSymbol, SplitTerminal, RenameTerminal, SelectOpenedFile, InstallShellCommand,
         ToggleDatabase, NewDatabaseConnection, ToggleDatabaseResults, RunSqlStatement, RunSqlScript, NewSqlScript,
     },
 };
@@ -793,6 +793,7 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Switch to Recent Tab (Backward)", RecentTabBack),
         a("Toggle Project Sidebar", ToggleSidebar),
         a("Toggle Sidebar Position", ToggleSidebarPosition),
+        a("Toggle Second Sidebar", ToggleSecondSidebar),
         a("Toggle Classic Layout", ToggleClassicLayout),
         a("Toggle Problems", ToggleProblems),
         a("Toggle Find Panel", ToggleResults),

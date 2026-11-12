@@ -56,12 +56,11 @@ impl Workspace {
     }
 
     pub(super) fn toggle_database(&mut self, _: &ToggleDatabase, window: &mut Window, cx: &mut Context<Self>) {
-        if self.show_sidebar && self.sidebar_mode == SidebarMode::Database {
-            self.show_sidebar = false;
+        if self.view_shown(SidebarMode::Database) {
+            self.set_view_shown(SidebarMode::Database, false);
             self.focus_active(window, cx);
         } else {
-            self.show_sidebar = true;
-            self.sidebar_mode = SidebarMode::Database;
+            self.set_view_shown(SidebarMode::Database, true);
             window.focus(&self.database.focus_handle(cx));
         }
         self.save_state(cx);
@@ -69,7 +68,7 @@ impl Workspace {
     }
 
     fn show_database_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !(self.show_sidebar && self.sidebar_mode == SidebarMode::Database) {
+        if !self.view_shown(SidebarMode::Database) {
             self.toggle_database(&ToggleDatabase, window, cx);
         }
     }

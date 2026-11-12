@@ -321,12 +321,8 @@ impl Workspace {
 
     pub(super) fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
         // Like JetBrains tool windows: show Files, or hide if Files is showing.
-        if self.show_sidebar && self.sidebar_mode == SidebarMode::Files {
-            self.show_sidebar = false;
-        } else {
-            self.show_sidebar = true;
-            self.sidebar_mode = SidebarMode::Files;
-        }
+        let shown = self.view_shown(SidebarMode::Files);
+        self.set_view_shown(SidebarMode::Files, !shown);
         self.release_hidden_focus(window, cx);
         self.save_state(cx);
         cx.notify();
@@ -335,8 +331,8 @@ impl Workspace {
     /// A sidebar view that's hidden now gives the keyboard to the editor. One
     /// that kept it (the Commit view's message box, the file tree a click on a
     /// file leaves it in) would leave key presses (⌘0 included) going nowhere.
-    fn release_hidden_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let hidden = |mode| !self.show_sidebar || self.sidebar_mode != mode;
+    pub(super) fn release_hidden_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let hidden = |mode| !self.view_shown(mode);
         if (hidden(SidebarMode::Files) && self.tree.focus_handle(cx).contains_focused(window, cx))
             || (hidden(SidebarMode::Commit) && self.git_panel.focus_handle(cx).contains_focused(window, cx))
             || (hidden(SidebarMode::Database) && self.database.focus_handle(cx).contains_focused(window, cx))
@@ -347,8 +343,7 @@ impl Workspace {
     }
 
     pub(super) fn show_commit(&mut self, _: &ShowCommit, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_sidebar = true;
-        self.sidebar_mode = SidebarMode::Commit;
+        self.set_view_shown(SidebarMode::Commit, true);
         self.refresh_commit_view(cx);
         self.git_panel.read(cx).focus_message(window, cx);
         self.save_state(cx);
@@ -356,8 +351,8 @@ impl Workspace {
     }
 
     pub(super) fn toggle_commit(&mut self, _: &ToggleCommit, window: &mut Window, cx: &mut Context<Self>) {
-        if self.show_sidebar && self.sidebar_mode == SidebarMode::Commit {
-            self.show_sidebar = false;
+        if self.view_shown(SidebarMode::Commit) {
+            self.set_view_shown(SidebarMode::Commit, false);
             self.focus_active(window, cx);
             self.save_state(cx);
             cx.notify();

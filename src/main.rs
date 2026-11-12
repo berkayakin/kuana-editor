@@ -96,7 +96,7 @@ use crate::{
         GitInit, GitPull, GitPush, GitSync, GitUndoCommit, GoToFile, GoToLine, MinimizeWindow, ZoomWindow, NewFile, NewWindow, NextTab, OpenFile,
         OpenFolder, OpenFolderInThisWindow, OpenRemote, PrevTab, Quit, RecentFiles, RecentProjects,
         Replace, ReplaceInFiles, Save, SaveAs, SearchEverywhere, SelectTheme, ShowCommit,
-        ToggleProblems, ToggleResults, ToggleSidebar, WelcomeSetup, GoToSymbol, InstallShellCommand,
+        ToggleProblems, ToggleResults, ToggleSidebar, ToggleSecondSidebar, WelcomeSetup, GoToSymbol, InstallShellCommand,
         DebugConfiguration, Resume, PauseProgram, StepOver, StepInto, StepOut, AttachToProcess, AddConditionalBreakpoint, AddLogpoint,
     },
 };
@@ -203,6 +203,7 @@ fn menus_for(mac: bool) -> Vec<Menu> {
             name: "View".into(),
             items: vec![
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                MenuItem::action("Toggle Second Sidebar", ToggleSecondSidebar),
                 MenuItem::action("Toggle Problems", ToggleProblems),
                 MenuItem::action("Find Panel", ToggleResults),
                 MenuItem::action("Terminal", ToggleTerminal),
