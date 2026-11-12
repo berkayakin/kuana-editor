@@ -900,15 +900,9 @@ impl Render for DebugSession {
             Status::Ended(_) => theme.text_dim.into(),
             _ => theme.text_muted.into(),
         };
-        let header = div()
-            .flex()
-            .items_center()
+        let header = crate::ui::panel_header()
             .gap_1()
-            .h(px(32.))
             .px_2()
-            .flex_shrink_0()
-            .border_b_1()
-            .border_color(theme.border_subtle)
             .child(div().px_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_muted).child("DEBUG"))
             .child(div().max_w(px(240.)).truncate().text_color(theme.text).child(self.target.name.clone()))
             .child(div().ml_1().max_w(px(320.)).truncate().text_size(px(12.)).text_color(status_color).child(self.status_label()))

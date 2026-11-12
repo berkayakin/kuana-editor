@@ -129,7 +129,7 @@ impl Render for ExtensionPanels {
                 .hover_fill(if on { gpui::Hsla::from(theme.active) } else { gpui::Hsla::from(theme.hover).alpha(0.) }, if on { theme.active } else { theme.hover })
         }));
         let subtitle = self.tabs.get(self.active).and_then(|t| t.subtitle.clone());
-        let header = crate::ui::panel_header(&theme)
+        let header = crate::ui::panel_header()
             .child(tabs)
             .children(subtitle.map(|s| div().min_w_0().truncate().text_size(px(12.)).text_color(theme.text_dim).child(s)))
             .child(div().flex_1())

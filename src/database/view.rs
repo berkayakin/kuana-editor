@@ -633,16 +633,7 @@ impl Render for DatabaseView {
         let focused = self.focus.contains_focused(window, cx);
         let empty = self.model.read(cx).connections.is_empty();
         let any_connected = !self.model.read(cx).connected().is_empty();
-        let header = div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .h(px(30.))
-            .px_1()
-            .mb_1()
-            .flex_shrink_0()
-            .border_b_1()
-            .border_color(theme.border_subtle)
+        let header = crate::ui::view_header()
             .child(
                 div()
                     .flex_1()

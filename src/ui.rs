@@ -894,20 +894,23 @@ pub fn switch(on: bool, theme: &Theme) -> impl IntoElement {
         .child(div().size(px(12.)).rounded_full().bg(if on { theme.background } else { theme.text_dim }))
 }
 
-/// A bottom panel's header row (Problems, Git log): its title at the left, a
-/// hairline under it, room above and below its controls, and the close button
-/// (`panel_close_button`) at the same place in every panel.
-pub fn panel_header(theme: &Theme) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .h(px(38.))
-        .flex_shrink_0()
-        .pl(px(10.))
-        .pr(px(4.))
-        .border_b_1()
-        .border_color(theme.border_subtle)
+/// A panel header's height: its 24–26pt controls with a little air.
+pub const PANEL_HEADER: f32 = 32.;
+
+/// A panel's header row, the same in every panel on an island (the bottom
+/// panels, the sidebars' views): its title at the left, its controls after,
+/// centered on one line, the close button (`panel_close_button`) last. No
+/// line under it: the island's inset is above it and nothing below, so a
+/// line sat closer to its content than the island's edge and the row looked
+/// off-center; its height alone sets it apart from what it heads.
+pub fn panel_header() -> Div {
+    div().flex().items_center().gap_2().h(px(PANEL_HEADER)).flex_shrink_0().pl(px(10.)).pr(px(4.))
+}
+
+/// A sidebar view's header: a `panel_header` whose title and buttons bring
+/// their own padding (a title 10pt in, like a bottom panel's).
+pub fn view_header() -> Div {
+    panel_header().gap_1().px_1()
 }
 
 /// The close button at the right of a `panel_header`.

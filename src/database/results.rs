@@ -254,7 +254,7 @@ impl Render for QueryResults {
         let theme = Theme::get(cx).clone();
         let running = self.entries.iter().any(|e| e.done.is_none());
         let has_grid = self.table.is_some();
-        let header = crate::ui::panel_header(&theme)
+        let header = crate::ui::panel_header()
             .child(div().flex_shrink_0().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_muted).child("DATABASE"))
             .children(self.connection.as_ref().map(|(_, name)| {
                 div().flex_shrink_0().flex().items_center().gap_1().text_size(px(12.)).text_color(theme.text_dim).child(icon_el(Icon::Database, px(12.), theme.text_dim.into())).child(name.clone())
