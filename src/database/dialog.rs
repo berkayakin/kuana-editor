@@ -2,16 +2,85 @@
 //! is (host, port and service name or SID, or a connect string: EZConnect, a
 //! TNS descriptor or a tnsnames.ora alias), the user, password and role.
 //! Test Connection connects and disconnects; Connect saves and connects.
+//!
+//! It opens in a window of its own (`open`), like Settings, so it can be
+//! moved aside to look something up: one at a time, centered over the
+//! project window it was opened from, dragged by its title bar.
 
-use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, Render, Subscription, Task, Window, div, prelude::*, px};
+use gpui::{
+    App, AppContext, Bounds, Context, DisplayId, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, Render, Subscription, Task,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, div, point, prelude::*, px, size,
+};
 
 use super::{ConnectionConfig, Role, oracle::Session};
 use crate::{
     assets::Icon,
     editor::{Cancel, Editor, EditorEvent, Indent, Newline, Outdent},
     theme::Theme,
-    ui::{icon_el, input_box, modal_panel, text_button, tooltip_view},
+    ui::{chrome_bg, icon_el, input_box, text_button, tooltip_view},
+    workspace::{self, CloseTab, CloseWindow, TITLEBAR_HEIGHT},
 };
+
+/// What happens with the filled-in connection: saving and connecting it, in
+/// the project window the dialog came from.
+pub type OnConnect = Box<dyn Fn(ConnectionConfig, Option<String>, &mut App)>;
+
+/// The window's size: the dialog's fields and buttons, with room for a
+/// two-line message.
+const WINDOW_SIZE: (f32, f32) = (540., 560.);
+
+/// Opens the connection dialog in its own window (`config`: the connection
+/// to edit; `ask_password`: the reason to ask for its password), centered on
+/// `display`. One at a time: when one is open, it's brought forward instead.
+pub fn open(config: Option<ConnectionConfig>, ask_password: Option<String>, display: Option<DisplayId>, on_connect: OnConnect, cx: &mut App) {
+    if let Some(existing) = cx.windows().into_iter().find_map(|w| w.downcast::<ConnectionWindow>()) {
+        existing.update(cx, |_, window, _| window.activate_window()).ok();
+        return;
+    }
+    let title = if config.is_some() { "Edit Connection" } else { "New Connection" };
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(display, size(px(WINDOW_SIZE.0), px(WINDOW_SIZE.1)), cx))),
+        display_id: display,
+        titlebar: Some(TitlebarOptions { title: Some(title.into()), appears_transparent: true, traffic_light_position: Some(point(px(16.), px(13.))) }),
+        is_resizable: false,
+        is_minimizable: false,
+        app_id: Some("dev.kuana.editor".into()),
+        ..Default::default()
+    };
+    let opened = cx.open_window(options, |window, cx| {
+        cx.new(|cx| {
+            let dialog = cx.new(|cx| ConnectionDialog::new(config, ask_password, window, cx));
+            let subscription = cx.subscribe_in(&dialog, window, move |_, _, event: &ConnectionDialogEvent, window, cx| {
+                if let ConnectionDialogEvent::Connect { config, password } = event {
+                    on_connect(config.clone(), password.clone(), cx);
+                }
+                window.remove_window();
+            });
+            ConnectionWindow { dialog, _subscription: subscription }
+        })
+    });
+    if let Err(err) = opened {
+        eprintln!("couldn't open the connection window: {err}");
+    }
+}
+
+/// The window around the dialog.
+pub struct ConnectionWindow {
+    dialog: Entity<ConnectionDialog>,
+    _subscription: Subscription,
+}
+
+impl Focusable for ConnectionWindow {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.dialog.focus_handle(cx)
+    }
+}
+
+impl Render for ConnectionWindow {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(self.dialog.clone())
+    }
+}
 
 pub enum ConnectionDialogEvent {
     /// Save it (with the password typed, if any), then connect.
@@ -313,20 +382,51 @@ impl Render for ConnectionDialog {
                 .child(div().flex().child(input_box(&self.service, None, window, cx)))
         };
         let testing = matches!(self.test, Some(Test::Running));
-        modal_panel(cx)
+        // A title bar of its own, like Settings': the window drags by it and
+        // (off macOS) has its buttons in it.
+        let title_bar = div()
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .h(px(TITLEBAR_HEIGHT))
+            .w_full()
+            .when(cfg!(windows), |el| el.occlude())
+            .child(
+                workspace::window_drag_area("connection-title")
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(13.))
+                    .text_color(theme.text_muted)
+                    .child(title),
+            )
+            .when(!cfg!(target_os = "macos"), |el| el.child(workspace::window_controls(window, cx)));
+        div()
+            .id("connection-window")
             .key_context("ConnectionDialog")
             .on_action(cx.listener(Self::on_enter))
             .on_action(cx.listener(Self::on_escape))
             .on_action(cx.listener(Self::on_tab))
             .on_action(cx.listener(Self::on_shift_tab))
-            .w(px(520.))
+            // ⌘W closes the window; it has no tabs.
+            .on_action(cx.listener(|_, _: &CloseTab, _, cx| cx.emit(ConnectionDialogEvent::Dismissed)))
+            .on_action(cx.listener(|_, _: &CloseWindow, _, cx| cx.emit(ConnectionDialogEvent::Dismissed)))
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(chrome_bg(&theme, 0.6))
+            .font_family(theme.ui_font.clone())
+            .text_size(px(theme.ui_font_size))
+            .text_color(theme.text)
+            .child(title_bar)
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_3()
                     .px_4()
-                    .pt_4()
+                    .pt_1()
                     .pb_3()
                     .child(
                         div()
@@ -342,8 +442,8 @@ impl Render for ConnectionDialog {
                         div()
                             .flex()
                             .flex_col()
-                            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(title))
-                            .child(div().text_size(px(12.)).text_color(theme.text_dim).child("Oracle Database")),
+                            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child("Oracle Database"))
+                            .child(div().text_size(px(12.)).text_color(theme.text_dim).child("Host, service and user, or a connect string")),
                     ),
             )
             .child(
@@ -415,6 +515,8 @@ impl Render for ConnectionDialog {
                     )
                     .child(div().min_h(px(34.)).pt_1().text_size(px(12.)).text_color(hint_color).line_clamp(2).child(hint)),
             )
+            // The buttons stay at the window's foot.
+            .child(div().flex_1())
             .child(
                 div()
                     .flex()

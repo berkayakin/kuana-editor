@@ -11,7 +11,7 @@ use gpui::WeakEntity;
 use super::*;
 use crate::{
     database::{
-        self, DbObject, ObjectFile, ObjectKind,
+        self, ConnectionConfig, DbObject, ObjectFile, ObjectKind,
         model::{DbModel, NEEDS_PASSWORD},
         oracle::{self, CompileError, Outcome},
         script,
@@ -75,24 +75,34 @@ impl Workspace {
     }
 
     /// New Connection… / Edit Connection…, or asking for the password of `id`.
+    /// The connection dialog, in a window of its own over this one; what it
+    /// connects comes back here (`connection_entered`).
     fn open_connection_dialog(&mut self, id: Option<String>, ask: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let config = id.and_then(|id| self.db_model(cx).read(cx).config(&id).cloned());
-        let dialog = cx.new(|cx| ConnectionDialog::new(config, ask, window, cx));
-        let subscription = cx.subscribe_in(&dialog, window, |ws, _, event: &ConnectionDialogEvent, window, cx| match event {
-            ConnectionDialogEvent::Connect { config, password } => {
-                let model = ws.db_model(cx);
-                let id = config.id.clone();
-                if let Err(err) = model.update(cx, |m, cx| m.save(config.clone(), password.clone(), cx)) {
-                    ws.toast(ToastKind::Error, "Couldn't save the connection", Some(err), cx);
-                }
-                ws.close_modal(window, cx);
-                ws.show_database_view(window, cx);
-                ws.connect_database(id, password.clone(), window, cx);
-            }
-            ConnectionDialogEvent::Dismissed => ws.close_modal(window, cx),
+        let display = window.display(cx).map(|d| d.id());
+        let Some(this) = window.window_handle().downcast::<Workspace>() else { return };
+        let on_connect = Box::new(move |config: ConnectionConfig, password: Option<String>, cx: &mut App| {
+            // After the dialog's own window is done with this update.
+            cx.defer(move |cx| {
+                this.update(cx, |ws, window, cx| {
+                    window.activate_window();
+                    ws.connection_entered(config, password, window, cx);
+                })
+                .ok();
+            });
         });
-        self.modals.open(Modal::Connection(dialog), subscription);
-        cx.notify();
+        crate::database::dialog::open(config, ask, display, on_connect, cx);
+    }
+
+    /// The connection dialog's Connect: save it, then connect.
+    fn connection_entered(&mut self, config: ConnectionConfig, password: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let model = self.db_model(cx);
+        let id = config.id.clone();
+        if let Err(err) = model.update(cx, |m, cx| m.save(config, password.clone(), cx)) {
+            self.toast(ToastKind::Error, "Couldn't save the connection", Some(err), cx);
+        }
+        self.show_database_view(window, cx);
+        self.connect_database(id, password, window, cx);
     }
 
     /// Connects `id`, asking for its password when there's none to use.
