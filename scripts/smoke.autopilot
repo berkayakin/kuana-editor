@@ -4,6 +4,22 @@
 size 1280 800
 # The project opens, its tree and Git status read.
 wait 6000
+# The file smoke.sh made is the open tab: typing reaches it and Save the disk; closed and
+# opened again from Recent Files it's read back, typed into and saved once more. smoke.sh
+# checks the file holds what it started with and both texts.
+type smokeone
+action workspace::Save
+wait 1500
+action workspace::CloseTab
+wait 500
+action workspace::RecentFiles
+type smoke-edit
+wait 1000
+keys enter
+wait 1500
+type smoketwo
+action workspace::Save
+wait 1500
 action workspace::GoToFile
 type main.rs
 wait 1000

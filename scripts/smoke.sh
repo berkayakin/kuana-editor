@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Starts a Kuana build on a project and plays scripts/smoke.autopilot (see src/autopilot.rs):
-# fails if Kuana can't start, a step fails, it panics or it doesn't finish in time. Saves a
-# screenshot of the screen at each `mark shot` and Kuana's output to the output folder.
+# fails if Kuana can't start, a step fails, it panics, it doesn't finish in time or the file
+# the script edits, saves and reopens doesn't hold its text afterwards. Saves a screenshot of
+# the screen at each `mark shot` and Kuana's output to the output folder.
 # Used by .github/workflows/smoke.yml on macOS, Windows (Git Bash) and Linux (under Xvfb). On a
 # desktop the screenshots are of the whole screen; SMOKE_SHOTS=0 skips them.
 #
@@ -18,12 +19,13 @@ mkdir -p "$out"
 out="$(cd "$out" && pwd)"
 limit=${SMOKE_TIMEOUT:-180}
 
-# A config of its own: no Welcome Setup, the project trusted, no update checks.
+# A config of its own: no Welcome Setup, the project trusted, no update checks, and no
+# auto-save, which would write the edited file even if the script's Save didn't.
 config="$out/config"
 rm -rf "$config"
 mkdir -p "$config/kuana"
 echo '{ "welcome_done": true }' >"$config/kuana/state.json"
-echo '{ "auto_update": false }' >"$config/kuana/settings.json"
+echo '{ "auto_update": false, "auto_save": "off" }' >"$config/kuana/settings.json"
 project_native=$project
 case "$(uname -s)" in
     MINGW* | MSYS* | CYGWIN*) windows=1; project_native=$(cygpath -w "$project") ;;
@@ -39,10 +41,18 @@ else
     export XDG_CONFIG_HOME="$config"
 fi
 
+# The file the script types into, saves, closes, reopens and saves again: opened with the
+# project, so it's the tab the script starts in.
+edit="$out/smoke-edit.txt"
+edit_texts=(smoke-start smokeone smoketwo)
+echo "${edit_texts[0]}" >"$edit"
+edit_native=$edit
+[[ $windows == 1 ]] && edit_native=$(cygpath -w "$edit")
+
 script="$root/scripts/smoke.autopilot"
 [[ $windows == 1 ]] && script=$(cygpath -w "$script")
 events="$out/kuana-output.log"
-KUANA_AUTOPILOT="$script" RUST_BACKTRACE=1 "$kuana" "$project_native" </dev/null >"$events" 2>&1 &
+KUANA_AUTOPILOT="$script" RUST_BACKTRACE=1 "$kuana" "$project_native" "$edit_native" </dev/null >"$events" 2>&1 &
 pid=$!
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 
@@ -87,6 +97,14 @@ if [[ $status != 0 ]]; then
     failed=1
 fi
 grep -q "kuana-autopilot: mark done" "$events" || { echo "::error::The smoke script didn't reach its end"; failed=1; }
+# What the file started with must have survived both saves, and each typed text its own.
+for text in "${edit_texts[@]}"; do
+    grep -q "$text" "$edit" && continue
+    echo "::error::smoke-edit.txt has no “$text”: typing, saving or reopening the file lost it"
+    echo "smoke-edit.txt now holds:"
+    cat "$edit"
+    failed=1
+done
 for log in "$config"/kuana/logs/panic-*.log; do
     [[ -e $log ]] || continue
     echo "::error::Kuana panicked: $(basename "$log")"
