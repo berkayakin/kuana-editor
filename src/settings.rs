@@ -66,6 +66,9 @@ pub struct Settings {
     pub run_configurations: Vec<RunConfiguration>,
     /// Download new versions from GitHub in the background (on by default).
     pub auto_update: Option<bool>,
+    /// Per extension, by id: `false` keeps one installed from the registry
+    /// at its version; the others update by themselves (Zed's setting).
+    pub auto_update_extensions: HashMap<String, bool>,
     /// Treat every folder as trusted (no Restricted Mode).
     pub trust_all_projects: Option<bool>,
     /// Compile extensions' grammars to native libraries with the system's C
@@ -478,6 +481,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "terminal_shell",
     "run_configurations",
     "auto_update",
+    "auto_update_extensions",
     "trust_all_projects",
     "native_grammars",
     "vim_mode",
@@ -765,6 +769,7 @@ impl Settings {
             "terminal_shell" => self.terminal_shell.is_some(),
             "run_configurations" => !self.run_configurations.is_empty(),
             "auto_update" => self.auto_update.is_some(),
+            "auto_update_extensions" => !self.auto_update_extensions.is_empty(),
             "trust_all_projects" => self.trust_all_projects.is_some(),
             "native_grammars" => self.native_grammars.is_some(),
             "pull_strategy" => self.pull_strategy.is_some(),
@@ -1208,6 +1213,10 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
 
   // Download new versions in the background; Restart to Update installs them.
   // "auto_update": true,
+
+  // Extensions installed from the registry update by themselves; false keeps
+  // one at the version you have.
+  // "auto_update_extensions": { "oracle-sql": false },
 
   // Run language servers, formatters and project tools in every folder
   // without asking (no Restricted Mode). Not recommended.

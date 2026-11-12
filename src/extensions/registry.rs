@@ -158,10 +158,15 @@ pub enum Installed {
     Elsewhere,
 }
 
+/// Whether the extension in `dir` was installed from the registry.
+pub fn installed_here(dir: &Path) -> bool {
+    !dir.is_symlink() && dir.join(MARKER).is_file()
+}
+
 /// Whether `listed` is installed, and from where.
 pub fn installed(listed: &Listed, extensions: &[super::ExtensionInfo]) -> Installed {
     let Some(extension) = extensions.iter().find(|e| e.id == listed.id) else { return Installed::No };
-    if extension.path.is_symlink() || !extension.path.join(MARKER).is_file() {
+    if !installed_here(&extension.path) {
         Installed::Elsewhere
     } else if crate::updater::is_newer(&listed.version, &extension.version) {
         Installed::Outdated

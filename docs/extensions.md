@@ -17,8 +17,11 @@ too.
 ([kuana-extensions](https://github.com/berkayakin/kuana-extensions)): popular languages that Kuana
 doesn't have built in, such as Java, C#, Dart, Ruby, Elixir, Zig and Vue, and Oxie and Lyth. Each is built there from its
 author's repository, with its grammars and its own code compiled, so nothing needs compiling here. Type
-to search, then click **Install**. **Update** appears when the registry has a newer version; only
-extensions installed from it get one, never one from Git or a folder. Kuana checks the list's
+to search, then click **Install**. Extensions installed from the registry update by themselves, as in
+Zed: shortly after Kuana starts and every few hours, it installs the newer versions the registry has
+and says which. To keep one at the version you have, set `"auto_update_extensions": { "<id>": false }`
+in `settings.json`; **Update** on its row installs the newer one when you want it. Only extensions
+installed from the registry update, never one from Git or a folder. Kuana checks the list's
 signature and each download's checksum. Every extension keeps its own license (shown on its row),
 which comes with it.
 

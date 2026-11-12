@@ -52,6 +52,7 @@ pub mod check;
 pub mod contrib;
 pub mod permissions;
 pub mod registry;
+pub mod updates;
 pub mod ui_host;
 pub mod wasm;
 
@@ -469,6 +470,11 @@ static WAITING: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 pub fn waiting_for_toolchain() -> Vec<String> {
     WAITING.lock().unwrap().clone()
+}
+
+/// Tells every window something about the extensions (a toast).
+pub fn announce(message: String, cx: &mut App) {
+    changed(Some(message), cx);
 }
 
 fn changed(message: Option<String>, cx: &mut App) {
