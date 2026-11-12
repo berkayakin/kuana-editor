@@ -294,9 +294,11 @@ impl LanguageDef {
         Ok(Loaded { language, highlights: Box::leak(Box::new(highlights)), outline, queries: Box::leak(Box::new(queries)) })
     }
 
-    fn matches(&self, path: &Path) -> bool {
+    /// The length of the longest of its suffixes that names `path` (the whole
+    /// file name, or what follows a dot in it).
+    fn suffix_len(&self, path: &Path) -> Option<usize> {
         let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
-        self.suffixes.iter().any(|s| name == s.as_str() || name.strip_suffix(s.as_str()).is_some_and(|rest| rest.ends_with('.')))
+        crate::languages::longest_suffix(&name, &self.suffixes)
     }
 }
 
@@ -334,9 +336,19 @@ pub fn languages() -> Vec<u16> {
     (0..registry.languages.len()).filter(|&i| registry.languages[i].is_some()).map(|i| i as u16).collect()
 }
 
-pub fn language_for_path(path: &Path) -> Option<u16> {
+/// The extension language whose suffix names `path`, the longest suffix
+/// winning (`blade.php` over `php`), with that suffix's length.
+pub fn language_for_path(path: &Path) -> Option<(u16, usize)> {
     let registry = REGISTRY.read().unwrap();
-    registry.languages.iter().position(|l| l.is_some_and(|l| l.matches(path))).map(|i| i as u16)
+    let mut best: Option<(u16, usize)> = None;
+    for (ix, def) in registry.languages.iter().enumerate() {
+        if let Some(len) = def.and_then(|l| l.suffix_len(path))
+            && best.is_none_or(|(_, b)| len > b)
+        {
+            best = Some((ix as u16, len));
+        }
+    }
+    best
 }
 
 /// A language that names this exact file (`docker-compose.yml`), which is
@@ -1331,8 +1343,8 @@ formatter = ["gleam", "format", "--stdin"]
         assert_eq!((gleam.name, gleam.id), ("Gleam", "gleam"));
         assert_eq!((gleam.line_comment, gleam.block_comment), (Some("// "), Some(("/* ", " */"))));
         assert_eq!((gleam.tab_size, gleam.formatter.as_deref()), (Some(2), Some(&["gleam".to_string(), "format".into(), "--stdin".into()][..])));
-        assert!(gleam.matches(Path::new("src/app.gleam")) && gleam.matches(Path::new("Gleamfile")));
-        assert!(!gleam.matches(Path::new("app.gleamx")) && !gleam.matches(Path::new("notgleam")));
+        assert!(gleam.suffix_len(Path::new("src/app.gleam")).is_some() && gleam.suffix_len(Path::new("Gleamfile")).is_some());
+        assert!(gleam.suffix_len(Path::new("app.gleamx")).is_none() && gleam.suffix_len(Path::new("notgleam")).is_none());
         assert_eq!(gleam.highlights, "(identifier) @variable\n");
         // Its extension's debug adapter stops in it.
         assert!(gleam.debuggable);

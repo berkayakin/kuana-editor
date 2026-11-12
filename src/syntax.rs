@@ -68,15 +68,20 @@ impl Language {
         all
     }
 
-    /// An extension's language naming this very file, else the built-in
-    /// language for `path`, else an extension's by extension.
+    /// An extension's language naming this very file, else the language
+    /// whose suffix for it is longest (an extension's `blade.php` over the
+    /// built-in `php`), a built-in one on a tie.
     pub fn from_path(path: &Path) -> Self {
         if let Some(ix) = crate::extensions::language_for_file_name(path) {
             return Language::Extension(ix);
         }
-        match crate::languages::for_path(path) {
-            Some(language) => language,
-            None => crate::extensions::language_for_path(path).map_or(Language::PlainText, Language::Extension),
+        let builtin = crate::languages::for_path_with_len(path);
+        let extension = crate::extensions::language_for_path(path);
+        match (builtin, extension) {
+            (Some((_, b)), Some((ix, e))) if e > b => Language::Extension(ix),
+            (Some((language, _)), _) => language,
+            (None, Some((ix, _))) => Language::Extension(ix),
+            (None, None) => Language::PlainText,
         }
     }
 
