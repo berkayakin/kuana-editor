@@ -460,10 +460,11 @@ pub struct Editor {
     gutter_hovered: bool,
     /// Runnable targets for a version and path (gutter ▶).
     run_targets: derived::Derived<(u64, Option<std::path::PathBuf>, crate::syntax::Language), Vec<crate::run::RunTarget>>,
-    /// The workspace runs this SQL file's statements (see `set_sql_runs`).
-    sql_runs: bool,
+    /// The workspace runs this SQL file's statements, split by these rules
+    /// (see `set_sql_runs`).
+    sql_runs: Option<crate::database::script::Dialect>,
     /// Each SQL statement's first row and offset, for a version (gutter ▶).
-    sql_statements: derived::Derived<u64, Vec<(usize, usize)>>,
+    sql_statements: derived::Derived<(u64, crate::database::script::Dialect), Vec<(usize, usize)>>,
     /// Merge conflicts for a version.
     conflicts: derived::Derived<u64, Vec<crate::conflict::Conflict>>,
     /// Accept labels on screen last frame: (bounds, conflict start row, choice).
@@ -600,7 +601,7 @@ impl Editor {
             sticky_spans: (None, Arc::default()),
             gutter_hovered: false,
             run_targets: derived::Derived::new(),
-            sql_runs: false,
+            sql_runs: None,
             sql_statements: derived::Derived::new(),
             conflicts: derived::Derived::new(),
             conflict_hits: Vec::new(),
@@ -759,6 +760,12 @@ impl Editor {
         this.soft_wrap = false;
         this.placeholder = placeholder.into();
         this
+    }
+
+    /// What an empty field shows.
+    pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.placeholder = placeholder.into();
+        cx.notify();
     }
 
     /// Shows a bullet per character and copies nothing (a password field).
@@ -7471,7 +7478,7 @@ mod frame_tests {
         let marks = |cx: &mut VisualTestContext| editor.update(cx, |e, _| e.run_rows.1.iter().map(|(row, _)| *row).collect::<Vec<_>>());
         redraw(cx);
         assert!(marks(cx).is_empty(), "not until the workspace says so");
-        editor.update(cx, |e, cx| e.set_sql_runs(true, cx));
+        editor.update(cx, |e, cx| e.set_sql_runs(Some(crate::database::script::Dialect::Oracle), cx));
         redraw(cx);
         redraw(cx);
         assert_eq!(marks(cx), [1, 5]);

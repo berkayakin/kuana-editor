@@ -1,7 +1,8 @@
 //! The Database view (a sidebar view beside Files and Commit): connections,
-//! and once connected, the user's schema grouped by kind (Tables, Views,
-//! Packages, …), then Other Schemas. Lists load as they open. A click on a
-//! package, procedure, function, trigger, type or view opens its source
+//! and once connected, the schema the connection starts in grouped by kind
+//! (Tables, Views, Packages, …), then the other schemas (MySQL's databases;
+//! listed at once when it starts in none). Lists load as they open. A click
+//! on a package, procedure, function, trigger, type or view opens its source
 //! (`DatabaseEvent::Open`); a table opens to its columns, and its DDL on a
 //! double click. Typing in the filter field narrows every loaded list.
 
@@ -13,7 +14,7 @@ use gpui::{
 };
 
 use super::{
-    DbObject, ObjectKind,
+    DbKind, DbObject, ObjectKind,
     model::{DbModel, Details, Live, Loaded},
 };
 use crate::{
@@ -164,7 +165,7 @@ impl DatabaseView {
             let id = NodeId::Connection(config.id.clone());
             let live = model.live.get(&config.id);
             let (icon_tone, detail) = match live {
-                Some(Live::Connected(session)) => (Tone::Success, Some(session.user.clone())),
+                Some(Live::Connected(session)) => (Tone::Success, Some(session.label.clone())),
                 Some(Live::Connecting) => (Tone::Muted, Some("connecting…".to_string())),
                 Some(Live::Failed(_)) => (Tone::Error, Some(config.address())),
                 None => (Tone::Muted, Some(config.address())),
@@ -190,37 +191,45 @@ impl DatabaseView {
                 continue;
             }
             let Some(Live::Connected(session)) = live else { continue };
-            let user = session.user.clone();
-            self.schema_rows(&config.id, &user, 1, &filter, &mut rows, &mut wanted, cx);
-            // Other schemas, while not filtering.
-            if filter.is_empty() {
+            let user = session.schema.clone();
+            // Without a schema to start in (MySQL without a database), the
+            // schemas themselves are listed.
+            let flat = user.is_empty();
+            if !flat {
+                self.schema_rows(&config.id, &user, 1, &filter, &mut rows, &mut wanted, cx);
+            }
+            // Other schemas, while not filtering (a SQLite file has only its own).
+            if (filter.is_empty() && session.kind != DbKind::Sqlite) || flat {
                 let others = NodeId::Schemas(config.id.clone());
-                let open = self.expanded.contains(&others);
-                rows.push(Row {
-                    id: others.clone(),
-                    depth: 1,
-                    icon: Some((Icon::FolderOpen, Tone::Muted)),
-                    label: "Other Schemas".into(),
-                    detail: None,
-                    tone: Tone::Normal,
-                    expandable: true,
-                    expanded: open,
-                });
+                let open = flat || self.expanded.contains(&others);
+                let depth = if flat { 1 } else { 2 };
+                if !flat {
+                    rows.push(Row {
+                        id: others.clone(),
+                        depth: 1,
+                        icon: Some((Icon::FolderOpen, Tone::Muted)),
+                        label: session.kind.other_schemas().into(),
+                        detail: None,
+                        tone: Tone::Normal,
+                        expandable: true,
+                        expanded: open,
+                    });
+                }
                 if open {
                     match self.model.read(cx).schemas.get(&config.id) {
                         None => {
                             wanted.push(others.clone());
-                            rows.push(message_row(&config.id, 2, 2, "Loading…", Tone::Muted));
+                            rows.push(message_row(&config.id, depth, 2, "Loading…", Tone::Muted));
                         }
-                        Some(Loaded::Loading) => rows.push(message_row(&config.id, 2, 2, "Loading…", Tone::Muted)),
-                        Some(Loaded::Failed(err)) => rows.push(message_row(&config.id, 2, 2, err, Tone::Error)),
+                        Some(Loaded::Loading) => rows.push(message_row(&config.id, depth, 2, "Loading…", Tone::Muted)),
+                        Some(Loaded::Failed(err)) => rows.push(message_row(&config.id, depth, 2, err, Tone::Error)),
                         Some(Loaded::Ready(schemas)) => {
                             for schema in schemas.clone().iter().filter(|s| **s != user) {
                                 let node = NodeId::Schema(config.id.clone(), schema.clone());
                                 let open = self.expanded.contains(&node);
                                 rows.push(Row {
                                     id: node,
-                                    depth: 2,
+                                    depth,
                                     icon: Some((Icon::Folder, Tone::Muted)),
                                     label: schema.clone().into(),
                                     detail: None,
@@ -229,7 +238,7 @@ impl DatabaseView {
                                     expanded: open,
                                 });
                                 if open {
-                                    self.schema_rows(&config.id, schema, 3, &filter, &mut rows, &mut wanted, cx);
+                                    self.schema_rows(&config.id, schema, depth + 1, &filter, &mut rows, &mut wanted, cx);
                                 }
                             }
                         }
@@ -431,7 +440,8 @@ impl DatabaseView {
             NodeId::Object(..) => {
                 let Some((connection, owner, object)) = self.object_of(&id, cx) else { return };
                 // Tables open to their columns; their DDL on a double click.
-                if object.kind.compiles() || double {
+                let saves = self.model.read(cx).config(&connection).is_some_and(|c| c.kind.saves(object.kind));
+                if saves || double {
                     cx.emit(DatabaseEvent::Open { connection, owner, object, body: false, at: None });
                 } else if expandable {
                     self.set_expanded(id.clone(), !expanded, cx);
@@ -559,7 +569,8 @@ impl DatabaseView {
         let group = matches!(row.id, NodeId::Group(..) | NodeId::Schemas(..));
         let selected_bg = if focused { theme.accent_soft } else { theme.active };
         let id = row.id.clone();
-        div()
+        // Inset and rounded, like the file tree's rows.
+        let row_el = div()
             .id(("db-row", ix))
             .w_full()
             .h(px(24.))
@@ -568,6 +579,7 @@ impl DatabaseView {
             .gap_1p5()
             .pl(px(6. + 14. * row.depth as f32))
             .pr_2()
+            .rounded(px(6.))
             .cursor_pointer()
             .when(selected, |el| el.bg(selected_bg))
             .row_hover(theme.hover)
@@ -603,8 +615,8 @@ impl DatabaseView {
                     cx.emit(DatabaseEvent::Menu { node: id.clone(), position: event.position });
                     cx.notify();
                 }),
-            )
-            .into_any_element()
+            );
+        div().w_full().px_1().child(row_el).into_any_element()
     }
 }
 
@@ -671,7 +683,7 @@ impl Render for DatabaseView {
                     div()
                         .text_size(px(12.))
                         .text_color(theme.text_dim)
-                        .child("Connect to an Oracle database to browse its tables, packages, procedures and functions, edit and compile them, and run SQL."),
+                        .child("Connect to PostgreSQL, MySQL, MariaDB, SQLite or Oracle to browse tables, views, functions and procedures, edit them, and run SQL."),
                 )
                 .child(
                     crate::ui::text_button("db-new-connection", "New Connection…", true, cx)

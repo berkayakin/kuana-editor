@@ -1,24 +1,135 @@
 //! The Database view's data: saved connections (`<config>/database/connections.json`,
-//! passwords in the system keychain), the kinds of objects it lists, and the
-//! local files an object's source opens in.
+//! passwords in the system keychain) to Oracle, PostgreSQL, MySQL/MariaDB and
+//! SQLite (`DbKind`; each a `backend::Backend`), the kinds of objects it
+//! lists, and the local files an object's source opens in.
 //!
-//! Opening a package, procedure, view… writes its source to
+//! Opening a package, function, view… writes its source to
 //! `<config>/database/objects/<connection>/<OWNER>/<NAME>.<ext>` and opens
-//! that file like any other, so editing, undo, Local History and the PL/SQL
-//! extension's highlighting just work. Saving such a file (an explicit Save)
-//! runs it against its connection: `CREATE OR REPLACE …`, then its compile
-//! errors become the file's problems (`workspace/database.rs`).
+//! that file like any other, so editing, undo, Local History and highlighting
+//! just work. Saving such a file (an explicit Save) runs it against its
+//! connection (`CREATE OR REPLACE …`, or a drop and create where the database
+//! has no such thing), then its errors become the file's problems
+//! (`workspace/database.rs`).
 
+pub mod backend;
 pub mod dialog;
 pub mod model;
+pub mod mysql;
 pub mod oracle;
+pub mod postgres;
 pub mod results;
 pub mod script;
+pub mod sqlite;
 pub mod view;
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+/// The databases it connects to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DbKind {
+    /// Connections saved before the others existed are Oracle's.
+    #[default]
+    Oracle,
+    Postgres,
+    /// MySQL and MariaDB.
+    Mysql,
+    Sqlite,
+}
+
+impl DbKind {
+    pub const ALL: [DbKind; 4] = [DbKind::Postgres, DbKind::Mysql, DbKind::Sqlite, DbKind::Oracle];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            DbKind::Oracle => "Oracle",
+            DbKind::Postgres => "PostgreSQL",
+            DbKind::Mysql => "MySQL",
+            DbKind::Sqlite => "SQLite",
+        }
+    }
+
+    pub fn default_port(self) -> u16 {
+        match self {
+            DbKind::Oracle => 1521,
+            DbKind::Postgres => 5432,
+            DbKind::Mysql => 3306,
+            DbKind::Sqlite => 0,
+        }
+    }
+
+    /// How its scripts split into statements.
+    pub fn dialect(self) -> script::Dialect {
+        match self {
+            DbKind::Oracle => script::Dialect::Oracle,
+            DbKind::Postgres => script::Dialect::Postgres,
+            DbKind::Mysql => script::Dialect::Mysql,
+            DbKind::Sqlite => script::Dialect::Sqlite,
+        }
+    }
+
+    /// Whether saving an object's source file runs it (it replaces the object).
+    pub fn saves(self, kind: ObjectKind) -> bool {
+        match self {
+            DbKind::Oracle => kind.source_type(false).is_some() || kind == ObjectKind::View,
+            DbKind::Postgres => matches!(kind, ObjectKind::View | ObjectKind::Function | ObjectKind::Procedure),
+            DbKind::Mysql => matches!(kind, ObjectKind::View | ObjectKind::Function | ObjectKind::Procedure | ObjectKind::Trigger),
+            DbKind::Sqlite => matches!(kind, ObjectKind::View | ObjectKind::Trigger),
+        }
+    }
+
+    /// Whether objects compile in place (Oracle's ALTER … COMPILE).
+    pub fn recompiles(self) -> bool {
+        self == DbKind::Oracle
+    }
+
+    /// Whether it needs a password (a SQLite database is a file).
+    pub fn has_login(self) -> bool {
+        self != DbKind::Sqlite
+    }
+
+    /// The Database view's folder for the schemas besides the one it starts in.
+    pub fn other_schemas(self) -> &'static str {
+        match self {
+            DbKind::Mysql => "Other Databases",
+            DbKind::Sqlite => "Attached Databases",
+            DbKind::Oracle | DbKind::Postgres => "Other Schemas",
+        }
+    }
+
+    /// An identifier quoted as it's written.
+    pub fn quote(self, ident: &str) -> String {
+        match self {
+            DbKind::Mysql => format!("`{}`", ident.replace('`', "``")),
+            _ => format!("\"{}\"", ident.replace('"', "\"\"")),
+        }
+    }
+
+    /// Select Rows: a table's first rows.
+    pub fn select_rows(self, schema: &str, table: &str) -> String {
+        let name = format!("{}.{}", self.quote(schema), self.quote(table));
+        match self {
+            DbKind::Oracle => format!("SELECT * FROM {name} FETCH FIRST {} ROWS ONLY", backend::MAX_ROWS),
+            _ => format!("SELECT * FROM {name} LIMIT {}", backend::MAX_ROWS),
+        }
+    }
+}
+
+/// Whether a connection is encrypted (PostgreSQL's and MySQL's; Oracle's
+/// connect string says it, a SQLite file has none). As in libpq: Prefer and
+/// Require encrypt without checking the server's certificate, Verify checks it
+/// and the host name against the system's certificates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SslMode {
+    Disable,
+    #[default]
+    Prefer,
+    Require,
+    Verify,
+}
 
 /// How the user connects (Oracle's administrative roles).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,8 +147,13 @@ pub struct ConnectionConfig {
     /// Stable: names the keychain entry and the objects' folder.
     pub id: String,
     pub name: String,
+    pub kind: DbKind,
     pub host: String,
     pub port: u16,
+    /// PostgreSQL's and MySQL's database (MySQL's may be empty), or the
+    /// SQLite database's file.
+    pub database: String,
+    pub ssl: SslMode,
     /// A service name, or a SID when `use_sid`.
     pub service: String,
     pub use_sid: bool,
@@ -53,12 +169,25 @@ pub struct ConnectionConfig {
 impl ConnectionConfig {
     /// Where it connects, as the view shows it.
     pub fn address(&self) -> String {
+        let port = if self.port == 0 { self.kind.default_port() } else { self.port };
+        match self.kind {
+            DbKind::Sqlite => return crate::clone_dialog::display_path(&self.sqlite_path()),
+            DbKind::Postgres | DbKind::Mysql => {
+                let db = self.database.trim();
+                return if db.is_empty() { format!("{}:{port}", self.host.trim()) } else { format!("{}:{port}/{db}", self.host.trim()) };
+            }
+            DbKind::Oracle => {}
+        }
         if !self.connect_string.trim().is_empty() {
             let text = self.connect_string.trim();
             return if text.len() > 48 { format!("{}…", &text[..text.floor_char_boundary(47)]) } else { text.to_string() };
         }
-        let port = if self.port == 0 { 1521 } else { self.port };
         format!("{}:{port}/{}", self.host.trim(), self.service.trim())
+    }
+
+    /// The SQLite file, `~` expanded.
+    pub fn sqlite_path(&self) -> PathBuf {
+        crate::clone_dialog::expand_home(self.database.trim())
     }
 }
 
@@ -206,14 +335,12 @@ impl ObjectKind {
         })
     }
 
-    /// Whether saving its source runs it (PL/SQL units and views, whose DDL
-    /// is CREATE OR REPLACE); tables and the rest open read as DDL only.
-    pub fn compiles(self) -> bool {
-        self.source_type(false).is_some() || self == ObjectKind::View
-    }
-
-    /// The file suffix its source opens with (Oracle's usual ones).
-    pub fn suffix(self, body: bool) -> &'static str {
+    /// The file suffix its source opens with: Oracle's usual ones, `.sql`
+    /// for the other databases.
+    pub fn suffix(self, body: bool, db: DbKind) -> &'static str {
+        if db != DbKind::Oracle {
+            return "sql";
+        }
         match (self, body) {
             (ObjectKind::Package, false) => "pks",
             (ObjectKind::Package, true) => "pkb",
@@ -288,11 +415,12 @@ impl ObjectFile {
     }
 }
 
-/// Where an object's source opens. Names are kept as Oracle stores them
-/// (uppercase, usually); characters a file name can't hold are escaped.
-pub fn object_path(object: &ObjectFile) -> Option<PathBuf> {
+/// Where an object's source opens. Names are kept as the database stores
+/// them (Oracle's uppercase, usually); characters a file name can't hold are
+/// escaped.
+pub fn object_path(object: &ObjectFile, db: DbKind) -> Option<PathBuf> {
     let kind = object.kind.object_type().to_lowercase().replace(' ', "_");
-    let file = format!("{}.{kind}.{}", escape(&object.name), object.kind.suffix(object.body));
+    let file = format!("{}.{kind}.{}", escape(&object.name), object.kind.suffix(object.body, db));
     Some(folder()?.join("objects").join(&object.connection).join(escape(&object.owner)).join(file))
 }
 
@@ -377,12 +505,28 @@ pub fn is_sql_path(path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    /// Connections saved before there were other databases are Oracle's;
+    /// a new kind reads back as itself.
+    #[test]
+    fn saved_connections_keep_their_kind() {
+        let old: Saved = serde_json::from_str(r#"{"connections": [{"id": "c1", "name": "HR", "host": "db", "port": 1521, "service": "FREEPDB1", "user": "hr"}]}"#).unwrap();
+        assert_eq!(old.connections[0].kind, DbKind::Oracle);
+        assert_eq!(old.connections[0].address(), "db:1521/FREEPDB1");
+        let pg = ConnectionConfig { kind: DbKind::Postgres, host: "db".into(), database: "shop".into(), ssl: SslMode::Verify, ..Default::default() };
+        let json = serde_json::to_string(&Saved { connections: vec![pg.clone()] }).unwrap();
+        let back: Saved = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.connections, [pg]);
+        assert_eq!(back.connections[0].address(), "db:5432/shop");
+        assert_eq!(DbKind::Mysql.select_rows("shop", "my`t"), "SELECT * FROM `shop`.`my``t` LIMIT 1000");
+        assert!(DbKind::Postgres.saves(ObjectKind::Function) && !DbKind::Postgres.saves(ObjectKind::Table) && !DbKind::Sqlite.saves(ObjectKind::Procedure));
+    }
+
     #[test]
     fn object_paths_round_trip() {
         let Some(_) = folder() else { return };
         for (name, kind, body) in [("ORDER_API", ObjectKind::Package, true), ("My Table/x", ObjectKind::Table, false), ("V$X", ObjectKind::MaterializedView, false)] {
             let object = ObjectFile { connection: "c1".into(), owner: "HR".into(), name: name.into(), kind, body };
-            let path = object_path(&object).unwrap();
+            let path = object_path(&object, DbKind::Oracle).unwrap();
             assert_eq!(object_of(&path), Some(object), "{}", path.display());
         }
     }

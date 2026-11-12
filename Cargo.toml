@@ -33,6 +33,15 @@ nucleo-matcher = "0.3.1"
 # The Database view's Oracle connections: Oracle's own pure-Rust driver (no Oracle
 # Client libraries; TLS through rustls). Pinned while it's a beta.
 oracledb = "=26.0.0-beta.5"
+# Its PostgreSQL, MySQL/MariaDB and SQLite connections: the usual pure-Rust
+# clients (TLS through rustls, with ring) and SQLite compiled in.
+tokio-postgres = "0.7"
+tokio = { version = "1", default-features = false, features = ["rt"] }
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+mysql = { version = "28", default-features = false, features = ["minimal-rust", "rustls-tls-ring"] }
+rusqlite = { version = "0.42", default-features = false, features = ["bundled", "column_decltype"] }
 # Saved database passwords, in the system's keychain (Keychain, Credential
 # Manager; on Linux the kernel keyring, which forgets them on restart).
 keyring = { version = "3.6", features = ["apple-native", "windows-native", "linux-native"] }

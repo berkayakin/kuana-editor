@@ -6,10 +6,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use gpui::{App, AppContext, Context, Entity, Global, Task};
 
-use super::{
-    ColumnInfo, ConnectionConfig, DbObject, Subprogram,
-    oracle::{self, Session},
-};
+use super::{ColumnInfo, ConnectionConfig, DbObject, Subprogram, backend::Session};
 
 pub enum Live {
     Connecting,
@@ -106,6 +103,20 @@ impl DbModel {
         saved
     }
 
+    /// The password prompt's Save password: keeps `password` in the keychain
+    /// (None: forgets the saved one), without disconnecting.
+    pub fn keep_password(&mut self, id: &str, password: Option<&str>, cx: &mut Context<Self>) -> Result<(), String> {
+        let Some(config) = self.connections.iter_mut().find(|c| c.id == id) else { return Ok(()) };
+        match password {
+            Some(password) => super::save_password(id, password)?,
+            None => super::forget_password(id),
+        }
+        config.save_password = password.is_some();
+        let saved = super::save_connections(&self.connections).map_err(|e| format!("Couldn't save the connections: {e}"));
+        cx.notify();
+        saved
+    }
+
     pub fn remove(&mut self, id: &str, cx: &mut Context<Self>) -> Result<(), String> {
         self.forget(id);
         self.connections.retain(|c| c.id != id);
@@ -150,6 +161,8 @@ impl DbModel {
         let Some(config) = self.config(id).cloned() else { return Task::ready(Err("No such connection".into())) };
         let password = match password.or_else(|| config.save_password.then(|| super::saved_password(id)).flatten()) {
             Some(password) => password,
+            // A SQLite file has none.
+            None if !config.kind.has_login() => String::new(),
             None => return Task::ready(Err(NEEDS_PASSWORD.into())),
         };
         self.live.insert(id.to_string(), Live::Connecting);
@@ -186,7 +199,7 @@ impl DbModel {
         }
         let Some(session) = self.session(id) else { return };
         self.schemas.insert(id.to_string(), Loaded::Loading);
-        let job = session.run(oracle::schemas);
+        let job = session.run(|db| db.schemas());
         let id = id.to_string();
         cx.spawn(async move |this, cx| {
             let result = job.await;
@@ -209,7 +222,7 @@ impl DbModel {
         let Some(session) = self.session(id) else { return };
         self.objects.insert(key.clone(), Loaded::Loading);
         let owner = owner.to_string();
-        let job = session.run(move |conn| oracle::objects(conn, &owner));
+        let job = session.run(move |db| db.objects(&owner));
         cx.spawn(async move |this, cx| {
             let result = job.await;
             this.update(cx, |this, cx| {
@@ -232,13 +245,7 @@ impl DbModel {
         let Some(session) = self.session(id) else { return };
         self.details.insert(key.clone(), Loaded::Loading);
         let (owner, name, columns) = (owner.to_string(), object.name.clone(), object.kind.has_columns());
-        let job = session.run(move |conn| {
-            if columns {
-                oracle::columns(conn, &owner, &name).map(Details::Columns)
-            } else {
-                oracle::subprograms(conn, &owner, &name).map(Details::Subprograms)
-            }
-        });
+        let job = session.run(move |db| if columns { db.columns(&owner, &name).map(Details::Columns) } else { db.subprograms(&owner, &name).map(Details::Subprograms) });
         cx.spawn(async move |this, cx| {
             let result = job.await;
             this.update(cx, |this, cx| {
