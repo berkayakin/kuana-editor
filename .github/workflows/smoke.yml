@@ -1,8 +1,10 @@
-# Starts each platform's released build and drives it through scripts/smoke.autopilot
+# Starts each platform's release build and drives it through scripts/smoke.autopilot
 # (scripts/smoke.sh): catches a build that doesn't start, draw or get through the main areas,
-# which unit tests can't. release.yml runs it once a release is published; run it by hand for
-# any tag from Actions → Smoke test → Run workflow. The screenshots are uploaded to look at.
-# Tags from before 0.1.16 can't be tested: their builds have no autopilot.
+# which unit tests can't. release.yml runs it on a release's builds before publishing them
+# (`artifacts`: the archives come from that run's `build-*` artifacts, since the release is
+# still a draft, and a platform whose build failed is skipped); run it by hand for any
+# published tag from Actions → Smoke test → Run workflow. The screenshots are uploaded to
+# look at. Tags from before 0.1.16 can't be tested: their builds have no autopilot.
 #
 # The machines have no GPU: Linux draws with Mesa's software Vulkan (lavapipe) under Xvfb (X11
 # only), Windows with WARP, so this is about starting and working, not speed.
@@ -15,6 +17,10 @@ on:
       tag:
         type: string
         required: true
+      artifacts:
+        description: Test the calling run's build-* artifacts instead of the release's assets
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       tag:
@@ -35,21 +41,27 @@ jobs:
       matrix:
         include:
           - os: macos-15
+            artifact: build-macos
             asset: "Kuana-*-macos.zip"
             binary: Kuana.app/Contents/MacOS/kuana
           - os: windows-latest
+            artifact: build-windows-x86_64
             asset: "kuana-*-windows-x86_64.zip"
             binary: kuana.exe
           - os: ubuntu-22.04
+            artifact: build-linux-x86_64
             asset: "kuana-*-linux-x86_64.tar.gz"
             binary: kuana
           - os: ubuntu-24.04
+            artifact: build-linux-x86_64
             asset: "kuana-*-linux-x86_64.tar.gz"
             binary: kuana
           - os: windows-11-arm
+            artifact: build-windows-aarch64
             asset: "kuana-*-windows-aarch64.zip"
             binary: kuana.exe
           - os: ubuntu-22.04-arm
+            artifact: build-linux-aarch64
             asset: "kuana-*-linux-aarch64.tar.gz"
             binary: kuana
     runs-on: ${{ matrix.os }}
@@ -61,17 +73,35 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
-      - name: Download the build
+      # A pattern, not a name: no match (the platform's build failed) isn't an error.
+      - name: Download this run's build
+        if: ${{ inputs.artifacts }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ matrix.artifact }}
+          path: build
+          merge-multiple: true
+      - name: Download the released build
+        if: ${{ !inputs.artifacts }}
         run: |
           mkdir -p build
           gh release download ${TAG:+"$TAG"} --repo "$GITHUB_REPOSITORY" --pattern "${{ matrix.asset }}" --dir build
+      - id: build
+        name: Unpack the build
+        run: |
+          mkdir -p build
           cd build
+          if ! compgen -G "${{ matrix.asset }}" > /dev/null; then
+            echo "::warning::This run has no ${{ matrix.asset }} (its build failed), so it isn't tested"
+            exit 0
+          fi
           case "${{ matrix.asset }}" in
             *.zip) unzip -q ./*.zip || 7z x -y ./*.zip ;;
             *.tar.gz) tar -xzf ./*.tar.gz ;;
           esac
+          echo "found=true" >> "$GITHUB_OUTPUT"
       - name: Install what the Linux build needs at runtime
-        if: runner.os == 'Linux'
+        if: steps.build.outputs.found == 'true' && runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb imagemagick mesa-vulkan-drivers libvulkan1 libxkbcommon-x11-0 \
@@ -79,6 +109,7 @@ jobs:
           sudo apt-get install -y xvfb imagemagick mesa-vulkan-drivers libvulkan1 libxkbcommon-x11-0 \
             libxcb-xkb1 libfontconfig1 libfreetype6 libwayland-client0 libasound2
       - name: Smoke test
+        if: steps.build.outputs.found == 'true'
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
             xvfb-run -a -s "-screen 0 1600x1000x24" scripts/smoke.sh "build/${{ matrix.binary }}" . smoke

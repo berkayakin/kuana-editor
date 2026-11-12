@@ -1,11 +1,15 @@
 # Builds Kuana for macOS, Windows and Linux when a version tag is pushed
 # (`git tag v0.2.0 && git push origin v0.2.0`) and publishes a GitHub Release.
 #
-# The release stays a draft while the builds upload. Then `publish` writes
-# `latest.json` (version, archive names and SHA-256s), signs it with minisign
-# (repository secret MINISIGN_SECRET_KEY) and publishes the release. Kuana's
-# updater (src/updater.rs) only installs what that signature vouches for.
+# The release stays a draft while the builds upload. Then `smoke` starts each
+# build and drives it through its main areas (smoke.yml), and only when that
+# passes `publish` writes `latest.json` (version, archive names and SHA-256s),
+# signs it with minisign (repository secret MINISIGN_SECRET_KEY) and publishes
+# the release. Kuana's updater (src/updater.rs) only installs what that
+# signature vouches for, so a build that doesn't start never reaches it.
 # A platform whose build fails is left out of the release; the rest ship.
+# A failed smoke test leaves the draft unpublished: re-run the failed jobs
+# when the runner was at fault, and `publish` follows.
 #
 # Builds use Cargo.toml's `dist` profile (thin LTO, one codegen unit; slower
 # to build than --release), so binaries are in target/[<triple>/]dist.
@@ -167,6 +171,13 @@ jobs:
           scripts/notarize.sh "dist/Kuana-$VERSION-macos.dmg"
           xcrun stapler staple "dist/Kuana-$VERSION-macos.dmg"
       - run: gh release upload "$TAG" dist/* --clobber
+      # For the smoke test, which can't read a draft's assets (that takes a
+      # write token) and so gets the archive as an artifact of this run.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-macos
+          path: dist/Kuana-*-macos.zip
+          retention-days: 1
 
   windows:
     needs: create
@@ -217,6 +228,11 @@ jobs:
             "/DSource=..\target\${{ matrix.target }}\dist" scripts\kuana.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: gh release upload "$TAG" dist/* --clobber
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-windows-${{ matrix.arch }}
+          path: dist/kuana-*-windows-${{ matrix.arch }}.zip
+          retention-days: 1
 
   linux:
     needs: create
@@ -250,10 +266,25 @@ jobs:
           cp target/dist/kuana LICENSE-MIT LICENSE-APACHE pkg/
           tar -czf "dist/kuana-$VERSION-linux-${{ matrix.arch }}.tar.gz" -C pkg .
       - run: gh release upload "$TAG" dist/* --clobber
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-linux-${{ matrix.arch }}
+          path: dist/kuana-*-linux-${{ matrix.arch }}.tar.gz
+          retention-days: 1
 
-  publish:
+  # Starts each build and drives it through its main areas before anything is
+  # published; see smoke.yml. A platform whose build failed is skipped there.
+  smoke:
     needs: [create, macos, windows, linux]
     if: ${{ !cancelled() && needs.create.result == 'success' }}
+    uses: ./.github/workflows/smoke.yml
+    with:
+      tag: ${{ github.ref_name }}
+      artifacts: true
+
+  publish:
+    needs: [create, macos, windows, linux, smoke]
+    if: ${{ !cancelled() && needs.create.result == 'success' && needs.smoke.result == 'success' }}
     runs-on: ubuntu-24.04
     env:
       VERSION: ${{ needs.create.outputs.version }}
@@ -343,10 +374,3 @@ jobs:
           git diff --cached --quiet && exit 0
           git commit -m "kuana $VERSION"
           git push
-
-  # Starts each published build and drives it through its main areas; see smoke.yml.
-  smoke:
-    needs: publish
-    uses: ./.github/workflows/smoke.yml
-    with:
-      tag: ${{ github.ref_name }}

@@ -18,10 +18,13 @@ aarch64 (built on GitHub's Arm runners, `windows-11-arm` and `ubuntu-22.04-arm`)
 (one archive per platform key, the keys `platform()` in `src/updater.rs` asks for), which the workflow signs with
 [minisign](https://jedisct1.github.io/minisign/) using the `MINISIGN_SECRET_KEY` repository
 secret. Tags with a hyphen (`v0.3.0-beta.1`) become pre-releases, which the updater skips.
-Once published, the [smoke test](../.github/workflows/smoke.yml) downloads each platform's build
-and drives it through its main areas (`scripts/smoke.autopilot`), Linux under Xvfb with software
-Vulkan; its screenshots are the run's artifacts. Run it by hand for any tag from Actions → Smoke
-test.
+Before anything is published, the [smoke test](../.github/workflows/smoke.yml) starts each
+platform's build and drives it through its main areas (`scripts/smoke.autopilot`), Linux under
+Xvfb with software Vulkan; its screenshots are the run's artifacts. If it fails, the release stays
+a draft, `latest.json` isn't written and no one is offered the update: when the runner was at
+fault, re-run the failed jobs and the release publishes; otherwise delete the draft and the tag,
+fix it and tag again. A platform whose build failed isn't tested and is left out of the release.
+Run the smoke test by hand for any published tag from Actions → Smoke test.
 The binaries are built with Cargo.toml's `dist` profile (thin LTO and one codegen unit, as Zed's
 releases), which takes longer than `cargo build --release`; to try one locally,
 `cargo build --profile dist` puts it in `target/dist/`. Its line tables for backtraces go to a file
