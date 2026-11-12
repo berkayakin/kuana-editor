@@ -100,7 +100,7 @@ impl Workspace {
                 .into_any_element()
         };
 
-        crate::ui::area_joined(&theme, Some(self.view_tab_joint(cx)))
+        crate::ui::area_joined(&theme, self.view_tab_joint(cx))
             .w(self.shown_sidebar_width())
             .flex_shrink_0()
             .h_full()

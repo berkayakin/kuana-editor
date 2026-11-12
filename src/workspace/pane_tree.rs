@@ -226,6 +226,21 @@ impl<P: Clone + PartialEq> PaneTree<P> {
         walk(&self.root, pane, true).unwrap_or(false)
     }
 
+    /// Whether the pane's left edge is the area's (it's first in every row it's in).
+    pub(super) fn at_left(&self, pane: &P) -> bool {
+        fn walk<P: PartialEq>(member: &Member<P>, pane: &P, left: bool) -> Option<bool> {
+            match member {
+                Member::Pane(p) => (p == pane).then_some(left),
+                Member::Split(split) => split
+                    .members
+                    .iter()
+                    .enumerate()
+                    .find_map(|(ix, m)| walk(m, pane, left && (split.axis == Axis::Column || ix == 0))),
+            }
+        }
+        walk(&self.root, pane, true).unwrap_or(false)
+    }
+
     fn find_split(&mut self, id: SplitId) -> Option<&mut Split<P>> {
         fn find<P>(member: &mut Member<P>, id: SplitId) -> Option<&mut Split<P>> {
             let Member::Split(split) = member else { return None };

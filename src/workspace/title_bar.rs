@@ -72,7 +72,9 @@ impl Workspace {
     /// The title bar's start, over the tab row's left end: room for the
     /// traffic lights (or the app menu). The project and branch are above the
     /// sidebar (`render_title_chips`), so they never push the tabs; with the
-    /// sidebar hidden only Restricted Mode stays, as its icon.
+    /// sidebar hidden they come here, in the room they'd have there and with
+    /// the branch and Restricted Mode as their icons, and the top left pane's
+    /// tabs start after them.
     pub(super) fn render_title_lead(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mac = cfg!(target_os = "macos");
         let theme = Theme::get(cx);
@@ -86,26 +88,84 @@ impl Workspace {
             .flex()
             .flex_row()
             .items_center()
-            // On Windows a title bar click must reach no listener, or GPUI reports
-            // it handled and the system's drag, double-click and window buttons
-            // don't happen. Blocking the mouse keeps the workspace root from
-            // taking focus on it.
-            .when(cfg!(windows), |el| el.occlude())
+            // All of it moves the window but its buttons. On Windows a title bar
+            // click must reach no listener, or GPUI reports it handled and the
+            // system's drag and double-click don't happen: this area is occluded
+            // (so the workspace root doesn't take focus on it), and the buttons
+            // in front of it are too, so it isn't under them.
+            .child(window_drag_area("titlebar-lead").absolute().top_0().left_0().size_full())
             .child(self.track_title_end(true, cx))
             // Room for the traffic lights, which macOS moves out of the window in full screen.
-            .child(window_drag_area("titlebar-start").flex_shrink_0().w(px(if mac && !window.is_fullscreen() { 82. } else { GAP + 4. })))
+            .child(div().flex_shrink_0().w(px(if mac && !window.is_fullscreen() { 82. } else { GAP + 4. })))
             .when(app_menu::APP_MENU_IN_TITLE_BAR, |el| {
-                el.child(self.render_app_menu(cx)).child(window_drag_area("titlebar-menu-gap").flex_shrink_0().w(px(GAP)))
+                el.child(self.render_app_menu(cx)).child(div().flex_shrink_0().w(px(GAP)))
             })
-            .when(!self.show_sidebar && !self.app_menu_open() && self.restricted(cx), |el| el.child(self.render_restricted_chip(false, cx)))
+            .child(self.track_lead_base(window, cx))
+            .when(!self.show_sidebar, |el| el.children(self.render_title_chips(self.lead_chips_room(cx), true, window, cx)))
+    }
+
+    /// The chips' room in the lead while the sidebar is hidden: what they'd
+    /// have above it, so they show no more than with it.
+    fn lead_chips_room(&self, cx: &App) -> f32 {
+        // Before the lead was first drawn: about the traffic lights' room.
+        let drawn = self.title_lead.get().base;
+        let base = if drawn > 0. { drawn } else if cfg!(target_os = "macos") { 82. } else { GAP + 4. };
+        self.sidebar_block_width(true, cx) - base - TITLE_END_GAP
+    }
+
+    /// Notes where the lead's chips start and how wide they'd be there (also
+    /// while the sidebar shows), so the panes can be told where the lead
+    /// ends in the frame the sidebar hides or shows (`title_ends_now`).
+    fn track_lead_base(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let chips = self.chip_fit(self.lead_chips_room(cx), true, window, cx).map_or(0., |(_, width)| width);
+        let lead = self.title_lead.clone();
+        let sidebar = self.show_sidebar;
+        gpui::canvas(|_, _, _| {}, move |bounds, _, _, _| lead.set(LeadLayout { base: f32::from(bounds.left()), chips, sidebar }))
+            .flex_shrink_0()
+            .w(px(0.))
+            .h_full()
+    }
+
+    /// Where the title bar's ends are for the panes: as last drawn, but for
+    /// the lead's end when the sidebar has shown or hidden since, which moves
+    /// the chips in or out (else the tabs would sit under them for a frame).
+    pub(super) fn title_ends_now(&self) -> (f32, f32) {
+        let (lead_end, trail_start) = self.title_ends.get();
+        let lead = self.title_lead.get();
+        if lead.base > 0. && lead.sidebar != self.show_sidebar {
+            (lead.base + if self.show_sidebar { 0. } else { lead.chips }, trail_start)
+        } else {
+            (lead_end, trail_start)
+        }
     }
 
     /// The project, branch, commits to sync and Restricted Mode, in the tab
     /// row's part above the sidebar, `room` wide: fitted to it from their
     /// names' measured widths (`fit_chips`), so the editor's tabs start at their
-    /// island whatever the names are. `None` while an open app menu's names
-    /// take their place.
-    pub(super) fn render_title_chips(&self, room: f32, window: &Window, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+    /// island whatever the names are; `icons` shows the branch and Restricted
+    /// Mode as just their icons (their tooltips name them). `None` while an
+    /// open app menu's names take their place.
+    pub(super) fn render_title_chips(&self, room: f32, icons: bool, window: &Window, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let (fit, _) = self.chip_fit(room, icons, window, cx)?;
+        let counts = self.render_sync_counts(window, cx);
+        Some(
+            div()
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .gap(px(CHIP_GAP))
+                // Over the title bar's drag area: see `render_title_lead`.
+                .when(cfg!(windows), |el| el.occlude())
+                .when_some(fit.project, |el, chars| el.child(self.render_project_chip(chars, fit.monogram, cx)))
+                .when_some(fit.branch, |el, chars| el.child(self.render_branch_chip(chars, cx)))
+                .when_some(counts.filter(|_| fit.counts), |el, counts| el.child(counts))
+                .when_some(fit.restricted, |el, label| el.child(self.render_restricted_chip(label, cx))),
+        )
+    }
+
+    /// How the chips fit `room` (see `render_title_chips`), and about how
+    /// wide they are then. `None` while an open app menu's names take their place.
+    pub(super) fn chip_fit(&self, room: f32, icons: bool, window: &Window, cx: &App) -> Option<(ChipFit, f32)> {
         if self.app_menu_open() {
             return None;
         }
@@ -118,33 +178,48 @@ impl Workspace {
             Text { width: f32::from(width), chars: text.chars().count().max(1) }
         };
         let project = self.root.as_deref().map(|root| measure(&folder_name(root), FontWeight::SEMIBOLD));
-        let branch = self.repo.is_some().then(|| measure(&self.branch_label(), FontWeight::NORMAL));
-        let counts = self.render_sync_counts(window, cx);
-        let restricted = self.restricted(cx).then(|| RESTRICTED_LABEL_CHROME + measure("Restricted Mode", FontWeight::NORMAL).width);
-        let fit = fit_chips(ChipNeeds {
+        let branch = (self.repo.is_some() && !icons).then(|| measure(&self.branch_label(), FontWeight::NORMAL));
+        let restricted = (self.restricted(cx) && !icons).then(|| RESTRICTED_LABEL_CHROME + measure("Restricted Mode", FontWeight::NORMAL).width);
+        // As icons, their room is kept aside and the project fitted to the rest.
+        let branch_icon = self.repo.is_some() && icons;
+        let restricted_icon = self.restricted(cx) && icons;
+        let room = room - [branch_icon, restricted_icon].iter().filter(|&&on| on).count() as f32 * (ICON_CHIP + CHIP_GAP);
+        let counts = self.repo.is_some() && (self.git_status.ahead > 0 || self.git_status.behind > 0);
+        let mut fit = fit_chips(ChipNeeds {
             room,
             project,
             branch,
             // About its icons and digits; it goes first anyway.
-            counts: counts.is_some().then_some(SYNC_COUNTS_WIDTH),
+            counts: counts.then_some(SYNC_COUNTS_WIDTH),
             restricted,
             avatar: Settings::get(cx).project_avatar(),
         });
-        Some(
-            div()
-                .flex()
-                .flex_shrink_0()
-                .items_center()
-                .gap(px(CHIP_GAP))
-                .when_some(fit.project, |el, chars| el.child(self.render_project_chip(chars, fit.monogram, cx)))
-                .when_some(fit.branch, |el, chars| el.child(self.render_branch_chip(chars, cx)))
-                .when_some(counts.filter(|_| fit.counts), |el, counts| el.child(counts))
-                .when_some(fit.restricted, |el, label| el.child(self.render_restricted_chip(label, cx))),
-        )
+        if branch_icon {
+            fit.branch = Some(None);
+        }
+        if restricted_icon {
+            fit.restricted = Some(false);
+        }
+        // Each shown chip's chrome and its name as shown, with the gaps between.
+        let name = |text: String, chars: usize, weight| measure(&ellipsize(&text, chars), weight).width;
+        let project_chrome = if fit.monogram { PROJECT_CHROME } else { PROJECT_CHROME_PLAIN };
+        let widths = [
+            fit.project.map(|chars| match chars {
+                Some(chars) => project_chrome + self.root.as_deref().map_or(0., |root| name(folder_name(root), chars, FontWeight::SEMIBOLD)),
+                None => PROJECT_MONOGRAM,
+            }),
+            fit.branch.map(|chars| chars.map_or(ICON_CHIP, |chars| BRANCH_CHROME + name(self.branch_label(), chars, FontWeight::NORMAL))),
+            fit.counts.then_some(SYNC_COUNTS_WIDTH),
+            fit.restricted.map(|label| if label { restricted.unwrap_or(ICON_CHIP) } else { ICON_CHIP }),
+        ];
+        let shown: Vec<f32> = widths.into_iter().flatten().collect();
+        let width = shown.iter().sum::<f32>() + CHIP_GAP * shown.len().saturating_sub(1) as f32;
+        Some((fit, width))
     }
 
     /// The title bar's end, over the tab row's right end: off macOS, the
-    /// window's buttons (Run and Debug are on the activity bar).
+    /// window's buttons (Run and Debug are on the activity bar, or in the
+    /// title bar's own row, `title_tools.rs`).
     pub(super) fn render_title_trail(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("title-trail")
@@ -457,6 +532,15 @@ const ICON_CHIP: f32 = 10. + 14. + 10.;
 const RESTRICTED_LABEL_CHROME: f32 = 10. + 14. + 6. + 12.;
 /// The commits to push and pull, about.
 const SYNC_COUNTS_WIDTH: f32 = 64.;
+/// The title bar's lead as last drawn (`Workspace::title_ends_now`): where its
+/// chips start, how wide they'd be there, and whether the sidebar showed.
+#[derive(Clone, Copy, Default)]
+pub(super) struct LeadLayout {
+    base: f32,
+    chips: f32,
+    sidebar: bool,
+}
+
 /// The least of a name worth showing, about four characters and "…".
 const MIN_NAME: f32 = 36.;
 
@@ -499,9 +583,9 @@ pub(super) struct ChipFit {
 
 /// Fits the chips to their room. All as they are when they fit; else the
 /// sync counts go and Restricted Mode keeps just its icon, then the branch's
-/// name shortens, keeping the project's whole while it can, then both
-/// shorten, then the branch is just its icon, then gone, and last the project
-/// is just its monogram. The monogram stays throughout (`project_avatar`
+/// name shortens, then the branch is just its icon (the project's name stays
+/// whole through all that), then the project's name shortens, then the
+/// branch is gone, and last the project is just its monogram. The monogram stays throughout (`project_avatar`
 /// turns it off), and Restricted Mode, a warning, while anything does.
 pub(super) fn fit_chips(n: ChipNeeds) -> ChipFit {
     let gap = CHIP_GAP;
@@ -530,14 +614,12 @@ pub(super) fn fit_chips(n: ChipNeeds) -> ChipFit {
     };
     let left = |others: f32| room - chrome - others;
     if let Some(b) = n.branch {
-        // Both named: the branch gives way first, then both.
-        let shared = left(gap + BRANCH_CHROME);
-        if shared >= 2. * MIN_NAME {
-            let for_project = p.width.min(shared - MIN_NAME);
-            let for_branch = (shared - for_project).min(b.width);
-            return ChipFit { project: Some(Some(p.chars_in(for_project))), branch: Some(Some(b.chars_in(for_branch))), ..natural };
+        // The branch gives way first, down to its icon, before the project's name.
+        let for_branch = left(gap + BRANCH_CHROME) - p.width;
+        if for_branch >= MIN_NAME.min(b.width) {
+            return ChipFit { project: Some(Some(p.chars)), branch: Some(Some(b.chars_in(for_branch))), ..natural };
         }
-        if left(gap + ICON_CHIP) >= MIN_NAME {
+        if left(gap + ICON_CHIP) >= MIN_NAME.min(p.width) {
             return ChipFit { project: Some(Some(p.chars_in(left(gap + ICON_CHIP)))), branch: Some(None), ..natural };
         }
     }
@@ -633,8 +715,13 @@ mod tests {
         let fit = fit_chips(needs(220.));
         assert_eq!((fit.project, fit.monogram), (Some(Some(12)), true));
         assert!(matches!(fit.branch, Some(Some(n)) if n < 15));
-        // Then both, then the branch is its icon, then gone, then the project its monogram.
-        assert!(matches!(fit_chips(needs(160.)).project, Some(Some(n)) if n < 12));
+        // Then the branch is its icon, the project still whole.
+        let fit = fit_chips(needs(180.));
+        assert_eq!((fit.project, fit.branch), (Some(Some(12)), Some(None)));
+        // Then the project shortens beside it, then the branch is gone, then the project its monogram.
+        let fit = fit_chips(needs(160.));
+        assert!(matches!(fit.project, Some(Some(n)) if n < 12));
+        assert_eq!(fit.branch, Some(None));
         assert_eq!(fit_chips(needs(120.)).branch, Some(None));
         assert_eq!(fit_chips(needs(80.)).branch, None);
         assert!(fit_chips(needs(80.)).monogram);

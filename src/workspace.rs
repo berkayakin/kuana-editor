@@ -107,11 +107,13 @@ mod running;
 mod saving;
 mod sessions;
 mod sidebar;
+mod sidebar_tabs;
 mod status_bar;
 mod tab_bar;
 mod terminal_panel;
 mod terminals;
 mod title_bar;
+mod title_tools;
 mod watching;
 mod welcome;
 mod windows;
@@ -699,6 +701,11 @@ const TAB_ACTIVE_MIN: f32 = 140.0;
 const TAB_ICON_WIDTH: f32 = 40.0;
 /// The "⋯ N" button listing the tabs that don't fit.
 const TAB_OVERFLOW_WIDTH: f32 = 48.0;
+/// Left free after the tabs of a strip along the window's top, however many
+/// there are, so the window can still be moved from there: wide enough to hit
+/// without aiming (an icon-only tab is `TAB_ICON_WIDTH`). ⌥-dragging the strip
+/// moves the window from anywhere on it (`Pane::render_tab_bar`).
+const TAB_DRAG_ROOM: f32 = 88.0;
 /// A tab's padding, icon, gaps and close button, around its name.
 const TAB_CHROME: f32 = 63.0;
 /// The error dot and its gap, when the file has errors.
@@ -727,6 +734,9 @@ pub struct Workspace {
     /// Where the title bar's lead ends and its trail starts, in window x, as
     /// last drawn: the top panes' tab strips keep clear of them (`PaneChrome::title_ends`).
     title_ends: std::rc::Rc<std::cell::Cell<(f32, f32)>>,
+    /// The lead as last drawn, to tell the panes where it will end as soon as
+    /// the sidebar shows or hides, before it's drawn again (`sync_panes`).
+    title_lead: std::rc::Rc<std::cell::Cell<title_bar::LeadLayout>>,
     /// The window's size at the last render: the sidebar and the bottom panels
     /// show smaller than their saved sizes when it can't spare them.
     viewport: gpui::Size<Pixels>,
@@ -1187,8 +1197,9 @@ impl Workspace {
             // the sidebar as it was left (see `set_root`).
             show_sidebar: false,
             title_ends: Default::default(),
+            title_lead: Default::default(),
             viewport: window.viewport_size(),
-            activity_width: activity_bar::BarSize::of(cx).width,
+            activity_width: activity_bar::BarSize::shown_width(cx),
             // One panel at a time; the terminal wins, as it always opened over the others.
             bottom: if state.show_terminal.unwrap_or(false) {
                 Some(BottomPanel::Terminal)
@@ -1732,14 +1743,16 @@ impl Workspace {
         let panes = self.center.panes();
         for pane in &panes {
             let active = *pane == self.active_pane;
-            let at_top = self.center.at_top(pane);
+            // Under a title bar row, no pane's strip is along the window's top.
+            let at_top = self.center.at_top(pane) && !self.has_title_row(cx);
             let chrome = PaneChrome {
                 active,
                 outlined: active && panes.len() > 1,
                 at_top,
                 find_bar: (active && self.show_find).then(|| self.find_bar.clone()),
                 root: self.root.clone(),
-                title_ends: if at_top { self.title_ends.get() } else { (0., f32::INFINITY) },
+                title_ends: if at_top { self.title_ends_now() } else { (0., f32::INFINITY) },
+                left: (at_top && self.center.at_left(pane)).then(|| self.editor_left(cx)),
             };
             pane.update(cx, |p, cx| p.set_chrome(chrome, cx));
         }

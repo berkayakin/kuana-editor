@@ -15,7 +15,7 @@ use std::{cell::Cell, rc::Rc};
 use crate::{
     assets::{self, Icon},
     keymap,
-    settings::{self, AutoSave, BaseKeymap, Settings, UiStyle, VisualEffects},
+    settings::{self, AutoSave, BaseKeymap, Settings, ToolsLocation, UiStyle, VisualEffects},
     theme::{self, Appearance, Theme, ThemeRegistry},
     transition::{self, TransitionExt, mix},
     ui::{Button, HoverFill, faded, field_glow, icon_el, kbd, switch},
@@ -242,56 +242,47 @@ impl Onboarding {
             .into_any_element()
     }
 
-    /// Modern and Classic as cards, each with a sketch of the window.
+    /// Modern and Classic as cards, then where the tool buttons sit, each
+    /// with a sketch of the window as it would look.
     fn render_layouts(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::get(cx).clone();
-        let current = Settings::get(cx).ui_style();
-        let cards: Vec<AnyElement> = UiStyle::ALL
+        let settings = Settings::get(cx);
+        let (style, tools) = (settings.ui_style(), settings.tools_location());
+        let styles: Vec<AnyElement> = UiStyle::ALL
             .iter()
-            .map(|&style| {
-                let selected = style == current;
-                let (name, blurb) = match style {
+            .map(|&option| {
+                let (name, blurb) = match option {
                     UiStyle::Modern => ("Modern", "Rounded islands with gaps between them, browser-like tabs"),
                     UiStyle::Classic => ("Classic", "Square areas side by side, separated by lines"),
                 };
-                let card = div()
-                    .id(SharedString::from(format!("welcome-layout-{}", style.key())))
-                    .flex()
-                    .flex_col()
-                    .rounded(px(12.))
-                    .bg(theme.panel)
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.write(Settings::set_ui_style(style), cx)))
-                    .child(layout_sketch(style, &theme))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .px(px(14.))
-                            .py(px(12.))
-                            .border_t_1()
-                            .border_color(theme.border_subtle)
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(name))
-                                    .child(radio(selected, &theme)),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(12.))
-                                    .text_color(if selected { theme.text_muted } else { theme.text_dim })
-                                    .child(blurb),
-                            ),
-                    );
-                choice_card(card, format!("welcome-layout-{}", style.key()), selected, &theme).into_any_element()
+                let id = format!("welcome-layout-{}", option.key());
+                sketch_card(id, name, blurb, option == style, layout_sketch(option, tools, &theme), &theme, cx, move |this, cx| {
+                    this.write(Settings::set_ui_style(option), cx)
+                })
             })
             .collect();
-        grid(cards, 2, px(12.)).into_any_element()
+        let placements: Vec<AnyElement> = ToolsLocation::ALL
+            .iter()
+            .map(|&option| {
+                let (name, blurb) = match option {
+                    ToolsLocation::ActivityBar => ("Activity bar", "Tools in a bar beside the sidebar, its views as vertical tabs"),
+                    ToolsLocation::TitleBar => ("Title bar", "Tools in a title bar above the tabs, the sidebar's views as tabs"),
+                };
+                let id = format!("welcome-tools-{}", option.key());
+                sketch_card(id, name, blurb, option == tools, layout_sketch(style, option, &theme), &theme, cx, move |this, cx| {
+                    this.write(Settings::set_tools_location(option), cx)
+                })
+            })
+            .collect();
+        let heading = |text: &'static str| div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_dim).child(text);
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(grid(styles, 2, px(12.)))
+            .child(heading("Tool buttons").mt(px(8.)))
+            .child(grid(placements, 2, px(12.)))
+            .into_any_element()
     }
 
     fn render_keymaps(&self, columns: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -742,6 +733,50 @@ fn option_rows(rows: Vec<(&str, &str, AnyElement)>, theme: &Theme) -> AnyElement
         .into_any_element()
 }
 
+/// A choice as a card: a sketch of what it looks like over its name, radio
+/// button and a line about it.
+#[allow(clippy::too_many_arguments)]
+fn sketch_card(
+    id: String,
+    name: &'static str,
+    blurb: &'static str,
+    selected: bool,
+    sketch: gpui::Div,
+    theme: &Theme,
+    cx: &mut Context<Onboarding>,
+    choose: impl Fn(&mut Onboarding, &mut Context<Onboarding>) + 'static,
+) -> AnyElement {
+    let card = div()
+        .id(SharedString::from(id.clone()))
+        .flex()
+        .flex_col()
+        .rounded(px(12.))
+        .bg(theme.panel)
+        .cursor_pointer()
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| choose(this, cx)))
+        .child(sketch)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px(px(14.))
+                .py(px(12.))
+                .border_t_1()
+                .border_color(theme.border_subtle)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(name))
+                        .child(radio(selected, theme)),
+                )
+                .child(div().truncate().text_size(px(12.)).text_color(if selected { theme.text_muted } else { theme.text_dim }).child(blurb)),
+        );
+    choice_card(card, id, selected, theme).into_any_element()
+}
+
 /// A card that stands for a choice. Like the Welcome tiles and focused text
 /// fields, the outline and glow say what it is, not a fill: the chosen card's
 /// border is the accent with a soft glow, and hovering another lights it part
@@ -780,9 +815,14 @@ fn radio(selected: bool, theme: &Theme) -> gpui::Div {
 
 /// A small picture of the window laid out in `style`, in the theme's colors:
 /// the title bar, the sidebar, an editor with its tab and a bottom panel, as
-/// islands with gaps (Modern) or square areas between lines (Classic).
-fn layout_sketch(style: UiStyle, theme: &Theme) -> gpui::Div {
+/// islands with gaps (Modern) or square areas between lines (Classic). The
+/// tool buttons (`tools`) are a bar beside the sidebar, with its views as
+/// vertical tabs and the window's buttons in the tab row; or squares at the
+/// end of a title bar row of their own, with the tab row under it and the
+/// sidebar's views as tabs like the editor's.
+fn layout_sketch(style: UiStyle, tools: ToolsLocation, theme: &Theme) -> gpui::Div {
     let classic = style == UiStyle::Classic;
+    let in_title = tools == ToolsLocation::TitleBar;
     let gap = px(if classic { 1. } else { 5. });
     let line = crate::ui::separator(theme);
     let area = || {
@@ -790,6 +830,10 @@ fn layout_sketch(style: UiStyle, theme: &Theme) -> gpui::Div {
         if classic { el } else { el.rounded(px(5.)).border_1().border_color(crate::ui::island_edge(theme)) }
     };
     let code = |w: f32, color: gpui::Rgba| div().h(px(3.)).w(px(w)).rounded_full().bg(Hsla::from(color).alpha(0.7));
+    let dim = Hsla::from(theme.text_dim).alpha(0.6);
+    let accent = Hsla::from(theme.accent);
+    // A tool button or a view's icon.
+    let glyph = |color: Hsla| div().size(px(4.)).rounded(px(1.)).bg(color);
     // The room above an area, with a tab joined to it.
     let tab_room = |tab: bool| {
         let room = div().flex().flex_shrink_0().items_end().h(px(12.));
@@ -803,12 +847,46 @@ fn layout_sketch(style: UiStyle, theme: &Theme) -> gpui::Div {
             )
         })
     };
+    let window_buttons = || (0..3).map(|_| div().size(px(4.)).rounded_full().bg(dim));
+    // The tab row's part above the sidebar holding the window's buttons.
+    let buttons_room = div()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap(px(3.))
+        .h(px(12.))
+        .px(px(3.))
+        .when(classic, |el| el.bg(theme.panel))
+        .children(window_buttons());
     let sidebar = div()
         .flex()
         .flex_col()
         .w(gpui::relative(0.26))
-        .child(tab_room(true))
-        .child(area().flex_1().child(code(30., theme.text_dim)).child(code(38., theme.text_dim)).child(code(24., theme.text_dim)));
+        .child(if in_title { tab_room(true) } else { buttons_room })
+        .child(
+            area()
+                .flex_1()
+                .child(code(30., theme.text_dim))
+                .child(code(38., theme.text_dim))
+                .child(code(24., theme.text_dim)),
+        );
+    // The activity bar: the views at its top (the first one current), tools at its foot.
+    let activity_bar = div()
+        .flex()
+        .flex_col()
+        .flex_shrink_0()
+        .items_center()
+        .gap(px(4.))
+        .w(px(10.))
+        .pt(px(16.))
+        .pb(px(5.))
+        .when(classic, |el| el.bg(theme.panel))
+        .child(glyph(accent))
+        .child(glyph(dim))
+        .child(glyph(dim))
+        .child(div().flex_1())
+        .child(glyph(dim))
+        .child(glyph(dim));
     let editor = div()
         .flex()
         .flex_col()
@@ -829,17 +907,22 @@ fn layout_sketch(style: UiStyle, theme: &Theme) -> gpui::Div {
         // Clipping doesn't follow rounded corners: the top rounds its own.
         .rounded_t(px(11.))
         .bg(theme.panel)
-        // The title bar, with its window buttons.
-        .child(
-            div()
-                .flex()
-                .flex_shrink_0()
-                .items_center()
-                .gap(px(3.))
-                .h(px(14.))
-                .px(px(8.))
-                .children((0..3).map(|_| div().size(px(4.)).rounded_full().bg(Hsla::from(theme.text_dim).alpha(0.6)))),
-        )
+        // The title bar row: the window's buttons and the tools.
+        .when(in_title, |el| {
+            el.child(
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap(px(3.))
+                    .h(px(14.))
+                    .px(px(8.))
+                    .children(window_buttons())
+                    .child(div().flex_1())
+                    .children((0..4).map(|_| glyph(dim))),
+            )
+        })
+        .when(!in_title, |el| el.pt(px(3.)))
         .child(
             div()
                 .flex()
@@ -847,8 +930,10 @@ fn layout_sketch(style: UiStyle, theme: &Theme) -> gpui::Div {
                 .min_h_0()
                 .gap(gap)
                 // Classic: the lines are the gaps over the separator color, with
-                // one under the title bar.
-                .map(|el| if classic { el.pt(px(1.)).bg(line) } else { el.px(gap).pb(gap) })
+                // one under the title bar row.
+                .map(|el| if classic { el.when(in_title, |el| el.pt(px(1.))).bg(line) } else { el.px(gap).pb(gap) })
+                // Modern: the bar is the room before the sidebar, at the window's edge.
+                .when(!in_title, |el| el.child(activity_bar).when(!classic, |el| el.pl(px(0.))))
                 .child(sidebar)
                 .child(div().flex().flex_col().flex_1().gap(gap).child(editor).child(panel)),
         )

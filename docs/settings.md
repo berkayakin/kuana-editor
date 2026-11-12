@@ -56,6 +56,7 @@ and theme colors.
 | `sidebar_dock` | `"left"` | which side of the editor the sidebar (Files, Commit) sits on: `"left"` or `"right"`; Settings → Appearance, Move to Right / Left on its tabs' right-click menu, or Toggle Sidebar Position |
 | `project_avatar` | `true` | the round initial before the project's name in the title bar; Settings → Appearance → Layout |
 | `compact_activity_bar` | `false` | a narrower activity bar beside the sidebar, with smaller buttons and icons (the title bar's buttons' size), leaving more room for the sidebar and editor; Settings → Appearance → Layout |
+| `tools_location` | `"activity_bar"` | where the tool buttons (Run, Debug, the panels' toggles, Search Everywhere, Extensions, Settings) sit: `"activity_bar"` (a column beside the sidebar, its views as vertical tabs) or `"title_bar"` (a title bar row of their own, with the project and branch, above the tab row; no activity bar, the sidebar's views are tabs like the editor's); Settings → Appearance → Layout, Welcome Setup |
 | `language_servers` | | per language: `false` turns its server off, `["cmd", "args"]` replaces it |
 | `extensions` | | per extension, by id: settings its code reads (see [Writing view extensions](extension-ui.md#settings)), as the extension documents them |
 | `lsp` | | per server, by id (Kuana's, e.g. `typescript`, or Zed's, e.g. `vtsls`, `basedpyright`): `settings` (what it asks for through `workspace/configuration`; a change is sent to it), `initialization_options` (applied when it restarts) and `binary` (`{ "path", "arguments" }`) |
