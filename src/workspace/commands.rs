@@ -155,14 +155,7 @@ impl Workspace {
         self.watch_task = None;
         self.root = None;
         self.show_sidebar = false;
-        self.repo = None;
-        self.git_remote = None;
-        self.last_commit = None;
-        self.git_status = Arc::new(RepoStatus::default());
-        self.git_paths = Arc::new(HashMap::new());
-        self.git_ignored = Arc::default();
-        self.status_task = None;
-        self.git_pending = git_ops::StatusWork::default();
+        self.git.update(cx, |g, cx| g.close(cx));
         window.focus(&self.focus_handle);
         cx.notify();
     }

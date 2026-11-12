@@ -7,8 +7,8 @@ impl Workspace {
     /// The Commit view's header: branch (opens Branches…), fetch, pull, push.
     pub(super) fn render_git_toolbar(&self, cx: &mut Context<Self>) -> [AnyElement; 4] {
         let theme = Theme::get(cx).clone();
-        let s = &self.git_status;
-        let branch = self.branch_label();
+        let s = &self.git_status(cx);
+        let branch = self.branch_label(cx);
         let button = |id: &'static str, icon: Icon, tip: &'static str, count: u32, op: GitOp, cx: &mut Context<Self>| {
             div()
                 .id(id)
@@ -59,7 +59,7 @@ impl Workspace {
     pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
         // The Commit view has a toolbar (its branch).
-        let header = (self.sidebar_mode == SidebarMode::Commit && self.repo.is_some()).then(|| {
+        let header = (self.sidebar_mode == SidebarMode::Commit && self.has_repo(cx)).then(|| {
             crate::ui::view_header().gap_0p5().children(self.render_git_toolbar(cx))
         });
 

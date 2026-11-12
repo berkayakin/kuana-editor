@@ -445,7 +445,7 @@ impl Workspace {
                 ws.toggle_database_results(&ToggleDatabaseResults, window, cx)
             }));
         }
-        if self.repo.is_some() {
+        if self.has_repo(cx) {
             tools.push(tool("toggle-git-log", Icon::GitCommit, "Git Log", self.shows(BottomPanel::GitLog), Group::Panel, 4, Box::new(ToggleGitLog), |ws, window, cx| {
                 ws.toggle_git_log(&ToggleGitLog, window, cx)
             }));
@@ -561,7 +561,7 @@ impl Workspace {
                 (format!("activity-ext-{slot}").into(), icon)
             }
         };
-        let changes = if mode == SidebarMode::Commit { self.git_status.files.len() } else { 0 };
+        let changes = if mode == SidebarMode::Commit { self.git_status(cx).files.len() } else { 0 };
         let bar = BarSize::of(cx);
         let (rest, hover): (Hsla, Hsla) = if on || lit { (theme.accent.into(), theme.accent.into()) } else { (theme.text_dim.into(), theme.text.into()) };
         let tab = div()
@@ -605,8 +605,8 @@ impl Workspace {
                         let keys = binding_label(&ToggleCommit, window);
                         crate::ui::entity_tooltip_view(
                             &workspace,
-                            move |ws, _| {
-                                let label = match ws.git_status.files.len() {
+                            move |ws, cx| {
+                                let label = match ws.git_status(cx).files.len() {
                                     0 => "Commit".to_string(),
                                     changes => format!("Commit ({changes} changed)"),
                                 };

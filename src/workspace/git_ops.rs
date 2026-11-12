@@ -1,65 +1,74 @@
 //! Git: running operations, refreshing status, diffs and blame.
 
-use std::collections::BTreeSet;
-
 use super::*;
 
 impl Workspace {
     // ---- Git -------------------------------------------------------------------------
 
+    /// The repository's working-tree root, if the project is in one.
+    pub(super) fn repo(&self, cx: &App) -> Option<PathBuf> {
+        self.git.read(cx).repo().cloned()
+    }
+
+    /// Whether the project is in a Git repository.
+    pub(super) fn has_repo(&self, cx: &App) -> bool {
+        self.git.read(cx).repo().is_some()
+    }
+
+    /// The repository's status as last read.
+    pub(super) fn git_status(&self, cx: &App) -> Arc<RepoStatus> {
+        self.git.read(cx).status().clone()
+    }
+
     pub(super) fn detect_repo(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
         let project = self.root.clone();
-        cx.spawn(async move |this, cx| {
-            let found = cx
-                .background_executor()
-                .spawn(async move {
-                    if !git::is_available() {
-                        return None;
-                    }
-                    let repo = git::discover(&dir)?;
-                    let user = git::user_name(&repo);
-                    let remote = git::remote_url(&repo);
-                    Some((repo, user, remote))
-                })
-                .await;
-            this.update(cx, |ws, cx| {
-                let (repo, user, remote) = found.map_or((None, None, None), |(r, u, o)| (Some(r), u, o));
-                ws.repo = repo.clone();
-                ws.git_user = user;
-                ws.git_remote = remote;
-                ws.last_commit = None;
-                ws.git_status = Arc::new(RepoStatus::default());
-                ws.git_paths = Arc::new(HashMap::new());
-                ws.git_ignored = Arc::default();
-                // A repository above the project folder: watch its .git too.
-                if let (Some(repo), Some(root), Some(watcher)) = (&repo, &ws.root, ws.watcher.as_mut())
-                    && !repo.starts_with(root)
-                    && let Err(err) = watcher.add(&repo.join(".git"))
-                {
-                    eprintln!("couldn't watch {}: {err}", repo.display());
+        self.git.update(cx, |g, cx| g.detect(dir, project, cx));
+    }
+
+    /// What the store reports: shown here, in the panels and in the editors.
+    pub(super) fn on_git_event(&mut self, _: &Entity<GitStore>, event: &GitEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            GitEvent::RepoChanged => self.repo_changed(cx),
+            GitEvent::StatusRead { stashes, changed } => {
+                if let Some(stashes) = stashes {
+                    self.git_panel.update(cx, |p, cx| p.set_stashes(stashes.clone(), cx));
                 }
-                ws.git_log.update(cx, |l, cx| l.set_repo(repo.clone(), cx));
-                ws.git_panel.update(cx, |p, cx| {
-                    p.set_repo(repo, project, cx);
-                    p.set_status(Arc::new(RepoStatus::default()), cx);
-                });
-                // What was read or asked for is the last repository's.
-                ws.status_task = None;
-                ws.git_pending = StatusWork::default();
-                ws.refresh_git(cx);
-                ws.load_diff_bases(ws.editors.clone(), cx);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+                if let Some(changed) = changed {
+                    self.show_status(changed, cx);
+                }
+            }
+            GitEvent::Started(label) => self.git_panel.update(cx, |p, cx| p.set_busy(Some(label.clone()), cx)),
+            GitEvent::Finished { op, result } => self.git_finished(op, result, window, cx),
+        }
+    }
+
+    /// Another repository (or none) is the project's now.
+    fn repo_changed(&mut self, cx: &mut Context<Self>) {
+        let (repo, project) = {
+            let git = self.git.read(cx);
+            (git.repo().cloned(), git.root().cloned())
+        };
+        // A repository above the project folder: watch its .git too.
+        if let (Some(repo), Some(root), Some(watcher)) = (&repo, &self.root, self.watcher.as_mut())
+            && !repo.starts_with(root)
+            && let Err(err) = watcher.add(&repo.join(".git"))
+        {
+            eprintln!("couldn't watch {}: {err}", repo.display());
+        }
+        self.git_log.update(cx, |l, cx| l.set_repo(repo.clone(), cx));
+        self.git_panel.update(cx, |p, cx| {
+            p.set_repo(repo, project, cx);
+            p.set_status(Arc::new(RepoStatus::default()), cx);
+        });
+        self.load_diff_bases(self.editors.clone(), cx);
+        cx.notify();
     }
 
     /// Opens a conflicted file in the Merge view: its tab's editor in the
     /// middle, the versions from the index's conflict stages around it
     /// (base 1, ours 2, theirs 3; yours is the user's side, `Side::yours`).
     pub(super) fn show_merge(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(repo) = self.repo.clone() else { return };
+        let Some(repo) = self.repo(cx) else { return };
         let Some(rel) = path.strip_prefix(&repo).ok().map(|r| r.to_string_lossy().replace('\\', "/")) else { return };
         let read_rel = rel.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -218,7 +227,7 @@ impl Workspace {
                 let dir = repo.clone();
                 let fetched = cx.background_executor().spawn(async move { git::fetch(&dir).is_ok() }).await;
                 let shown = this.update(cx, |ws, cx| {
-                    if fetched && ws.repo.as_ref() == Some(&repo) {
+                    if fetched && ws.repo(cx).as_ref() == Some(&repo) {
                         ws.refresh_git(cx);
                     }
                 });
@@ -234,12 +243,13 @@ impl Workspace {
     /// on, the window is in use, the project is trusted, it has a remote, and
     /// no Git operation is running or stopped halfway.
     fn auto_fetch_target(&self, window: &Window, cx: &App) -> Option<PathBuf> {
-        let repo = self.repo.as_ref()?;
+        let git = self.git.read(cx);
+        let repo = git.repo()?;
         let ready = Settings::get(cx).auto_fetch()
             && window.is_window_active()
-            && self.git_remote.is_some()
-            && !self.git_busy.is_running()
-            && self.git_status.state.is_none()
+            && git.remote().is_some()
+            && !git.busy().is_running()
+            && git.status().state.is_none()
             && crate::trust::is_trusted(repo);
         ready.then(|| repo.clone())
     }
@@ -247,14 +257,14 @@ impl Workspace {
     /// Reads all of `git status` again in the background: a project
     /// opened, `.git` changed (HEAD, the index, refs), a Git operation ran.
     pub(super) fn refresh_git(&mut self, cx: &mut Context<Self>) {
-        self.read_status(StatusWork::all(), cx);
+        self.git.update(cx, |g, cx| g.refresh(cx));
     }
 
     /// The Commit view opens: it lists the whole repository's changes, and
     /// the watcher only sees the project folder's (and `.git`), so one
     /// above the project folder is read again, as is one not watched.
     pub(super) fn refresh_commit_view(&mut self, cx: &mut Context<Self>) {
-        let outside = self.repo.as_ref().zip(self.root.as_ref()).is_some_and(|(repo, root)| repo != root);
+        let outside = self.repo(cx).as_ref().zip(self.root.as_ref()).is_some_and(|(repo, root)| repo != root);
         if outside || self.watcher.is_none() {
             self.refresh_git(cx);
         }
@@ -272,58 +282,19 @@ impl Workspace {
     }
 
     /// Reads Git status again in the background, of what `work` covers
-    /// (paths are merged into what's known). One read at a time: what's
-    /// asked for meanwhile is read together after it.
+    /// (see `GitStore::read_status`).
     pub(super) fn read_status(&mut self, work: StatusWork, cx: &mut Context<Self>) {
-        let Some(repo) = self.repo.clone() else { return };
-        self.git_pending.add(work);
-        if self.status_task.is_some() || self.git_pending.is_empty() {
-            return;
-        }
-        let work = std::mem::take(&mut self.git_pending);
-        let (known, ignored) = (self.git_status.clone(), self.git_ignored.clone());
-        self.status_task = Some(cx.spawn(async move |this, cx| {
-            let repo2 = repo.clone();
-            let read = cx.background_executor().spawn(async move { StatusRead::read(&repo2, work, &known, &ignored) }).await;
-            this.update(cx, |ws, cx| {
-                // This task is running; let it finish instead of dropping it.
-                if let Some(task) = ws.status_task.take() {
-                    task.detach();
-                }
-                // Not for another repository opened meanwhile.
-                if ws.repo.as_ref() == Some(&repo) {
-                    ws.show_status(read, cx);
-                }
-                // Once it's shown: a read of some paths merges into it.
-                ws.read_status(StatusWork::default(), cx);
-            })
-            .ok();
-        }));
+        self.git.update(cx, |g, cx| g.read_status(work, cx));
     }
 
-    /// Shows a status read in the background: the tree's colors, diff
-    /// bases, the Git panel, the diff view.
-    fn show_status(&mut self, read: StatusRead, cx: &mut Context<Self>) {
-        if let Some((last_commit, stashes)) = read.head {
-            self.git_panel.update(cx, |p, cx| p.set_stashes(stashes, cx));
-            if self.last_commit != last_commit {
-                self.last_commit = last_commit;
-                cx.notify();
-            }
-        }
-        let Some(changed) = read.changed else { return };
-        let (old, status) = (&self.git_status, &changed.status);
-        let moved = (&old.head_oid, &old.branch, old.ahead, old.behind) != (&status.head_oid, &status.branch, status.ahead, status.behind);
-        if moved && self.shows(BottomPanel::GitLog) {
+    /// Shows a status that differs from the one before: the tree's colors,
+    /// diff bases, the Git panel, the diff view.
+    fn show_status(&mut self, changed: &StatusChange, cx: &mut Context<Self>) {
+        if changed.branch_moved && self.shows(BottomPanel::GitLog) {
             self.git_log.update(cx, |l, cx| l.reload(cx));
         }
-        self.git_paths = changed.paths;
-        if let Some(ignored) = changed.ignored {
-            self.git_ignored = ignored;
-        }
         self.decorate_tree(cx);
-        self.git_status = Arc::new(changed.status);
-        let new = self.git_status.clone();
+        let new = self.git_status(cx);
         // Diff bases are read again only where HEAD or a file's index blob
         // moved (commits, staging, checkouts), not for every change in the
         // working tree.
@@ -352,7 +323,7 @@ impl Workspace {
     /// Loads several files' HEAD and index text with one `git cat-file`,
     /// once per document however many tabs show it (they share its diff).
     pub(super) fn load_diff_bases(&mut self, editors: Vec<Entity<Editor>>, cx: &mut Context<Self>) {
-        let Some(repo) = self.repo.clone() else { return };
+        let Some(repo) = self.repo(cx) else { return };
         let mut wanted = Vec::new();
         let mut seen = HashSet::new();
         for editor in editors {
@@ -377,8 +348,8 @@ impl Workspace {
         if wanted.is_empty() {
             return;
         }
-        let user = self.git_user.clone();
-        let head = self.git_status.head_oid.clone();
+        let user = self.git.read(cx).user().cloned();
+        let head = self.git_status(cx).head_oid.clone();
         cx.spawn(async move |_, cx| {
             let specs: Vec<String> = wanted.iter().flat_map(|(_, rel, _)| [format!("HEAD:{rel}"), format!(":{rel}")]).collect();
             let repo2 = repo.clone();
@@ -414,10 +385,10 @@ impl Workspace {
         }
         // Marking a file resolved while it still has conflict markers is
         // usually a mistake, so ask.
-        if let (GitOp::Stage(rels), Some(repo)) = (&op, &self.repo) {
+        if let (GitOp::Stage(rels), Some(repo)) = (&op, &self.repo(cx)) {
             let unresolved: Vec<&String> = rels
                 .iter()
-                .filter(|rel| self.git_status.conflicted().any(|f| &f.rel == *rel))
+                .filter(|rel| self.git_status(cx).conflicted().any(|f| &f.rel == *rel))
                 .filter(|rel| std::fs::read_to_string(repo.join(rel)).is_ok_and(|t| !crate::conflict::parse(&t).is_empty()))
                 .collect();
             if !unresolved.is_empty() {
@@ -436,7 +407,7 @@ impl Workspace {
             }
         }
         // Rewriting a commit that's on a remote already means a force push.
-        if let (GitOp::UndoCommit | GitOp::EditHistory { .. }, Some(repo)) = (&op, self.repo.clone()) {
+        if let (GitOp::UndoCommit | GitOp::EditHistory { .. }, Some(repo)) = (&op, self.repo(cx)) {
             let sha = match &op {
                 GitOp::EditHistory { sha, .. } => sha.clone(),
                 _ => "HEAD".into(),
@@ -465,7 +436,7 @@ impl Workspace {
             return;
         }
         // Deleting a branch whose commits aren't merged loses them, so look first.
-        if let (GitOp::DeleteBranch { name, force: false }, Some(repo)) = (&op, self.repo.clone()) {
+        if let (GitOp::DeleteBranch { name, force: false }, Some(repo)) = (&op, self.repo(cx)) {
             let name = name.clone();
             cx.spawn_in(window, async move |this, cx| {
                 let check = name.clone();
@@ -503,7 +474,7 @@ impl Workspace {
         }
         // Untracked files a stash holds that exist again would leave it half
         // applied (Git restores the rest and keeps the stash), so look first.
-        if let (&GitOp::Unstash { index, pop }, Some(repo)) = (&op, self.repo.clone()) {
+        if let (&GitOp::Unstash { index, pop }, Some(repo)) = (&op, self.repo(cx)) {
             cx.spawn_in(window, async move |this, cx| {
                 let blockers = cx.background_executor().spawn(async move { git::stash_blockers(&repo, index) }).await;
                 this.update_in(cx, |ws, window, cx| {
@@ -537,7 +508,7 @@ impl Workspace {
     /// move them to the Trash so the whole stash applies, instead of Git
     /// applying the rest and keeping the stash.
     fn clear_stash_blockers(&mut self, blockers: Vec<String>, index: usize, pop: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(repo) = self.repo.clone() else { return };
+        let Some(repo) = self.repo(cx) else { return };
         let verb = if pop { "Pop" } else { "Apply" };
         let (message, detail) = match blockers.as_slice() {
             [one] => (
@@ -577,204 +548,161 @@ impl Workspace {
         .detach();
     }
 
-    pub(super) fn execute_git(&mut self, op: GitOp, window: &mut Window, cx: &mut Context<Self>) {
-        let dir = match (&op, &self.repo, &self.root) {
-            (GitOp::Init, _, Some(root)) => root.clone(),
-            (_, Some(repo), _) => repo.clone(),
-            _ => return,
-        };
-        if self.git_busy.is_running() {
-            self.git_queue.push_back(op);
-            return;
+    /// Runs `op` after the one running (see `GitStore::execute`); how it
+    /// ended comes back in `git_finished`.
+    pub(super) fn execute_git(&mut self, op: GitOp, _: &mut Window, cx: &mut Context<Self>) {
+        self.git.update(cx, |g, cx| g.execute(op, cx));
+    }
+
+    /// Reports how a Git operation ended and shows what it changed.
+    fn git_finished(&mut self, op: &GitOp, result: &Result<Outcome, String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.git_panel.update(cx, |p, cx| p.set_busy(None, cx));
+        match result.clone() {
+            Ok(Outcome::Done(message)) => {
+                if let Some(message) = message {
+                    // A merge or rebase that stopped on conflicts isn't done yet.
+                    let kind = if message.contains("conflicts") { ToastKind::Info } else { ToastKind::Success };
+                    self.toast(kind, message, None, cx);
+                }
+                if matches!(op, GitOp::Commit { .. }) {
+                    self.git_panel.update(cx, |p, cx| p.committed(cx));
+                }
+            }
+            Ok(Outcome::Nothing(message)) => self.toast(ToastKind::Info, message, None, cx),
+            Ok(Outcome::UndoneCommit { message }) => {
+                let summary = message.lines().next().unwrap_or_default().to_string();
+                self.toast(ToastKind::Success, format!("Undid “{summary}”; its changes are staged"), None, cx);
+                self.git_panel.update(cx, |p, cx| p.restore_message(&message, cx));
+            }
+            Ok(Outcome::PushNext(message)) => {
+                if let Some(message) = message.filter(|m| m != "Already up to date") {
+                    self.toast(ToastKind::Success, message, None, cx);
+                }
+                self.show_push(window, cx);
+            }
+            Ok(Outcome::KeptStash { message, sha }) => {
+                self.toast(ToastKind::Info, message, None, cx);
+                self.git_panel.update(cx, |p, cx| p.set_kept_stash(Some(sha), cx));
+            }
+            Ok(Outcome::Diverged { branch, upstream, ahead, behind }) => match op {
+                // Nothing says how to combine them (the setting or the Git config): ask, once.
+                GitOp::Pull(None) => self.choose_pull_strategy(&branch, &upstream, ahead, behind, false, window, cx),
+                GitOp::Sync(None) => self.choose_pull_strategy(&branch, &upstream, ahead, behind, true, window, cx),
+                _ => {
+                    let detail = format!(
+                        "{branch} has {} that {upstream} doesn't. Merge or rebase it from Branches…, or change the pull strategy in Settings → Git.",
+                        commits(ahead),
+                    );
+                    self.toast(ToastKind::Error, format!("Can't fast-forward {branch} to {upstream}"), Some(detail), cx);
+                }
+            },
+            Ok(Outcome::CommittedNotPushed { summary, error }) => {
+                self.git_panel.update(cx, |p, cx| p.committed(cx));
+                match error {
+                    None => {
+                        self.toast(ToastKind::Info, format!("Committed {summary}"), None, cx);
+                        self.show_push(window, cx);
+                    }
+                    Some(error) => self.toast(ToastKind::Error, format!("Committed {summary}, but the push failed"), Some(error), cx),
+                }
+            }
+            Ok(Outcome::PartlyApplied { not_restored, error }) => {
+                // Git applies the changes to tracked files first, then restores
+                // untracked ones, skipping those that exist (or stopping).
+                let what = match not_restored.as_slice() {
+                    [] => format!("Tracked files are updated; restoring untracked ones stopped ({error})."),
+                    [one] => format!("{one} wasn't restored: it already exists. The rest is applied."),
+                    many => format!("{} untracked files weren't restored: they already exist. The rest is applied.", many.len()),
+                };
+                let detail = format!("{what} The stash is kept: don't apply it again, drop it when you're done.");
+                self.toast(ToastKind::Error, "The stash was only partly applied", Some(detail), cx);
+            }
+            Err(err) => {
+                let title = match op {
+                    GitOp::Push | GitOp::PushNow { .. } => "Push failed",
+                    GitOp::Pull(_) | GitOp::Sync(_) => "Update failed",
+                    GitOp::Fetch => "Fetch failed",
+                    GitOp::Commit { .. } => "Commit failed",
+                    GitOp::Checkout(_) | GitOp::CreateBranch(_) | GitOp::CheckoutCommit(_) | GitOp::BranchAt { .. } => {
+                        "Checkout failed"
+                    }
+                    GitOp::CherryPick(_) => "Cherry-pick failed",
+                    GitOp::Revert(_) => "Revert failed",
+                    GitOp::Reset { .. } => "Reset failed",
+                    GitOp::Stash { .. } => "Stash failed",
+                    GitOp::Unstash { .. } => "Couldn't apply the stash",
+                    _ => "Git operation failed",
+                };
+                self.toast(ToastKind::Error, title, Some(err), cx);
+            }
         }
-        // Without a strategy of its own, a pull takes the setting's.
-        let op = match op {
-            GitOp::Pull(None) => GitOp::Pull(Settings::get(cx).pull_strategy),
-            GitOp::Sync(None) => GitOp::Sync(Settings::get(cx).pull_strategy),
-            op => op,
-        };
-        let label = op.busy_label();
-        self.git_busy.set(Some(label.into()), |ws: &mut Self| &mut ws.git_busy, cx);
-        self.git_panel.update(cx, |p, cx| p.set_busy(Some(label.into()), cx));
-        let status = self.git_status.clone();
-        let auto_resolve = Settings::get(cx).auto_resolve_conflicts();
-        let op2 = op.clone();
-        self.git_op_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { perform_git(&dir, op2, &status, auto_resolve) }).await;
-            this.update_in(cx, |ws, window, cx| {
-                ws.git_busy.set(None, |ws: &mut Self| &mut ws.git_busy, cx);
-                ws.git_panel.update(cx, |p, cx| p.set_busy(None, cx));
-                match result {
-                    Ok(Outcome::Done(message)) => {
-                        if let Some(message) = message {
-                            // A merge or rebase that stopped on conflicts isn't done yet.
-                            let kind = if message.contains("conflicts") { ToastKind::Info } else { ToastKind::Success };
-                            ws.toast(kind, message, None, cx);
-                        }
-                        match &op {
-                            GitOp::Commit { .. } => ws.git_panel.update(cx, |p, cx| p.committed(cx)),
-                            GitOp::Init => {
-                                if let Some(root) = ws.root.clone() {
-                                    ws.detect_repo(root, cx);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    Ok(Outcome::Nothing(message)) => ws.toast(ToastKind::Info, message, None, cx),
-                    Ok(Outcome::UndoneCommit { message }) => {
-                        let summary = message.lines().next().unwrap_or_default().to_string();
-                        ws.toast(ToastKind::Success, format!("Undid “{summary}”; its changes are staged"), None, cx);
-                        ws.git_panel.update(cx, |p, cx| p.restore_message(&message, cx));
-                    }
-                    Ok(Outcome::PushNext(message)) => {
-                        if let Some(message) = message.filter(|m| m != "Already up to date") {
-                            ws.toast(ToastKind::Success, message, None, cx);
-                        }
-                        ws.show_push(window, cx);
-                    }
-                    Ok(Outcome::KeptStash { message, sha }) => {
-                        ws.toast(ToastKind::Info, message, None, cx);
-                        ws.git_panel.update(cx, |p, cx| p.set_kept_stash(Some(sha), cx));
-                    }
-                    Ok(Outcome::Diverged { branch, upstream, ahead, behind }) => match &op {
-                        // Nothing says how to combine them (the setting or the Git config): ask, once.
-                        GitOp::Pull(None) => ws.choose_pull_strategy(&branch, &upstream, ahead, behind, false, window, cx),
-                        GitOp::Sync(None) => ws.choose_pull_strategy(&branch, &upstream, ahead, behind, true, window, cx),
-                        _ => {
-                            let detail = format!(
-                                "{branch} has {} that {upstream} doesn't. Merge or rebase it from Branches…, or change the pull strategy in Settings → Git.",
-                                commits(ahead),
-                            );
-                            ws.toast(ToastKind::Error, format!("Can't fast-forward {branch} to {upstream}"), Some(detail), cx);
-                        }
-                    },
-                    Ok(Outcome::CommittedNotPushed { summary, error }) => {
-                        ws.git_panel.update(cx, |p, cx| p.committed(cx));
-                        match error {
-                            None => {
-                                ws.toast(ToastKind::Info, format!("Committed {summary}"), None, cx);
-                                ws.show_push(window, cx);
-                            }
-                            Some(error) => ws.toast(ToastKind::Error, format!("Committed {summary}, but the push failed"), Some(error), cx),
-                        }
-                    }
-                    Ok(Outcome::PartlyApplied { not_restored, error }) => {
-                        // Git applies the changes to tracked files first, then restores
-                        // untracked ones, skipping those that exist (or stopping).
-                        let what = match not_restored.as_slice() {
-                            [] => format!("Tracked files are updated; restoring untracked ones stopped ({error})."),
-                            [one] => format!("{one} wasn't restored: it already exists. The rest is applied."),
-                            many => format!("{} untracked files weren't restored: they already exist. The rest is applied.", many.len()),
-                        };
-                        let detail = format!("{what} The stash is kept: don't apply it again, drop it when you're done.");
-                        ws.toast(ToastKind::Error, "The stash was only partly applied", Some(detail), cx);
-                    }
-                    Err(err) => {
-                        let title = match &op {
-                            GitOp::Push | GitOp::PushNow { .. } => "Push failed",
-                            GitOp::Pull(_) | GitOp::Sync(_) => "Update failed",
-                            GitOp::Fetch => "Fetch failed",
-                            GitOp::Commit { .. } => "Commit failed",
-                            GitOp::Checkout(_) | GitOp::CreateBranch(_) | GitOp::CheckoutCommit(_) | GitOp::BranchAt { .. } => {
-                                "Checkout failed"
-                            }
-                            GitOp::CherryPick(_) => "Cherry-pick failed",
-                            GitOp::Revert(_) => "Revert failed",
-                            GitOp::Reset { .. } => "Reset failed",
-                            GitOp::Stash { .. } => "Stash failed",
-                            GitOp::Unstash { .. } => "Couldn't apply the stash",
-                            _ => "Git operation failed",
-                        };
-                        ws.toast(ToastKind::Error, title, Some(err), cx);
-                    }
-                }
-                if matches!(
-                    op,
-                    GitOp::Discard(_)
-                        | GitOp::ResolveSimple
-                        | GitOp::AcceptSide { .. }
-                        | GitOp::UndoCommit
-                        | GitOp::EditHistory { .. }
-                        | GitOp::Pull(_)
-                        | GitOp::Sync(_)
-                        | GitOp::Checkout(_)
-                        | GitOp::Merge(_)
-                        | GitOp::Rebase(_)
-                        | GitOp::Abort(_)
-                        | GitOp::Continue(_)
-                        | GitOp::Stash { .. }
-                        | GitOp::Unstash { .. }
-                        | GitOp::CheckoutCommit(_)
-                        | GitOp::BranchAt { .. }
-                        | GitOp::CherryPick(_)
-                        | GitOp::Revert(_)
-                        | GitOp::Reset { .. }
-                ) {
-                    ws.reload_changed_files(cx);
-                }
-                if ws.shows(BottomPanel::GitLog)
-                    && matches!(
-                        op,
-                        GitOp::Commit { .. }
-                            | GitOp::Fetch
-                            | GitOp::Pull(_)
-                            | GitOp::Sync(_)
-                            | GitOp::Push
-                            | GitOp::PushNow { .. }
-                            | GitOp::Checkout(_)
-                            | GitOp::CreateBranch(_)
-                            | GitOp::Merge(_)
-                            | GitOp::Rebase(_)
-                            | GitOp::Abort(_)
-                            | GitOp::Continue(_)
-                            | GitOp::RemoveRemote(_)
-                            | GitOp::EditRemote { .. }
-                            | GitOp::DeleteBranch { .. }
-                            | GitOp::DeleteRemoteBranch(_)
-                            | GitOp::UndoCommit
-                            | GitOp::EditHistory { .. }
-                            | GitOp::RenameBranch { .. }
-                            | GitOp::Stash { .. }
-                            | GitOp::CheckoutCommit(_)
-                            | GitOp::BranchAt { .. }
-                            | GitOp::TagAt { .. }
-                            | GitOp::CherryPick(_)
-                            | GitOp::Revert(_)
-                            | GitOp::Reset { .. }
-                    )
-                {
-                    ws.git_log.update(cx, |l, cx| l.reload(cx));
-                }
-                // Staging part of a file may leave its status as it was.
-                if matches!(op, GitOp::StageLines { .. } | GitOp::UnstageLines { .. }) {
-                    ws.load_diff_bases(ws.editors.clone(), cx);
-                }
-                for diff in ws.diff_views(cx) {
-                    diff.update(cx, |v, cx| v.reload(cx));
-                }
-                if let Some(Modal::Remotes(dialog)) = &ws.modals.current {
-                    dialog.update(cx, |d, cx| d.reload(cx));
-                }
-                if op.changes_remotes()
-                    && let Some(repo) = &ws.repo
-                {
-                    ws.git_remote = git::remote_url(repo);
-                }
-                ws.status_task = None;
-                ws.refresh_git(cx);
-                // Then what was started meanwhile (this task is running: let
-                // it finish rather than drop it for the next one's).
-                if let Some(next) = ws.git_queue.pop_front() {
-                    if let Some(task) = ws.git_op_task.take() {
-                        task.detach();
-                    }
-                    ws.execute_git(next, window, cx);
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
+        if matches!(
+            op,
+            GitOp::Discard(_)
+                | GitOp::ResolveSimple
+                | GitOp::AcceptSide { .. }
+                | GitOp::UndoCommit
+                | GitOp::EditHistory { .. }
+                | GitOp::Pull(_)
+                | GitOp::Sync(_)
+                | GitOp::Checkout(_)
+                | GitOp::Merge(_)
+                | GitOp::Rebase(_)
+                | GitOp::Abort(_)
+                | GitOp::Continue(_)
+                | GitOp::Stash { .. }
+                | GitOp::Unstash { .. }
+                | GitOp::CheckoutCommit(_)
+                | GitOp::BranchAt { .. }
+                | GitOp::CherryPick(_)
+                | GitOp::Revert(_)
+                | GitOp::Reset { .. }
+        ) {
+            self.reload_changed_files(cx);
+        }
+        if self.shows(BottomPanel::GitLog)
+            && matches!(
+                op,
+                GitOp::Commit { .. }
+                    | GitOp::Fetch
+                    | GitOp::Pull(_)
+                    | GitOp::Sync(_)
+                    | GitOp::Push
+                    | GitOp::PushNow { .. }
+                    | GitOp::Checkout(_)
+                    | GitOp::CreateBranch(_)
+                    | GitOp::Merge(_)
+                    | GitOp::Rebase(_)
+                    | GitOp::Abort(_)
+                    | GitOp::Continue(_)
+                    | GitOp::RemoveRemote(_)
+                    | GitOp::EditRemote { .. }
+                    | GitOp::DeleteBranch { .. }
+                    | GitOp::DeleteRemoteBranch(_)
+                    | GitOp::UndoCommit
+                    | GitOp::EditHistory { .. }
+                    | GitOp::RenameBranch { .. }
+                    | GitOp::Stash { .. }
+                    | GitOp::CheckoutCommit(_)
+                    | GitOp::BranchAt { .. }
+                    | GitOp::TagAt { .. }
+                    | GitOp::CherryPick(_)
+                    | GitOp::Revert(_)
+                    | GitOp::Reset { .. }
+            )
+        {
+            self.git_log.update(cx, |l, cx| l.reload(cx));
+        }
+        // Staging part of a file may leave its status as it was.
+        if matches!(op, GitOp::StageLines { .. } | GitOp::UnstageLines { .. }) {
+            self.load_diff_bases(self.editors.clone(), cx);
+        }
+        for diff in self.diff_views(cx) {
+            diff.update(cx, |v, cx| v.reload(cx));
+        }
+        if let Some(Modal::Remotes(dialog)) = &self.modals.current {
+            dialog.update(cx, |d, cx| d.reload(cx));
+        }
         cx.notify();
     }
 
@@ -886,7 +814,7 @@ impl Workspace {
     }
 
     pub(super) fn git_branches(&mut self, _: &GitBranches, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(repo) = self.repo.clone() else {
+        let Some(repo) = self.repo(cx) else {
             self.toast(ToastKind::Error, "Not a Git repository", None, cx);
             return;
         };
@@ -905,9 +833,9 @@ impl Workspace {
     }
 
     pub(super) fn git_stash(&mut self, _: &GitStash, window: &mut Window, cx: &mut Context<Self>) {
-        if self.repo.is_none() {
+        if !self.has_repo(cx) {
             self.toast(ToastKind::Error, "Not a Git repository", None, cx);
-        } else if self.git_status.files.is_empty() {
+        } else if self.git_status(cx).files.is_empty() {
             self.toast(ToastKind::Info, "No changes to stash", None, cx);
         } else {
             self.ask_for_name(PendingInput::Git(GitPrompt::Stash), window, cx);
@@ -915,7 +843,7 @@ impl Workspace {
     }
 
     pub(super) fn manage_remotes(&mut self, _: &ManageRemotes, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(repo) = self.repo.clone() else {
+        let Some(repo) = self.repo(cx) else {
             self.toast(ToastKind::Error, "Not a Git repository", None, cx);
             return;
         };
@@ -951,7 +879,7 @@ impl Workspace {
     }
 
     pub(super) fn git_init(&mut self, _: &GitInit, window: &mut Window, cx: &mut Context<Self>) {
-        match (&self.root, &self.repo) {
+        match (&self.root, &self.repo(cx)) {
             (None, _) => self.toast(ToastKind::Error, "Open a folder first", None, cx),
             (Some(_), Some(_)) => self.toast(ToastKind::Error, "This folder is already in a Git repository", None, cx),
             (Some(_), None) => self.run_git(GitOp::Init, window, cx),
@@ -959,7 +887,7 @@ impl Workspace {
     }
 
     pub(super) fn open_remote(&mut self, _: &OpenRemote, _: &mut Window, cx: &mut Context<Self>) {
-        match self.git_remote.as_deref().and_then(git::web_url) {
+        match self.git.read(cx).remote().and_then(git::web_url) {
             Some(url) => cx.open_url(&url),
             None => self.toast(ToastKind::Error, "No browsable remote", Some("This repository has no HTTPS or SSH remote.".into()), cx),
         }
@@ -987,7 +915,7 @@ impl Workspace {
     }
 
     pub(super) fn show_push(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(repo) = self.repo.clone() else {
+        let Some(repo) = self.repo(cx) else {
             self.toast(ToastKind::Error, "Not a Git repository", None, cx);
             return;
         };
@@ -1024,7 +952,7 @@ impl Workspace {
         // A Local History version needs no repository: paths show from the project.
         let repo = match &source {
             DiffSource::History { path, .. } => self.root.clone().or_else(|| path.parent().map(Path::to_path_buf)),
-            _ => self.repo.clone(),
+            _ => self.repo(cx),
         };
         let repo = repo?;
         let document = source.live_file().and_then(|path| self.documents.read(cx).get(path, cx));
@@ -1089,102 +1017,6 @@ impl Workspace {
     }
 }
 
-
-
-/// Git status to read: all of it, or what's under some paths (files Kuana
-/// wrote, changes in the work tree).
-#[derive(Debug, Default)]
-pub(super) struct StatusWork {
-    pub(super) all: bool,
-    pub(super) paths: BTreeSet<PathBuf>,
-}
-
-impl StatusWork {
-    pub(super) fn all() -> Self {
-        StatusWork { all: true, paths: BTreeSet::new() }
-    }
-
-    pub(super) fn paths(paths: impl IntoIterator<Item = PathBuf>) -> Self {
-        StatusWork { all: false, paths: paths.into_iter().collect() }
-    }
-
-    pub(super) fn is_empty(&self) -> bool {
-        !self.all && self.paths.is_empty()
-    }
-
-    pub(super) fn add(&mut self, more: StatusWork) {
-        self.all |= more.all;
-        if self.all {
-            self.paths.clear();
-        } else {
-            self.paths.extend(more.paths);
-        }
-    }
-
-    pub(super) fn add_path(&mut self, path: PathBuf) {
-        if !self.all {
-            self.paths.insert(path);
-        }
-    }
-}
-
-/// A Git status read in the background, with what showing it needs.
-struct StatusRead {
-    /// With all of it read: the last commit and the stashes.
-    head: Option<(Option<git::CommitInfo>, Vec<git::Stash>)>,
-    /// When it differs from the status shown.
-    changed: Option<ChangedStatus>,
-}
-
-struct ChangedStatus {
-    status: RepoStatus,
-    /// Its colors for the tree (`RepoStatus::path_map`).
-    paths: Arc<HashMap<PathBuf, Change>>,
-    /// What Git ignores, when that changed.
-    ignored: Option<Arc<HashSet<PathBuf>>>,
-    /// HEAD moved: every file's diff base may have.
-    head_moved: bool,
-    /// The files whose HEAD or index blob moved: their diff bases did.
-    blobs_moved: HashSet<PathBuf>,
-}
-
-impl StatusRead {
-    /// Reads the status (blocking): all of it, or `work`'s paths', merged
-    /// into `known` (the status shown, `ignored` its ignored set).
-    fn read(repo: &Path, work: StatusWork, known: &RepoStatus, ignored: &HashSet<PathBuf>) -> Self {
-        let pathspecs = if work.all { None } else { git::pathspecs(repo, work.paths.iter().map(PathBuf::as_path)) };
-        let (status, head) = match pathspecs {
-            // All outside the repository.
-            Some(rels) if rels.is_empty() => return StatusRead { head: None, changed: None },
-            Some(rels) => {
-                let status = git::status_of(repo, &rels).map(|scoped| {
-                    let mut status = known.clone();
-                    status.merge(repo, &rels, scoped);
-                    status
-                });
-                (status, None)
-            }
-            None => (git::status(repo), Some((git::last_commit(repo), git::stashes(repo)))),
-        };
-        let changed = status.ok().filter(|status| status != known).map(|status| {
-            let blobs = |status: &RepoStatus| -> HashMap<PathBuf, String> {
-                status.files.iter().filter_map(|f| Some((f.path.clone(), f.blobs.clone()?))).collect()
-            };
-            let (before, after) = (blobs(known), blobs(&status));
-            let blobs_moved = before.keys().chain(after.keys()).filter(|path| before.get(*path) != after.get(*path)).cloned().collect();
-            let now_ignored: HashSet<PathBuf> = status.ignored.iter().cloned().collect();
-            ChangedStatus {
-                paths: Arc::new(status.path_map(repo)),
-                ignored: (now_ignored != *ignored).then(|| Arc::new(now_ignored)),
-                head_moved: status.head_oid != known.head_oid,
-                blobs_moved,
-                status,
-            }
-        });
-        StatusRead { head, changed }
-    }
-}
-
 /// What to ask before an operation that loses something: message, detail,
 /// button, and whether it can be undone (else Cancel is the default).
 fn confirmation(op: &GitOp) -> Option<(String, &'static str, &'static str, bool)> {
@@ -1212,34 +1044,6 @@ fn confirmation(op: &GitOp) -> Option<(String, &'static str, &'static str, bool)
     }
 }
 
-/// How a Git operation ended, for the workspace to report.
-pub(super) enum Outcome {
-    /// Finished; the message for a notification, if any.
-    Done(Option<String>),
-    /// Nothing to do, and why.
-    Nothing(String),
-    /// A fast-forward-only pull found commits on both sides; nothing changed.
-    Diverged { branch: String, upstream: String, ahead: u32, behind: u32 },
-    /// A stash applied in part and kept (see `git::Unstashed::Partly`).
-    PartlyApplied { not_restored: Vec<String>, error: String },
-    /// Commit & Push committed, then didn't push: it failed with `error`,
-    /// or (None) the branch is behind its upstream.
-    CommittedNotPushed { summary: String, error: Option<String> },
-    /// Changes put back over new commits (a pull's, a stash popped)
-    /// conflicted; the stash with commit `sha` keeps them until they're resolved.
-    KeptStash { message: String, sha: String },
-    /// Sync pulled (`message`, if any to show); there are commits to push next.
-    PushNext(Option<String>),
-    /// The last commit was undone; its message goes back in the commit box.
-    UndoneCommit { message: String },
-}
-
-/// "1 commit", "3 commits".
-fn commits(n: impl Into<u64>) -> String {
-    let n = n.into();
-    format!("{n} commit{}", if n == 1 { "" } else { "s" })
-}
-
 /// Up to a few names, one per line, and how many more there are.
 fn list_some(names: &[String]) -> String {
     const SHOWN: usize = 6;
@@ -1248,390 +1052,4 @@ fn list_some(names: &[String]) -> String {
         list.push_str(&format!("\nand {} more", names.len() - SHOWN));
     }
     list
-}
-
-/// Runs one Git operation; blocking. When it stops on conflicts and
-/// `auto_resolve` is on, the simple ones (each side changing different words)
-/// are combined right away, as JetBrains does.
-pub(super) fn perform_git(dir: &Path, op: GitOp, status: &RepoStatus, auto_resolve: bool) -> Result<Outcome, String> {
-    let may_conflict = matches!(
-        op,
-        GitOp::Merge(_)
-            | GitOp::Rebase(_)
-            | GitOp::Pull(_)
-            | GitOp::Sync(_)
-            | GitOp::Continue(_)
-            | GitOp::Unstash { .. }
-            | GitOp::CherryPick(_)
-            | GitOp::Revert(_)
-            | GitOp::Checkout(_)
-            | GitOp::CheckoutCommit(_)
-            | GitOp::EditHistory { .. }
-    );
-    // What the user started may ask for credentials.
-    let cancellations = crate::askpass::cancellations();
-    let outcome = match git::asking(|| perform(dir, op, status)) {
-        Err(_) if crate::askpass::cancellations() > cancellations => {
-            return Ok(Outcome::Nothing("Cancelled: Git didn't get the credentials it asked for".into()));
-        }
-        outcome => outcome?,
-    };
-    if !auto_resolve || !may_conflict {
-        return Ok(outcome);
-    }
-    let conflicted: Vec<String> = git::status(dir).map(|s| s.conflicted().map(|f| f.rel.clone()).collect()).unwrap_or_default();
-    let done = match git::resolve_simple(dir, &conflicted) {
-        Ok(done) if done.resolved > 0 => done,
-        _ => return Ok(outcome),
-    };
-    let note = match done.left {
-        0 if done.resolved == 1 => "the conflict was simple and is resolved".to_string(),
-        0 => format!("all {} conflicts were simple and are resolved", done.resolved),
-        left => format!("{} resolved automatically, {left} left", conflicts(done.resolved)),
-    };
-    Ok(match outcome {
-        Outcome::Done(Some(message)) => Outcome::Done(Some(format!("{message}; {note}"))),
-        // Changes put back over a pull's commits that all combined: say what that means.
-        Outcome::KeptStash { message, sha } if done.left == 0 => Outcome::KeptStash {
-            message: match message.split_once("; ") {
-                Some((pulled, _)) => format!("{pulled}; your changes touched the same lines and were combined"),
-                None => format!("{message}; {note}"),
-            },
-            sha,
-        },
-        Outcome::KeptStash { message, sha } => Outcome::KeptStash { message: format!("{message}; {note}"), sha },
-        outcome => outcome,
-    })
-}
-
-/// "1 conflict", "3 conflicts".
-fn conflicts(n: usize) -> String {
-    format!("{n} conflict{}", if n == 1 { "" } else { "s" })
-}
-
-fn perform(dir: &Path, op: GitOp, status: &RepoStatus) -> Result<Outcome, String> {
-    // A switch whose local changes came along, through a stash when Git refused.
-    let switched = |switched: git::Switched, done: String| match switched {
-        git::Switched::Done => Outcome::Done(Some(done)),
-        git::Switched::Carried => Outcome::Done(Some(format!("{done}; your changes came along"))),
-        git::Switched::ChangesConflict { stash } => {
-            let message = format!("{done}; putting your changes back stopped on conflicts");
-            match stash {
-                Some(sha) => Outcome::KeptStash { message, sha },
-                None => Outcome::Done(Some(message)),
-            }
-        }
-    };
-    let push = |dir: &Path, force: bool, remote: Option<String>| -> Result<String, String> {
-        let Some(remote) = remote.or_else(|| git::default_remote(dir)) else {
-            return Err("No remote is configured. Add one in Git → Manage Remotes….".into());
-        };
-        let current = git::status(dir).ok();
-        let branch = current.as_ref().and_then(|s| s.branch.clone()).or_else(|| status.branch.clone());
-        let has_upstream = current.and_then(|s| s.upstream).is_some();
-        let verb = if force { "Force-pushed" } else { "Pushed" };
-        match (has_upstream, branch) {
-            (false, Some(branch)) => git::push(dir, Some((&remote, &branch)), force).map(|_| format!("{verb} {branch} to {remote}")),
-            _ => git::push(dir, None, force).map(|_| verb.to_string()),
-        }
-    };
-    let short = |sha: &str| sha[..sha.len().min(7)].to_string();
-    let stopped = |out: &str, what: &str, done: String| Some(if out == "CONFLICT" { format!("{what} stopped on conflicts") } else { done });
-    let message = match op {
-        GitOp::Stage(rels) => git::stage(dir, &rels).map(|_| None),
-        GitOp::Unstage(rels) => git::unstage(dir, &rels, status.head_oid.is_some()).map(|_| None),
-        GitOp::StageLines { rel, text, rows } => git::stage_lines(dir, &rel, &text, rows).map(|_| None),
-        GitOp::UnstageLines { rel, text, rows } => git::unstage_lines(dir, &rel, text.as_deref(), rows).map(|_| None),
-        GitOp::Merge(branch) => git::merge(dir, &branch).map(|out| {
-            Some(if out == "CONFLICT" {
-                "Merge stopped on conflicts".into()
-            } else if out.contains("Already up to date") {
-                "Already up to date".into()
-            } else {
-                format!("Merged {branch}")
-            })
-        }),
-        GitOp::Rebase(onto) => git::rebase(dir, &onto).map(|out| {
-            Some(if out == "CONFLICT" { "Rebase stopped on conflicts".into() } else { format!("Rebased onto {onto}") })
-        }),
-        GitOp::Abort(state) => git::abort(dir, state).map(|_| Some(format!("{} aborted", state.noun()))),
-        GitOp::Continue(state) => git::continue_op(dir, state).map(|_| {
-            Some(match git::repo_state(dir) {
-                // A rebase can stop again on the next commit.
-                Some(_) => "Stopped on more conflicts".into(),
-                None => format!("{} finished", state.noun()),
-            })
-        }),
-        GitOp::Discard(files) => {
-            // Local History keeps what a rollback throws away.
-            for file in &files {
-                crate::local_history::record_disk(&file.path, crate::local_history::Kind::BeforeRollback);
-            }
-            let n = files.len();
-            git::discard(dir, &files).map(|_| Some(format!("Rolled back {n} file{}", if n == 1 { "" } else { "s" })))
-        }
-        GitOp::Commit { message, amend, all, untracked, push: and_push } => {
-            // A checked file deleted since it was listed would fail the
-            // whole commit (and leave what `all` staged behind).
-            let untracked: Vec<String> = untracked.into_iter().filter(|rel| std::fs::symlink_metadata(dir.join(rel)).is_ok()).collect();
-            // Untracked files only when checked: a commit of "everything"
-            // mustn't pick up build output or notes nobody chose.
-            if all {
-                git::stage_tracked(dir)?;
-            }
-            if !untracked.is_empty() {
-                git::stage(dir, &untracked)?;
-            }
-            let summary = git::commit(dir, &message, amend)?;
-            if !and_push {
-                return Ok(Outcome::Done(Some(format!("Committed {summary}"))));
-            }
-            // Behind its upstream (an amended commit that was pushed, or
-            // commits fetched since), a push would be refused: the Push
-            // dialog says why and offers Force Push.
-            if git::status(dir).is_ok_and(|s| s.upstream.is_some() && s.behind > 0) {
-                return Ok(Outcome::CommittedNotPushed { summary, error: None });
-            }
-            return Ok(match push(dir, false, None) {
-                Ok(_) => Outcome::Done(Some(format!("Committed and pushed {summary}"))),
-                Err(error) => Outcome::CommittedNotPushed { summary, error: Some(error) },
-            });
-        }
-        // `Push` opens the dialog before it gets here; treat it as a plain push.
-        GitOp::Push => push(dir, false, None).map(Some),
-        GitOp::PushNow { force, remote, tags } => {
-            // The tags go where the branch went.
-            let tag_remote = remote.clone().or_else(|| git::push_remote(dir));
-            // Only tags: the branch is on its remote already.
-            let only_tags = !tags.is_empty() && git::status(dir).is_ok_and(|s| s.upstream.is_some() && s.ahead == 0) && !force;
-            let pushed = if only_tags { String::new() } else { push(dir, force, remote)? };
-            match (tags.as_slice(), tag_remote) {
-                ([], _) => Ok(Some(pushed)),
-                (_, None) => Err("No remote is configured. Add one in Git → Manage Remotes….".into()),
-                (tags, Some(remote)) => git::push_tags(dir, &remote, tags).map(|_| {
-                    let what = match tags {
-                        [one] => format!("tag {one}"),
-                        many => format!("{} tags", many.len()),
-                    };
-                    Some(if only_tags { format!("Pushed {what} to {remote}") } else { format!("{pushed}, with {what}") })
-                }),
-            }
-        }
-        GitOp::Sync(strategy) => {
-            let pulled = perform(dir, GitOp::Pull(strategy), status)?;
-            // Pushes only after a pull that left nothing to sort out.
-            let now = git::status(dir).ok();
-            let clean = git::repo_state(dir).is_none() && now.as_ref().is_some_and(|s| s.conflicted().next().is_none());
-            let ahead = now.as_ref().filter(|s| s.upstream.is_some()).map_or(0, |s| s.ahead);
-            return Ok(match pulled {
-                Outcome::Done(message) if clean && ahead > 0 => Outcome::PushNext(message),
-                outcome => outcome,
-            });
-        }
-        GitOp::Pull(strategy) => {
-            return git::pull(dir, strategy).map(|pulled| match pulled {
-                git::Pulled::UpToDate => Outcome::Done(Some("Already up to date".into())),
-                git::Pulled::FastForwarded(n) => Outcome::Done(Some(format!("Pulled {}", commits(n as u64)))),
-                git::Pulled::Merged(n) => Outcome::Done(Some(format!("Pulled {} and merged", commits(n as u64)))),
-                git::Pulled::Rebased(n) => Outcome::Done(Some(format!("Pulled {}, yours rebased on top", commits(n as u64)))),
-                git::Pulled::Conflicts => Outcome::Done(Some("Update stopped on conflicts".into())),
-                git::Pulled::ChangesConflict { incoming, stash } => {
-                    let message = format!("Pulled {}; putting your changes back stopped on conflicts", commits(incoming as u64));
-                    match stash {
-                        Some(sha) => Outcome::KeptStash { message, sha },
-                        None => Outcome::Done(Some(message)),
-                    }
-                }
-                git::Pulled::Diverged { branch, upstream, ahead, behind } => Outcome::Diverged { branch, upstream, ahead, behind },
-            });
-        }
-        GitOp::Fetch => git::fetch(dir).map(|_| Some("Fetched all remotes".into())),
-        GitOp::Checkout(branch) => return git::checkout(dir, &branch).map(|s| switched(s, format!("Switched to {}", branch.name))),
-        GitOp::CreateBranch(name) => git::create_branch(dir, &name).map(|_| Some(format!("Created and switched to {name}"))),
-        GitOp::Init => git::init(dir).map(|_| Some("Initialized a Git repository".into())),
-        GitOp::AddRemote { name, url } => git::add_remote(dir, &name, &url).map(|_| Some(format!("Added remote {name}"))),
-        GitOp::RemoveRemote(name) => git::remove_remote(dir, &name).map(|_| Some(format!("Removed remote {name}"))),
-        GitOp::EditRemote { name, new_name, url } => {
-            git::set_remote_url(dir, &name, &url)?;
-            if new_name != name {
-                git::rename_remote(dir, &name, &new_name)?;
-            }
-            Ok(Some(format!("Updated remote {new_name}")))
-        }
-        GitOp::DeleteBranch { name, force } => git::delete_branch(dir, &name, force).map(|_| Some(format!("Deleted branch {name}"))),
-        GitOp::RenameBranch { from, to } => git::rename_branch(dir, &from, &to).map(|_| Some(format!("Renamed {from} to {to}"))),
-        GitOp::Stash { message, untracked } => {
-            return git::stash(dir, message.as_deref(), untracked).map(|stashed| match stashed {
-                true => Outcome::Done(Some("Stashed changes".into())),
-                false if untracked => Outcome::Nothing("No changes to stash".into()),
-                false => Outcome::Nothing("No changes to stash besides untracked files".into()),
-            });
-        }
-        GitOp::Unstash { index, pop } => {
-            let sha = git::stash_sha(dir, index);
-            return git::unstash(dir, index, pop).map(|unstashed| match unstashed {
-                git::Unstashed::Applied => Outcome::Done(Some(if pop { "Popped stash".into() } else { "Applied stash".into() })),
-                // Git keeps a stash that didn't apply cleanly; a Pop's is
-                // offered for dropping once the conflicts are resolved.
-                git::Unstashed::Conflicts => match sha.filter(|_| pop) {
-                    Some(sha) => Outcome::KeptStash { message: "Popping the stash stopped on conflicts".into(), sha },
-                    None => Outcome::Done(Some("Applying the stash stopped on conflicts; it's kept".into())),
-                },
-                git::Unstashed::Partly { error, not_restored } => Outcome::PartlyApplied { not_restored, error },
-            });
-        }
-        GitOp::DropStash(index) => git::drop_stash(dir, index).map(|_| Some("Dropped stash".into())),
-        GitOp::UndoCommit => return git::undo_commit(dir).map(|message| Outcome::UndoneCommit { message }),
-        GitOp::DeleteRemoteBranch(name) => git::delete_remote_branch(dir, &name).map(|_| Some(format!("Deleted {name} on the remote"))),
-        GitOp::EditHistory { sha, edit } => {
-            let done = match &edit {
-                git::HistoryEdit::Reword(_) => format!("Reworded {}", short(&sha)),
-                git::HistoryEdit::Squash => format!("Squashed {} into the commit before it", short(&sha)),
-                git::HistoryEdit::Drop => format!("Dropped {}", short(&sha)),
-            };
-            git::edit_history(dir, &sha, &edit).map(|out| stopped(&out, "Rewriting history", done))
-        }
-        GitOp::DropKeptStash(sha) => git::drop_stash_sha(dir, &sha).map(|_| Some("Dropped the stash".into())),
-        GitOp::ResolveSimple => {
-            let conflicted: Vec<String> = git::status(dir)?.conflicted().map(|f| f.rel.clone()).collect();
-            let done = git::resolve_simple(dir, &conflicted)?;
-            return Ok(match (done.resolved, done.left) {
-                (0, 0) => Outcome::Nothing("No conflict markers left; mark the files resolved".into()),
-                (0, _) => Outcome::Nothing("No simple conflicts: the rest change the same words on both sides".into()),
-                (n, 0) => Outcome::Done(Some(format!("Resolved {}", conflicts(n)))),
-                (n, left) => Outcome::Done(Some(format!("Resolved {}; {} left", conflicts(n), conflicts(left)))),
-            });
-        }
-        GitOp::AcceptSide { rels, yours } => {
-            let mine = git::Side::yours(git::repo_state(dir));
-            let side = match (yours, mine) {
-                (true, side) => side,
-                (false, git::Side::Ours) => git::Side::Theirs,
-                (false, git::Side::Theirs) => git::Side::Ours,
-            };
-            let whose = if yours { "yours" } else { "theirs" };
-            git::accept_side(dir, &rels, side).map(|_| match rels.as_slice() {
-                [one] => Some(format!("Resolved {one}: kept {whose}")),
-                many => Some(format!("Resolved {} files: kept {whose}", many.len())),
-            })
-        }
-        GitOp::CheckoutCommit(sha) => {
-            return git::checkout_commit(dir, &sha).map(|s| switched(s, format!("Checked out {} (detached HEAD)", short(&sha))));
-        }
-        GitOp::BranchAt { name, sha } => git::create_branch_at(dir, &name, &sha).map(|_| Some(format!("Created and switched to {name}"))),
-        GitOp::TagAt { name, sha } => git::create_tag(dir, &name, &sha).map(|_| Some(format!("Tagged {} as {name}", short(&sha)))),
-        GitOp::CherryPick(sha) => git::cherry_pick(dir, &sha).map(|out| stopped(&out, "Cherry-pick", format!("Cherry-picked {}", short(&sha)))),
-        GitOp::Revert(sha) => git::revert(dir, &sha).map(|out| stopped(&out, "Revert", format!("Reverted {}", short(&sha)))),
-        GitOp::Reset { sha, mode } => git::reset(dir, &sha, mode).map(|_| Some(format!("Reset to {}", short(&sha)))),
-    };
-    message.map(Outcome::Done)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A read of some paths merges into the status shown, and tells what
-    /// showing it needs to know.
-    #[test]
-    fn a_read_of_some_paths_merges_into_the_status_shown() {
-        if !git::is_available() {
-            return;
-        }
-        let root = std::env::temp_dir().join(format!("kuana-status-read-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        git::init(&root).unwrap();
-        let root = git::discover(&root).unwrap();
-        for args in [["config", "user.name", "Test"], ["config", "user.email", "test@example.com"]] {
-            git::run(&root, &args).unwrap();
-        }
-        std::fs::write(root.join(".gitignore"), "*.log\n").unwrap();
-        std::fs::write(root.join("a.txt"), "one\n").unwrap();
-        git::stage(&root, &[".gitignore".into(), "a.txt".into()]).unwrap();
-        git::commit(&root, "first", false).unwrap();
-
-        // All of it: with the last commit, and HEAD moved from nothing.
-        let read = StatusRead::read(&root, StatusWork::all(), &RepoStatus::default(), &HashSet::new());
-        assert!(read.head.as_ref().is_some_and(|(commit, _)| commit.is_some()));
-        let shown = read.changed.expect("HEAD is known now");
-        assert!(shown.head_moved && shown.status.files.is_empty());
-
-        // A file written and a log: only they are read, and merge in.
-        std::fs::write(root.join("a.txt"), "two\n").unwrap();
-        std::fs::write(root.join("new.log"), "").unwrap();
-        let ignored: HashSet<PathBuf> = shown.status.ignored.iter().cloned().collect();
-        let read = StatusRead::read(&root, StatusWork::paths([root.join("a.txt"), root.join("new.log")]), &shown.status, &ignored);
-        assert!(read.head.is_none(), "no need for the last commit");
-        let changed = read.changed.expect("a.txt changed");
-        assert_eq!(changed.status.head_oid, shown.status.head_oid);
-        assert_eq!(changed.status.files.iter().map(|f| (f.rel.as_str(), f.unstaged)).collect::<Vec<_>>(), [("a.txt", Some(Change::Modified))]);
-        assert!(changed.ignored.is_some_and(|i| i.contains(&root.join("new.log"))), "the tree dims it");
-        // Its blobs are known now: the diff base is read again.
-        assert!(!changed.head_moved && changed.blobs_moved.iter().eq([&root.join("a.txt")]));
-        assert_eq!(changed.paths.get(&root.join("a.txt")), Some(&Change::Modified));
-
-        // Read again unchanged: nothing to show. Outside the repository: nothing read.
-        let ignored: HashSet<PathBuf> = changed.status.ignored.iter().cloned().collect();
-        assert!(StatusRead::read(&root, StatusWork::paths([root.join("a.txt")]), &changed.status, &ignored).changed.is_none());
-        let outside = StatusWork::paths([std::env::temp_dir().join("elsewhere.txt")]);
-        assert!(StatusRead::read(&root, outside, &changed.status, &ignored).changed.is_none());
-
-        // Asked for together: all of it covers any paths.
-        let mut work = StatusWork::paths([root.join("a.txt")]);
-        work.add(StatusWork::all());
-        work.add(StatusWork::paths([root.join("b.txt")]));
-        assert!(work.all && work.paths.is_empty());
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// Commit & Push: checked files that went away are skipped, a branch
-    /// behind its upstream (an amended pushed commit) isn't pushed, and a
-    /// push that fails still reports the commit.
-    #[test]
-    fn commit_and_push() {
-        if !git::is_available() {
-            return;
-        }
-        let base = std::env::temp_dir().join(format!("kuana-commit-push-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let remote = base.join("remote.git");
-        let dir = base.join("work");
-        std::fs::create_dir_all(&remote).unwrap();
-        std::fs::create_dir_all(&dir).unwrap();
-        git::run(&remote, &["init", "--bare", "--quiet"]).unwrap();
-        git::init(&dir).unwrap();
-        let root = git::discover(&dir).unwrap();
-        for args in [["config", "user.name", "Test"], ["config", "user.email", "test@example.com"], ["symbolic-ref", "HEAD", "refs/heads/main"]] {
-            git::run(&root, &args).unwrap();
-        }
-        git::add_remote(&root, "origin", remote.to_str().unwrap()).unwrap();
-        let write = |rel: &str, text: &str| std::fs::write(root.join(rel), text).unwrap();
-        let commit = |message: &str, amend: bool, untracked: &[&str], status: &RepoStatus| {
-            let untracked = untracked.iter().map(|rel| rel.to_string()).collect();
-            perform_git(&root, GitOp::Commit { message: message.into(), amend, all: !amend, untracked, push: true }, status, false)
-        };
-
-        // The first push sets the upstream; a checked file deleted since is left out.
-        write("a.txt", "one\n");
-        write("gone.txt", "");
-        let status = git::status(&root).unwrap();
-        std::fs::remove_file(root.join("gone.txt")).unwrap();
-        assert!(matches!(commit("first", false, &["a.txt", "gone.txt"], &status), Ok(Outcome::Done(Some(m))) if m.starts_with("Committed and pushed")));
-        let status = git::status(&root).unwrap();
-        assert_eq!((status.upstream.as_deref(), status.ahead, status.files.len()), (Some("origin/main"), 0, 0));
-
-        // Amending the pushed commit: committed, not pushed (the Push dialog offers to force).
-        assert!(matches!(commit("first, amended", true, &[], &status), Ok(Outcome::CommittedNotPushed { error: None, .. })));
-        assert_eq!(git::last_commit_message(&root).unwrap(), "first, amended");
-
-        // A push that fails still reports the commit.
-        git::run(&root, &["reset", "--quiet", "--hard", "origin/main"]).unwrap();
-        git::checkout_commit(&root, &status.head_oid.clone().unwrap()).unwrap();
-        write("a.txt", "two\n");
-        let status = git::status(&root).unwrap();
-        assert!(matches!(commit("detached", false, &[], &status), Ok(Outcome::CommittedNotPushed { error: Some(_), .. })));
-        assert_eq!(git::last_commit_message(&root).unwrap(), "detached");
-        let _ = std::fs::remove_dir_all(&base);
-    }
 }

@@ -19,7 +19,6 @@ use gpui::{
 
 use crate::{
     assets::{self, Icon},
-    busy::Busy,
     document::{BinaryFile, Breakpoint, Document},
     document_store::{DocumentStore, DocumentStoreEvent},
     branch_picker::{BranchPicker, BranchPickerEvent},
@@ -44,6 +43,7 @@ use crate::{
     pane_item::{PaneItem, Saving, TabIcon, TabLook},
     git::{self, Change, FileStatus, RepoStatus},
     git_panel::{GitOp, GitPanel, GitPanelEvent},
+    git_store::{GitEvent, GitStore, Outcome, StatusChange, StatusWork, commits},
     problems_panel::{ProblemsEvent, ProblemsPanel},
     results_panel::{ResultsEvent, ResultsPanel},
     database::{
@@ -1294,6 +1294,8 @@ impl Workspace {
                 find_subscription,
                 git_subscription,
                 log_subscription,
+                store_subscription,
+                store_observation,
                 problems_subscription,
                 results_subscription,
                 database_subscription,
@@ -1541,7 +1543,7 @@ impl Workspace {
             }
         }
         self.lsp.update(cx, |s, cx| s.register(editor, cx));
-        if self.repo(cx).is_none() && self.root.is_none() {
+        if !self.has_repo(cx) && self.root.is_none() {
             // A lone file: use the repository it lives in, if any.
             if let Some(dir) = editor.read(cx).doc.read(cx).path.as_deref().and_then(Path::parent) {
                 self.detect_repo(dir.to_path_buf(), cx);

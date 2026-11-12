@@ -37,6 +37,7 @@ mod git;
 mod git_log;
 mod hierarchy;
 mod git_panel;
+mod git_store;
 mod image_view;
 mod instance;
 mod input_dialog;

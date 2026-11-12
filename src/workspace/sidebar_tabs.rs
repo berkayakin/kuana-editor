@@ -91,7 +91,7 @@ impl Workspace {
             theme.background = crate::ui::drop_lift(&theme).1.into();
         }
         let edge = crate::ui::island_edge(&theme);
-        let changes = self.git_status.files.len();
+        let changes = self.git_status(cx).files.len();
         let count = (changes > 0).then(|| if changes > 99 { "99+".to_string() } else { changes.to_string() });
         // A view moved to the second sidebar isn't one of its tabs.
         let modes = self.sidebar_views();
@@ -144,8 +144,8 @@ impl Workspace {
                         let keys = binding_label(&*action, window);
                         crate::ui::entity_tooltip_view(
                             &workspace,
-                            move |ws, _| {
-                                let label = match (mode, ws.git_status.files.len()) {
+                            move |ws, cx| {
+                                let label = match (mode, ws.git_status(cx).files.len()) {
                                     (SidebarMode::Commit, changes) if changes > 0 => format!("Commit ({changes} changed)"),
                                     _ => mode.label().to_string(),
                                 };
