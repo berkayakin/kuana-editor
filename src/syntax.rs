@@ -1584,25 +1584,36 @@ pub fn input_edit(
 /// File Structure's definitions in `tree` (see `Syntax::symbols`); takes no
 /// `Syntax`, so it can run in the background on a tree's clone.
 pub fn symbols(language: Language, tree: &Tree, rope: &Rope) -> Vec<Symbol> {
-    let Some(config) = outline_config(language) else {
-        return Vec::new();
-    };
-    // (definition range, kind, name range)
-    let mut found: Vec<(Range<usize>, &'static str, Range<usize>)> = Vec::new();
+    match outline_config(language) {
+        Some(config) => symbols_with(config, tree, rope),
+        None => Vec::new(),
+    }
+}
+
+fn symbols_with(config: &OutlineConfig, tree: &Tree, rope: &Rope) -> Vec<Symbol> {
+    // (definition range, kind, name pieces)
+    let mut found: Vec<(Range<usize>, &'static str, Vec<Range<usize>>)> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&config.query, tree.root_node(), RopeProvider(rope));
     while let Some(m) = matches.next() {
         let mut def = None;
-        let mut name = None;
-        let context: Vec<String> = m
+        // Several `@name`s make one name, as in Zed: Swift's outline names
+        // "struct User: Codable" by the keyword, the name and what follows.
+        let mut names: Vec<Range<usize>> = m.captures.iter().filter(|c| c.index == config.name).map(|c| c.node.byte_range()).collect();
+        names.sort_by_key(|r| r.start);
+        let mut context: Vec<String> = m
             .captures
             .iter()
             .filter(|c| Some(c.index) == config.context && c.node.byte_range().len() < 40)
             .map(|c| rope.byte_slice(c.node.byte_range()).to_string())
             .collect();
+        // Without `@context`, a name's first piece is its keyword ("func").
+        if context.is_empty() && names.len() > 1 && names[0].len() < 40 {
+            context.push(rope.byte_slice(names[0].clone()).to_string());
+        }
         for c in m.captures {
             if c.index == config.name {
-                name = Some(c.node.byte_range());
+                continue;
             } else if let Some(kind) = config.kinds[c.index as usize] {
                 let kind = match kind {
                     "symbol" => context_kind(&context).unwrap_or_else(|| guess_kind(c.node.kind())),
@@ -1611,8 +1622,10 @@ pub fn symbols(language: Language, tree: &Tree, rope: &Rope) -> Vec<Symbol> {
                 def = Some((c.node.byte_range(), kind));
             }
         }
-        if let (Some((range, kind)), Some(name)) = (def, name) {
-            found.push((range, kind, name));
+        if let Some((range, kind)) = def
+            && !names.is_empty()
+        {
+            found.push((range, kind, names));
         }
         if found.len() >= MAX_SYMBOLS * 2 {
             break;
@@ -1625,18 +1638,32 @@ pub fn symbols(language: Language, tree: &Tree, rope: &Rope) -> Vec<Symbol> {
 
     let mut symbols = Vec::new();
     let mut open: Vec<usize> = Vec::new(); // ends of enclosing definitions
-    for (range, kind, name) in found.into_iter().take(MAX_SYMBOLS) {
+    for (range, kind, names) in found.into_iter().take(MAX_SYMBOLS) {
         while open.last().is_some_and(|&end| end <= range.start) {
             open.pop();
         }
-        let text = rope.byte_slice(name.clone()).to_string();
+        // Pieces apart get a space between them; overlapping ones count once.
+        let mut text = String::new();
+        let mut end = names[0].start;
+        for piece in &names {
+            let start = piece.start.max(end);
+            if start >= piece.end {
+                continue;
+            }
+            if !text.is_empty() && start > end {
+                text.push(' ');
+            }
+            text.push_str(&rope.byte_slice(start..piece.end).to_string());
+            end = piece.end;
+        }
+        let offset = names[0].start;
         let mut name_text: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
         if name_text.len() > 100 {
             name_text.truncate(name_text.floor_char_boundary(100));
             name_text.push('…');
         }
         if !name_text.is_empty() {
-            symbols.push(Symbol { name: name_text, kind, offset: name.start, depth: open.len(), range: range.clone() });
+            symbols.push(Symbol { name: name_text, kind, offset, depth: open.len(), range: range.clone() });
         }
         open.push(range.end);
     }
@@ -1967,6 +1994,24 @@ mod tests {
         assert!(OutlineConfig::build(rust.clone(), "(line_comment) @annotation").unwrap().is_none());
         assert!(OutlineConfig::build(rust.clone(), "(function_item) @item").is_err());
         assert!(OutlineConfig::build(rust, "(function_item name: (identifier) @name) @item").unwrap().is_some());
+    }
+
+    /// Several `@name`s in one match make one name (Zed's Swift outline:
+    /// keyword, name, parameters), and its first piece gives the kind when
+    /// the query has no `@context`.
+    #[test]
+    fn outline_names_join_their_pieces() {
+        let rust: TsLanguage = tree_sitter_rust::LANGUAGE.into();
+        let query = "(function_item \"fn\" @name . name: (identifier) @name parameters: (parameters) @name) @item\n\
+                     (struct_item name: (type_identifier) @name) @item";
+        let config = OutlineConfig::build(rust.clone(), query).unwrap().unwrap();
+        let src = "fn greet(name: &str) {}\nstruct User;\n";
+        let rope = Rope::from_str(src);
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&rust).unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let found: Vec<_> = symbols_with(&config, &tree, &rope).into_iter().map(|s| (s.name, s.kind, s.offset)).collect();
+        assert_eq!(found, [("fn greet(name: &str)".to_string(), "function", 0), ("User".to_string(), "struct", 31)]);
     }
 
     #[test]
