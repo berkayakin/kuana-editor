@@ -143,10 +143,23 @@ pub fn by_name(name: &str) -> Option<&'static BuiltinDef> {
     BUILTINS.iter().find(|d| d.name.eq_ignore_ascii_case(name))
 }
 
-/// The built-in language a file name or extension says `path` is.
-pub fn for_path(path: &Path) -> Option<Language> {
+/// The built-in language a file name or extension says `path` is, with the
+/// length of the suffix that matched (so a longer extension suffix,
+/// `blade.php`, can win over a built-in's `php`).
+pub fn for_path_with_len(path: &Path) -> Option<(Language, usize)> {
     let name = path.file_name()?.to_string_lossy().to_lowercase();
-    BUILTINS.iter().find(|d| d.suffixes.iter().any(|s| name == *s || name.strip_suffix(s.as_str()).is_some_and(|rest| rest.ends_with('.')))).map(|d| d.language)
+    BUILTINS.iter().find_map(|d| Some((d.language, longest_suffix(&name, &d.suffixes)?)))
+}
+
+/// The length of the longest of `suffixes` that names a file called `name`:
+/// the whole name, or what follows a dot in it.
+pub fn longest_suffix<S: AsRef<str>>(name: &str, suffixes: &[S]) -> Option<usize> {
+    suffixes
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|s| name == *s || name.strip_suffix(*s).is_some_and(|rest| rest.ends_with('.')))
+        .map(str::len)
+        .max()
 }
 
 fn file(path: &str) -> Option<&'static str> {
@@ -291,6 +304,17 @@ fn crate_query(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The longest suffix wins, so an extension's `blade.php` beats the
+    /// built-in `php` (`Language::from_path` compares the two lengths).
+    #[test]
+    fn suffixes_match_whole_names_or_after_a_dot() {
+        assert_eq!(longest_suffix("welcome.blade.php", &["php", "blade.php"]), Some(9));
+        assert_eq!(longest_suffix("welcome.blade.php", &["php"]), Some(3));
+        assert_eq!(longest_suffix("justfile", &["justfile"]), Some(8));
+        assert_eq!(longest_suffix("xphp", &["php"]), None);
+        assert_eq!(for_path_with_len(Path::new("welcome.blade.php")), Some((Language::Php, 3)));
+    }
 
     #[test]
     fn every_built_in_language_loads_from_its_files() {
