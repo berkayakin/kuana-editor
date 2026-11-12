@@ -89,7 +89,9 @@ settings = { mylang = { formatting = "auto" } }
 
 # How the status bar's Install gets it (Kuana's key; checksummed like Kuana's own):
 # an npm package, a Go module, or a GitHub release asset per platform (the binary, gzipped,
-# or in a .zip or tarball such as cargo-dist's .tar.xz).
+# or in a .zip or tarball such as cargo-dist's .tar.xz). An asset name may hold {version}
+# (the release's tag without a leading v) or {tag}; a binary inside an archive stays where
+# it is, beside files it reads relative to itself (clangd's lib/clang headers).
 [language_servers.mylang-ls.installer]
 github = "someone/mylang-ls"
 assets = { "macos-aarch64" = "mylang-ls-darwin-arm64.gz", "linux-x86_64" = "mylang-ls-linux-x64.gz" }
