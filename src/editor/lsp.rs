@@ -86,7 +86,10 @@ const MAX_MATCHES: usize = 1000;
 const RESOLVE_PAUSE: Duration = Duration::from_millis(100);
 /// How long an accepted completion's resolve may hold back what follows it
 /// (see `accept_completion`); later, the edits it would bring are given up.
-const RESOLVE_WAIT: Duration = Duration::from_secs(1);
+/// Tests wait longer: on a busy CI machine the fake server's answer (it
+/// pauses 0.4 s) can take more than a second, and the test would then see
+/// the import given up rather than what it checks.
+const RESOLVE_WAIT: Duration = if cfg!(test) { Duration::from_secs(10) } else { Duration::from_secs(1) };
 /// Inlay hints are asked for by chunks of this many lines, those in and
 /// around the view: a big file's hints all at once cost the server (and
 /// Kuana) for lines nobody looks at.
