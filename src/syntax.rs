@@ -315,6 +315,18 @@ impl Highlight {
             "text.uri" => Highlight::Property,
             "text.reference" => Highlight::Function,
             "text.emphasis" => Highlight::Type,
+            // Zed's names for the same (Typst, XML and other extensions).
+            "title" | "markup.heading" | "emphasis.strong" | "markup.bold" | "markup.strong" => Highlight::Keyword,
+            "emphasis" | "markup.italic" => Highlight::Type,
+            "markup.raw" => Highlight::String,
+            "link_text" | "markup.link.text" => Highlight::Function,
+            "link_uri" | "markup.link" | "markup.link.url" => Highlight::Property,
+            "markup.quote" => Highlight::Comment,
+            "markup.list" => Highlight::Punctuation,
+            // Selectors (SCSS): classes and ids as tree-sitter-css's, pseudo-classes as attributes.
+            "selector.class" | "selector.id" => Highlight::Property,
+            "selector.pseudo" => Highlight::Attribute,
+            "selector" => Highlight::Tag,
             // CSS at-rules capture under their own names.
             "keyword" | "charset" | "import" | "keyframes" | "media" | "namespace" | "supports" => Highlight::Keyword,
             "string" => Highlight::String,
