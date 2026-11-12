@@ -5404,7 +5404,7 @@ impl Editor {
         let end = if hunk.new_rows.end >= line_count { self.doc.read(cx).len() } else { self.doc.read(cx).line_start(hunk.new_rows.end) };
         let mut text = hunk.old_text.clone();
         // Keep the file's final-newline state when the hunk reaches the end.
-        if end == self.doc.read(cx).len() && !self.doc.read(cx).rope().to_string().ends_with('\n') && text.ends_with('\n') {
+        if end == self.doc.read(cx).len() && !self.doc.read(cx).ends_with_newline() && text.ends_with('\n') {
             text.pop();
         }
         self.open_hunk = None;
