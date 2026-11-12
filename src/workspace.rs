@@ -47,7 +47,6 @@ use crate::{
     problems_panel::{ProblemsEvent, ProblemsPanel},
     results_panel::{ResultsEvent, ResultsPanel},
     database::{
-        dialog::{ConnectionDialog, ConnectionDialogEvent},
         results::{QueryResults, QueryResultsEvent},
         view::{DatabaseEvent, DatabaseView},
     },
@@ -635,7 +634,6 @@ enum Modal {
     Push(Entity<PushDialog>),
     Remotes(Entity<RemotesDialog>),
     Trust(Entity<crate::trust_dialog::TrustDialog>),
-    Connection(Entity<ConnectionDialog>),
     Merge(Entity<crate::merge_view::MergeView>),
 }
 
