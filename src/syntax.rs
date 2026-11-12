@@ -590,9 +590,18 @@ impl InjectionQuery {
         let Some(own) = own else { return false };
         (0..self.query.pattern_count()).all(|pattern| {
             let named = self.language.is_some_and(|ix| self.query.capture_quantifiers(pattern)[ix as usize] != CaptureQuantifier::Zero);
-            !named && set_language(&self.query, pattern).and_then(|name| injected(&name)).is_some_and(|(_, config, _)| std::ptr::eq(config, own))
+            !named
+                && !allows_self(&self.query, pattern)
+                && set_language(&self.query, pattern).and_then(|name| injected(&name)).is_some_and(|(_, config, _)| std::ptr::eq(config, own))
         })
     }
+}
+
+/// Whether a pattern may inject its host's own language: Kuana's
+/// `(#set! injection.self)` (C's macro bodies are C). Others are dropped,
+/// as Rust's macro bodies are.
+fn allows_self(query: &Query, pattern: usize) -> bool {
+    query.property_settings(pattern).iter().any(|p| p.key.as_ref() == "injection.self")
 }
 
 /// The language a pattern names with `#set! injection.language`.
@@ -1485,7 +1494,7 @@ fn find_injections(
             let Some((language, config, queries)) = named.or_else(set).and_then(|name| *known.entry(name).or_insert_with_key(|name| injected(name))) else {
                 continue;
             };
-            if own.is_some_and(|own| std::ptr::eq(own, config)) {
+            if own.is_some_and(|own| std::ptr::eq(own, config)) && !allows_self(&query.query, m.pattern_index) {
                 continue;
             }
             let ranges: Vec<Range<usize>> =
@@ -2037,6 +2046,26 @@ mod tests {
         assert!(OutlineConfig::build(rust.clone(), "(line_comment) @annotation").unwrap().is_none());
         assert!(OutlineConfig::build(rust.clone(), "(function_item) @item").is_err());
         assert!(OutlineConfig::build(rust, "(function_item name: (identifier) @name) @item").unwrap().is_some());
+    }
+
+    /// A pattern injecting the host's own language is dropped (Rust's macro
+    /// bodies) unless it says `injection.self` (C's macro bodies are C).
+    #[test]
+    fn self_injections_need_injection_self() {
+        let rust: TsLanguage = tree_sitter_rust::LANGUAGE.into();
+        let src = "// let x = 1;\nfn f() {}\n";
+        let rope = Rope::from_str(src);
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&rust).unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let own = config(Language::Rust);
+        let found = |query: &str| {
+            let queries = LanguageQueries::build(&rust, |f| (f == "injections.scm").then(|| query.to_string()), &mut Vec::new());
+            let query = queries.injections.as_ref().unwrap();
+            (query.injects_only(own), find_injections(query, own, &tree, &rope, &[0..src.len()]).len())
+        };
+        assert_eq!(found(r#"((line_comment) @injection.content (#set! injection.language "rust"))"#), (true, 0));
+        assert_eq!(found(r#"((line_comment) @injection.content (#set! injection.language "rust") (#set! injection.self))"#), (false, 1));
     }
 
     /// Several `@name`s in one match make one name (Zed's Swift outline:
