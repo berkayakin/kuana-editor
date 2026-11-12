@@ -218,6 +218,15 @@ pub fn grammar(language: Language) -> Option<TsLanguage> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Highlight(u16);
 
+/// See `Highlight::severity`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Severity {
+    Error,
+    Warning,
+    Info,
+    Hint,
+}
+
 /// The base kinds' capture names, in the order of their `Highlight` ids.
 const BASE: [&str; 17] = [
     "", "keyword", "string", "number", "constant", "function", "function.method", "property", "type", "variable",
@@ -299,6 +308,22 @@ impl Highlight {
                 None => return Highlight::None,
             }
         }
+    }
+
+    /// Severity names (a log's levels, TODO comments, a grammar's `@error`),
+    /// which take the theme's diagnostic colors rather than a syntax color.
+    /// Only names made of these words; the most specific one wins
+    /// (`hint.info` is info).
+    pub(crate) fn severity(name: &str) -> Option<Severity> {
+        let word = |w: &str| match w {
+            "error" | "danger" => Some(Severity::Error),
+            "warning" | "warn" => Some(Severity::Warning),
+            "info" | "note" => Some(Severity::Info),
+            "hint" => Some(Severity::Hint),
+            _ => None,
+        };
+        let words: Option<Vec<Severity>> = name.split('.').map(word).collect();
+        words?.last().copied()
     }
 
     /// The base kind for exactly this name (one level of a dotted name).
