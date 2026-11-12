@@ -44,7 +44,7 @@ const ZED_LANGUAGE_KEYS: &[&str] = &[
     "collapsed_placeholder", "documentation", "documentation_comment",
     "wrap_characters", "jsx_tag_auto_close", "hidden", "auto_indent_using_last_non_empty_line", "auto_indent_on_paste", "overrides",
     "soft_wrap", "ignored_import_segments", "import_path_strip_regex", "debuggers", "rewrap_prefixes", "unordered_list", "ordered_list",
-    "task_list", "libraries",
+    "task_list", "libraries", "modeline_aliases",
 ];
 
 /// Captures with no color by design (spell-checking regions, predicates' helpers).
