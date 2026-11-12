@@ -1031,6 +1031,14 @@ mod tests {
         // A more specific base kind wins over a shorter name the theme colors.
         assert_eq!(color("variable.builtin"), Hsla::from(theme.syntax.variable_builtin));
         assert_eq!(color("function.method.call"), Hsla::from(theme.syntax.method));
+        // Zed's markup and selector names (Typst, XML, SCSS) get base colors.
+        assert_eq!(color("title"), hex("#111111"));
+        assert_eq!(color("emphasis.strong"), hex("#111111"));
+        assert_eq!(color("emphasis"), Hsla::from(theme.syntax.type_));
+        assert_eq!(color("markup.raw"), Hsla::from(theme.syntax.string));
+        assert_eq!(color("link_uri"), Hsla::from(theme.syntax.property));
+        assert_eq!(color("selector.class"), Hsla::from(theme.syntax.property));
+        assert_eq!(color("selector.pseudo"), Hsla::from(theme.syntax.attribute));
         // A misspelled base name is still reported.
         assert!(errors.iter().any(|e| e.contains("keywrd") && e.contains("keyword")), "{errors:?}");
     }
