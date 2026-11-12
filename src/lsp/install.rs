@@ -53,16 +53,20 @@ enum Source {
 enum Asset {
     Fn(fn() -> Option<String>),
     /// By `<os>-<arch>` as Rust names them: "macos-aarch64", "linux-x86_64".
+    /// A name may hold `{version}` (the release's tag without a leading `v`,
+    /// as clangd's `clangd-mac-23.1.0.zip`) or `{tag}`.
     PerPlatform(Vec<(String, String)>),
 }
 
 impl Asset {
-    fn name(&self) -> Option<String> {
+    /// This computer's asset in the release tagged `tag`.
+    fn name(&self, tag: &str) -> Option<String> {
         match self {
             Asset::Fn(asset) => asset(),
             Asset::PerPlatform(assets) => {
                 let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-                assets.iter().find(|(p, _)| *p == platform).map(|(_, name)| name.clone())
+                let name = assets.iter().find(|(p, _)| *p == platform).map(|(_, name)| name)?;
+                Some(name.replace("{version}", tag.strip_prefix('v').unwrap_or(tag)).replace("{tag}", tag))
             }
         }
     }
@@ -177,11 +181,16 @@ impl Installer {
         Some(servers_dir()?.join(name))
     }
 
-    /// The command inside a version folder.
+    /// The command inside a version folder: at its top, else where an
+    /// archive put it (clangd's `clangd_23.1.0/bin/clangd` stays beside the
+    /// `lib/clang` headers it finds relative to itself).
     fn binary(&self, dir: &Path) -> PathBuf {
         match self.source {
             Source::Npm { .. } => dir.join("node_modules").join(".bin").join(self.command),
-            _ => dir.join(exe_name(self.command)),
+            _ => {
+                let top = dir.join(exe_name(self.command));
+                if top.is_file() { top } else { find_file(dir, &exe_name(self.command)).unwrap_or(top) }
+            }
         }
     }
 }
@@ -281,10 +290,12 @@ fn folder_name(version: &str) -> String {
 }
 
 fn install_github(installer: &Installer, home: &Path, repo: &str, asset: &Asset) -> Result<(), String> {
-    let asset = asset.name().ok_or_else(|| format!("{} has no build for this computer", installer.command))?;
+    let no_build = || format!("{} has no build for this computer", installer.command);
+    asset.name("").ok_or_else(no_build)?;
     let release: Value = serde_json::from_slice(&crate::updater::fetch(&format!("https://api.github.com/repos/{repo}/releases/latest"))?)
         .map_err(|e| format!("GitHub's answer didn't parse: {e}"))?;
     let tag = release["tag_name"].as_str().ok_or("GitHub listed no release")?;
+    let asset = asset.name(tag).ok_or_else(no_build)?;
     let found = release["assets"].as_array().into_iter().flatten().find(|a| a["name"].as_str() == Some(asset.as_str()));
     let found = found.ok_or_else(|| format!("{repo}'s latest release has no {asset}"))?;
     let url = found["browser_download_url"].as_str().ok_or("the release lists no download address")?;
@@ -303,15 +314,13 @@ fn install_github(installer: &Installer, home: &Path, repo: &str, asset: &Asset)
         return Err(format!("{asset} didn't match its checksum"));
     }
     let installed = install_into(home, &version, |dir| {
-        let binary = installer.binary(dir);
+        let mut binary = installer.binary(dir);
         if is_archive(&asset) {
             unzip(&temp, dir)?;
-            // The binary may sit in a folder inside the archive.
+            // The binary may sit in a folder inside the archive, beside files
+            // it reads relative to itself: it stays there (`binary` finds it).
             let name = exe_name(installer.command);
-            let inside = find_file(dir, &name).ok_or_else(|| format!("{asset} has no {name}"))?;
-            if inside != binary {
-                std::fs::rename(&inside, &binary).map_err(|e| e.to_string())?;
-            }
+            binary = find_file(dir, &name).ok_or_else(|| format!("{asset} has no {name}"))?;
         } else if asset.ends_with(".gz") {
             let mut input = flate2::read::GzDecoder::new(std::fs::File::open(&temp).map_err(|e| e.to_string())?);
             let mut output = std::fs::File::create(&binary).map_err(|e| e.to_string())?;
@@ -586,9 +595,24 @@ mod tests {
         let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
         let github = Installer::from_manifest("x", &table(&format!("github = \"me/x\"\nassets = {{ \"{platform}\" = \"x.gz\" }}"))).unwrap();
         match &github.source {
-            Source::GitHub { repo, asset } => assert_eq!((*repo, asset.name()), ("me/x", Some("x.gz".to_string()))),
+            Source::GitHub { repo, asset } => assert_eq!((*repo, asset.name("v1")), ("me/x", Some("x.gz".to_string()))),
             _ => panic!("not GitHub"),
         }
+        // A version in the asset's name (clangd's): the tag without its `v`.
+        let versioned = Installer::from_manifest("clangd", &table(&format!("github = \"clangd/clangd\"\nassets = {{ \"{platform}\" = \"clangd-mac-{{version}}.zip\" }}"))).unwrap();
+        match &versioned.source {
+            Source::GitHub { asset, .. } => {
+                assert_eq!(asset.name("23.1.0").as_deref(), Some("clangd-mac-23.1.0.zip"));
+                assert_eq!(asset.name("v2.0").as_deref(), Some("clangd-mac-2.0.zip"));
+            }
+            _ => panic!("not GitHub"),
+        }
+        // An archive's binary is found where it was unpacked, beside its files.
+        let dir = std::env::temp_dir().join(format!("kuana-install-nested-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("clangd_23/bin")).unwrap();
+        std::fs::write(dir.join("clangd_23/bin").join(exe_name("clangd")), b"").unwrap();
+        assert_eq!(versioned.binary(&dir), dir.join("clangd_23/bin").join(exe_name("clangd")));
+        std::fs::remove_dir_all(&dir).ok();
         assert!(Installer::from_manifest("x", &table(r#"github = "me/x""#)).is_err());
         assert!(Installer::from_manifest("x", &table("")).is_err());
     }
@@ -671,6 +695,31 @@ mod tests {
         let path = installed("oxie").expect("installed");
         let output = std::process::Command::new(&path).arg("version").output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        std::fs::remove_dir_all(&config).ok();
+    }
+
+    /// The C/C++ extension's installer: a versioned asset name, and clangd
+    /// left in its `bin/` beside the `lib/clang/<v>/include` headers it reads.
+    /// `cargo test -- --ignored installs_clangd_beside_its_headers`.
+    #[test]
+    #[ignore = "downloads clangd (~100 MB) from GitHub"]
+    fn installs_clangd_beside_its_headers() {
+        let config = std::env::temp_dir().join(format!("kuana-install-clangd-{}", std::process::id()));
+        // SAFETY: tests that touch XDG_CONFIG_HOME run alone (--ignored, one test).
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config) };
+        let manifest: toml::Table = toml::from_str(
+            r#"github = "clangd/clangd"
+            assets = { "macos-aarch64" = "clangd-mac-{version}.zip", "macos-x86_64" = "clangd-mac-{version}.zip", "linux-x86_64" = "clangd-linux-{version}.zip", "windows-x86_64" = "clangd-windows-{version}.zip" }"#,
+        )
+        .unwrap();
+        let clangd: &'static Installer = Box::leak(Box::new(Installer::from_manifest("clangd", &manifest).unwrap()));
+        set_extension_installers(vec![clangd]);
+        install(clangd).unwrap();
+        let path = installed("clangd").expect("installed");
+        assert_eq!(path.parent().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned()).as_deref(), Some("bin"), "{path:?}");
+        let clang = path.parent().unwrap().parent().unwrap().join("lib/clang");
+        let headers = std::fs::read_dir(&clang).unwrap().flatten().map(|v| v.path().join("include/stddef.h")).find(|h| h.is_file());
+        assert!(headers.is_some(), "no lib/clang/<version>/include/stddef.h beside {path:?}");
         std::fs::remove_dir_all(&config).ok();
     }
 }
