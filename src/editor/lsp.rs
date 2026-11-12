@@ -422,6 +422,18 @@ impl Editor {
         self.lsp_servers(cx).into_iter().next()
     }
 
+    /// The C/C++ header or source paired with this file, as clangd knows it
+    /// (`textDocument/switchSourceHeader`, its own request): None without
+    /// clangd, Some(None) when it knows none.
+    pub fn clangd_counterpart(&self, cx: &App) -> Option<gpui::Task<Option<PathBuf>>> {
+        let server = self.lsp_servers(cx).into_iter().find(|s| s.id.contains("clangd") || s.name.starts_with("clangd"))?;
+        let params = self.text_document(cx)?;
+        Some(cx.background_executor().spawn(async move {
+            let answer = server.request("textDocument/switchSourceHeader", params).await.ok()?;
+            crate::lsp::protocol::uri_to_path(answer.as_str()?)
+        }))
+    }
+
     /// The first server that has `capability` (`hoverProvider`…).
     pub(super) fn lsp_server_with(&self, capability: &str, cx: &gpui::App) -> Option<Arc<Server>> {
         self.lsp_servers(cx).into_iter().find(|s| s.capability(capability))

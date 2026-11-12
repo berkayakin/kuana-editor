@@ -21,7 +21,7 @@ use crate::{
     settings::{BaseKeymap, strip_jsonc},
     theme::{self, config_dir},
     workspace::{
-        CloseAllTabs, CloseOtherTabs, CloseTab, CloseTerminal, NextPane, PreviousPane, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPaneDown, Rerun, RunConfiguration, StopRun, SplitDown, SplitRight, TogglePinTab, DecreaseFontSize, NewTerminal, ToggleTerminal, FileStructure, Find, IncreaseFontSize, OpenKeymap, OpenSettings, ResetFontSize, RestartLanguageServer, CopilotSignIn, CopilotSignOut, FindAction, FindInFiles, FindNext, FindPrevious, GoToFile, GoToLine, OpenSettingsFile,
+        CloseAllTabs, CloseOtherTabs, CloseTab, CloseTerminal, NextPane, PreviousPane, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPaneDown, Rerun, RunConfiguration, StopRun, SplitDown, SplitRight, TogglePinTab, DecreaseFontSize, NewTerminal, ToggleTerminal, FileStructure, Find, IncreaseFontSize, OpenKeymap, OpenSettings, ResetFontSize, RestartLanguageServer, CopilotSignIn, CopilotSignOut, FindAction, FindInFiles, FindNext, FindPrevious, GoToFile, GoToLine, OpenSettingsFile, SwitchHeaderSource,
         CloseWindow, MinimizeWindow, ZoomWindow, NewFile, NewWindow, NextTab, OpenFile, OpenFolder, OpenFolderInThisWindow,
         PrevTab, Quit, RecentFiles, RecentProjects, RecentTab, RecentTabBack, Replace,
         GitBranches, GitStash, ManageRemotes, GitClone, GitFetch, GitInit, GitPull, GitPush, GitSync, GitUndoCommit, OpenRemote, OpenThemesFolder, OpenSnippetsFolder, ReloadThemes, ReplaceInFiles,
@@ -283,6 +283,8 @@ fn jetbrains(mac: bool) -> Vec<KeyBinding> {
         KeyBinding::new("secondary-shift-+", ExpandAllRegions, e),
         KeyBinding::new("secondary-shift-a", FindAction, None),
         KeyBinding::new("secondary-p", GoToFile, None),
+        // CLion's Go to Related Symbol (header ↔ source).
+        KeyBinding::new(if mac { "ctrl-cmd-up" } else { "alt-f10" }, SwitchHeaderSource, e),
         KeyBinding::new("secondary-shift-m", ToggleProblems, None),
         // "Quick Switch Scheme".
         KeyBinding::new("ctrl-`", SelectTheme, None),
@@ -392,6 +394,8 @@ fn vscode(mac: bool) -> Vec<KeyBinding> {
         KeyBinding::new("secondary-shift-p", FindAction, None),
         KeyBinding::new("f1", FindAction, None),
         KeyBinding::new("secondary-p", GoToFile, None),
+        // The clangd extension's Switch Between Source/Header.
+        KeyBinding::new("alt-o", SwitchHeaderSource, e),
         KeyBinding::new("ctrl-g", GoToLine, None),
         KeyBinding::new("secondary-shift-o", FileStructure, None),
         KeyBinding::new("secondary-shift-h", ReplaceInFiles, None),
@@ -715,6 +719,7 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Find Next Occurrence", FindNext),
         a("Find Previous Occurrence", FindPrevious),
         a("Go to File", GoToFile),
+        a("Switch Header/Source", SwitchHeaderSource),
         a("Welcome Setup", WelcomeSetup),
         a("Go to Line:Column", GoToLine),
         a("File Structure", FileStructure),
