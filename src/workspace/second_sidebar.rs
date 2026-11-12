@@ -8,9 +8,6 @@
 
 use super::*;
 
-/// The header's row, as tall as the Commit view's toolbar.
-const HEADER_HEIGHT: f32 = 30.;
-
 /// The moved views `state.json` remembers, without ones that are gone or
 /// listed twice.
 pub(super) fn restore_moved(saved: &[String]) -> Vec<SidebarMode> {
@@ -255,7 +252,7 @@ impl Workspace {
         };
         let back_side = if self.sidebar_on_right(cx) { ("Right", Icon::PanelRight) } else { ("Left", Icon::PanelLeft) };
         let back = format!("Move {} Back to {} Side", mode.label(), back_side.0);
-        let row = || div().flex().items_center().gap_0p5().h(px(HEADER_HEIGHT)).px_1().flex_shrink_0().border_b_1().border_color(theme.border_subtle);
+        let row = || crate::ui::view_header().gap_0p5();
         let buttons = [
             small_button("second-back", back_side.1, back.into()).on_click(cx.listener(move |ws, _, window, cx| ws.move_view_back(mode, window, cx))),
             small_button("second-close", Icon::X, "Close".into()).on_click(cx.listener(|ws, _, window, cx| ws.close_second_sidebar(window, cx))),
@@ -294,8 +291,8 @@ impl Workspace {
             vec![name, div().flex_1().into_any_element()]
         };
         // Beside the view's name, the Commit view's toolbar is a row of its own.
-        let toolbar = (commit_toolbar && !toolbar_leads).then(|| row().mb_1().children(self.render_git_toolbar(cx)));
-        let header = row().when(toolbar_leads, |el| el.mb_1()).children(lead).children(buttons);
+        let toolbar = (commit_toolbar && !toolbar_leads).then(|| row().children(self.render_git_toolbar(cx)));
+        let header = row().children(lead).children(buttons);
         div()
             .flex()
             .flex_col()

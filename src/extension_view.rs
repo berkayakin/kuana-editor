@@ -392,16 +392,7 @@ impl Render for ExtensionView {
             .menu(&place, |_| true)
             .map(|c| (c.id.clone(), c.title.clone(), c.icon.clone().unwrap_or_else(|| "icons/more.svg".into())))
             .collect();
-        let header = div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .h(px(30.))
-            .px_1()
-            .mb_1()
-            .flex_shrink_0()
-            .border_b_1()
-            .border_color(theme.border_subtle)
+        let header = crate::ui::view_header()
             .child(
                 div()
                     .flex_1()

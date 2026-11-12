@@ -692,7 +692,7 @@ impl Render for ResultsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
         let pinned = self.tabs.get(self.active).is_some_and(|t| t.pinned);
-        let header = crate::ui::panel_header(&theme)
+        let header = crate::ui::panel_header()
             .child(div().flex_shrink_0().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_muted).child("FIND"))
             .child(self.render_tabs(cx))
             .child(div().flex_1())

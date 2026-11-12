@@ -469,7 +469,7 @@ impl Render for GitLog {
             Some(path) => format!("HISTORY · {}", path.rsplit('/').next().unwrap_or(path)).into(),
             None => "GIT LOG".into(),
         };
-        let header = crate::ui::panel_header(&theme)
+        let header = crate::ui::panel_header()
             .gap_1()
             .child(div().mr_1().flex_shrink_0().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_muted).child(title))
             .when(self.path.is_some(), |el| {

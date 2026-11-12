@@ -124,7 +124,7 @@ impl Render for ProblemsPanel {
         // Information and hints aren't problems.
         let diag_count = doc.map_or(0, |d| d.severity_count(Severity::Error) + d.severity_count(Severity::Warning));
 
-        let header = crate::ui::panel_header(&theme)
+        let header = crate::ui::panel_header()
             .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_muted).child("PROBLEMS"))
             .child(
                 div()

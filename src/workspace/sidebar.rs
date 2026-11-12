@@ -60,17 +60,7 @@ impl Workspace {
         let theme = Theme::get(cx).clone();
         // The Commit view has a toolbar (its branch).
         let header = (self.sidebar_mode == SidebarMode::Commit && self.repo.is_some()).then(|| {
-            div()
-                .flex()
-                .items_center()
-                .gap_0p5()
-                .h(px(30.))
-                .px_1()
-                .mb_1()
-                .flex_shrink_0()
-                .border_b_1()
-                .border_color(theme.border_subtle)
-                .children(self.render_git_toolbar(cx))
+            crate::ui::view_header().gap_0p5().children(self.render_git_toolbar(cx))
         });
 
         let body = self.render_view_body(self.sidebar_mode, cx);

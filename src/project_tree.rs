@@ -1048,16 +1048,9 @@ impl Render for ProjectTree {
                 None => String::new(),
             };
             // A header over the tree, as the Commit view's toolbar is over its list.
-            div()
-                .flex()
-                .flex_shrink_0()
-                .items_center()
+            crate::ui::view_header()
                 .gap_1p5()
-                .h(px(30.))
                 .px_2()
-                .mb_1()
-                .border_b_1()
-                .border_color(theme.border_subtle)
                 // A click around the field leaves the keyboard in it.
                 .on_mouse_down(
                     MouseButton::Left,

@@ -293,6 +293,12 @@ Everything is one binary crate. The window's root view is `Workspace`; every ope
   one under another yet. An extension view that shows without its entity (restored from the last session, in
   either sidebar) gets it in `make_shown_extension_views` (from `render`). View tabs carry no tooltip while a
   context menu is open: a right-click's opens under the pointer.
+- **Panel headers:** every panel on an island starts with the same row, `ui::panel_header()` (bottom panels:
+  Problems, Find, Git log, Debug, Database, extensions' output) or `ui::view_header()` (the sidebars' views: the
+  Commit toolbar, Database, an extension's view, the tree's speed search, the second sidebar's header):
+  `PANEL_HEADER` (32pt) tall, content centered, an 11pt semibold muted title in capitals, 24–26pt buttons, the
+  close button last. No line under it and no margin after it: with the island's inset above and a line below, the
+  row read as off-center. Never build a header row by hand.
 - Rows and menu items are full-width hover targets; menus are compact (24px rows).
 - Every scrolling list or pane gets an overlay scrollbar: give it a scroll handle (`track_scroll`), put it in a
   `relative` parent as tall as it, and add `ui::scrollbar(id, &handle, cx)` (`ui::list_scrollbar` for a
