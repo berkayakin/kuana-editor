@@ -235,7 +235,7 @@ impl Workspace {
         let theme = Theme::get(cx).clone();
         let views = self.second_views();
         let lone = views.len() == 1;
-        let commit_toolbar = mode == SidebarMode::Commit && self.repo.is_some();
+        let commit_toolbar = mode == SidebarMode::Commit && self.has_repo(cx);
         let small_button = |id: &'static str, icon: Icon, tip: SharedString| {
             div()
                 .id(id)

@@ -68,7 +68,7 @@ impl Workspace {
         }
 
         // Git, when the file is in the repository.
-        if let (Some(path), Some(repo)) = (path.as_ref(), self.repo.as_ref())
+        if let (Some(path), Some(repo)) = (path.as_ref(), self.repo(cx).as_ref())
             && path.starts_with(repo)
         {
             add(MenuEntry::Separator, None);
@@ -93,7 +93,7 @@ impl Workspace {
                 let (entry, action) = run(MenuEntry::item("Rollback Lines", Icon::Undo), Box::new(editor::RollbackHunk));
                 add(entry, action);
             }
-            if let Some(f) = self.git_status.files.iter().find(|f| &f.path == path) {
+            if let Some(f) = self.git_status(cx).files.iter().find(|f| &f.path == path) {
                 add(
                     MenuEntry::item("Show Diff", Icon::GitCompare),
                     Some(MenuAction::Tree(TreeAction::ShowDiff(f.clone(), f.unstaged.is_none()))),
@@ -205,7 +205,7 @@ impl Workspace {
     pub(super) fn open_commit_menu(&mut self, entry: git::LogEntry, position: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         self.close_modal(window, cx);
         let sha = entry.sha.clone();
-        let is_head = self.git_status.head_oid.as_deref() == Some(sha.as_str());
+        let is_head = self.git_status(cx).head_oid.as_deref() == Some(sha.as_str());
         let mut entries: Vec<MenuEntry> = Vec::new();
         let mut actions: Vec<Option<MenuAction>> = Vec::new();
         let mut add = |entry: MenuEntry, action: Option<TreeAction>| {
@@ -378,8 +378,8 @@ impl Workspace {
         // Untracked files stay out of a stash unless asked for (they're often
         // build output, which comes back and blocks the stash's own copy);
         // when they're all there is to stash, they're in from the start.
-        let untracked = self.git_status.untracked().count();
-        let only_untracked = untracked == self.git_status.files.len();
+        let untracked = self.git_status(cx).untracked().count();
+        let only_untracked = untracked == self.git_status(cx).files.len();
         let dialog = cx.new(|cx| {
             let dialog = InputDialog::new(title, icon, hint, &initial, select, window, cx);
             match stash {
@@ -412,9 +412,9 @@ impl Workspace {
     }
 
     /// `name` as a branch name (spaces become dashes), if Git accepts it.
-    fn branch_name(&self, name: &str) -> Result<String, String> {
+    fn branch_name(&self, name: &str, cx: &App) -> Result<String, String> {
         let name = name.replace(char::is_whitespace, "-");
-        match &self.repo {
+        match &self.repo(cx) {
             Some(repo) if !git::valid_branch_name(repo, &name) => Err(format!("“{name}” isn't a valid branch name")),
             _ => Ok(name),
         }
@@ -487,8 +487,8 @@ impl Workspace {
                 GitPrompt::Stash => GitOp::Stash { message: Some(name.to_string()).filter(|n| !n.is_empty()), untracked: checked },
                 _ if name.is_empty() => return Err("Enter a name".into()),
                 GitPrompt::RenameBranch(from) if from == name => return Ok(()),
-                GitPrompt::RenameBranch(from) => GitOp::RenameBranch { from, to: self.branch_name(name)? },
-                GitPrompt::BranchAt(sha) => GitOp::BranchAt { name: self.branch_name(name)?, sha },
+                GitPrompt::RenameBranch(from) => GitOp::RenameBranch { from, to: self.branch_name(name, cx)? },
+                GitPrompt::BranchAt(sha) => GitOp::BranchAt { name: self.branch_name(name, cx)?, sha },
                 GitPrompt::TagAt(sha) => GitOp::TagAt { name: name.to_string(), sha },
                 GitPrompt::Reword { subject, .. } if subject == name => return Ok(()),
                 GitPrompt::Reword { sha, .. } => GitOp::EditHistory { sha, edit: git::HistoryEdit::Reword(name.to_string()) },
@@ -797,7 +797,7 @@ impl Workspace {
         self.reveal_in_tree(&first, cx);
         self.after_fs_change(&added, cx);
         self.schedule_session_save(cx);
-        let Some(repo) = self.repo.clone().filter(|r| added.iter().all(|p| p.starts_with(r))) else { return };
+        let Some(repo) = self.repo(cx).filter(|r| added.iter().all(|p| p.starts_with(r))) else { return };
         let ignored: Vec<bool> = added.iter().map(|p| self.ignore.as_ref().is_some_and(|i| i.matched_path_or_any_parents(p, p.is_dir()).is_ignore())).collect();
         let added: Vec<PathBuf> = added.into_iter().zip(ignored).filter(|(_, ignored)| !ignored).map(|(p, _)| p).collect();
         if added.is_empty() {
@@ -1002,7 +1002,7 @@ impl Workspace {
     }
 
     pub(super) fn add_to_gitignore(&mut self, rel: String, cx: &mut Context<Self>) {
-        let Some(repo) = self.repo.clone() else { return };
+        let Some(repo) = self.repo(cx) else { return };
         let file = repo.join(".gitignore");
         let entry = if repo.join(&rel).is_dir() { format!("/{rel}/") } else { format!("/{rel}") };
         let existing = std::fs::read_to_string(&file).unwrap_or_default();

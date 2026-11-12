@@ -134,9 +134,9 @@ impl Workspace {
         }
 
         // Git actions for this file, or every changed file inside this folder.
-        if let Some(repo) = self.repo.clone().filter(|r| path.starts_with(r)) {
+        if let Some(repo) = self.repo(cx).filter(|r| path.starts_with(r)) {
             let files: Vec<FileStatus> = self
-                .git_status
+                .git_status(cx)
                 .files
                 .iter()
                 .filter(|f| if is_dir { f.path.starts_with(&path) } else { f.path == path })

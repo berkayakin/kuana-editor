@@ -6,7 +6,7 @@
 
 use ignore::gitignore::Gitignore;
 
-use super::{git_ops::StatusWork, *};
+use super::*;
 use crate::lsp::{FileWatchers, ServerKey};
 
 impl Workspace {
@@ -53,7 +53,7 @@ impl Workspace {
         Some(WatchState {
             root,
             ignore: self.ignore.clone(),
-            git_ignored: self.git_ignored.clone(),
+            git_ignored: self.git.read(cx).ignored().clone(),
             tree_read: self.tree.read(cx).read_folders(),
             open,
             watchers: self.lsp.read(cx).file_watchers(),

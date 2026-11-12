@@ -178,13 +178,13 @@ impl Workspace {
             Text { width: f32::from(width), chars: text.chars().count().max(1) }
         };
         let project = self.root.as_deref().map(|root| measure(&folder_name(root), FontWeight::SEMIBOLD));
-        let branch = (self.repo.is_some() && !icons).then(|| measure(&self.branch_label(), FontWeight::NORMAL));
+        let branch = (self.has_repo(cx) && !icons).then(|| measure(&self.branch_label(cx), FontWeight::NORMAL));
         let restricted = (self.restricted(cx) && !icons).then(|| RESTRICTED_LABEL_CHROME + measure("Restricted Mode", FontWeight::NORMAL).width);
         // As icons, their room is kept aside and the project fitted to the rest.
-        let branch_icon = self.repo.is_some() && icons;
+        let branch_icon = self.has_repo(cx) && icons;
         let restricted_icon = self.restricted(cx) && icons;
         let room = room - [branch_icon, restricted_icon].iter().filter(|&&on| on).count() as f32 * (ICON_CHIP + CHIP_GAP);
-        let counts = self.repo.is_some() && (self.git_status.ahead > 0 || self.git_status.behind > 0);
+        let counts = self.has_repo(cx) && (self.git_status(cx).ahead > 0 || self.git_status(cx).behind > 0);
         let mut fit = fit_chips(ChipNeeds {
             room,
             project,
@@ -208,7 +208,7 @@ impl Workspace {
                 Some(chars) => project_chrome + self.root.as_deref().map_or(0., |root| name(folder_name(root), chars, FontWeight::SEMIBOLD)),
                 None => PROJECT_MONOGRAM,
             }),
-            fit.branch.map(|chars| chars.map_or(ICON_CHIP, |chars| BRANCH_CHROME + name(self.branch_label(), chars, FontWeight::NORMAL))),
+            fit.branch.map(|chars| chars.map_or(ICON_CHIP, |chars| BRANCH_CHROME + name(self.branch_label(cx), chars, FontWeight::NORMAL))),
             fit.counts.then_some(SYNC_COUNTS_WIDTH),
             fit.restricted.map(|label| if label { restricted.unwrap_or(ICON_CHIP) } else { ICON_CHIP }),
         ];
@@ -363,7 +363,7 @@ impl Workspace {
     /// `chars`: the most of its name shown; `None`, just its icon.
     pub(super) fn render_branch_chip(&self, chars: Option<usize>, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = crate::ui::chrome_theme(Theme::get(cx));
-        let branch = self.branch_label();
+        let branch = self.branch_label(cx);
         // Just the icon in the narrowest windows; the tooltip names the branch.
         let tip = if chars.is_some() { "Branches…".to_string() } else { format!("{branch} · Branches…") };
         // Uncommitted changes aren't marked here: the Commit tab counts them.
@@ -392,9 +392,9 @@ impl Workspace {
     /// Commits to push and to pull, beside the branch pill: Push… when there
     /// are some to push, else Update Project.
     pub(super) fn render_sync_counts(&self, window: &Window, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let s = &self.git_status;
+        let s = &self.git_status(cx);
         let (ahead, behind) = (s.ahead, s.behind);
-        if self.repo.is_none() || (ahead == 0 && behind == 0) {
+        if !self.has_repo(cx) || (ahead == 0 && behind == 0) {
             return None;
         }
         let theme = crate::ui::chrome_theme(Theme::get(cx));
@@ -479,8 +479,8 @@ impl Workspace {
     }
 
     /// The checked-out branch, or what HEAD is when it isn't one.
-    pub(super) fn branch_label(&self) -> String {
-        let s = &self.git_status;
+    pub(super) fn branch_label(&self, cx: &App) -> String {
+        let s = &self.git_status(cx);
         s.branch.clone().unwrap_or_else(|| match &s.head_oid {
             Some(oid) => format!("{} (detached)", &oid[..7.min(oid.len())]),
             None => "No commits yet".into(),

@@ -261,7 +261,7 @@ impl Workspace {
                     .child(counter(Icon::CircleX, errors, theme.error.into()))
                     .child(counter(Icon::TriangleAlert, warnings, theme.warning.into())),
             )
-            .when_some(self.git_busy.label().cloned(), |el, busy| {
+            .when_some(self.git.read(cx).busy().label().cloned(), |el, busy| {
                 el.child(
                     div()
                         .flex()

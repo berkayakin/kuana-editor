@@ -408,7 +408,7 @@ impl Workspace {
         let section = div().flex().flex_col().gap_2().child(section_label("Git", &theme));
         let body_text = |text: String| div().text_size(px(12.)).text_color(theme.text_dim).child(text);
 
-        if self.repo.is_none() {
+        if !self.has_repo(cx) {
             let (title, detail) = match self.root.as_deref() {
                 Some(root) => ("Not a Git repository", format!("Start tracking changes in {} with Git.", folder_name(root))),
                 None => ("No repository open", "Clone a repository, or open a folder that's already under version control.".to_string()),
@@ -449,10 +449,10 @@ impl Workspace {
             .into_any_element();
         };
 
-        let status = &self.git_status;
+        let status = &self.git_status(cx);
         let branch = status.branch.clone().unwrap_or_else(|| "detached HEAD".into());
         let changes = status.files.len();
-        let web = self.git_remote.as_deref().and_then(git::web_url);
+        let web = self.git.read(cx).remote().and_then(git::web_url);
         let counter = |icon: Icon, n: u32, tip: &'static str, id: &'static str| {
             div()
                 .id(id)
@@ -509,9 +509,9 @@ impl Workspace {
                                 .child(format!("{changes} changed file{}", if changes == 1 { "" } else { "s" }))
                         }
                     })
-                    .when_some(self.git_busy.label().cloned(), |el, busy| el.child(div().flex_1()).child(div().text_color(theme.accent).child(busy))),
+                    .when_some(self.git.read(cx).busy().label().cloned(), |el, busy| el.child(div().flex_1()).child(div().text_color(theme.accent).child(busy))),
             )
-            .when_some(self.last_commit.clone(), |el, c| {
+            .when_some(self.git.read(cx).last_commit().cloned(), |el, c| {
                 el.child(
                     div()
                         .flex()

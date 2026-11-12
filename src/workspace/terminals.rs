@@ -48,7 +48,7 @@ impl Workspace {
     pub(super) fn show_file_history(&mut self, _: &ShowFileHistory, window: &mut Window, cx: &mut Context<Self>) {
         let rel = self.active_editor(cx).and_then(|e| {
             let path = e.read(cx).doc.read(cx).path.clone()?;
-            Some(path.strip_prefix(self.repo.as_ref()?).ok()?.to_string_lossy().replace('\\', "/"))
+            Some(path.strip_prefix(self.repo(cx).as_ref()?).ok()?.to_string_lossy().replace('\\', "/"))
         });
         let Some(rel) = rel else {
             self.toast(ToastKind::Info, "This file isn't in a Git repository", None, cx);
@@ -66,7 +66,7 @@ impl Workspace {
     }
 
     pub(super) fn open_git_log(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.repo.is_none() {
+        if !self.has_repo(cx) {
             self.toast(ToastKind::Info, "Not a Git repository", None, cx);
             return;
         }
