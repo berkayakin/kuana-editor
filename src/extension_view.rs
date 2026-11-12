@@ -302,7 +302,12 @@ impl ExtensionView {
         (path.extension().is_some_and(|e| e == "svg") && path.is_file()).then(|| format!("{FILE_ICON_PREFIX}{}", path.display()).into())
     }
 
+    /// A row, inset and rounded like the file tree's.
     fn render_row(&self, ix: usize, focused: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div().w_full().px_1().child(self.row_content(ix, focused, cx)).into_any_element()
+    }
+
+    fn row_content(&self, ix: usize, focused: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::get(cx);
         let row = &self.rows[ix];
         let color = |tone: Tone| -> Hsla {
@@ -314,7 +319,7 @@ impl ExtensionView {
                 Tone::Error => theme.error.into(),
             }
         };
-        let base = div().id(("ext-row", ix)).w_full().h(px(24.)).flex().items_center().gap_1p5().pl(px(6. + 14. * row.depth as f32)).pr_2();
+        let base = div().id(("ext-row", ix)).w_full().h(px(24.)).flex().items_center().gap_1p5().pl(px(6. + 14. * row.depth as f32)).pr_2().rounded(px(6.));
         let Some(item) = row.item.clone() else {
             let (text, error) = row.message.clone().unwrap_or_default();
             return base

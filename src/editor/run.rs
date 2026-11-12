@@ -108,43 +108,40 @@ impl Editor {
 
     // ---- SQL statements --------------------------------------------------------------
 
-    /// Whether the gutter shows a ▶ per SQL statement: the workspace says so
-    /// for SQL scripts while a database connection exists.
-    pub fn set_sql_runs(&mut self, on: bool, cx: &mut Context<Self>) {
-        if self.sql_runs != on {
-            self.sql_runs = on;
+    /// Whether the gutter shows a ▶ per SQL statement, and by whose rules
+    /// statements split: the workspace says so for SQL scripts while a
+    /// database connection exists (the file's, else the first).
+    pub fn set_sql_runs(&mut self, dialect: Option<crate::database::script::Dialect>, cx: &mut Context<Self>) {
+        if self.sql_runs != dialect {
+            self.sql_runs = dialect;
             cx.notify();
         }
     }
 
     /// Each statement's first row and offset: the last ones found (see `Derived`).
     pub(super) fn shown_sql_statements(&mut self, cx: &mut Context<Self>) -> Arc<Vec<(usize, usize)>> {
-        if !self.sql_runs {
-            return Arc::default();
-        }
-        let (key, job) = self.sql_job(cx);
+        let Some(dialect) = self.sql_runs else { return Arc::default() };
+        let (key, job) = self.sql_job(dialect, cx);
         self.sql_statements.schedule(key, job, |e| &mut e.sql_statements, cx);
         self.sql_statements.last()
     }
 
-    fn sql_job(&self, cx: &App) -> (u64, impl FnOnce() -> Vec<(usize, usize)> + Send + 'static) {
+    fn sql_job(&self, dialect: crate::database::script::Dialect, cx: &App) -> ((u64, crate::database::script::Dialect), impl FnOnce() -> Vec<(usize, usize)> + Send + 'static) {
         let rope = self.doc.read(cx).rope().clone();
         let job = move || {
             let mut rows: Vec<(usize, usize)> =
-                crate::database::script::starts(&rope.to_string()).into_iter().map(|at| (rope.byte_to_line(at), at)).collect();
+                crate::database::script::starts(&rope.to_string(), dialect).into_iter().map(|at| (rope.byte_to_line(at), at)).collect();
             // One ▶ per line: it runs the line's first statement.
             rows.dedup_by_key(|(row, _)| *row);
             rows
         };
-        (self.doc.read(cx).version(), job)
+        ((self.doc.read(cx).version(), dialect), job)
     }
 
     /// The statement whose ▶ is on `row` (by the current text).
     pub(super) fn sql_statement_at(&mut self, row: usize, cx: &App) -> Option<usize> {
-        if !self.sql_runs {
-            return None;
-        }
-        let (key, job) = self.sql_job(cx);
+        let dialect = self.sql_runs?;
+        let (key, job) = self.sql_job(dialect, cx);
         let statements = self.sql_statements.now(key, job);
         statements.iter().find(|(r, _)| *r == row).map(|&(_, at)| at)
     }

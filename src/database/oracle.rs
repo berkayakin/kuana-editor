@@ -3,29 +3,13 @@
 //! connection is a thread of its own that owns it and runs jobs in order
 //! (`Session::run`); the UI awaits their results.
 
-use std::{
-    sync::mpsc,
-    time::{Duration, Instant},
+use std::time::Instant;
+
+use super::{
+    ColumnInfo, ConnectionConfig, DbObject, ObjectFile, ObjectKind, Role, Subprogram,
+    backend::{Backend, CONNECT_TIMEOUT, CompileError, Connected, Executed, FileProblem, Grid, MAX_ROWS, Outcome},
+    script::{self, Dialect},
 };
-
-use futures::channel::oneshot;
-
-use super::{ColumnInfo, ConnectionConfig, DbObject, ObjectKind, Role, Subprogram};
-
-type Job = Box<dyn FnOnce(&mut oracledb::Connection) + Send>;
-
-/// A live connection: its thread runs one job at a time.
-pub struct Session {
-    jobs: mpsc::Sender<Job>,
-    /// The connected user (the default schema), uppercase.
-    pub user: String,
-    pub version: String,
-}
-
-/// How many rows a query result keeps.
-pub const MAX_ROWS: usize = 1000;
-/// How long connecting may take.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The connect string for a configuration: its own, else `host:port/service`
 /// (EZConnect), or a descriptor with a SID.
@@ -45,81 +29,111 @@ pub fn connect_string(config: &ConnectionConfig) -> String {
     }
 }
 
-impl Session {
-    /// Connects on a new thread; resolves once connected (or not).
-    pub fn connect(config: &ConnectionConfig, password: String) -> oneshot::Receiver<Result<Session, String>> {
-        let (done, result) = oneshot::channel();
-        let connect = connect_string(config);
-        let user = config.user.trim().to_string();
-        let role = config.role;
-        let name = format!("db-{}", config.name);
-        let spawned = std::thread::Builder::new().name(name).spawn(move || {
-            let mut options = oracledb::Config::default()
-                .set_credentials(&user, &password)
-                .set_driver_name("Kuana")
-                .set_transport_connect_timeout(Some(CONNECT_TIMEOUT));
-            // The program name Oracle shows in V$SESSION.
-            options = options.clone().set_program("Kuana").unwrap_or(options);
-            options = match role {
-                Role::Default => options,
-                Role::Sysdba => options.set_auth_mode(oracledb::AUTH_MODE_SYSDBA),
-                Role::Sysoper => options.set_auth_mode(oracledb::AUTH_MODE_SYSOPER),
-            };
-            let options = match options.set_connect_string(&connect) {
-                Ok(options) => options,
-                Err(err) => {
-                    let _ = done.send(Err(message(&err)));
-                    return;
-                }
-            };
-            let mut conn = match oracledb::connect(options) {
-                Ok(conn) => conn,
-                Err(err) => {
-                    let _ = done.send(Err(message(&err)));
-                    return;
-                }
-            };
-            let user = conn
-                .query_row("select sys_context('USERENV', 'CURRENT_SCHEMA') from dual", &[])
-                .and_then(|row| row.get::<String>(0))
-                .unwrap_or_else(|_| user.to_uppercase());
-            let version = conn.version().map(|v| v.to_string()).unwrap_or_default();
-            prepare(&conn);
-            let (jobs, queue) = mpsc::channel::<Job>();
-            if done.send(Ok(Session { jobs, user, version })).is_err() {
-                return;
-            }
-            // Until every handle is dropped (disconnect, quit).
-            for job in queue {
-                job(&mut conn);
-            }
-            let _ = conn.close();
-        });
-        if let Err(err) = spawned {
-            let (done, result) = oneshot::channel();
-            let _ = done.send(Err(err.to_string()));
-            return result;
-        }
-        result
+/// Connects (blocking, on the session's thread).
+pub fn connect(config: &ConnectionConfig, password: &str) -> Result<Connected, String> {
+    let user = config.user.trim().to_string();
+    let mut options = oracledb::Config::default().set_credentials(&user, password).set_driver_name("Kuana").set_transport_connect_timeout(Some(CONNECT_TIMEOUT));
+    // The program name Oracle shows in V$SESSION.
+    options = options.clone().set_program("Kuana").unwrap_or(options);
+    options = match config.role {
+        Role::Default => options,
+        Role::Sysdba => options.set_auth_mode(oracledb::AUTH_MODE_SYSDBA),
+        Role::Sysoper => options.set_auth_mode(oracledb::AUTH_MODE_SYSOPER),
+    };
+    let options = options.set_connect_string(&connect_string(config)).map_err(|e| message(&e))?;
+    let conn = oracledb::connect(options).map_err(|e| message(&e))?;
+    let user = conn
+        .query_row("select sys_context('USERENV', 'CURRENT_SCHEMA') from dual", &[])
+        .and_then(|row| row.get::<String>(0))
+        .unwrap_or_else(|_| user.to_uppercase());
+    let version = conn.version().map(|v| format!("Oracle {v}")).unwrap_or_else(|_| "Oracle".into());
+    prepare(&conn);
+    Ok(Connected { backend: Box::new(Oracle { conn, user: user.clone() }), schema: user.clone(), label: user, version })
+}
+
+/// A live Oracle connection, as the session's thread owns it.
+struct Oracle {
+    conn: oracledb::Connection,
+    /// The connected user's schema (uppercase).
+    user: String,
+}
+
+impl Drop for Oracle {
+    fn drop(&mut self) {
+        let _ = self.conn.close();
+    }
+}
+
+impl Backend for Oracle {
+    fn schemas(&mut self) -> Result<Vec<String>, String> {
+        schemas(&mut self.conn)
     }
 
-    /// Runs `job` with the connection, after the jobs before it.
-    pub fn run<T, F>(&self, job: F) -> impl Future<Output = Result<T, String>> + use<T, F>
-    where
-        T: Send + 'static,
-        F: FnOnce(&mut oracledb::Connection) -> Result<T, String> + Send + 'static,
-    {
-        let (done, result) = oneshot::channel();
-        let sent = self.jobs.send(Box::new(move |conn| {
-            let _ = done.send(job(conn));
-        }));
-        async move {
-            if sent.is_err() {
-                return Err("The connection was closed".to_string());
-            }
-            result.await.unwrap_or_else(|_| Err("The connection was closed".to_string()))
-        }
+    fn objects(&mut self, schema: &str) -> Result<Vec<DbObject>, String> {
+        objects(&mut self.conn, schema)
     }
+
+    fn columns(&mut self, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
+        columns(&mut self.conn, schema, table)
+    }
+
+    fn subprograms(&mut self, schema: &str, package: &str) -> Result<Vec<Subprogram>, String> {
+        subprograms(&mut self.conn, schema, package)
+    }
+
+    fn source(&mut self, schema: &str, name: &str, kind: ObjectKind, body: bool) -> Result<String, String> {
+        let user = self.user.clone();
+        source(&mut self.conn, &user, schema, name, kind, body)
+    }
+
+    /// Runs the unit's `CREATE OR REPLACE …` and puts ALL_ERRORS' lines and
+    /// columns (counted from the unit's keyword) back into the file.
+    fn save_object(&mut self, object: &ObjectFile, text: &str) -> Result<Vec<FileProblem>, String> {
+        let statements = script::split(text, Dialect::Oracle);
+        let Some(statement) = statements.iter().find(|s| s.kind != script::Kind::Client) else { return Ok(Vec::new()) };
+        let sql = statement.sql(text);
+        let first_line = text[..statement.range.start].matches('\n').count();
+        let lead = unit_column(&text[statement.range.clone()], object.kind.object_type());
+        let errors = compile(&mut self.conn, &sql, &object.owner, &object.name, object.source_type())?;
+        Ok(errors.iter().map(|e| FileProblem { offset: error_place(text, first_line, lead, e), message: e.message.clone(), warning: e.warning }).collect())
+    }
+
+    fn recompile(&mut self, schema: &str, name: &str, kind: ObjectKind, body: bool) -> Result<Vec<CompileError>, String> {
+        recompile(&mut self.conn, schema, name, kind, body)
+    }
+
+    fn execute(&mut self, sql: &str) -> Executed {
+        execute(&mut self.conn, sql)
+    }
+
+    fn commit(&mut self) -> Result<(), String> {
+        self.conn.commit().map_err(|e| message(&e))
+    }
+
+    fn rollback(&mut self) -> Result<(), String> {
+        self.conn.rollback().map_err(|e| message(&e))
+    }
+}
+
+/// Where the unit's own text starts on its CREATE line (its keyword's byte column).
+fn unit_column(statement: &str, keyword: &str) -> usize {
+    let line = statement.lines().next().unwrap_or("");
+    let upper = line.to_ascii_uppercase();
+    let first = keyword.split(' ').next().unwrap_or(keyword);
+    upper.find(&format!(" {first}")).map_or(0, |i| i + 1)
+}
+
+/// An ALL_ERRORS row's place in the file: `first_line` is the statement's
+/// line in it, `lead` the unit keyword's column on that line (ALL_SOURCE's
+/// first line starts there).
+fn error_place(text: &str, first_line: usize, lead: usize, error: &CompileError) -> usize {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let row = (first_line + error.line - 1).min(lines.len().saturating_sub(1));
+    let start: usize = lines[..row].iter().map(|l| l.len()).sum();
+    let line = lines.get(row).map_or("", |l| l.trim_end_matches(['\n', '\r']));
+    let column = if error.line == 1 { lead.min(line.len()) } else { 0 };
+    let byte = column + line[column..].char_indices().nth(error.column.saturating_sub(1)).map_or(line.len() - column, |(i, _)| i);
+    start + byte.min(line.len())
 }
 
 /// Session setup: DBMS_OUTPUT on, DDL from DBMS_METADATA without storage
@@ -138,7 +152,7 @@ fn prepare(conn: &oracledb::Connection) {
 }
 
 /// An error as a person reads it (Oracle's own "ORA-…" line when there is one).
-pub fn message(err: &oracledb::Error) -> String {
+fn message(err: &oracledb::Error) -> String {
     match err.kind() {
         oracledb::ErrorKind::DbError(db) => db.message().trim().to_string(),
         _ => err.to_string(),
@@ -164,7 +178,7 @@ fn error_offset(err: &oracledb::Error) -> Option<usize> {
 // ---- The catalog ------------------------------------------------------------------
 
 /// The schemas (users) the connection can see.
-pub fn schemas(conn: &mut oracledb::Connection) -> Result<Vec<String>, String> {
+fn schemas(conn: &mut oracledb::Connection) -> Result<Vec<String>, String> {
     let rows = conn.query("select username from all_users order by username", &[]).map_err(|e| message(&e))?;
     let mut out = Vec::new();
     for row in rows {
@@ -174,7 +188,7 @@ pub fn schemas(conn: &mut oracledb::Connection) -> Result<Vec<String>, String> {
 }
 
 /// The objects in `owner` that the Database view lists.
-pub fn objects(conn: &mut oracledb::Connection, owner: &str) -> Result<Vec<DbObject>, String> {
+fn objects(conn: &mut oracledb::Connection, owner: &str) -> Result<Vec<DbObject>, String> {
     let types = ObjectKind::ALL.iter().map(|k| format!("'{}'", k.object_type())).collect::<Vec<_>>().join(", ");
     let sql = format!(
         "select object_name, object_type, status from all_objects
@@ -209,7 +223,7 @@ pub fn objects(conn: &mut oracledb::Connection, owner: &str) -> Result<Vec<DbObj
 }
 
 /// A table's or view's columns.
-pub fn columns(conn: &mut oracledb::Connection, owner: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
+fn columns(conn: &mut oracledb::Connection, owner: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
     let sql = "select c.column_name, c.data_type, c.data_length, c.data_precision, c.data_scale, c.nullable,
                       (select count(*) from all_cons_columns cc join all_constraints k
                          on k.owner = cc.owner and k.constraint_name = cc.constraint_name
@@ -241,7 +255,7 @@ pub fn columns(conn: &mut oracledb::Connection, owner: &str, table: &str) -> Res
 }
 
 /// A package's (or type's) procedures and functions, in declaration order.
-pub fn subprograms(conn: &mut oracledb::Connection, owner: &str, package: &str) -> Result<Vec<Subprogram>, String> {
+fn subprograms(conn: &mut oracledb::Connection, owner: &str, package: &str) -> Result<Vec<Subprogram>, String> {
     let sql = "select p.procedure_name,
                       (select count(*) from all_arguments a
                         where a.owner = p.owner and a.package_name = p.object_name and a.object_name = p.procedure_name
@@ -266,7 +280,7 @@ pub fn subprograms(conn: &mut oracledb::Connection, owner: &str, package: &str) 
 /// An object's source as a script that creates it: PL/SQL from ALL_SOURCE
 /// (`CREATE OR REPLACE ` + its text, the name qualified when it's in another
 /// schema), anything else from DBMS_METADATA.
-pub fn source(conn: &mut oracledb::Connection, user: &str, owner: &str, name: &str, kind: ObjectKind, body: bool) -> Result<String, String> {
+fn source(conn: &mut oracledb::Connection, user: &str, owner: &str, name: &str, kind: ObjectKind, body: bool) -> Result<String, String> {
     let Some(source_type) = kind.source_type(body) else {
         let ddl: Option<String> = conn
             .query_row("select dbms_metadata.get_ddl(:1, :2, :3) from dual", &[&kind.metadata_type(), &name, &owner])
@@ -327,16 +341,7 @@ fn find_word_ci(text: &str, word: &str) -> Option<usize> {
     None
 }
 
-/// A compile error from ALL_ERRORS: 1-based line and column in the unit's source.
-#[derive(Clone, Debug)]
-pub struct CompileError {
-    pub line: usize,
-    pub column: usize,
-    pub message: String,
-    pub warning: bool,
-}
-
-pub fn errors(conn: &mut oracledb::Connection, owner: &str, name: &str, source_type: &str) -> Result<Vec<CompileError>, String> {
+fn errors(conn: &mut oracledb::Connection, owner: &str, name: &str, source_type: &str) -> Result<Vec<CompileError>, String> {
     let rows = conn
         .query(
             "select line, position, text, attribute from all_errors where owner = :1 and name = :2 and type = :3 order by sequence",
@@ -358,7 +363,7 @@ pub fn errors(conn: &mut oracledb::Connection, owner: &str, name: &str, source_t
 
 /// Runs a unit's `CREATE OR REPLACE …` and reads back its errors. Oracle
 /// creates a unit that doesn't compile (ORA-24344), so that's not a failure.
-pub fn compile(conn: &mut oracledb::Connection, sql: &str, owner: &str, name: &str, source_type: &str) -> Result<Vec<CompileError>, String> {
+fn compile(conn: &mut oracledb::Connection, sql: &str, owner: &str, name: &str, source_type: &str) -> Result<Vec<CompileError>, String> {
     if let Err(err) = conn.execute(sql, &[])
         && code(&err) != Some(24344)
     {
@@ -368,54 +373,21 @@ pub fn compile(conn: &mut oracledb::Connection, sql: &str, owner: &str, name: &s
 }
 
 /// ALTER … COMPILE for an object, then its errors.
-pub fn recompile(conn: &mut oracledb::Connection, owner: &str, name: &str, kind: ObjectKind, body: bool) -> Result<Vec<CompileError>, String> {
+fn recompile(conn: &mut oracledb::Connection, owner: &str, name: &str, kind: ObjectKind, body: bool) -> Result<Vec<CompileError>, String> {
     let what = match (kind, body) {
         (ObjectKind::Package, true) => "PACKAGE {} COMPILE BODY".to_string(),
         (ObjectKind::Type, true) => "TYPE {} COMPILE BODY".to_string(),
         (ObjectKind::View, _) => "VIEW {} COMPILE".to_string(),
         _ => format!("{} {{}} COMPILE", kind.object_type()),
     };
-    let sql = what.replace("{}", &format!("\"{owner}\".\"{name}\""));
+    let sql = format!("ALTER {}", what.replace("{}", &format!("\"{owner}\".\"{name}\"")));
     compile(conn, &sql, owner, name, kind.source_type(body).unwrap_or(kind.object_type()))
 }
 
 // ---- Running statements ---------------------------------------------------------------
 
-/// What one statement did.
-#[derive(Clone, Debug)]
-pub enum Outcome {
-    Rows(Grid),
-    /// DML: rows changed (not committed yet).
-    Changed(u64),
-    /// DDL and PL/SQL.
-    Done,
-    /// A PL/SQL unit created with compile errors.
-    Compiled(Vec<CompileError>),
-    Failed { message: String, offset: Option<usize> },
-}
-
-/// A query's result: column names and types, and its rows as text (None: NULL).
-#[derive(Clone, Debug, Default)]
-pub struct Grid {
-    pub columns: Vec<String>,
-    pub types: Vec<String>,
-    /// Columns shown right-aligned (numbers).
-    pub numeric: Vec<bool>,
-    pub rows: Vec<Vec<Option<String>>>,
-    /// More rows than `MAX_ROWS` were there.
-    pub truncated: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct Executed {
-    pub outcome: Outcome,
-    /// DBMS_OUTPUT's lines.
-    pub output: Vec<String>,
-    pub elapsed: Duration,
-}
-
 /// Runs one statement (SQL without its `;`, or a PL/SQL block).
-pub fn execute(conn: &mut oracledb::Connection, sql: &str) -> Executed {
+fn execute(conn: &mut oracledb::Connection, sql: &str) -> Executed {
     let started = Instant::now();
     let outcome = match run_statement(conn, sql) {
         Ok(outcome) => outcome,
@@ -459,7 +431,7 @@ fn run_statement(conn: &mut oracledb::Connection, sql: &str) -> Result<Outcome, 
         Err(err) => return Err(err),
     };
     if dml {
-        return Ok(Outcome::Changed(result.rows_affected()));
+        return Ok(Outcome::Changed { rows: result.rows_affected(), pending: true });
     }
     if ddl || plsql {
         let errors = unit_errors(conn, sql);
@@ -602,14 +574,6 @@ fn cell(row: &oracledb::Row, i: usize) -> Option<String> {
     Some(format!("({})", row.columns().get(i).map(|c| c.data_type()).unwrap_or_default()))
 }
 
-pub fn commit(conn: &mut oracledb::Connection) -> Result<(), String> {
-    conn.commit().map_err(|e| message(&e))
-}
-
-pub fn rollback(conn: &mut oracledb::Connection) -> Result<(), String> {
-    conn.rollback().map_err(|e| message(&e))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,19 +599,20 @@ mod tests {
     #[ignore]
     fn oracle_end_to_end() {
         let spec = std::env::var("KUANA_ORACLE_TEST").expect("KUANA_ORACLE_TEST=user/password@connect");
-        let (credentials, connect) = spec.split_once('@').unwrap();
+        let (credentials, connect_to) = spec.split_once('@').unwrap();
         let (user, password) = credentials.split_once('/').unwrap();
-        let config = ConnectionConfig { connect_string: connect.into(), user: user.into(), ..Default::default() };
-        let session = futures::executor::block_on(Session::connect(&config, password.into())).unwrap().unwrap();
-        assert_eq!(session.user, user.to_uppercase());
-        let run = |job: Box<dyn FnOnce(&mut oracledb::Connection) -> Result<Executed, String> + Send>| futures::executor::block_on(session.run(job)).unwrap();
-        let exec = |sql: &'static str| run(Box::new(move |c| Ok(execute(c, sql))));
+        let config = ConnectionConfig { connect_string: connect_to.into(), user: user.into(), ..Default::default() };
+        let Connected { backend, schema, .. } = connect(&config, password).unwrap();
+        let mut db = backend;
+        let me = user.to_uppercase();
+        assert_eq!(schema, me);
+        let exec = |db: &mut Box<dyn Backend>, sql: &str| db.execute(sql);
 
-        let _ = exec("drop table kuana_t purge");
-        assert!(matches!(exec("create table kuana_t (id number(10) primary key, name varchar2(20), born date, price number(8,2))").outcome, Outcome::Done));
-        assert!(matches!(exec("insert into kuana_t values (1, 'Ada', date '1815-12-10', 12.5)").outcome, Outcome::Changed(1)));
-        assert!(matches!(exec("insert into kuana_t (id) values (2)").outcome, Outcome::Changed(1)));
-        let Outcome::Rows(grid) = exec("select * from kuana_t order by id").outcome else { panic!() };
+        let _ = exec(&mut db, "drop table kuana_t purge");
+        assert!(matches!(exec(&mut db, "create table kuana_t (id number(10) primary key, name varchar2(20), born date, price number(8,2))").outcome, Outcome::Done));
+        assert!(matches!(exec(&mut db, "insert into kuana_t values (1, 'Ada', date '1815-12-10', 12.5)").outcome, Outcome::Changed { rows: 1, pending: true }));
+        assert!(matches!(exec(&mut db, "insert into kuana_t (id) values (2)").outcome, Outcome::Changed { rows: 1, .. }));
+        let Outcome::Rows(grid) = exec(&mut db, "select * from kuana_t order by id").outcome else { panic!() };
         assert_eq!(grid.columns, ["ID", "NAME", "BORN", "PRICE"]);
         assert_eq!(grid.numeric, [true, false, false, true]);
         assert_eq!(grid.rows[0][0].as_deref(), Some("1"));
@@ -657,48 +622,45 @@ mod tests {
         assert_eq!(grid.rows[1][1], None);
 
         // DBMS_OUTPUT, and an error's position.
-        let done = exec("begin dbms_output.put_line('hello'); dbms_output.put_line('world'); end;");
+        let done = exec(&mut db, "begin dbms_output.put_line('hello'); dbms_output.put_line('world'); end;");
         assert!(matches!(done.outcome, Outcome::Done));
         assert_eq!(done.output, ["hello", "world"]);
-        let Outcome::Failed { message, offset } = exec("select nosuch from kuana_t").outcome else { panic!() };
+        let Outcome::Failed { message, offset } = exec(&mut db, "select nosuch from kuana_t").outcome else { panic!() };
         assert!(message.contains("ORA-00904"), "{message}");
         assert_eq!(offset, Some(7));
 
-        // A package with an error, then fixed; the catalog lists it.
+        // A package with an error, then fixed through its file; the catalog lists it.
         let bad = "create or replace package kuana_p as\n  procedure a;\nend;";
-        assert!(matches!(exec(bad).outcome, Outcome::Done));
+        assert!(matches!(exec(&mut db, bad).outcome, Outcome::Done));
         let body = "create or replace package body kuana_p as\n  procedure a is\n  begin\n    nosuch := 1;\n  end;\nend;";
-        let Outcome::Compiled(errors) = exec(body).outcome else { panic!() };
+        let Outcome::Compiled(errors) = exec(&mut db, body).outcome else { panic!() };
         assert_eq!(errors[0].line, 4, "{errors:?}");
-        let user_owned = user.to_uppercase();
-        let (u, u2) = (user_owned.clone(), user_owned.clone());
-        let objects = futures::executor::block_on(session.run(move |c| objects(c, &u))).unwrap();
+        let objects = db.objects(&me).unwrap();
         let package = objects.iter().find(|o| o.name == "KUANA_P").unwrap();
         assert!(package.has_body && !package.body_valid);
-        let fixed = "create or replace package body kuana_p as\n  procedure a is\n  begin\n    null;\n  end;\nend;";
-        let errors = futures::executor::block_on(session.run(move |c| compile(c, fixed, &u2, "KUANA_P", "PACKAGE BODY"))).unwrap();
-        assert!(errors.is_empty(), "{errors:?}");
+        let file = ObjectFile { connection: "c".into(), owner: me.clone(), name: "KUANA_P".into(), kind: ObjectKind::Package, body: true };
+        let broken = "CREATE OR REPLACE package body kuana_p as\n  procedure a is\n  begin\n    nosuch := 1;\n  end;\nend;\n/\n";
+        let problems = db.save_object(&file, broken).unwrap();
+        // PLS-00201, then "Statement ignored", both at the identifier.
+        assert!(!problems.is_empty() && problems.iter().all(|p| broken[p.offset..].starts_with("nosuch")), "{problems:?}");
+        let fixed = "CREATE OR REPLACE package body kuana_p as\n  procedure a is\n  begin\n    null;\n  end;\nend;\n/\n";
+        assert!(db.save_object(&file, fixed).unwrap().is_empty());
 
         // Source as a script, and DDL; columns and subprograms.
-        let (u, u2, u3) = (user_owned.clone(), user_owned.clone(), user_owned.clone());
-        let user_for_source = user_owned.clone();
-        let spec = futures::executor::block_on(session.run(move |c| source(c, &user_for_source, &u, "KUANA_P", ObjectKind::Package, true))).unwrap();
+        let spec = db.source(&me, "KUANA_P", ObjectKind::Package, true).unwrap();
         assert!(spec.starts_with("CREATE OR REPLACE package body kuana_p"), "{spec}");
         assert!(spec.ends_with("\n/\n"));
-        let user_for_ddl = user_owned.clone();
-        let ddl = futures::executor::block_on(session.run(move |c| source(c, &user_for_ddl, &u2, "KUANA_T", ObjectKind::Table, false))).unwrap();
+        let ddl = db.source(&me, "KUANA_T", ObjectKind::Table, false).unwrap();
         assert!(ddl.contains("CREATE TABLE"), "{ddl}");
-        let cols = futures::executor::block_on(session.run(move |c| columns(c, &u3, "KUANA_T"))).unwrap();
+        let cols = db.columns(&me, "KUANA_T").unwrap();
         assert_eq!(cols[0], ColumnInfo { name: "ID".into(), data_type: "NUMBER(10)".into(), nullable: false, primary: true });
         assert_eq!(cols[1].data_type, "VARCHAR2(20)");
-        let u4 = user_owned.clone();
-        let subs = futures::executor::block_on(session.run(move |c| subprograms(c, &u4, "KUANA_P"))).unwrap();
-        assert_eq!(subs, [Subprogram { name: "A".into(), function: false }]);
-        let schemas = futures::executor::block_on(session.run(schemas)).unwrap();
-        assert!(schemas.contains(&user_owned));
+        assert_eq!(db.subprograms(&me, "KUANA_P").unwrap(), [Subprogram { name: "A".into(), function: false }]);
+        assert!(db.schemas().unwrap().contains(&me));
+        assert!(db.recompile(&me, "KUANA_P", ObjectKind::Package, true).unwrap().is_empty());
 
-        let _ = exec("drop package kuana_p");
-        let _ = exec("drop table kuana_t purge");
+        let _ = exec(&mut db, "drop package kuana_p");
+        let _ = exec(&mut db, "drop table kuana_t purge");
     }
 
     #[test]

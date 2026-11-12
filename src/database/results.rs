@@ -1,14 +1,15 @@
 //! The Database panel in the bottom area: what the last run did. Each query
 //! is a tab with its rows in a grid (a row number column, then the columns,
 //! scrolling both ways), and Output lists every statement with its outcome,
-//! time and DBMS_OUTPUT lines. Commit and Rollback act on the connection the
-//! run used. The grid is a `GridTable` (⌘C / Ctrl+C copies its selected cell).
+//! time and what the server said (DBMS_OUTPUT, notices, warnings). Commit
+//! and Rollback act on the connection the run used, while it has changes
+//! waiting for one (Oracle's). The grid is a `GridTable` (⌘C / Ctrl+C copies its selected cell).
 
 use std::time::Duration;
 
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, Render, ScrollHandle, SharedString, Window, div, prelude::*, px};
 
-use super::oracle::{Executed, Grid, Outcome};
+use super::backend::{Executed, Grid, Outcome};
 use crate::{
     assets::Icon,
     grid::GridTable,
@@ -74,7 +75,7 @@ impl QueryResults {
 
     /// Statement `ix` finished.
     pub fn finish(&mut self, ix: usize, executed: Executed, cx: &mut Context<Self>) {
-        if matches!(executed.outcome, Outcome::Changed(_)) {
+        if matches!(executed.outcome, Outcome::Changed { pending: true, .. }) {
             self.uncommitted = true;
         }
         let Some(entry) = self.entries.get_mut(ix) else { return };
@@ -159,7 +160,11 @@ impl QueryResults {
                             theme.success.into(),
                             format!("{} row{}{} in {time}", grid.rows.len(), if grid.rows.len() == 1 { "" } else { "s" }, if grid.truncated { " (first ones)" } else { "" }),
                         ),
-                        Outcome::Changed(n) => (Icon::CircleCheck, theme.success.into(), format!("{n} row{} changed in {time} (not committed)", if *n == 1 { "" } else { "s" })),
+                        Outcome::Changed { rows: n, pending } => (
+                            Icon::CircleCheck,
+                            theme.success.into(),
+                            format!("{n} row{} changed in {time}{}", if *n == 1 { "" } else { "s" }, if *pending { " (not committed)" } else { "" }),
+                        ),
                         Outcome::Done => (Icon::CircleCheck, theme.success.into(), format!("Done in {time}")),
                         Outcome::Compiled(errors) => (
                             Icon::TriangleAlert,

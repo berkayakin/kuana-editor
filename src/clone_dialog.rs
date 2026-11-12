@@ -429,7 +429,8 @@ pub fn display_path(path: &Path) -> String {
     }
 }
 
-fn expand_home(text: &str) -> PathBuf {
+/// `~/…` as the path under the home folder.
+pub fn expand_home(text: &str) -> PathBuf {
     match (text.strip_prefix('~'), home_dir()) {
         (Some(rest), Some(home)) => home.join(rest.trim_start_matches(['/', '\\'])),
         _ => PathBuf::from(text),

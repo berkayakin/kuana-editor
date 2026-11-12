@@ -1,8 +1,8 @@
 //! The Database view's and panel's place in the workspace (see
 //! `crate::database`): connecting (asking for a password when none is
-//! saved), opening objects' source in tabs, compiling them on Save, running
-//! SQL from the editor (⌘↩ / Ctrl+Enter) into the Database panel, and the
-//! view's right-click menus.
+//! saved), opening objects' source in tabs, running them on Save (Oracle
+//! compiles them), running SQL from the editor (⌘↩ / Ctrl+Enter, the
+//! gutter's ▶) into the Database panel, and the view's right-click menus.
 
 use std::{borrow::Cow, ops::Range, rc::Rc, sync::Arc};
 
@@ -11,10 +11,10 @@ use gpui::WeakEntity;
 use super::*;
 use crate::{
     database::{
-        self, ConnectionConfig, DbObject, ObjectFile, ObjectKind,
+        self, ConnectionConfig, DbKind, DbObject, ObjectFile, ObjectKind,
+        backend::{FileProblem, Outcome},
         model::{DbModel, NEEDS_PASSWORD},
-        oracle::{self, CompileError, Outcome},
-        script,
+        oracle, script,
         view::NodeId,
     },
     editor::Submit,
@@ -27,10 +27,9 @@ pub(super) struct SqlRun {
     ranges: Vec<Range<usize>>,
 }
 
-/// A run that asked for a connection's password: it goes on once the
-/// connection dialog connects.
+/// A run that had to ask for its connection's password: it goes on once
+/// the password connects.
 pub(super) struct SqlWaiting {
-    connection: String,
     editor: WeakEntity<Editor>,
     scope: SqlScope,
 }
@@ -47,8 +46,8 @@ pub(super) enum SqlScope {
 }
 
 /// Diagnostics lists the database fills on a document (by "server" name).
-const COMPILE_PROBLEMS: &str = "oracle";
-const RUN_PROBLEMS: &str = "oracle-run";
+const COMPILE_PROBLEMS: &str = "database";
+const RUN_PROBLEMS: &str = "database-run";
 
 impl Workspace {
     fn db_model(&self, cx: &App) -> Entity<DbModel> {
@@ -74,7 +73,7 @@ impl Workspace {
     }
 
     pub(super) fn new_database_connection(&mut self, _: &NewDatabaseConnection, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_connection_dialog(None, None, window, cx);
+        self.open_connection_dialog(None, window, cx);
     }
 
     pub(super) fn toggle_database_results(&mut self, _: &ToggleDatabaseResults, window: &mut Window, cx: &mut Context<Self>) {
@@ -92,12 +91,10 @@ impl Workspace {
         area(&theme).h(self.shown_panel_height()).flex_shrink_0().child(cached(&self.db_results)).child(self.resize_handle(Edge::Problems, cx))
     }
 
-    /// New Connection… / Edit Connection…, or asking for the password of `id`.
-    /// The connection dialog, in a window of its own over this one; what it
-    /// connects comes back here (`connection_entered`).
-    fn open_connection_dialog(&mut self, id: Option<String>, ask: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        // A run waits for the dialog it opened, not a later one.
-        self.sql_waiting = None;
+    /// New Connection… / Edit Connection…: the connection dialog, in a
+    /// window of its own over this one; what it connects comes back here
+    /// (`connection_entered`).
+    fn open_connection_dialog(&mut self, id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let config = id.and_then(|id| self.db_model(cx).read(cx).config(&id).cloned());
         let display = window.display(cx).map(|d| d.id());
         let Some(this) = window.window_handle().downcast::<Workspace>() else { return };
@@ -111,7 +108,7 @@ impl Workspace {
                 .ok();
             });
         });
-        crate::database::dialog::open(config, ask, display, on_connect, cx);
+        crate::database::dialog::open(config, None, display, on_connect, cx);
     }
 
     /// The connection dialog's Connect: save it, then connect.
@@ -121,30 +118,41 @@ impl Workspace {
         if let Err(err) = model.update(cx, |m, cx| m.save(config, password.clone(), cx)) {
             self.toast(ToastKind::Error, "Couldn't save the connection", Some(err), cx);
         }
-        let waiting = self.sql_waiting.take().filter(|w| w.connection == id);
-        if waiting.is_none() {
-            self.show_database_view(window, cx);
-        }
-        self.connect_database(id, password, waiting, window, cx);
+        self.show_database_view(window, cx);
+        self.connect_database(id, password, None, window, cx);
     }
 
     /// Connects `id`, asking for its password when there's none to use;
     /// then a run that was waiting for it goes on, in its editor.
     fn connect_database(&mut self, id: String, password: Option<String>, then: Option<SqlWaiting>, window: &mut Window, cx: &mut Context<Self>) {
+        self.connect_with(id, password, None, then, window, cx);
+    }
+
+    /// `asked`: the password came from `ask_db_password`, with whether to
+    /// keep it; it's kept once it works, and a wrong one asks again.
+    fn connect_with(&mut self, id: String, password: Option<String>, asked: Option<bool>, then: Option<SqlWaiting>, window: &mut Window, cx: &mut Context<Self>) {
         let model = self.db_model(cx);
+        let typed = password.clone();
         let task = model.update(cx, |m, cx| m.connect(&id, password, cx));
         cx.spawn_in(window, async move |ws, cx| {
             let result = task.await;
             ws.update_in(cx, |ws, window, cx| match result {
                 Ok(()) => {
+                    if let (Some(save), Some(password)) = (asked, typed) {
+                        let kept = ws.db_model(cx).update(cx, |m, cx| m.keep_password(&id, save.then_some(password.as_str()), cx));
+                        if let Err(err) = kept {
+                            ws.toast(ToastKind::Error, "Couldn't save the password", Some(err), cx);
+                        }
+                    }
                     ws.database.update(cx, |v, cx| v.expand_connection(&id, cx));
                     if let Some((editor, scope)) = then.and_then(|w| Some((w.editor.upgrade()?, w.scope))) {
                         window.focus(&editor.focus_handle(cx));
                         ws.run_sql(editor, scope, window, cx);
                     }
                 }
-                Err(err) if err == NEEDS_PASSWORD => ws.open_connection_dialog(Some(id), Some(err), window, cx),
+                Err(err) if err == NEEDS_PASSWORD => ws.ask_db_password(id, then, None, window, cx),
                 Err(err) if err == "Cancelled" => {}
+                Err(err) if asked.is_some() => ws.ask_db_password(id, then, Some(err), window, cx),
                 Err(err) => {
                     let name = ws.db_model(cx).read(cx).config(&id).map(|c| c.name.clone()).unwrap_or_default();
                     ws.toast(ToastKind::Error, format!("Couldn't connect to {name}"), Some(err), cx);
@@ -155,9 +163,37 @@ impl Workspace {
         .detach();
     }
 
+    /// Asks for a connection's password (none is saved) in a small dialog,
+    /// with Save password, then connects; `error`: why the last one didn't.
+    fn ask_db_password(&mut self, id: String, then: Option<SqlWaiting>, error: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(config) = self.db_model(cx).read(cx).config(&id).cloned() else { return };
+        self.close_modal(window, cx);
+        let title = format!("Connect to {}", config.name);
+        let hint = format!("Password for {} at {}", config.user, config.address());
+        let dialog = cx.new(|cx| InputDialog::new(title, Icon::Database, hint, "", None, window, cx).secret(cx).allow_empty().with_option("Save password", true));
+        if let Some(error) = error {
+            dialog.update(cx, |d, cx| d.set_error(error, cx));
+        }
+        let then = std::cell::RefCell::new(then);
+        let subscription = cx.subscribe_in(&dialog, window, move |ws, dialog, event: &InputDialogEvent, window, cx| {
+            let password = match event {
+                InputDialogEvent::Confirm(text) => text.clone(),
+                InputDialogEvent::Dismissed => {
+                    ws.close_modal(window, cx);
+                    return;
+                }
+            };
+            let save = dialog.read(cx).option_checked();
+            ws.close_modal(window, cx);
+            ws.connect_with(id.clone(), Some(password), Some(save), then.borrow_mut().take(), window, cx);
+        });
+        self.modals.open(Modal::Input(dialog), subscription);
+        cx.notify();
+    }
+
     pub(super) fn on_database_event(&mut self, event: &DatabaseEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            DatabaseEvent::NewConnection => self.open_connection_dialog(None, None, window, cx),
+            DatabaseEvent::NewConnection => self.open_connection_dialog(None, window, cx),
             DatabaseEvent::Connect(id) => self.connect_database(id.clone(), None, None, window, cx),
             DatabaseEvent::Open { connection, owner, object, body, at } => {
                 self.open_db_object(connection.clone(), owner.clone(), object.clone(), *body, at.clone(), window, cx)
@@ -194,7 +230,7 @@ impl Workspace {
     fn end_transaction(&mut self, commit: bool, cx: &mut Context<Self>) {
         let Some((id, name)) = self.db_results.read(cx).connection.clone() else { return };
         let Some(session) = self.db_model(cx).read(cx).session(&id) else { return };
-        let job = session.run(move |conn| if commit { oracle::commit(conn) } else { oracle::rollback(conn) });
+        let job = session.run(move |db| if commit { db.commit() } else { db.rollback() });
         cx.spawn(async move |ws, cx| {
             let result = job.await;
             ws.update(cx, |ws, cx| match result {
@@ -218,7 +254,7 @@ impl Workspace {
         let model = self.db_model(cx);
         let Some(session) = model.read(cx).session(&connection) else { return };
         let file = ObjectFile { connection, owner: owner.clone(), name: object.name.clone(), kind: object.kind, body };
-        let Some(path) = database::object_path(&file) else { return };
+        let Some(path) = database::object_path(&file, session.kind) else { return };
         // Unsaved edits in its tab stay.
         if let Some(editor) = self.tab_for(&path, cx)
             && editor.read(cx).doc.read(cx).is_dirty()
@@ -227,9 +263,8 @@ impl Workspace {
             self.reveal_subprogram(&file_path_editor(self, &file, cx), at.as_deref(), window, cx);
             return;
         }
-        let user = session.user.clone();
         let (name, kind) = (object.name.clone(), object.kind);
-        let job = session.run(move |conn| oracle::source(conn, &user, &owner, &name, kind, body));
+        let job = session.run(move |db| db.source(&owner, &name, kind, body));
         cx.spawn_in(window, async move |ws, cx| {
             let result = job.await;
             ws.update_in(cx, |ws, window, cx| {
@@ -271,49 +306,47 @@ impl Workspace {
         }
     }
 
-    /// After a file's Save: an object's file is compiled against its connection.
+    /// After a file's Save: an object's file runs against its connection
+    /// (Oracle compiles it), and what's wrong in it becomes its problems.
     pub(super) fn database_saved(&mut self, editor: &Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = editor.read(cx).doc.read(cx).path.clone() else { return };
         let Some(object) = database::object_of(&path) else { return };
-        if !object.kind.compiles() {
+        let model = self.db_model(cx);
+        let Some(config) = model.read(cx).config(&object.connection).cloned() else { return };
+        if !config.kind.saves(object.kind) {
             return;
         }
-        let model = self.db_model(cx);
+        let verb = if config.kind == DbKind::Oracle { "compile" } else { "update" };
         let Some(session) = model.read(cx).session(&object.connection) else {
-            let name = model.read(cx).config(&object.connection).map(|c| c.name.clone()).unwrap_or_else(|| "its connection".into());
-            self.toast(ToastKind::Info, format!("Saved locally: connect to {name} to compile {}", object.name), None, cx);
+            self.toast(ToastKind::Info, format!("Saved locally: connect to {} to {verb} {}", config.name, object.name), None, cx);
             return;
         };
         let text = editor.read(cx).text(cx);
-        let statements = script::split(&text);
-        let Some(statement) = statements.iter().find(|s| s.kind != script::Kind::SqlPlus).cloned() else { return };
-        let sql = statement.sql(&text);
-        let first_line = text[..statement.range.start].matches('\n').count();
-        // ALL_SOURCE's first line is the unit's from its keyword (PACKAGE …): where that is on the CREATE line.
-        let lead = unit_column(&text[statement.range.clone()], object.kind.object_type());
-        let (owner, name, source_type) = (object.owner.clone(), object.name.clone(), object.source_type().to_string());
-        let job = session.run(move |conn| oracle::compile(conn, &sql, &owner, &name, &source_type));
+        let saved = object.clone();
+        let job = session.run(move |db| db.save_object(&saved, &text));
         let weak = editor.downgrade();
+        let rule = config.kind.name();
         cx.spawn_in(window, async move |ws, cx| {
             let result = job.await;
             ws.update_in(cx, |ws, _, cx| {
                 let Some(editor) = weak.upgrade() else { return };
                 match result {
-                    Ok(errors) => {
-                        let problems = errors.iter().filter(|e| !e.warning).count();
-                        let diagnostics = compile_diagnostics(&editor, &errors, first_line, lead, cx);
+                    Ok(problems) => {
+                        let errors: Vec<&FileProblem> = problems.iter().filter(|p| !p.warning).collect();
+                        let first = errors.first().map(|p| format!("Line {}: {}", line_of(&editor, p.offset, cx), p.message));
+                        let diagnostics = problem_diagnostics(&editor, &problems, rule, cx);
                         editor.update(cx, |e, cx| {
                             e.doc.as_mut(cx).set_server_diagnostics(COMPILE_PROBLEMS, diagnostics);
                             cx.notify();
                         });
-                        if problems == 0 {
-                            ws.toast(ToastKind::Success, format!("Compiled {}", object.name), None, cx);
-                        } else {
-                            let first = errors.iter().find(|e| !e.warning).map(|e| format!("Line {}: {}", e.line + first_line, e.message));
-                            ws.toast(ToastKind::Error, format!("{} has {problems} compile error{}", object.name, if problems == 1 { "" } else { "s" }), first, cx);
+                        match (errors.len(), verb) {
+                            (0, "compile") => ws.toast(ToastKind::Success, format!("Compiled {}", object.name), None, cx),
+                            (0, _) => ws.toast(ToastKind::Success, format!("Updated {} in {}", object.name, config.name), None, cx),
+                            (n, "compile") => ws.toast(ToastKind::Error, format!("{} has {n} compile error{}", object.name, if n == 1 { "" } else { "s" }), first, cx),
+                            (_, _) => ws.toast(ToastKind::Error, format!("Couldn't update {}", object.name), first, cx),
                         }
                     }
-                    Err(err) => ws.toast(ToastKind::Error, format!("Couldn't compile {}", object.name), Some(err), cx),
+                    Err(err) => ws.toast(ToastKind::Error, format!("Couldn't {verb} {}", object.name), Some(err), cx),
                 }
                 ws.db_model(cx).update(cx, |m, cx| m.refresh_schema(&object.connection, &object.owner, cx));
             })
@@ -346,11 +379,19 @@ impl Workspace {
 
     /// Whether an editor's gutter shows a ▶ per statement: in SQL files
     /// other than an object's (saving compiles those) while a connection exists.
+    /// Its statements split by the rules of the database the file runs on.
     pub(super) fn sync_sql_gutter(&self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
-        let has_connections = !self.db_model(cx).read(cx).connections.is_empty();
-        let runs = has_connections
-            && editor.read(cx).doc.read(cx).path.as_deref().is_some_and(|p| database::is_sql_path(p) && database::object_of(p).is_none());
-        editor.update(cx, |e, cx| e.set_sql_runs(runs, cx));
+        let path = editor.read(cx).doc.read(cx).path.clone();
+        let runs = path.as_deref().is_some_and(|p| database::is_sql_path(p) && database::object_of(p).is_none());
+        let model = self.db_model(cx);
+        let dialect = runs
+            .then(|| {
+                let id = self.sql_connection(path.as_deref(), cx);
+                let model = model.read(cx);
+                id.and_then(|id| model.config(&id)).or_else(|| model.connections.first()).map(|c| c.kind.dialect())
+            })
+            .flatten();
+        editor.update(cx, |e, cx| e.set_sql_runs(dialect, cx));
     }
 
     pub(super) fn sync_sql_gutters(&mut self, cx: &mut Context<Self>) {
@@ -362,7 +403,7 @@ impl Workspace {
     /// New SQL Script: a scratch file for the selected (or only) connection.
     pub(super) fn new_sql_script(&mut self, _: &NewSqlScript, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.database.read(cx).selected_connection().or_else(|| self.db_model(cx).read(cx).connections.first().map(|c| c.id.clone())) else {
-            self.open_connection_dialog(None, None, window, cx);
+            self.open_connection_dialog(None, window, cx);
             return;
         };
         self.new_script_for(id, window, cx);
@@ -411,7 +452,7 @@ impl Workspace {
         let model = self.db_model(cx);
         let Some(id) = self.sql_connection(path.as_deref(), cx) else {
             if model.read(cx).connections.is_empty() {
-                self.open_connection_dialog(None, None, window, cx);
+                self.open_connection_dialog(None, window, cx);
             } else {
                 self.show_database_view(window, cx);
                 self.toast(ToastKind::Info, "Choose a connection", Some("Connect to a database in the Database view, or pick one for this file in the status bar.".into()), cx);
@@ -428,10 +469,7 @@ impl Workspace {
                 let result = task.await;
                 ws.update_in(cx, |ws, window, cx| match result {
                     Ok(()) => ws.run_sql(editor, scope, window, cx),
-                    Err(err) if err == NEEDS_PASSWORD => {
-                        ws.open_connection_dialog(Some(id.clone()), Some(err), window, cx);
-                        ws.sql_waiting = Some(SqlWaiting { connection: id, editor: editor.downgrade(), scope });
-                    }
+                    Err(err) if err == NEEDS_PASSWORD => ws.ask_db_password(id, Some(SqlWaiting { editor: editor.downgrade(), scope }), None, window, cx),
                     Err(err) => ws.toast(ToastKind::Error, "Couldn't connect", Some(err), cx),
                 })
                 .ok();
@@ -441,10 +479,11 @@ impl Workspace {
         };
         let text = editor.read(cx).text(cx);
         let selection = editor.read(cx).primary_selection().range();
+        let db_kind = session.kind;
         // The selection's statements (as typed), else the file's, else one.
         let selected = matches!(scope, SqlScope::Caret) && !selection.is_empty();
         let (base, script_text) = if selected { (selection.start, text[selection.clone()].to_string()) } else { (0, text.clone()) };
-        let mut statements = script::split(&script_text);
+        let mut statements = script::split(&script_text, db_kind.dialect());
         let one = match scope {
             SqlScope::Caret if !selected => Some(editor.read(cx).primary_selection().head),
             SqlScope::At(at) => Some(at),
@@ -453,7 +492,7 @@ impl Workspace {
         if let Some(at) = one {
             statements = script::at(&statements, &script_text, at).map(|ix| vec![statements[ix].clone()]).unwrap_or_default();
         }
-        statements.retain(|s| s.kind != script::Kind::SqlPlus);
+        statements.retain(|s| s.kind != script::Kind::Client);
         if statements.is_empty() {
             self.toast(ToastKind::Info, "No SQL statement here", None, cx);
             return;
@@ -468,13 +507,13 @@ impl Workspace {
         editor.update(cx, |e, cx| e.doc.as_mut(cx).set_server_diagnostics(RUN_PROBLEMS, Vec::new()));
         cx.notify();
         let weak = editor.downgrade();
-        let user = session.user.clone();
+        let schema = session.schema.clone();
         cx.spawn_in(window, async move |ws, cx| {
             let mut problems: Vec<(Range<usize>, String)> = Vec::new();
             let mut changed_schema = false;
             for (ix, sql) in sqls.into_iter().enumerate() {
                 let created = oracle::created_unit(&sql).is_some() || starts_ddl(&sql);
-                let executed = session.run(move |conn| Ok(oracle::execute(conn, &sql))).await;
+                let executed = session.run(move |db| Ok(db.execute(&sql))).await;
                 let Ok(executed) = executed else { break };
                 let range = ranges[ix].clone();
                 match &executed.outcome {
@@ -507,7 +546,7 @@ impl Workspace {
                         .into_iter()
                         .map(|(range, message)| {
                             let range = word_at(&editor.read(cx).text(cx), range.start);
-                            Diagnostic { range, severity: Severity::Error, message: Arc::from(message), rule: Cow::Borrowed("oracle"), unnecessary: false }
+                            Diagnostic { range, severity: Severity::Error, message: Arc::from(message), rule: Cow::Borrowed(db_kind.name()), unnecessary: false }
                         })
                         .collect();
                     editor.update(cx, |e, cx| {
@@ -516,7 +555,8 @@ impl Workspace {
                     });
                 }
                 if changed_schema {
-                    ws.db_model(cx).update(cx, |m, cx| m.refresh_schema(&id, &user, cx));
+                    // Without a schema it started in, any of them may have changed.
+                    ws.db_model(cx).update(cx, |m, cx| if schema.is_empty() { m.refresh(&id, cx) } else { m.refresh_schema(&id, &schema, cx) });
                 }
             })
             .ok();
@@ -555,12 +595,13 @@ impl Workspace {
                 }
                 add(MenuEntry::Separator, None);
                 let i = id.clone();
-                add(MenuEntry::item("Edit Connection…", Icon::Pencil), Some(Rc::new(move |ws, window, cx| ws.open_connection_dialog(Some(i.clone()), None, window, cx))));
+                add(MenuEntry::item("Edit Connection…", Icon::Pencil), Some(Rc::new(move |ws, window, cx| ws.open_connection_dialog(Some(i.clone()), window, cx))));
                 let i = id.clone();
                 add(MenuEntry::item("Delete Connection…", Icon::Trash).danger(), Some(Rc::new(move |ws, window, cx| ws.delete_connection(i.clone(), window, cx))));
             }
             NodeId::Object(..) | NodeId::Body(..) | NodeId::Detail(..) => {
                 let Some((conn, owner, object)) = self.database.read(cx).object_at(&node, cx) else { return };
+                let db_kind = model.read(cx).config(&conn).map(|c| c.kind).unwrap_or_default();
                 let qualified = format!("{owner}.{}", object.name);
                 if object.kind.has_columns() {
                     let (c, o, ob) = (conn.clone(), owner.clone(), object.clone());
@@ -570,7 +611,7 @@ impl Workspace {
                 let (c, o, ob) = (conn.clone(), owner.clone(), object.clone());
                 let label = match object.kind {
                     ObjectKind::Package | ObjectKind::Type => "Open Specification",
-                    kind if kind.compiles() => "Open Source",
+                    kind if db_kind.saves(kind) => "Open Source",
                     _ => "Show DDL",
                 };
                 add(MenuEntry::item(label, Icon::FileCode), Some(Rc::new(move |ws, window, cx| ws.open_db_object(c.clone(), o.clone(), ob.clone(), false, None, window, cx))));
@@ -578,7 +619,7 @@ impl Workspace {
                     let (c, o, ob) = (conn.clone(), owner.clone(), object.clone());
                     add(MenuEntry::item("Open Body", Icon::FileCode), Some(Rc::new(move |ws, window, cx| ws.open_db_object(c.clone(), o.clone(), ob.clone(), true, None, window, cx))));
                 }
-                if object.kind.compiles() {
+                if db_kind.recompiles() && db_kind.saves(object.kind) {
                     let (c, o, ob) = (conn.clone(), owner.clone(), object.clone());
                     add(MenuEntry::item("Compile", Icon::Refresh), Some(Rc::new(move |ws, _, cx| ws.recompile(c.clone(), o.clone(), ob.clone(), cx))));
                 }
@@ -625,14 +666,14 @@ impl Workspace {
     fn select_rows(&mut self, id: String, owner: &str, object: &DbObject, window: &mut Window, cx: &mut Context<Self>) {
         let model = self.db_model(cx);
         let Some(session) = model.read(cx).session(&id) else { return };
-        let sql = format!("SELECT * FROM \"{owner}\".\"{}\" FETCH FIRST {} ROWS ONLY", object.name, oracle::MAX_ROWS);
+        let sql = session.kind.select_rows(owner, &object.name);
         let name = model.read(cx).config(&id).map(|c| c.name.clone()).unwrap_or_default();
         self.db_results.update(cx, |r, cx| r.start((id, name), vec![sql.clone()], cx));
         self.db_run = None;
         self.has_db_results = true;
         self.bottom = Some(BottomPanel::Database);
         cx.notify();
-        let job = session.run(move |conn| Ok(oracle::execute(conn, &sql)));
+        let job = session.run(move |db| Ok(db.execute(&sql)));
         cx.spawn_in(window, async move |ws, cx| {
             if let Ok(executed) = job.await {
                 ws.update(cx, |ws, cx| ws.db_results.update(cx, |r, cx| r.finish(0, executed, cx))).ok();
@@ -646,10 +687,10 @@ impl Workspace {
         let model = self.db_model(cx);
         let Some(session) = model.read(cx).session(&id) else { return };
         let (o, name, kind, body) = (owner.clone(), object.name.clone(), object.kind, false);
-        let job = session.run(move |conn| {
-            let mut errors = oracle::recompile(conn, &o, &name, kind, body)?;
+        let job = session.run(move |db| {
+            let mut errors = db.recompile(&o, &name, kind, body)?;
             if object.has_body {
-                errors.extend(oracle::recompile(conn, &o, &name, kind, true)?);
+                errors.extend(db.recompile(&o, &name, kind, true)?);
             }
             Ok(errors)
         });
@@ -696,6 +737,7 @@ impl Workspace {
             actions.push(Some(MenuAction::Call(Rc::new(move |ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| {
                 if let Some(path) = &path {
                     ws.sql_connections.insert(path.clone(), id.clone());
+                    ws.sync_sql_gutters(cx);
                 }
                 if !ws.db_model(cx).read(cx).is_connected(&id) {
                     ws.connect_database(id.clone(), None, None, window, cx);
@@ -706,14 +748,15 @@ impl Workspace {
         entries.push(MenuEntry::Separator);
         actions.push(None);
         entries.push(MenuEntry::item("New Connection…", Icon::Plus));
-        actions.push(Some(MenuAction::Call(Rc::new(|ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| ws.open_connection_dialog(None, None, window, cx)))));
+        actions.push(Some(MenuAction::Call(Rc::new(|ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| ws.open_connection_dialog(None, window, cx)))));
         self.show_context_menu(entries, actions, position, None, window, cx);
     }
 }
 
 /// The tab of an object's file, if open.
 fn file_path_editor(ws: &Workspace, file: &ObjectFile, cx: &App) -> Option<Entity<Editor>> {
-    ws.tab_for(&database::object_path(file)?, cx)
+    let kind = ws.db_model(cx).read(cx).config(&file.connection)?.kind;
+    ws.tab_for(&database::object_path(file, kind)?, cx)
 }
 
 /// Whether ⌘↩ in this editor runs SQL.
@@ -727,38 +770,29 @@ fn starts_ddl(sql: &str) -> bool {
     matches!(first.as_str(), "create" | "drop" | "alter" | "rename" | "comment")
 }
 
-/// Where the unit's own text starts on its CREATE line (its keyword's byte column).
-fn unit_column(statement: &str, keyword: &str) -> usize {
-    let line = statement.lines().next().unwrap_or("");
-    let upper = line.to_ascii_uppercase();
-    let first = keyword.split(' ').next().unwrap_or(keyword);
-    upper.find(&format!(" {first}")).map_or(0, |i| i + 1)
-}
-
-/// ALL_ERRORS rows as the file's problems: `first_line` is the statement's
-/// line in the file, `lead` the unit keyword's column on it.
-fn compile_diagnostics(editor: &Entity<Editor>, errors: &[CompileError], first_line: usize, lead: usize, cx: &App) -> Vec<Diagnostic> {
-    let doc = editor.read(cx).doc.read(cx);
-    let text = doc.rope().to_string();
-    let lines = doc.rope().len_lines();
-    errors
+/// An object file's problems as diagnostics (`rule`: the database's name).
+fn problem_diagnostics(editor: &Entity<Editor>, problems: &[FileProblem], rule: &'static str, cx: &App) -> Vec<Diagnostic> {
+    let text = editor.read(cx).text(cx);
+    problems
         .iter()
-        .map(|e| {
-            let row = (first_line + e.line - 1).min(lines.saturating_sub(1));
-            let start = doc.line_start(row);
-            let line = doc.line_text(row);
-            let column = if e.line == 1 { lead } else { 0 };
-            let byte = column + line[column.min(line.len())..].char_indices().nth(e.column.saturating_sub(1)).map_or(line.len().saturating_sub(column), |(i, _)| i);
-            let range = word_at(&text, start + byte.min(line.len()));
+        .map(|p| {
+            let offset = p.offset.min(text.len());
+            let offset = (0..=offset).rev().find(|&o| text.is_char_boundary(o)).unwrap_or(0);
             Diagnostic {
-                range,
-                severity: if e.warning { Severity::Warning } else { Severity::Error },
-                message: Arc::from(e.message.as_str()),
-                rule: Cow::Borrowed("oracle"),
+                range: word_at(&text, offset),
+                severity: if p.warning { Severity::Warning } else { Severity::Error },
+                message: Arc::from(p.message.as_str()),
+                rule: Cow::Borrowed(rule),
                 unnecessary: false,
             }
         })
         .collect()
+}
+
+/// The 1-based line of a byte offset in an editor's text.
+fn line_of(editor: &Entity<Editor>, offset: usize, cx: &App) -> usize {
+    let doc = editor.read(cx).doc.read(cx);
+    doc.row_of(offset.min(doc.rope().len_bytes())) + 1
 }
 
 /// The word at `offset` (at least one character), for a problem's underline.

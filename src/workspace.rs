@@ -811,8 +811,6 @@ pub struct Workspace {
     db_results: Entity<QueryResults>,
     /// The last SQL run: its editor and its statements' ranges (Output's rows go to them).
     db_run: Option<database::SqlRun>,
-    /// A run waiting for the connection dialog's password (see `run_sql`).
-    sql_waiting: Option<database::SqlWaiting>,
     /// The Database panel has something to show (read in render instead of the panel).
     has_db_results: bool,
     /// The connection chosen for a SQL file (in the status bar, or the one its last run used).
@@ -847,26 +845,10 @@ pub struct Workspace {
     /// The diff tab opened from the Push dialog, and the dialog: it comes back
     /// when that tab closes while still the current one.
     diff_return: Option<(gpui::EntityId, Entity<PushDialog>)>,
-    /// Working-tree root of the project's Git repository.
-    repo: Option<PathBuf>,
-    git_status: Arc<RepoStatus>,
-    /// Change per file (and "contains changes" per folder) for the file tree.
-    git_paths: Arc<HashMap<PathBuf, Change>>,
-    /// What Git ignores (files, and folders as a whole), dimmed in the tree.
-    git_ignored: Arc<HashSet<PathBuf>>,
-    git_user: Option<String>,
-    /// URL of the repository's `origin` (or first) remote.
-    git_remote: Option<String>,
-    last_commit: Option<git::CommitInfo>,
+    /// The project's Git repository: its status and the running operation.
+    git: Entity<GitStore>,
     /// Project folders opened before, newest first.
     recent_projects: Vec<PathBuf>,
-    /// The running Git operation (one at a time), shown in the status bar.
-    git_busy: Busy,
-    /// Operations started while another ran: they run next, in order (Git
-    /// takes one at a time).
-    git_queue: std::collections::VecDeque<GitOp>,
-    status_task: Option<Task<()>>,
-    git_op_task: Option<Task<()>>,
     toasts: Vec<Toast>,
     next_toast: usize,
     context_menu: Option<OpenContextMenu>,
@@ -896,8 +878,6 @@ pub struct Workspace {
     watch_task: Option<Task<()>>,
     /// The project's .gitignore, to skip Git refreshes for ignored churn.
     ignore: Option<Arc<ignore::gitignore::Gitignore>>,
-    /// Git status asked for while a read ran (`read_status`).
-    git_pending: git_ops::StatusWork,
     /// The running Go to Symbol request; replaced as the query changes.
     symbol_task: Option<Task<()>>,
     /// Welcome Setup, shown in place of everything below the title bar.
@@ -1063,6 +1043,10 @@ impl Workspace {
         let db_results = cx.new(QueryResults::new);
         let db_results_subscription =
             cx.subscribe_in(&db_results, window, |ws, _, event: &QueryResultsEvent, window, cx| ws.on_query_results_event(event, window, cx));
+        let git = cx.new(|_| GitStore::new());
+        let store_subscription = cx.subscribe_in(&git, window, Self::on_git_event);
+        // What the chrome shows of it (branch, counts, progress) is read in render.
+        let store_observation = cx.observe(&git, |_, _, cx| cx.notify());
         let git_log = cx.new(GitLog::new);
         let log_subscription = cx.subscribe_in(&git_log, window, |ws, _, event: &GitLogEvent, window, cx| match event {
             GitLogEvent::OpenDiff(source) => {
@@ -1261,7 +1245,6 @@ impl Workspace {
             database,
             db_results,
             db_run: None,
-            sql_waiting: None,
             has_db_results: false,
             sql_connections: HashMap::new(),
             ext_views: HashMap::new(),
@@ -1279,18 +1262,8 @@ impl Workspace {
             last_tests: None,
             git_log,
             diff_return: None,
-            repo: None,
-            git_status: Arc::new(RepoStatus::default()),
-            git_paths: Arc::new(HashMap::new()),
-            git_ignored: Arc::default(),
-            git_user: None,
-            git_remote: None,
-            last_commit: None,
+            git,
             recent_projects: state.recent_projects.clone(),
-            git_busy: Busy::default(),
-            git_queue: Default::default(),
-            status_task: None,
-            git_op_task: None,
             toasts: Vec::new(),
             next_toast: 0,
             context_menu: None,
@@ -1310,7 +1283,6 @@ impl Workspace {
             watcher: None,
             watch_task: None,
             ignore: None,
-            git_pending: git_ops::StatusWork::default(),
             symbol_task: None,
             lsp,
             documents,
@@ -1569,7 +1541,7 @@ impl Workspace {
             }
         }
         self.lsp.update(cx, |s, cx| s.register(editor, cx));
-        if self.repo.is_none() && self.root.is_none() {
+        if self.repo(cx).is_none() && self.root.is_none() {
             // A lone file: use the repository it lives in, if any.
             if let Some(dir) = editor.read(cx).doc.read(cx).path.as_deref().and_then(Path::parent) {
                 self.detect_repo(dir.to_path_buf(), cx);
