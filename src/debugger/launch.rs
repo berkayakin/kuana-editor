@@ -167,7 +167,7 @@ pub fn find_adapter(name: &str) -> Option<&'static dyn DebugAdapter> {
 /// The adapter that debugs `spec`.
 fn adapter_for(spec: &DebugSpec) -> Option<&'static dyn DebugAdapter> {
     Some(match spec {
-        DebugSpec::Cargo { .. } => &LldbDap,
+        DebugSpec::Cargo { .. } | DebugSpec::Native { .. } => &LldbDap,
         DebugSpec::Go { .. } => &Delve,
         DebugSpec::Python { .. } => &Debugpy,
         DebugSpec::Node { .. } => &JsDebug,
@@ -201,7 +201,7 @@ fn lldb_dap() -> Result<Adapter, String> {
     let program = servers::which("lldb-dap")
         .or_else(xcrun_lldb_dap)
         .or_else(|| servers::which("lldb-vscode"))
-        .ok_or("Debugging Rust needs lldb-dap: install Xcode's command line tools (xcode-select --install) or LLVM.")?;
+        .ok_or("Debugging Rust, C and C++ needs lldb-dap: install Xcode's command line tools (xcode-select --install) or LLVM.")?;
     Ok(Adapter { id: "lldb-dap", program, args: Vec::new(), port: None })
 }
 
@@ -313,6 +313,13 @@ pub fn launch_arguments(spec: &DebugSpec, cwd: &Path, program: Option<&Path>, ad
             "cwd": cwd,
             "stopOnEntry": false,
             "initCommands": lldb_commands(cwd),
+        }),
+        // C and C++: the program the build made, run where it was asked.
+        DebugSpec::Native { program, args, .. } => json!({
+            "program": program,
+            "args": args,
+            "cwd": cwd,
+            "stopOnEntry": false,
         }),
         DebugSpec::Go { mode, program, args } => json!({
             "mode": mode,
@@ -600,6 +607,48 @@ pub fn cargo_build(cwd: &Path, args: &[String], build: &Build, on_line: impl FnM
         None => return Err("The build was stopped".into()),
     }
     pick_executable(&artifacts, args).ok_or_else(|| "cargo didn't build an executable for this".into())
+}
+
+/// Runs a native program's build commands in order (each a program and
+/// its arguments), their output to `on_line`; stops at the first that
+/// fails. Blocks: run it off the main thread.
+pub fn native_build(cwd: &Path, steps: &[Vec<String>], build: &Build, mut on_line: impl FnMut(String) + Send + 'static) -> Result<(), String> {
+    for step in steps {
+        let Some((program, args)) = step.split_first() else { continue };
+        on_line(format!("$ {}", step.join(" ")));
+        let mut command = crate::process::command(program);
+        command
+            .args(args)
+            .current_dir(cwd)
+            .env("PATH", servers::search_path())
+            .env("CLICOLOR_FORCE", "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(|e| format!("couldn't run {program}: {e}"))?;
+        let stdout = child.stdout.take().ok_or("no output")?;
+        let stderr = child.stderr.take().ok_or("no output")?;
+        *build.lock().unwrap() = Some(child);
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let tx2 = tx.clone();
+        let errors = std::thread::spawn(move || crate::lsp::rpc::for_each_line(stderr, move |line| {
+            let _ = tx2.send(line);
+        }));
+        let output = std::thread::spawn(move || crate::lsp::rpc::for_each_line(stdout, move |line| {
+            let _ = tx.send(line);
+        }));
+        for line in rx {
+            on_line(line);
+        }
+        let _ = (errors.join(), output.join());
+        match build.lock().unwrap().take().map(|mut child| child.wait()) {
+            Some(Ok(status)) if status.success() => {}
+            Some(Ok(_)) => return Err("The build failed".into()),
+            Some(Err(err)) => return Err(err.to_string()),
+            None => return Err("The build was stopped".into()),
+        }
+    }
+    Ok(())
 }
 
 /// The executable among cargo's artifacts: the test binary for a test

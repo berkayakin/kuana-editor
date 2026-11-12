@@ -132,7 +132,7 @@ impl DebugSession {
         let input = cx.new(|cx| Editor::single_line("Evaluate an expression", cx));
         let watch_input = cx.new(|cx| Editor::single_line("Add a watch", cx));
         let build = launch::Build::default();
-        let status = if matches!(target.debug, Some(DebugSpec::Cargo { .. })) { Status::Building } else { Status::Starting };
+        let status = if matches!(target.debug, Some(DebugSpec::Cargo { .. } | DebugSpec::Native { .. })) { Status::Building } else { Status::Starting };
         let task = cx.spawn(async move |this, cx| {
             if let Err(message) = Self::run(this.clone(), cx).await {
                 this.update(cx, |s, cx| s.end(message, cx)).ok();
@@ -207,6 +207,30 @@ impl DebugSession {
                 this.update(cx, |s, cx| s.push_line(Line::Info, &line, cx)).ok();
             }
             program = Some(built.await?);
+            this.update(cx, |s, cx| {
+                s.status = Status::Starting;
+                cx.notify();
+            })
+            .ok();
+        }
+
+        // C and C++: the build's commands first, then the program they made.
+        if let DebugSpec::Native { build: steps, program: made, .. } = &spec {
+            let (line_tx, mut lines) = futures::channel::mpsc::unbounded::<String>();
+            let (cwd2, steps2, build2) = (cwd.clone(), steps.clone(), build.clone());
+            let built = cx.background_executor().spawn(async move {
+                launch::native_build(&cwd2, &steps2, &build2, move |line| {
+                    let _ = line_tx.unbounded_send(line);
+                })
+            });
+            while let Some(line) = lines.next().await {
+                this.update(cx, |s, cx| s.push_line(Line::Info, &line, cx)).ok();
+            }
+            built.await?;
+            if !made.is_file() {
+                return Err(format!("The build made no {}", made.display()));
+            }
+            program = Some(made.clone());
             this.update(cx, |s, cx| {
                 s.status = Status::Starting;
                 cx.notify();

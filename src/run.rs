@@ -57,6 +57,9 @@ pub enum DebugSpec {
     /// A configuration as written (`.vscode/launch.json`, `.zed/debug.json`):
     /// the adapter by name, `launch` or `attach`, and its arguments.
     Config { adapter: String, request: String, config: serde_json::Value },
+    /// A native program (C, C++): commands that build it, run in order (each
+    /// a program and its arguments), then lldb-dap runs `program`.
+    Native { build: Vec<Vec<String>>, program: PathBuf, args: Vec<String> },
 }
 
 impl DebugSpec {
@@ -194,7 +197,12 @@ pub fn file_targets(language: Language, path: &Path, text: &str, tree: &Tree) ->
         Language::Go => go_targets(path, text, root, &mut out),
         Language::Python => python_targets(path, text, root, &mut out),
         Language::JavaScript | Language::TypeScript | Language::Tsx => js_targets(path, text, root, &mut out),
-        Language::Extension(_) => extension_targets(language, path, text, tree, &mut out),
+        Language::Extension(_) => {
+            extension_targets(language, path, text, tree, &mut out);
+            if let Some(cpp) = c_family(language) {
+                c_targets(cpp, path, text, root, &mut out);
+            }
+        }
         _ => {}
     }
     out.sort_by_key(|t| t.row);
@@ -257,6 +265,196 @@ fn extension_targets(language: Language, path: &Path, text: &str, tree: &Tree, o
                 test,
             });
         }
+    }
+}
+
+// ---- C and C++ ----------------------------------------------------------------------
+
+/// Whether `language` is C (false) or C++ (true): the C/C++ extension's
+/// languages. Kuana runs and debugs their programs itself, since an
+/// extension's tasks can't say how to debug.
+fn c_family(language: Language) -> Option<bool> {
+    match language.name() {
+        "C" => Some(false),
+        "C++" => Some(true),
+        _ => None,
+    }
+}
+
+/// A ▶ on `main`: build (CMake's target for the file, else the file alone)
+/// and run it, or debug it with lldb-dap.
+fn c_targets(cpp: bool, path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>) {
+    let mut cursor = root.walk();
+    for child in root.named_children(&mut cursor) {
+        let is_main = child.kind() == "function_definition"
+            && child.child_by_field_name("declarator").and_then(|d| d.child_by_field_name("declarator")).is_some_and(|n| node_text(n, text) == "main");
+        if !is_main {
+            continue;
+        }
+        let Some(plan) = native_plan(path, cpp) else { return };
+        let command = chain(&plan.build, &[plan.program.to_string_lossy().into_owned()]);
+        let debug = DebugSpec::Native { build: plan.build, program: plan.program, args: Vec::new() };
+        out.push(target(format!("Run '{}'", plan.label), command, &plan.cwd, child, child, Some(debug)));
+    }
+}
+
+/// How to build and start a C/C++ program.
+#[derive(Debug, PartialEq)]
+struct NativePlan {
+    /// Commands (a program and its arguments), in order.
+    build: Vec<Vec<String>>,
+    program: PathBuf,
+    cwd: PathBuf,
+    /// The CMake target, or the file.
+    label: String,
+}
+
+fn native_plan(path: &Path, cpp: bool) -> Option<NativePlan> {
+    match cmake_root(path) {
+        Some(root) => cmake_plan(&root, path),
+        None => single_file_plan(path, cpp),
+    }
+}
+
+/// The outermost folder above `path` with a CMakeLists.txt, within its
+/// repository: the project CMake configures.
+fn cmake_root(path: &Path) -> Option<PathBuf> {
+    let mut found = None;
+    for dir in path.ancestors().skip(1) {
+        if dir.join("CMakeLists.txt").is_file() {
+            found = Some(dir.to_path_buf());
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
+    }
+    found
+}
+
+/// Configure once (into `build/`, a Debug build with compile_commands.json
+/// for clangd and CMake's File API asked for), then build the executable
+/// whose sources include `path`.
+fn cmake_plan(root: &Path, path: &Path) -> Option<NativePlan> {
+    let build = root.join("build");
+    let (name, program) = file_api_target(&build, root, path).or_else(|| cmakelists_target(root, path, &build))?;
+    let s = |p: &Path| p.to_string_lossy().into_owned();
+    let mut steps = Vec::new();
+    if !build.join("CMakeCache.txt").is_file() {
+        let query = build.join(".cmake/api/v1/query");
+        steps.push(vec!["cmake".into(), "-E".into(), "make_directory".into(), s(&query)]);
+        steps.push(vec!["cmake".into(), "-E".into(), "touch".into(), s(&query.join("codemodel-v2"))]);
+        steps.push(vec![
+            "cmake".into(),
+            "-S".into(),
+            s(root),
+            "-B".into(),
+            s(&build),
+            "-DCMAKE_BUILD_TYPE=Debug".into(),
+            "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON".into(),
+        ]);
+    }
+    steps.push(vec!["cmake".into(), "--build".into(), s(&build), "--target".into(), name.clone()]);
+    Some(NativePlan { build: steps, program, cwd: root.to_path_buf(), label: name })
+}
+
+/// The executable target building `path`, from CMake's File API reply (as
+/// configured: exact names and output paths).
+fn file_api_target(build: &Path, root: &Path, path: &Path) -> Option<(String, PathBuf)> {
+    use serde_json::Value;
+    let reply = build.join(".cmake/api/v1/reply");
+    let read = |file: &str| -> Option<Value> { serde_json::from_str(&std::fs::read_to_string(reply.join(file)).ok()?).ok() };
+    let mut indexes: Vec<String> = std::fs::read_dir(&reply).ok()?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("index-")).collect();
+    indexes.sort();
+    let index = read(indexes.last()?)?;
+    let codemodel = index["objects"].as_array()?.iter().find(|o| o["kind"] == "codemodel")?["jsonFile"].as_str()?.to_string();
+    let codemodel = read(&codemodel)?;
+    let source_dir = codemodel["paths"]["source"].as_str().map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
+    let same = |a: &Path, b: &Path| a == b || crate::paths::canonicalize(a).ok() == crate::paths::canonicalize(b).ok();
+    for t in codemodel["configurations"].as_array()?.first()?["targets"].as_array()? {
+        let Some(target) = t["jsonFile"].as_str().and_then(read) else { continue };
+        if target["type"] != "EXECUTABLE" {
+            continue;
+        }
+        let builds_it = target["sources"].as_array().into_iter().flatten().filter_map(|s| s["path"].as_str()).any(|p| same(&source_dir.join(p), path));
+        if let (true, Some(name), Some(artifact)) = (builds_it, target["name"].as_str(), target["artifacts"][0]["path"].as_str()) {
+            return Some((name.to_string(), build.join(artifact)));
+        }
+    }
+    None
+}
+
+/// Before CMake ran: the `add_executable` naming `path`'s file in a
+/// CMakeLists.txt from its folder up, its program where CMake puts it by
+/// default (the build folder's matching subfolder).
+fn cmakelists_target(root: &Path, path: &Path, build: &Path) -> Option<(String, PathBuf)> {
+    static ADD_EXECUTABLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)add_executable\s*\(\s*([A-Za-z0-9_.+-]+)([^)]*)\)").unwrap());
+    let file = path.file_name()?.to_string_lossy().into_owned();
+    for dir in path.ancestors().skip(1) {
+        if let Ok(lists) = std::fs::read_to_string(dir.join("CMakeLists.txt")) {
+            let rel = path.strip_prefix(dir).ok()?.to_string_lossy().replace('\\', "/");
+            for found in ADD_EXECUTABLE.captures_iter(&lists) {
+                let names_it = found[2].split_whitespace().map(|s| s.trim_matches('"')).any(|s| s == rel || s.ends_with(&format!("/{file}")) || s == file);
+                if names_it {
+                    let name = found[1].to_string();
+                    let program = build.join(dir.strip_prefix(root).ok()?).join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+                    return Some((name, program));
+                }
+            }
+        }
+        if dir == root {
+            break;
+        }
+    }
+    None
+}
+
+/// A file on its own: compiled with debug info (and compile_flags.txt's
+/// flags, which clangd reads too) into the temp folder.
+fn single_file_plan(path: &Path, cpp: bool) -> Option<NativePlan> {
+    let compiler = if cfg!(windows) {
+        let clang = if cpp { "clang++" } else { "clang" };
+        crate::lsp::servers::which(clang)?.to_string_lossy().into_owned()
+    } else {
+        (if cpp { "c++" } else { "cc" }).to_string()
+    };
+    let stem = path.file_stem()?.to_string_lossy().into_owned();
+    let program = std::env::temp_dir().join(format!("kuana-run-{stem}{}", std::env::consts::EXE_SUFFIX));
+    let mut step = vec![compiler, "-g".into(), "-O0".into()];
+    if cpp {
+        step.push("-std=c++20".into());
+    }
+    if let Some(dir) = nearest_with(path, "compile_flags.txt")
+        && let Ok(flags) = std::fs::read_to_string(dir.join("compile_flags.txt"))
+    {
+        // Relative include folders are relative to that file's folder.
+        step.extend(flags.lines().map(str::trim).filter(|l| !l.is_empty()).map(|flag| match flag.strip_prefix("-I") {
+            Some(inc) if !inc.is_empty() && Path::new(inc).is_relative() => format!("-I{}", dir.join(inc).display()),
+            _ => flag.to_string(),
+        }));
+    }
+    step.extend([path.to_string_lossy().into_owned(), "-o".into(), program.to_string_lossy().into_owned()]);
+    Some(NativePlan { build: vec![step], program, cwd: path.parent()?.to_path_buf(), label: stem })
+}
+
+/// The commands in order, each only after the one before succeeded, then
+/// `then`: `a && b && c` for a POSIX shell, nested `if ($?)` in PowerShell
+/// (Windows PowerShell 5 has no `&&`).
+fn chain(steps: &[Vec<String>], then: &[String]) -> String {
+    let line = |argv: &[String]| argv.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
+    let all: Vec<&[String]> = steps.iter().map(Vec::as_slice).chain(std::iter::once(then)).filter(|s| !s.is_empty()).collect();
+    if cfg!(windows) {
+        let mut out = String::new();
+        for (i, argv) in all.iter().enumerate() {
+            if i > 0 {
+                out.push_str("; if ($?) { ");
+            }
+            out.push_str("& ");
+            out.push_str(&line(argv));
+        }
+        out.push_str(&" }".repeat(all.len().saturating_sub(1)));
+        out
+    } else {
+        all.iter().map(|argv| line(argv)).collect::<Vec<_>>().join(" && ")
     }
 }
 
@@ -652,6 +850,16 @@ pub fn project_targets(root: &Path, current: Option<(&Path, Language)>) -> Vec<R
         add("go test ./...".into(), "go test -v ./...".into(), root, None);
         add("go build ./...".into(), "go build ./...".into(), root, None);
     }
+    // CMake: configure once (with compile_commands.json for clangd), then build.
+    if root.join("CMakeLists.txt").is_file() {
+        let build = root.join("build");
+        let mut steps = Vec::new();
+        if !build.join("CMakeCache.txt").is_file() {
+            let s = |p: &Path| p.to_string_lossy().into_owned();
+            steps.push(vec!["cmake".into(), "-S".into(), s(root), "-B".into(), s(&build), "-DCMAKE_BUILD_TYPE=Debug".into(), "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON".into()]);
+        }
+        add("cmake --build build".into(), chain(&steps, &["cmake".into(), "--build".into(), "build".into()]), root, None);
+    }
     if let Ok(makefile) = std::fs::read_to_string(root.join("Makefile")) {
         for line in makefile.lines() {
             // `name:` rules, not variables (`A := b`) or special targets.
@@ -941,6 +1149,60 @@ mod tests {
             std::fs::write(path, content).unwrap();
         }
         dir
+    }
+
+    /// C/C++ programs: CMake's target for the file (from add_executable
+    /// before CMake ran, from its File API after), else the file compiled alone.
+    #[test]
+    fn c_programs_build_with_cmake_or_alone() {
+        let lists = "cmake_minimum_required(VERSION 3.20)\nproject(P CXX)\nadd_subdirectory(app)\n";
+        let app = "add_executable(shapes\n  main.cpp\n  shape.cpp)\n";
+        let dir = temp_project(&[("CMakeLists.txt", lists), ("app/CMakeLists.txt", app), ("app/main.cpp", "int main() {}\n"), ("app/other.cpp", "")]);
+        let main = dir.join("app/main.cpp");
+        let plan = native_plan(&main, true).unwrap();
+        assert_eq!(plan.label, "shapes");
+        assert_eq!(plan.program, dir.join("build/app").join(format!("shapes{}", std::env::consts::EXE_SUFFIX)));
+        assert_eq!(plan.build.len(), 4, "configure (query, configure) then build: {:?}", plan.build);
+        assert!(plan.build[2].contains(&"-DCMAKE_EXPORT_COMPILE_COMMANDS=ON".to_string()));
+        assert_eq!(plan.build[3][..4], ["cmake", "--build", &dir.join("build").to_string_lossy(), "--target"].map(String::from));
+        // A file no executable lists has no plan in a CMake project.
+        assert_eq!(native_plan(&dir.join("app/other.cpp"), true), None);
+
+        // Configured: CMake's File API reply names the target and its output.
+        let reply = dir.join("build/.cmake/api/v1/reply");
+        std::fs::create_dir_all(&reply).unwrap();
+        std::fs::write(dir.join("build/CMakeCache.txt"), "").unwrap();
+        std::fs::write(reply.join("index-1.json"), r#"{"objects":[{"kind":"codemodel","jsonFile":"codemodel-v2-1.json"}]}"#).unwrap();
+        let codemodel = format!(r#"{{"paths":{{"source":{:?}}},"configurations":[{{"targets":[{{"jsonFile":"target-lib.json"}},{{"jsonFile":"target-app.json"}}]}}]}}"#, dir.to_string_lossy());
+        std::fs::write(reply.join("codemodel-v2-1.json"), codemodel).unwrap();
+        std::fs::write(reply.join("target-lib.json"), r#"{"name":"core","type":"STATIC_LIBRARY","sources":[{"path":"app/main.cpp"}]}"#).unwrap();
+        std::fs::write(reply.join("target-app.json"), r#"{"name":"shapes-app","type":"EXECUTABLE","sources":[{"path":"app/main.cpp"}],"artifacts":[{"path":"bin/shapes-app"}]}"#).unwrap();
+        let plan = native_plan(&main, true).unwrap();
+        assert_eq!((plan.label.as_str(), plan.program.clone()), ("shapes-app", dir.join("build/bin/shapes-app")));
+        assert_eq!(plan.build.len(), 1, "no configure once CMakeCache.txt exists");
+
+        // No CMake: the file alone, with compile_flags.txt's flags.
+        let alone = temp_project(&[("compile_flags.txt", "-Iinclude\n-Wall\n"), ("src/list.c", "int main(void) { return 0; }\n")]);
+        let plan = native_plan(&alone.join("src/list.c"), false).unwrap();
+        if !cfg!(windows) {
+            let step = &plan.build[0];
+            assert_eq!(step[0], "cc");
+            assert!(step.contains(&format!("-I{}", alone.join("include").display())) && step.contains(&"-Wall".to_string()), "{step:?}");
+            assert_eq!(step[step.len() - 2..], ["-o".to_string(), plan.program.to_string_lossy().into_owned()]);
+        }
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&alone).ok();
+    }
+
+    #[test]
+    fn commands_chain_only_after_success() {
+        let steps = vec![vec!["cmake".to_string(), "--build".into(), "my build".into()]];
+        let chained = chain(&steps, &["./app".to_string()]);
+        if cfg!(windows) {
+            assert_eq!(chained, "& cmake --build 'my build'; if ($?) { & ./app }");
+        } else {
+            assert_eq!(chained, "cmake --build 'my build' && ./app");
+        }
     }
 
     #[test]
