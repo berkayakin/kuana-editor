@@ -34,6 +34,8 @@ my-extension/
   languages/mylang/highlights.scm     tree-sitter highlight query
   languages/mylang/outline.scm        File Structure, breadcrumbs, sticky scroll
   languages/mylang/injections.scm     embedded languages (CSS in <style>, SQL in strings…)
+                                      (Kuana skips a pattern injecting the file's own language
+                                      unless it says (#set! injection.self): C's macro bodies)
   languages/mylang/brackets.scm       bracket pairs, words too (do … end)
   languages/mylang/indents.scm        what Enter indents after; @end / @outdent go back out
   languages/mylang/textobjects.scm    functions and classes for Vim's af / if / ac / ic
