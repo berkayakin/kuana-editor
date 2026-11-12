@@ -13,6 +13,11 @@
 //!   is ⌘P on macOS and Ctrl+P elsewhere, `enter`, `shift-tab`)
 //! - `type <text>`: type the rest of the line, a character at a time
 //! - `action <name> [json]`: dispatch an action by name (`kuana::ToggleTerminal`)
+//! - `click <x> <y> [right] [double]`: a mouse click at a point of the window's
+//!   content (points from its top left), the pointer moved there first
+//! - `drag <x> <y> <to x> <to y>`: press, move in steps, release (mouse steps
+//!   are macOS only: GPUI takes mouse events from the system alone, so they're
+//!   handed to its view as AppKit events, still without leaving Kuana)
 //! - `size <width> <height>`: resize the window's content, in points
 //! - `mark <name>`: print `kuana-autopilot: mark <name>` (the recorder starts
 //!   and stops on marks)
@@ -20,7 +25,7 @@
 
 use std::{path::Path, time::Duration};
 
-use gpui::{App, AsyncApp, Keystroke, Modifiers, Window, px, size};
+use gpui::{App, AsyncApp, Keystroke, Modifiers, MouseButton, Window, px, size};
 
 #[derive(Debug, PartialEq)]
 enum Step {
@@ -30,6 +35,9 @@ enum Step {
     Type(String),
     Action(String, Option<serde_json::Value>),
     Size(f32, f32),
+    /// A click at a point: the button and how many presses.
+    Click(f32, f32, MouseButton, usize),
+    Drag((f32, f32), (f32, f32)),
     Mark(String),
     Quit,
 }
@@ -88,6 +96,26 @@ fn parse(text: &str) -> Result<Vec<(usize, Step)>, String> {
                 let dims: Vec<f32> = rest.split_whitespace().filter_map(|n| n.parse().ok()).collect();
                 let [w, h] = dims[..] else { return Err(format!("line {line_no}: size takes a width and a height")) };
                 Step::Size(w, h)
+            }
+            "click" => {
+                let mut words = rest.split_whitespace();
+                let (Some(x), Some(y)) = (words.next().and_then(|n| n.parse().ok()), words.next().and_then(|n| n.parse().ok())) else {
+                    return Err(format!("line {line_no}: click takes an x and a y"));
+                };
+                let (mut button, mut count) = (MouseButton::Left, 1);
+                for word in words {
+                    match word {
+                        "right" => button = MouseButton::Right,
+                        "double" => count = 2,
+                        other => return Err(format!("line {line_no}: click doesn't know “{other}”")),
+                    }
+                }
+                Step::Click(x, y, button, count)
+            }
+            "drag" => {
+                let n: Vec<f32> = rest.split_whitespace().filter_map(|n| n.parse().ok()).collect();
+                let [x, y, to_x, to_y] = n[..] else { return Err(format!("line {line_no}: drag takes two points")) };
+                Step::Drag((x, y), (to_x, to_y))
             }
             "mark" => Step::Mark(rest.trim().to_string()),
             "quit" => Step::Quit,
@@ -159,6 +187,34 @@ async fn perform(step: &Step, pace: &mut u64, cx: &mut AsyncApp) -> Result<(), S
             window.resize(size(px(*w), px(*h)));
             Ok(())
         })?,
+        Step::Click(x, y, button, count) => {
+            let (down, up) = if *button == MouseButton::Right { (Mouse::RightDown, Mouse::RightUp) } else { (Mouse::Down, Mouse::Up) };
+            mouse(cx, Mouse::Moved, (*x, *y), 0)?;
+            sleep(*pace).await;
+            for clicks in 1..=*count {
+                mouse(cx, down, (*x, *y), clicks)?;
+                mouse(cx, up, (*x, *y), clicks)?;
+            }
+            sleep(*pace).await;
+        }
+        Step::Drag(from, to) => {
+            const STEPS: usize = 8;
+            let at = |step: usize| {
+                let t = step as f32 / STEPS as f32;
+                (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
+            };
+            mouse(cx, Mouse::Moved, at(0), 0)?;
+            sleep(*pace).await;
+            mouse(cx, Mouse::Down, at(0), 1)?;
+            // A frame between moves: what a drag draws (a resize tracker) takes the next ones.
+            for step in 1..=STEPS {
+                sleep(30).await;
+                mouse(cx, Mouse::Dragged, at(step), 0)?;
+            }
+            sleep(30).await;
+            mouse(cx, Mouse::Up, at(STEPS), 1)?;
+            sleep(*pace).await;
+        }
         Step::Mark(name) => {
             use std::io::Write as _;
             println!("kuana-autopilot: mark {name}");
@@ -169,6 +225,123 @@ async fn perform(step: &Step, pace: &mut u64, cx: &mut AsyncApp) -> Result<(), S
         }
     }
     Ok(())
+}
+
+/// A mouse event's kind, by AppKit's `NSEventType` number.
+#[derive(Clone, Copy)]
+enum Mouse {
+    Down = 1,
+    Up = 2,
+    RightDown = 3,
+    RightUp = 4,
+    Moved = 5,
+    Dragged = 6,
+}
+
+/// Hands the frontmost window's GPUI view a mouse event at a point of its
+/// content (from the top left), as AppKit would.
+#[cfg(target_os = "macos")]
+fn mouse(_: &mut AsyncApp, kind: Mouse, at: (f32, f32), clicks: usize) -> Result<(), String> {
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    use objc2::{Encode, Encoding, RefEncode, class, msg_send};
+
+    /// The Core Graphics event behind an `NSEvent`.
+    #[repr(C)]
+    struct CGEvent([u8; 0]);
+    unsafe impl RefEncode for CGEvent {
+        const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("__CGEvent", &[]));
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventSetIntegerValueField(event: *mut CGEvent, field: u32, value: i64);
+    }
+    const MOUSE_EVENT_BUTTON_NUMBER: u32 = 3;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Point {
+        x: f64,
+        y: f64,
+    }
+    unsafe impl Encode for Point {
+        const ENCODING: Encoding = Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Rect {
+        origin: Point,
+        size: Point,
+    }
+    unsafe impl Encode for Rect {
+        const ENCODING: Encoding =
+            Encoding::Struct("CGRect", &[Point::ENCODING, Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING])]);
+    }
+    let is_a = |object: &AnyObject, class: &AnyClass| -> bool {
+        let is: Bool = unsafe { msg_send![object, isKindOfClass: class] };
+        is.as_bool()
+    };
+    let (Some(window_class), Some(view_class)) = (AnyClass::get(c"GPUIWindow"), AnyClass::get(c"GPUIView")) else {
+        return Err("no GPUI window class".into());
+    };
+    unsafe {
+        let app: &AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        // Front to back.
+        let windows: &AnyObject = msg_send![app, orderedWindows];
+        let count: usize = msg_send![windows, count];
+        let window = (0..count).map(|i| -> &AnyObject { msg_send![windows, objectAtIndex: i] }).find(|w| is_a(w, window_class)).ok_or("no window is open")?;
+        let content: &AnyObject = msg_send![window, contentView];
+        let subviews: &AnyObject = msg_send![content, subviews];
+        let count: usize = msg_send![subviews, count];
+        let view = (0..count).map(|i| -> &AnyObject { msg_send![subviews, objectAtIndex: i] }).find(|v| is_a(v, view_class)).ok_or("the window has no GPUI view")?;
+        let frame: Rect = msg_send![content, frame];
+        // Window coordinates start at the bottom.
+        let location = Point { x: at.0 as f64, y: frame.size.y - at.1 as f64 };
+        let number: isize = msg_send![window, windowNumber];
+        let context: *const AnyObject = std::ptr::null();
+        let event: *mut AnyObject = msg_send![
+            class!(NSEvent),
+            mouseEventWithType: kind as usize,
+            location: location,
+            modifierFlags: 0_usize,
+            timestamp: 0_f64,
+            windowNumber: number,
+            context: context,
+            eventNumber: 0_isize,
+            clickCount: clicks as isize,
+            pressure: 1_f32,
+        ];
+        let mut event = event.as_ref().ok_or("couldn't make the mouse event")?;
+        // AppKit makes every such event the left button's, and GPUI reads the
+        // button from its number: set on the Core Graphics event behind it,
+        // which a new event is made from.
+        if matches!(kind, Mouse::RightDown | Mouse::RightUp) {
+            let cg: *mut CGEvent = msg_send![event, CGEvent];
+            if cg.is_null() {
+                return Err("the mouse event has no Core Graphics event".into());
+            }
+            CGEventSetIntegerValueField(cg, MOUSE_EVENT_BUTTON_NUMBER, 1);
+            let right: *mut AnyObject = msg_send![class!(NSEvent), eventWithCGEvent: cg];
+            event = right.as_ref().ok_or("couldn't make the right button's event")?;
+            let (button, place): (isize, Point) = (msg_send![event, buttonNumber], msg_send![event, locationInWindow]);
+            if button != 1 || (place.x - location.x).abs() > 0.5 || (place.y - location.y).abs() > 0.5 {
+                return Err(format!("the right button's event came out as button {button} at {}, {}", place.x, place.y));
+            }
+        }
+        match kind {
+            Mouse::Down => msg_send![view, mouseDown: event],
+            Mouse::Up => msg_send![view, mouseUp: event],
+            Mouse::RightDown => msg_send![view, rightMouseDown: event],
+            Mouse::RightUp => msg_send![view, rightMouseUp: event],
+            Mouse::Moved => msg_send![view, mouseMoved: event],
+            Mouse::Dragged => msg_send![view, mouseDragged: event],
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mouse(_: &mut AsyncApp, _: Mouse, _: (f32, f32), _: usize) -> Result<(), String> {
+    Err("mouse steps only work on macOS".into())
 }
 
 fn in_window(cx: &mut AsyncApp, f: impl FnOnce(&mut Window, &mut App) -> Result<(), String>) -> Result<(), String> {
@@ -200,6 +373,12 @@ mod tests {
         assert_eq!(steps[6], Step::Size(1280., 800.));
         assert_eq!(steps[7], Step::Mark("start".into()));
         assert_eq!(steps[8], Step::Quit);
+        let steps = parse("click 10 20\nclick 5.5 6 right\nclick 1 2 double\ndrag 1 2 30 40\n").unwrap();
+        let steps: Vec<Step> = steps.into_iter().map(|(_, s)| s).collect();
+        assert_eq!(steps[0], Step::Click(10., 20., MouseButton::Left, 1));
+        assert_eq!(steps[1], Step::Click(5.5, 6., MouseButton::Right, 1));
+        assert_eq!(steps[2], Step::Click(1., 2., MouseButton::Left, 2));
+        assert_eq!(steps[3], Step::Drag((1., 2.), (30., 40.)));
     }
 
     #[test]
@@ -208,6 +387,9 @@ mod tests {
         assert!(err("wait 1\njump 3").contains("line 2: unknown command “jump”"));
         assert!(err("wait soon").contains("line 1"));
         assert!(err("size 100").contains("line 1: size takes"));
+        assert!(err("click 10").contains("line 1: click takes"));
+        assert!(err("click 1 2 middle").contains("line 1: click doesn't know"));
+        assert!(err("drag 1 2 3").contains("line 1: drag takes"));
         assert!(err("action a::B {nope").contains("line 1: the action's data isn't JSON"));
     }
 
