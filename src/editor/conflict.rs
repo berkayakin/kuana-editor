@@ -10,8 +10,9 @@ use super::{AcceptBoth, AcceptCombination, AcceptCurrent, AcceptIncoming, EditKi
 use crate::conflict::{self, Conflict, Resolution};
 
 impl Editor {
-    /// The file's conflicts (cached per version).
-    pub(super) fn conflicts(&mut self, cx: &App) -> Arc<Vec<Conflict>> {
+    /// The file's conflicts (cached per version; the Merge view and the
+    /// workspace read them here too, so the text is parsed once).
+    pub(crate) fn conflicts(&mut self, cx: &App) -> Arc<Vec<Conflict>> {
         let rope = self.doc.read(cx).rope().clone();
         self.conflicts.now(self.doc.read(cx).version(), move || conflict::parse(&rope.to_string()))
     }
@@ -39,7 +40,7 @@ impl Editor {
         };
         let end = line(c.end + 1);
         // At the end of a file without a final newline, keep it that way.
-        if end == self.doc.read(cx).len() && !self.doc.read(cx).rope().to_string().ends_with('\n') && text.ends_with('\n') {
+        if end == self.doc.read(cx).len() && !self.doc.read(cx).ends_with_newline() && text.ends_with('\n') {
             text.pop();
         }
         self.edit_and_remap(vec![(line(c.start)..end, text)], EditKind::Other, cx);

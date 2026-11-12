@@ -405,6 +405,12 @@ impl Document {
         self.rope.len_bytes()
     }
 
+    /// Whether the text ends with a line break (an empty one doesn't).
+    pub fn ends_with_newline(&self) -> bool {
+        let len = self.rope.len_bytes();
+        len > 0 && self.rope.byte(len - 1) == b'\n'
+    }
+
     pub fn version(&self) -> u64 {
         self.version
     }
@@ -2260,6 +2266,15 @@ mod tests {
         assert_eq!(doc.code_lenses().iter().map(|l| l.line_start).collect::<Vec<_>>(), [17, 27]);
         doc.edit(vec![(17..27, String::new())], &[], EditKind::Other);
         assert_eq!(doc.code_lenses().iter().map(|l| l.line_start).collect::<Vec<_>>(), [17]);
+    }
+
+    #[test]
+    fn knows_whether_the_text_ends_with_a_line_break() {
+        let ends = |text: &str| Document::from_text(text.into(), None).ends_with_newline();
+        assert!(ends("a\n") && ends("\n") && ends("a\nb\n"));
+        assert!(!ends("") && !ends("a") && !ends("a\nb"));
+        // A big text ends in another chunk of the rope than it starts in.
+        assert!(ends(&"line\n".repeat(5000)) && !ends(&format!("{}end", "line\n".repeat(5000))));
     }
 
     #[test]

@@ -106,7 +106,8 @@ impl Workspace {
             self.toast(ToastKind::Info, format!("{rel} was deleted on one side"), Some("Right-click it in the Commit panel for Accept Yours or Accept Theirs.".into()), cx);
             return;
         };
-        let labels = crate::conflict::parse(&file.read(cx).doc.read(cx).rope().to_string())
+        let labels = file
+            .update(cx, |e, cx| e.conflicts(cx))
             .first()
             .map(|c| (c.ours_label.clone(), c.theirs_label.clone()))
             .unwrap_or_default();

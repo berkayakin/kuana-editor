@@ -11,7 +11,7 @@
 //! both (`MergeViewEvent::Apply`), as it does taking a side that deleted the
 //! file (`AcceptDeletion`).
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, IntoElement, Render, Subscription, Window,
@@ -20,7 +20,7 @@ use gpui::{
 
 use crate::{
     assets::Icon,
-    conflict,
+    conflict::{self, Conflict},
     document::Document,
     document_diff::DocumentDiff,
     editor::{Cancel, Editor},
@@ -60,8 +60,6 @@ pub struct MergeView {
     /// Each editor's top line as last seen, and the one it was told to scroll to.
     tops: [Option<usize>; 3],
     expected: [Option<usize>; 3],
-    /// The result's conflicts (their first rows) at a version.
-    conflicts: Option<(u64, Vec<usize>)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -91,7 +89,7 @@ impl MergeView {
         window.focus(&result.focus_handle(cx));
         let editors = [left, result, right];
         let subscriptions = editors.iter().enumerate().map(|(i, e)| cx.observe(e, move |this, _, cx| this.scrolled(i, cx))).collect();
-        Self { rel, editors, sides: [yours, theirs], maps: None, tops: [None; 3], expected: [None; 3], conflicts: None, _subscriptions: subscriptions }
+        Self { rel, editors, sides: [yours, theirs], maps: None, tops: [None; 3], expected: [None; 3], _subscriptions: subscriptions }
     }
 
     fn result(&self) -> &Entity<Editor> {
@@ -141,22 +139,17 @@ impl MergeView {
         }
     }
 
-    /// The result's conflicts: the row each starts on.
-    fn conflict_rows(&mut self, cx: &App) -> &[usize] {
-        let doc = self.result().read(cx).doc.read(cx);
-        let version = doc.version();
-        if self.conflicts.as_ref().is_none_or(|(v, _)| *v != version) {
-            let rows = conflict::parse(&doc.rope().to_string()).iter().map(|c| c.start).collect();
-            self.conflicts = Some((version, rows));
-        }
-        &self.conflicts.as_ref().expect("just made").1
+    /// The result's conflicts, as its editor knows them (it parses the text
+    /// once per version, for its own labels too).
+    fn conflicts(&self, cx: &mut App) -> Arc<Vec<Conflict>> {
+        self.result().update(cx, |e, cx| e.conflicts(cx))
     }
 
     /// Moves the result's caret to the next (or previous) conflict, around the end.
     fn step(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         let result = self.result().clone();
         let caret = result.read(cx).doc.read(cx).row_of(result.read(cx).primary_selection().head);
-        let rows = self.conflict_rows(cx).to_vec();
+        let rows: Vec<usize> = self.conflicts(cx).iter().map(|c| c.start).collect();
         let next = if forward {
             rows.iter().find(|&&r| r > caret).or(rows.first())
         } else {
@@ -241,7 +234,7 @@ impl Render for MergeView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
         let viewport = window.viewport_size();
-        let left = self.conflict_rows(cx).len();
+        let left = self.conflicts(cx).len();
         let status = match left {
             0 => "No conflicts left".to_string(),
             1 => "1 conflict left".to_string(),
