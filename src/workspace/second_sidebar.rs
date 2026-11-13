@@ -34,7 +34,7 @@ fn view_menu(mode: SidebarMode, cx: &mut Context<Workspace>) -> impl Fn(&MouseDo
 
 impl Workspace {
     /// Every view there is now, in the tabs' order.
-    fn all_views(&self) -> Vec<SidebarMode> {
+    pub(super) fn all_views(&self) -> Vec<SidebarMode> {
         SidebarMode::ALL.into_iter().chain(self.extension_modes().iter().copied()).collect()
     }
 
@@ -213,20 +213,7 @@ impl Workspace {
 
     /// The views here, to switch between: the header's name opens it.
     fn open_second_views_menu(&mut self, position: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let (mut entries, mut actions) = (Vec::new(), Vec::new());
-        for view in self.second_views() {
-            let icon = match view {
-                SidebarMode::Files => Icon::Folder,
-                SidebarMode::Commit => Icon::GitBranch,
-                SidebarMode::Database => Icon::Database,
-                SidebarMode::Extension(_) => Icon::Puzzle,
-            };
-            entries.push(MenuEntry::item(view.label(), icon));
-            actions.push(Some(MenuAction::Call(std::rc::Rc::new(move |ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| {
-                ws.select_sidebar_view(view, window, cx)
-            }))));
-        }
-        self.show_context_menu(entries, actions, position, None, window, cx);
+        self.open_more_views_menu(&self.second_views(), position, window, cx);
     }
 
     /// The second sidebar: the tab row's room, free to move the window, over
