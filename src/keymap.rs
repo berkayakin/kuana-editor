@@ -31,6 +31,7 @@ use crate::{
         ToggleResults, NextResult, PreviousResult, RerunFailedTests, ShowLocalHistory,
         ToggleAutoSave, ToggleSidebar, ToggleSidebarPosition, ToggleSecondSidebar, ToggleClassicLayout, CheckForUpdates, WelcomeSetup, GoToSymbol, SplitTerminal, RenameTerminal, SelectOpenedFile, InstallShellCommand,
         ToggleDatabase, NewDatabaseConnection, ToggleDatabaseResults, RunSqlStatement, RunSqlScript, NewSqlScript,
+        ToggleBookmark, ToggleBookmarkWithMnemonic, EditBookmarkDescription, ShowBookmarks, NextBookmark, PreviousBookmark, GoToBookmark, ShowTodo,
     },
 };
 
@@ -92,7 +93,7 @@ fn common(mac: bool) -> Vec<KeyBinding> {
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("secondary-f", Find, None),
         KeyBinding::new("secondary-shift-f", FindInFiles, None),
-        KeyBinding::new("f3", FindNext, None),
+        // F3 (Find Next) is each keymap's: JetBrains on macOS bookmarks with it.
         KeyBinding::new("shift-f3", FindPrevious, None),
         // The last used tab, as every editor's Ctrl+Tab switcher starts.
         KeyBinding::new("ctrl-tab", RecentTab, None),
@@ -102,6 +103,7 @@ fn common(mac: bool) -> Vec<KeyBinding> {
         // Dialogs and panels.
         KeyBinding::new("escape", Cancel, Some("PushDialog")),
         KeyBinding::new("escape", Cancel, Some("TrustDialog")),
+        KeyBinding::new("escape", Cancel, Some("MnemonicDialog")),
         KeyBinding::new("escape", Cancel, Some("About")),
         KeyBinding::new("enter", ConfirmPush, Some("PushDialog")),
         KeyBinding::new("secondary-enter", ConfirmPush, Some("PushDialog")),
@@ -165,6 +167,9 @@ fn common(mac: bool) -> Vec<KeyBinding> {
         KeyBinding::new("backspace", Backspace, e),
         KeyBinding::new("shift-backspace", Backspace, e),
         KeyBinding::new("delete", Delete, e),
+        // Later than the field's own, so a picker hears them first (and passes them on).
+        KeyBinding::new("backspace", crate::picker::RemoveSelected, Some("Picker > Editor")),
+        KeyBinding::new("delete", crate::picker::RemoveSelected, Some("Picker > Editor")),
         KeyBinding::new("enter", Newline, e),
         // New line below in code, "submit" in text fields.
         KeyBinding::new("secondary-enter", Submit, e),
@@ -306,6 +311,10 @@ fn jetbrains(mac: bool) -> Vec<KeyBinding> {
     ];
     if mac {
         b.extend([
+            // Bookmarks; Find Next is ⌘G.
+            KeyBinding::new("f3", ToggleBookmark, None),
+            KeyBinding::new("alt-f3", ToggleBookmarkWithMnemonic, None),
+            KeyBinding::new("cmd-f3", ShowBookmarks, None),
             // The Windows-style Ctrl variants also work on macOS.
             KeyBinding::new("ctrl-f", Find, None),
             KeyBinding::new("ctrl-shift-f", FindInFiles, None),
@@ -346,6 +355,10 @@ fn jetbrains(mac: bool) -> Vec<KeyBinding> {
         ]);
     } else {
         b.extend([
+            KeyBinding::new("f3", FindNext, None),
+            KeyBinding::new("f11", ToggleBookmark, None),
+            KeyBinding::new("ctrl-f11", ToggleBookmarkWithMnemonic, None),
+            KeyBinding::new("shift-f11", ShowBookmarks, None),
             KeyBinding::new("ctrl-shift-]", NextTab, None),
             KeyBinding::new("ctrl-shift-[", PrevTab, None),
             KeyBinding::new("ctrl-shift-n", GoToFile, None),
@@ -384,6 +397,8 @@ fn jetbrains(mac: bool) -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-alt-down", AddCursorBelow, e),
         ]);
     }
+    // Go to Bookmark 0–9 on both platforms.
+    b.extend(('0'..='9').map(|mnemonic| KeyBinding::new(&format!("ctrl-{mnemonic}"), GoToBookmark { mnemonic }, None)));
     b
 }
 
@@ -391,6 +406,7 @@ fn jetbrains(mac: bool) -> Vec<KeyBinding> {
 fn vscode(mac: bool) -> Vec<KeyBinding> {
     let e = Some("Editor");
     let mut b = vec![
+        KeyBinding::new("f3", FindNext, None),
         KeyBinding::new("secondary-shift-p", FindAction, None),
         KeyBinding::new("f1", FindAction, None),
         KeyBinding::new("secondary-p", GoToFile, None),
@@ -466,6 +482,10 @@ fn vscode(mac: bool) -> Vec<KeyBinding> {
     ];
     if mac {
         b.extend([
+            // The Bookmarks extension's.
+            KeyBinding::new("cmd-alt-k", ToggleBookmark, None),
+            KeyBinding::new("cmd-alt-l", NextBookmark, None),
+            KeyBinding::new("cmd-alt-j", PreviousBookmark, None),
             KeyBinding::new("cmd-alt-f", Replace, None),
             KeyBinding::new("cmd-alt-right", NextTab, None),
             KeyBinding::new("cmd-alt-left", PrevTab, None),
@@ -479,6 +499,9 @@ fn vscode(mac: bool) -> Vec<KeyBinding> {
         ]);
     } else {
         b.extend([
+            KeyBinding::new("ctrl-alt-k", ToggleBookmark, None),
+            KeyBinding::new("ctrl-alt-l", NextBookmark, None),
+            KeyBinding::new("ctrl-alt-j", PreviousBookmark, None),
             KeyBinding::new("ctrl-h", Replace, None),
             KeyBinding::new("ctrl-,", OpenSettings, None),
             KeyBinding::new("ctrl-w", CloseTab, None),
@@ -504,6 +527,10 @@ fn vscode(mac: bool) -> Vec<KeyBinding> {
 fn sublime_text(mac: bool) -> Vec<KeyBinding> {
     let e = Some("Editor");
     let mut b = vec![
+        KeyBinding::new("secondary-f2", ToggleBookmark, None),
+        KeyBinding::new("f2", NextBookmark, None),
+        KeyBinding::new("shift-f2", PreviousBookmark, None),
+        KeyBinding::new("f3", FindNext, None),
         KeyBinding::new("secondary-shift-p", FindAction, None),
         KeyBinding::new("secondary-p", GoToFile, None),
         KeyBinding::new("ctrl-g", GoToLine, None),
@@ -590,6 +617,7 @@ fn sublime_text(mac: bool) -> Vec<KeyBinding> {
 fn zed(mac: bool) -> Vec<KeyBinding> {
     let e = Some("Editor");
     let mut b = vec![
+        KeyBinding::new("f3", FindNext, None),
         KeyBinding::new("secondary-shift-p", FindAction, None),
         KeyBinding::new("secondary-p", GoToFile, None),
         KeyBinding::new("ctrl-g", GoToLine, None),
@@ -654,6 +682,10 @@ fn zed(mac: bool) -> Vec<KeyBinding> {
     ];
     if mac {
         b.extend([
+            // As VS Code's Bookmarks extension (Zed has none).
+            KeyBinding::new("cmd-alt-k", ToggleBookmark, None),
+            KeyBinding::new("cmd-alt-l", NextBookmark, None),
+            KeyBinding::new("cmd-alt-j", PreviousBookmark, None),
             KeyBinding::new("cmd-alt-f", Replace, None),
             KeyBinding::new("alt-cmd-o", RecentProjects, None),
             KeyBinding::new("alt-cmd-right", NextTab, None),
@@ -676,6 +708,9 @@ fn zed(mac: bool) -> Vec<KeyBinding> {
         ]);
     } else {
         b.extend([
+            KeyBinding::new("ctrl-alt-k", ToggleBookmark, None),
+            KeyBinding::new("ctrl-alt-l", NextBookmark, None),
+            KeyBinding::new("ctrl-alt-j", PreviousBookmark, None),
             KeyBinding::new("ctrl-h", Replace, None),
             KeyBinding::new("ctrl-,", OpenSettings, None),
             KeyBinding::new("ctrl-w", CloseTab, None),
@@ -735,6 +770,13 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Debug…", DebugConfiguration),
         a("Toggle Line Breakpoint", ToggleBreakpoint),
         a("Add Conditional Breakpoint…", AddConditionalBreakpoint),
+        a("Toggle Bookmark", ToggleBookmark),
+        a("Toggle Bookmark with Mnemonic…", ToggleBookmarkWithMnemonic),
+        a("Edit Bookmark Description…", EditBookmarkDescription),
+        a("Show Bookmarks", ShowBookmarks),
+        a("Next Bookmark", NextBookmark),
+        a("Previous Bookmark", PreviousBookmark),
+        a("Show TODO", ShowTodo),
         a("Add Logpoint…", AddLogpoint),
         a("Attach to Process…", AttachToProcess),
         a("Resume Program", Resume),

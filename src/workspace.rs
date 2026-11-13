@@ -19,7 +19,7 @@ use gpui::{
 
 use crate::{
     assets::{self, Icon},
-    document::{BinaryFile, Breakpoint, Document},
+    document::{BinaryFile, Bookmark, Breakpoint, Document},
     document_store::{DocumentStore, DocumentStoreEvent},
     branch_picker::{BranchPicker, BranchPickerEvent},
     clone_dialog::{self, CloneDialog, CloneDialogEvent},
@@ -36,7 +36,7 @@ use crate::{
     debugger::{DebugEvent, DebugSession, launch},
     extensions,
     editor::{
-        self, Cancel, Editor, EditorBreakpointMenu, EditorBreakpointsChanged, EditorContextMenu, EditorEvent, EditorGitEvent, EditorLoaded,
+        self, Cancel, Editor, EditorBookmarksChanged, EditorBreakpointMenu, EditorBreakpointsChanged, EditorContextMenu, EditorEvent, EditorGitEvent, EditorLoaded,
         EditorLspEvent, EditorPreviewToggle, EditorRunEvent, EditorRunSql, GitFile, ToggleMarkdownPreview, Unloaded,
     },
     image_view::ImageView,
@@ -64,7 +64,7 @@ use crate::{
     project_search::{ProjectSearch, ProjectSearchEvent},
     search::{SearchQuery},
     state::{
-        FileBreakpoints, PaneNode, PaneShare, ProjectSession, SessionState, TabKind, TabSession, TerminalGroupSession, TerminalLayout, TerminalTabSession,
+        FileBookmarks, FileBreakpoints, PaneNode, PaneShare, ProjectSession, SessionState, TabKind, TabSession, TerminalGroupSession, TerminalLayout, TerminalTabSession,
         WindowPlacement,
     },
     syntax::Language,
@@ -86,6 +86,7 @@ use crate::ui::{
 mod activity_bar;
 mod app_menu;
 mod background;
+mod bookmarks;
 mod commands;
 mod file_tree;
 mod git_ops;
@@ -112,6 +113,7 @@ mod sidebar_tabs;
 mod status_bar;
 mod suggestions;
 mod tab_bar;
+mod todo;
 mod terminal_panel;
 mod terminals;
 mod title_bar;
@@ -130,6 +132,7 @@ use self::{
     windows::*,
 };
 pub use self::{
+    bookmarks::GoToBookmark,
     extension_ui::{ToggleExtensionView, handle_extension_request},
     sessions::update_recent_projects,
     title_bar::{window_controls, window_drag_area},
@@ -185,6 +188,15 @@ actions!(
         AttachToProcess,
         AddConditionalBreakpoint,
         AddLogpoint,
+        /// On every caret's line: adds bookmarks, or removes them when all have one.
+        ToggleBookmark,
+        ToggleBookmarkWithMnemonic,
+        EditBookmarkDescription,
+        ShowBookmarks,
+        NextBookmark,
+        PreviousBookmark,
+        /// The project's TODO comments in the Find panel.
+        ShowTodo,
         OpenExtensions,
         ProjectTrust,
         UndoFileChange,
@@ -645,6 +657,7 @@ enum Modal {
     Clone(Entity<CloneDialog>),
     Remotes(Entity<RemotesDialog>),
     Trust(Entity<crate::trust_dialog::TrustDialog>),
+    Mnemonic(Entity<crate::bookmark_dialog::MnemonicDialog>),
 }
 
 /// The modal over the workspace, if any, with its subscription: they're
@@ -775,6 +788,12 @@ pub struct Workspace {
     debug_location: Option<(PathBuf, u32)>,
     /// Breakpoints of files that aren't open; open files keep theirs in their documents.
     breakpoints: HashMap<PathBuf, Vec<Breakpoint>>,
+    /// Bookmarks of files that aren't open, the same way.
+    bookmarks: HashMap<PathBuf, Vec<Bookmark>>,
+    /// Reads the lines Show Bookmarks lists.
+    bookmarks_task: Option<Task<()>>,
+    /// The TODO list, once asked for.
+    todo: todo::TodoList,
     /// The status bar's venv for a folder (looked up once, not every frame).
     venv_shown: std::cell::RefCell<Option<(PathBuf, Option<PathBuf>)>>,
     sidebar_width: Pixels,
@@ -1143,6 +1162,7 @@ impl Workspace {
             }
             ws.extension_callers_changed(cx);
             ws.lsp.update(cx, |s, cx| s.settings_changed(cx));
+            ws.todo_settings_changed(cx);
             cx.notify();
         });
         // An update finished downloading: show Restart to Update.
@@ -1231,6 +1251,9 @@ impl Workspace {
             tree_root_drop: false,
             debug_location: None,
             breakpoints: HashMap::new(),
+            bookmarks: HashMap::new(),
+            bookmarks_task: None,
+            todo: Default::default(),
             venv_shown: Default::default(),
             problems_height: px(state.problems_height.unwrap_or(200.).clamp(90., 4000.)),
             sidebar_width: px(state.sidebar_width.unwrap_or(250.).clamp(SIDEBAR_MIN_WIDTH, 4000.)),
@@ -1467,6 +1490,7 @@ impl Workspace {
         subscriptions.push(cx.subscribe(editor, |ws, editor, _: &EditorEvent, cx| {
             ws.schedule_auto_save(&editor, cx);
             ws.schedule_session_save(cx);
+            ws.todo_edited(&editor, cx);
         }));
         subscriptions.push(cx.subscribe_in(editor, window, |ws, editor, event: &EditorContextMenu, window, cx| {
             ws.open_editor_menu(editor.clone(), event.0, window, cx);
@@ -1482,6 +1506,9 @@ impl Workspace {
         }));
         subscriptions.push(cx.subscribe(editor, |ws, editor, _: &EditorBreakpointsChanged, cx| {
             ws.breakpoints_changed(&editor, cx);
+        }));
+        subscriptions.push(cx.subscribe(editor, |ws, _, _: &EditorBookmarksChanged, cx| {
+            ws.bookmarks_changed(cx);
         }));
         subscriptions.push(cx.subscribe_in(editor, window, |ws, editor, event: &EditorBreakpointMenu, window, cx| {
             ws.open_breakpoint_menu(editor.clone(), event.row, event.position, window, cx);
@@ -1544,11 +1571,14 @@ impl Workspace {
             editor.update(cx, |e, cx| e.set_git_diff(diff, cx));
             return;
         }
-        // Breakpoints it had while closed, and the paused line if it's here.
+        // Breakpoints and bookmarks it had while closed, and the paused line if it's here.
         let path = editor.read(cx).doc.read(cx).path.clone();
         if let Some(path) = path {
             if let Some(breakpoints) = self.breakpoints.remove(&path) {
                 editor.update(cx, |e, cx| e.set_breakpoints(&breakpoints, cx));
+            }
+            if let Some(bookmarks) = self.bookmarks.remove(&path) {
+                editor.update(cx, |e, cx| e.set_bookmarks(&bookmarks, cx));
             }
             if let Some((at, line)) = self.debug_location.clone().filter(|(at, _)| *at == path) {
                 let _ = at;
@@ -1672,6 +1702,7 @@ impl Workspace {
             if self.show_find {
                 self.find_bar.update(cx, |f, cx| f.set_target(item.editor().cloned(), cx));
             }
+            self.todo_scope_input_changed(todo::TodoScope::CurrentFile, cx);
             self.schedule_session_save(cx);
         }
         cx.notify();

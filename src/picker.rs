@@ -20,6 +20,15 @@ use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
 };
 
+gpui::actions!(
+    picker,
+    [
+        /// ⌫ / Delete in a picker's field: removes the selected item where a
+        /// picker can (Show Bookmarks) and nothing is typed; edits the field otherwise.
+        RemoveSelected,
+    ]
+);
+
 use crate::{
     assets::Icon,
     clone_dialog::display_path,
@@ -52,6 +61,8 @@ pub enum PickerMode {
     /// Symbols across the project from the language servers; the workspace
     /// answers [`PickerEvent::SymbolQuery`] with [`Picker::set_locations`].
     Symbols,
+    /// The project's bookmarks; see [`Picker::set_bookmarks`].
+    Bookmarks,
 }
 
 /// One place in a [`PickerMode::Locations`] list.
@@ -64,6 +75,19 @@ pub struct LocationRow {
     /// The line's text, trimmed (Symbols: the symbol's name).
     pub preview: String,
     pub encoding: Encoding,
+}
+
+/// One row of a [`PickerMode::Bookmarks`] list.
+pub struct BookmarkRow {
+    pub path: PathBuf,
+    /// 0-based.
+    pub row: usize,
+    pub mnemonic: Option<char>,
+    pub description: Option<String>,
+    /// The file, relative to the project.
+    pub file: String,
+    /// The line's text, trimmed.
+    pub preview: String,
 }
 
 pub struct ActionEntry {
@@ -82,6 +106,10 @@ pub enum PickerEvent {
     SymbolQuery(String),
     Run(RunTarget),
     Debug(RunTarget),
+    /// Bookmarks: go to this one (0-based row).
+    OpenBookmark { path: PathBuf, row: usize },
+    /// Bookmarks: ⌫ with nothing typed removes the selected one.
+    RemoveBookmark { path: PathBuf, row: usize },
     Dismissed,
 }
 
@@ -119,6 +147,9 @@ enum Item {
         ix: usize,
         hl: Vec<Range<usize>>,
     },
+    Bookmark {
+        ix: usize,
+    },
 }
 
 pub struct Picker {
@@ -135,6 +166,7 @@ pub struct Picker {
     current_symbol: Option<usize>,
     locations: Arc<Vec<LocationRow>>,
     run_targets: Arc<Vec<RunTarget>>,
+    bookmarks: Arc<Vec<BookmarkRow>>,
     /// Overrides the mode's title (Locations: "Usages of foo").
     title: Option<SharedString>,
     items: Arc<Vec<Item>>,
@@ -178,6 +210,7 @@ impl Picker {
             PickerMode::Debug => "Debug configuration",
             PickerMode::Attach => "Search processes by name, command or PID",
             PickerMode::Symbols => "Search symbols in the project",
+            PickerMode::Bookmarks => "Filter bookmarks",
         };
         let query = cx.new(|cx| Editor::single_line(placeholder, cx));
         window.focus(&query.focus_handle(cx));
@@ -204,6 +237,7 @@ impl Picker {
             locations: Arc::new(Vec::new()),
 
             run_targets: Arc::new(Vec::new()),
+            bookmarks: Arc::new(Vec::new()),
             title: None,
             items: Arc::new(Vec::new()),
             selected: 0,
@@ -243,6 +277,30 @@ impl Picker {
     pub fn set_run_targets(&mut self, targets: Vec<RunTarget>, cx: &mut Context<Self>) {
         self.run_targets = Arc::new(targets);
         self.update_items(cx);
+    }
+
+    /// Fills (or refills, after a removal) a Bookmarks picker, keeping the
+    /// selection where it was.
+    pub fn set_bookmarks(&mut self, rows: Vec<BookmarkRow>, cx: &mut Context<Self>) {
+        let selected = self.selected;
+        self.bookmarks = Arc::new(rows);
+        self.update_items(cx);
+        self.selected = selected.min(self.items.len().saturating_sub(1));
+        self.move_selection(0, cx);
+    }
+
+    /// Bookmarks: ⌫ or Delete with nothing typed removes the selected one;
+    /// otherwise the key goes on to the field (its next binding).
+    fn on_remove_selected(&mut self, _: &RemoveSelected, _: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == PickerMode::Bookmarks
+            && self.query.read(cx).text(cx).is_empty()
+            && let Some(Item::Bookmark { ix }) = self.items.get(self.selected)
+        {
+            let row = &self.bookmarks[*ix];
+            cx.emit(PickerEvent::RemoveBookmark { path: row.path.clone(), row: row.row });
+            return;
+        }
+        cx.propagate();
     }
 
     /// Fills a Locations picker.
@@ -491,6 +549,35 @@ impl Picker {
             items.extend(scored.into_iter().map(|(_, i)| i));
         }
 
+        if self.mode == PickerMode::Bookmarks {
+            let bookmarks = self.bookmarks.clone();
+            let mut scored: Vec<(u32, Item)> = Vec::new();
+            for (ix, row) in bookmarks.iter().enumerate() {
+                let score = match &pattern {
+                    Some(p) => {
+                        let text = format!(
+                            "{} {} {} {}",
+                            row.mnemonic.map(String::from).unwrap_or_default(),
+                            row.description.as_deref().unwrap_or(""),
+                            row.file,
+                            row.preview
+                        );
+                        let mut buf = Vec::new();
+                        match p.score(Utf32Str::new(&text, &mut buf), &mut self.matcher) {
+                            Some(score) => score,
+                            None => continue,
+                        }
+                    }
+                    None => 0,
+                };
+                scored.push((score, Item::Bookmark { ix }));
+            }
+            if pattern.is_some() {
+                scored.sort_by_key(|a| std::cmp::Reverse(a.0));
+            }
+            items.extend(scored.into_iter().map(|(_, i)| i));
+        }
+
         if self.mode == PickerMode::Structure {
             let mut scored: Vec<(u32, Item)> =
                 (0..self.symbols.len()).filter_map(|ix| self.symbol_item(ix, pattern.as_ref())).collect();
@@ -561,6 +648,10 @@ impl Picker {
             Some(Item::Run { ix, .. }) => {
                 let target = self.run_targets[*ix].clone();
                 cx.emit(if self.mode == PickerMode::Run { PickerEvent::Run(target) } else { PickerEvent::Debug(target) })
+            }
+            Some(Item::Bookmark { ix }) => {
+                let row = &self.bookmarks[*ix];
+                cx.emit(PickerEvent::OpenBookmark { path: row.path.clone(), row: row.row })
             }
             Some(Item::Location { ix }) => cx.emit(PickerEvent::OpenLocation {
                 location: self.locations[*ix].location.clone(),
@@ -669,6 +760,7 @@ impl Render for Picker {
             PickerMode::Debug => ("Debug", Icon::Bug, ""),
             PickerMode::Attach => ("Attach to Process", Icon::Bug, ""),
             PickerMode::Symbols => ("Symbols", Icon::Braces, ""),
+            PickerMode::Bookmarks => ("Bookmarks", Icon::Bookmark, ""),
         };
         let title: SharedString = match &self.title {
             Some(t) => t.clone(),
@@ -677,6 +769,8 @@ impl Render for Picker {
         let hint = match self.mode {
             PickerMode::Locations => format!("{} found", self.locations.len()),
             PickerMode::Symbols if !self.locations.is_empty() => format!("{} found", self.locations.len()),
+            PickerMode::Bookmarks if self.bookmarks.is_empty() => "None yet".to_string(),
+            PickerMode::Bookmarks => "⌫ removes".to_string(),
             _ => hint.to_string(),
         };
         let items = self.items.clone();
@@ -684,6 +778,7 @@ impl Render for Picker {
         let symbols = self.symbols.clone();
         let locations = self.locations.clone();
         let run_targets = self.run_targets.clone();
+        let bookmarks = self.bookmarks.clone();
         let shortcuts = self.shortcuts.clone();
         let selected = self.selected;
         let mode = self.mode;
@@ -820,6 +915,53 @@ impl Render for Picker {
                                                     .child(format!("{}:{}", row_data.file, row_data.line)),
                                             )
                                     }
+                                    Item::Bookmark { ix } => {
+                                        let data = &bookmarks[*ix];
+                                        let marker = match data.mnemonic {
+                                            Some(m) => div()
+                                                .size(px(16.))
+                                                .flex_shrink_0()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .rounded(px(4.))
+                                                .bg(theme.accent_soft)
+                                                .text_size(px(11.))
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(theme.accent)
+                                                .child(m.to_string())
+                                                .into_any_element(),
+                                            None => div()
+                                                .size(px(16.))
+                                                .flex_shrink_0()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .child(icon_el(Icon::Bookmark, px(14.), theme.text_muted.into()))
+                                                .into_any_element(),
+                                        };
+                                        row.child(marker)
+                                            .when_some(data.description.clone(), |row, description| {
+                                                row.child(div().flex_shrink_0().max_w(gpui::relative(0.4)).truncate().text_color(theme.text).child(description))
+                                            })
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .text_color(if data.description.is_some() { theme.text_dim } else { theme.text })
+                                                    .child(data.preview.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .max_w(gpui::relative(0.5))
+                                                    .truncate()
+                                                    .text_size(px(12.))
+                                                    .text_color(theme.text_dim)
+                                                    .child(format!("{}:{}", data.file, data.row + 1)),
+                                            )
+                                    }
                                     Item::Header(_) => unreachable!(),
                                 };
                                 row.into_any_element()
@@ -839,6 +981,7 @@ impl Render for Picker {
 
         modal_panel(cx)
             .key_context("Picker")
+            .on_action(cx.listener(Self::on_remove_selected))
             .on_action(cx.listener(Self::on_up))
             .on_action(cx.listener(Self::on_down))
             .on_action(cx.listener(Self::on_page_up))

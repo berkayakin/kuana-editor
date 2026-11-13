@@ -82,8 +82,14 @@ impl Workspace {
             self.refresh_file_index(cx);
             self.refresh_git(cx);
             self.reload_documents(|_| true, cx);
+            if let Some(root) = self.root.clone() {
+                self.todo_files_changed([root], cx);
+            }
             cx.notify();
             return;
+        }
+        if !changed.files.is_empty() {
+            self.todo_files_changed(changed.files, cx);
         }
         if let Some(ignore) = changed.ignore {
             self.ignore = ignore;
@@ -190,6 +196,7 @@ impl Workspace {
             let files = self.project.openable();
             picker.update(cx, |p, cx| p.set_files(files, cx));
         }
+        self.todo_project_listed(cx);
         self.project_updated_unchanged(cx);
     }
 
@@ -234,6 +241,9 @@ pub(super) struct Classified {
     git: StatusWork,
     /// Open files that changed.
     open: HashSet<PathBuf>,
+    /// The project's paths that changed in any way (not in ignored build
+    /// output or dependencies), for the TODO list.
+    files: Vec<PathBuf>,
     /// Each language server's `didChangeWatchedFiles`, for what it watches.
     lsp: Vec<(ServerKey, serde_json::Value)>,
     /// A project settings file changed (a checkout, another editor).
@@ -291,6 +301,7 @@ pub(super) fn classify(changes: Vec<FsChange>, state: &WatchState) -> Classified
                 if !in_project(&change.path, ignore.as_deref()) {
                     continue;
                 }
+                out.files.push(change.path.clone());
                 if change.structural {
                     out.structural.push(change.path.clone());
                 }

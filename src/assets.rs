@@ -13,6 +13,7 @@ macro_rules! icons {
 }
 
 static ICONS: &[(&str, &[u8])] = icons![
+    "bookmark",
     "database",
     "table",
     "package",
@@ -204,6 +205,7 @@ pub enum Icon {
     StepInto,
     StepOut,
     Bug,
+    Bookmark,
     Puzzle,
     ArrowDown,
     Refresh,
@@ -293,6 +295,7 @@ impl Icon {
             Icon::StepInto => "icons/step-into.svg",
             Icon::StepOut => "icons/step-out.svg",
             Icon::Bug => "icons/bug.svg",
+            Icon::Bookmark => "icons/bookmark.svg",
             Icon::Puzzle => "icons/puzzle.svg",
             Icon::ArrowDown => "icons/arrow-down.svg",
             Icon::Refresh => "icons/refresh-cw.svg",

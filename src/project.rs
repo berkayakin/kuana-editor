@@ -67,6 +67,16 @@ impl ProjectSnapshot {
         self.files.iter().filter(|(_, ignored)| !**ignored).map(|(path, _)| path.clone()).collect()
     }
 
+    /// Whether Find in Files reads `path` (listed and not ignored).
+    pub fn is_searchable(&self, path: &Path) -> bool {
+        self.files.get(path) == Some(&false)
+    }
+
+    /// Whether `path` is listed, ignored or not.
+    pub fn lists(&self, path: &Path) -> bool {
+        self.files.contains_key(path)
+    }
+
     /// Takes in paths the watcher reported as created, removed or renamed:
     /// a file is added or dropped, a folder read (or dropped) with what's in it.
     pub fn apply<'a>(&mut self, paths: impl IntoIterator<Item = &'a Path>) -> Applied {

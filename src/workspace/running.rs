@@ -193,26 +193,43 @@ impl Workspace {
     /// Right-click on a line number: add or remove its breakpoint, or give it
     /// a condition or a log message.
     pub(super) fn open_breakpoint_menu(&mut self, editor: Entity<Editor>, row: usize, position: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let existing = editor.read(cx).breakpoint(row, cx).is_some();
-        let toggle = binding_label(&editor::ToggleBreakpoint, window);
-        let entries = if existing {
-            vec![
-                MenuEntry::item("Remove Breakpoint", Icon::Minus).shortcut(toggle),
-                MenuEntry::item("Edit Condition…", Icon::Pencil).shortcut(binding_label(&AddConditionalBreakpoint, window)),
-                MenuEntry::item("Edit Log Message…", Icon::Terminal).shortcut(binding_label(&AddLogpoint, window)),
-            ]
-        } else {
-            vec![
-                MenuEntry::item("Add Breakpoint", Icon::Plus).shortcut(toggle),
-                MenuEntry::item("Add Conditional Breakpoint…", Icon::Pencil).shortcut(binding_label(&AddConditionalBreakpoint, window)),
-                MenuEntry::item("Add Logpoint…", Icon::Terminal).shortcut(binding_label(&AddLogpoint, window)),
-            ]
-        };
-        let actions = [BreakpointEdit::Toggle, BreakpointEdit::Condition, BreakpointEdit::LogMessage]
-            .into_iter()
-            .map(|edit| Some(MenuAction::Breakpoint(edit, editor.clone(), row)))
-            .collect();
-        self.show_context_menu(entries, actions, position, None, window, cx);
+        let mut entries = Vec::new();
+        let mut actions = Vec::new();
+        if editor.read(cx).can_break(cx) {
+            let existing = editor.read(cx).breakpoint(row, cx).is_some();
+            let toggle = binding_label(&editor::ToggleBreakpoint, window);
+            entries = if existing {
+                vec![
+                    MenuEntry::item("Remove Breakpoint", Icon::Minus).shortcut(toggle),
+                    MenuEntry::item("Edit Condition…", Icon::Pencil).shortcut(binding_label(&AddConditionalBreakpoint, window)),
+                    MenuEntry::item("Edit Log Message…", Icon::Terminal).shortcut(binding_label(&AddLogpoint, window)),
+                ]
+            } else {
+                vec![
+                    MenuEntry::item("Add Breakpoint", Icon::Plus).shortcut(toggle),
+                    MenuEntry::item("Add Conditional Breakpoint…", Icon::Pencil).shortcut(binding_label(&AddConditionalBreakpoint, window)),
+                    MenuEntry::item("Add Logpoint…", Icon::Terminal).shortcut(binding_label(&AddLogpoint, window)),
+                ]
+            };
+            actions = [BreakpointEdit::Toggle, BreakpointEdit::Condition, BreakpointEdit::LogMessage]
+                .into_iter()
+                .map(|edit| Some(MenuAction::Breakpoint(edit, editor.clone(), row)))
+                .collect();
+        }
+        let bookmarks = self.bookmark_menu_entries(&editor, row, window, cx);
+        if !bookmarks.is_empty() {
+            if !entries.is_empty() {
+                entries.push(MenuEntry::Separator);
+                actions.push(None);
+            }
+            for (entry, action) in bookmarks {
+                entries.push(entry);
+                actions.push(action);
+            }
+        }
+        if !entries.is_empty() {
+            self.show_context_menu(entries, actions, position, None, window, cx);
+        }
     }
 
     /// Add Conditional Breakpoint… (⇧⌘F8 / Ctrl+Shift+F8 in JetBrains): on the caret's line.
@@ -699,6 +716,7 @@ impl Workspace {
                 on_click: std::rc::Rc::new(move |window, cx| {
                     this.update(cx, |ws, cx| ws.run_target(target.clone(), window, cx)).ok();
                 }),
+                on: false,
             }
         };
         let mut buttons = Vec::new();

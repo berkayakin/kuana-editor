@@ -10,7 +10,11 @@ use std::{
 
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 
-use crate::{document::Breakpoint, run::RunTarget, theme::config_dir};
+use crate::{
+    document::{Bookmark, Breakpoint},
+    run::RunTarget,
+    theme::config_dir,
+};
 
 /// Writes a file whole or not at all: to a temporary file in the same
 /// folder, flushed to disk, then renamed over it, so a crash or a full disk
@@ -351,6 +355,9 @@ pub struct ProjectSession {
     /// Line breakpoints per file, open or not.
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "skip_bad")]
     pub breakpoints: Vec<FileBreakpoints>,
+    /// Bookmarks per file, open or not.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "skip_bad")]
+    pub bookmarks: Vec<FileBookmarks>,
     /// The Python venv picked for the project (a path, or "off"); detected
     /// when absent.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "none_if_bad")]
@@ -405,6 +412,16 @@ pub struct FileBreakpoints {
     /// Relative to the project.
     pub path: PathBuf,
     pub breakpoints: Vec<Breakpoint>,
+}
+
+/// A file's bookmarks.
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
+#[serde(default)]
+pub struct FileBookmarks {
+    /// Relative to the project.
+    pub path: PathBuf,
+    #[serde(deserialize_with = "skip_bad")]
+    pub bookmarks: Vec<Bookmark>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
@@ -645,6 +662,10 @@ mod tests {
             breakpoints: vec![FileBreakpoints {
                 path: "src/a.rs".into(),
                 breakpoints: vec![Breakpoint::at(3), Breakpoint { condition: Some("i > 2".into()), ..Breakpoint::at(9) }],
+            }],
+            bookmarks: vec![FileBookmarks {
+                path: "src/a.rs".into(),
+                bookmarks: vec![Bookmark::at(0), Bookmark { mnemonic: Some('A'), description: Some("entry".into()), ..Bookmark::at(12) }],
             }],
             last_run: Some(RunTarget {
                 name: "Tests in 'tests'".into(),

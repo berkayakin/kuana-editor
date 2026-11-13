@@ -687,6 +687,17 @@ impl Workspace {
                 image.update(cx, |i, cx| i.set_path(moved, cx));
             }
         }
+        // Closed files' breakpoints and bookmarks.
+        for (path, moved) in self.breakpoints.keys().filter_map(|p| Some((p.clone(), remap(p)?))).collect::<Vec<_>>() {
+            if let Some(marks) = self.breakpoints.remove(&path) {
+                self.breakpoints.insert(moved, marks);
+            }
+        }
+        for (path, moved) in self.bookmarks.keys().filter_map(|p| Some((p.clone(), remap(p)?))).collect::<Vec<_>>() {
+            if let Some(marks) = self.bookmarks.remove(&path) {
+                self.bookmarks.insert(moved, marks);
+            }
+        }
         self.tree.update(cx, |t, _| t.remap(remap));
         for p in &mut self.recent {
             if let Some(m) = remap(p) {
@@ -1039,6 +1050,7 @@ impl Workspace {
             Modal::Clone(c) => c.clone().into_any_element(),
             Modal::Remotes(r) => r.clone().into_any_element(),
             Modal::Trust(t) => t.clone().into_any_element(),
+            Modal::Mnemonic(m) => m.clone().into_any_element(),
         };
         let top = modal_top(window);
         // Deferred above the other deferred layers (resize handles), so they

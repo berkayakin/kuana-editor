@@ -67,6 +67,13 @@ Everything Kuana does, in one list. Each area has its own page with the details.
 - Search Everywhere (double Shift, or the magnifier at the top right), fuzzy Go to File
   (git-ignored files included, ignored folders skipped), Recent Files, Find Action, Go to Line,
   and File Structure: the current file's functions, classes, headings, selectors or keys
+- Bookmarks, as in JetBrains: on any line, optionally with a mnemonic (0–9, A–Z) and a description,
+  shown in the gutter and the scrollbar, following the lines as you edit; Show Bookmarks lists them
+  all, Next / Previous Bookmark and Go to Bookmark 0–9 jump between them; see
+  [Bookmarks](editing.md#bookmarks)
+- A TODO list (View → TODO): the project's TODO, FIXME, HACK and XXX comments in the Find panel, by
+  file, for the project, the current file or the files with changes, updated as you edit; the words
+  are highlighted in the editor's comments, and `todo_patterns` sets them; see [TODO list](editing.md#todo-list)
 - Breadcrumbs under the tabs (folders, file, then the definitions around the caret; click one to go
   there) and sticky scroll: the header lines of the functions and classes you've scrolled into stay
   pinned at the top of the editor (up to four; click one to jump to it)

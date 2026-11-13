@@ -117,6 +117,9 @@ pub struct Settings {
     /// Where ghost-text suggestions come from (none unless chosen): only the
     /// user's settings pick a service that's sent code, never a project's.
     pub edit_prediction_provider: Option<EditPredictionProvider>,
+    /// Words that make a comment a TODO item (the TODO list, the editor's
+    /// highlight), in any case; `todo_patterns()` has the defaults.
+    pub todo_patterns: Option<Vec<String>>,
 }
 
 /// One language server's settings (`lsp.<id>`).
@@ -502,6 +505,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "auto_fetch",
     "minimap_width",
     "edit_prediction_provider",
+    "todo_patterns",
 ];
 
 pub const EDITOR_KEYS: &[&str] = &[
@@ -541,6 +545,11 @@ pub struct FileSettings {
 }
 
 impl Settings {
+    /// The words that make a comment a TODO item.
+    pub fn todo_patterns(&self) -> Vec<String> {
+        self.todo_patterns.clone().unwrap_or_else(|| crate::todo::DEFAULT_PATTERNS.map(String::from).to_vec())
+    }
+
     pub fn get(cx: &App) -> &Settings {
         cx.try_global::<Settings>().unwrap_or_else(|| {
             static DEFAULT: std::sync::LazyLock<Settings> = std::sync::LazyLock::new(Settings::default);
@@ -762,6 +771,7 @@ impl Settings {
             "edit_predictions" => self.editor.edit_predictions.is_some(),
             "edit_prediction_provider" => self.edit_prediction_provider.is_some(),
             "minimap_width" => self.minimap_width.is_some(),
+            "todo_patterns" => self.todo_patterns.is_some(),
             "vim_mode" => self.vim_mode.is_some(),
             "icon_theme" => self.icon_theme.is_some(),
             "visual_effects" => self.visual_effects.is_some() || self.reduce_visual_effects.is_some(),
@@ -1125,6 +1135,9 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // "syntax_errors": true,
   // Vim keys (Normal, Insert and Visual modes).
   // "vim_mode": false,
+  // Words that make a comment a TODO item (in any case), for the TODO list
+  // and the editor's highlight.
+  // "todo_patterns": ["TODO", "FIXME", "HACK", "XXX"],
 
   // Ghost-text suggestions after the caret, accepted with Tab: "none" or
   // "copilot" (GitHub Copilot; sign in from the status bar). Code goes to
