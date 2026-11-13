@@ -53,6 +53,7 @@ pub mod contrib;
 pub mod permissions;
 pub mod processes;
 pub mod registry;
+pub mod results;
 pub mod suggest;
 pub mod updates;
 pub mod ui_host;

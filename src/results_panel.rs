@@ -15,7 +15,7 @@ use std::{ops::Range, path::PathBuf, rc::Rc};
 
 use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla, Render, ScrollStrategy, SharedString, StyledText, Task,
-    UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    UniformListScrollHandle, Window, div, prelude::*, px, svg, uniform_list,
 };
 
 use crate::{
@@ -45,6 +45,8 @@ pub enum Leading {
     Icon(Icon),
     /// An icon in a color that means something (a test's pass or fail).
     Tinted(Icon, Tone),
+    /// An SVG by its asset path (an extension's icon), in a tone's color.
+    Svg(SharedString, Tone),
     /// Nothing ("Loading…", a message).
     Blank,
 }
@@ -52,7 +54,9 @@ pub enum Leading {
 /// What a tinted icon's color says; the theme picks the color.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Tone {
+    Normal,
     Success,
+    Warning,
     Error,
     Muted,
 }
@@ -168,8 +172,9 @@ struct ResultTab {
     selected: Option<usize>,
     pinned: bool,
     buttons: Vec<TabButton>,
-    /// A tab that's kept up to date (the TODO list): found again by this.
-    kind: Option<&'static str>,
+    /// A tab that's kept up to date (the TODO list, an extension's results):
+    /// found again by this.
+    kind: Option<SharedString>,
 }
 
 impl ResultTab {
@@ -345,6 +350,17 @@ pub enum ResultsEvent {
 
 impl EventEmitter<ResultsEvent> for ResultsPanel {}
 
+fn tone_color(tone: Tone, theme: &Theme) -> Hsla {
+    match tone {
+        Tone::Normal => theme.text_dim,
+        Tone::Success => theme.success,
+        Tone::Warning => theme.warning,
+        Tone::Error => theme.error,
+        Tone::Muted => theme.text_dim,
+    }
+    .into()
+}
+
 /// How many searches stay; the oldest unpinned goes first.
 const MAX_TABS: usize = 10;
 const ROW_HEIGHT: f32 = 24.;
@@ -396,8 +412,9 @@ impl ResultsPanel {
     /// Shows a tab that's kept up to date (`kind`): fills the one there is in
     /// place (it stays where it is, pinned or not) and makes it current, else
     /// opens it like a search's.
-    pub fn show_kind(&mut self, kind: &'static str, title: SharedString, nodes: Vec<ResultNode>, buttons: Vec<TabButton>, cx: &mut Context<Self>) {
-        if let Some(ix) = self.tabs.iter().position(|t| t.kind == Some(kind)) {
+    pub fn show_kind(&mut self, kind: impl Into<SharedString>, title: SharedString, nodes: Vec<ResultNode>, buttons: Vec<TabButton>, cx: &mut Context<Self>) {
+        let kind = kind.into();
+        if let Some(ix) = self.tabs.iter().position(|t| t.kind.as_ref() == Some(&kind)) {
             self.active = ix;
             self.update_kind(kind, title, nodes, buttons, cx);
             return;
@@ -408,11 +425,17 @@ impl ResultsPanel {
         }
     }
 
+    /// Whether a `kind` tab is open.
+    pub fn has_kind(&self, kind: &str) -> bool {
+        self.tabs.iter().any(|t| t.kind.as_ref().is_some_and(|k| k == kind))
+    }
+
     /// Fills the `kind` tab with new nodes, if it's open: groups closed
     /// before stay closed, and the selected place stays selected. False when
     /// there's no such tab.
-    pub fn update_kind(&mut self, kind: &'static str, title: SharedString, mut nodes: Vec<ResultNode>, buttons: Vec<TabButton>, cx: &mut Context<Self>) -> bool {
-        let Some(tab) = self.tabs.iter_mut().find(|t| t.kind == Some(kind)) else { return false };
+    pub fn update_kind(&mut self, kind: impl Into<SharedString>, title: SharedString, mut nodes: Vec<ResultNode>, buttons: Vec<TabButton>, cx: &mut Context<Self>) -> bool {
+        let kind = Some(kind.into());
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.kind == kind) else { return false };
         let closed: Vec<&Leading> = tab.nodes.iter().filter(|n| !n.expanded && !n.children.is_empty()).map(|n| &n.leading).collect();
         for node in &mut nodes {
             if closed.contains(&&node.leading) {
@@ -423,7 +446,7 @@ impl ResultsPanel {
         let mut fresh = ResultTab::new(tab.id, title, nodes);
         fresh.pinned = tab.pinned;
         fresh.buttons = buttons;
-        fresh.kind = tab.kind;
+        fresh.kind = tab.kind.take();
         fresh.selected = selected.and_then(|old| {
             fresh.rows.iter().position(|r| {
                 let node = fresh.node(&r.path);
@@ -688,14 +711,8 @@ impl ResultsPanel {
                 .child(line.to_string())
                 .into_any_element(),
             Leading::Icon(icon) => icon_el(*icon, px(14.), theme.text_dim.into()).into_any_element(),
-            Leading::Tinted(icon, tone) => {
-                let color = match tone {
-                    Tone::Success => theme.success,
-                    Tone::Error => theme.error,
-                    Tone::Muted => theme.text_dim,
-                };
-                icon_el(*icon, px(14.), color.into()).into_any_element()
-            }
+            Leading::Tinted(icon, tone) => icon_el(*icon, px(14.), tone_color(*tone, theme)).into_any_element(),
+            Leading::Svg(path, tone) => svg().path(path.clone()).size(px(14.)).flex_shrink_0().text_color(tone_color(*tone, theme)).into_any_element(),
             Leading::Blank => div().into_any_element(),
         };
         let label = match &node.highlight {
