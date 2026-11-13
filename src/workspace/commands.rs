@@ -204,11 +204,23 @@ impl Workspace {
                 // the task cancels its request.
                 let result = match futures::future::select(task, timeout).await {
                     futures::future::Either::Left((result, _)) => result,
-                    futures::future::Either::Right(_) => Err("The formatter took too long".to_string()),
+                    futures::future::Either::Right(_) => Err(FormatError::Failed("The formatter took too long".into())),
                 };
                 this.update_in(cx, |ws, window, cx| {
-                    if let Err(err) = result {
-                        ws.toast(ToastKind::Info, "Saved without formatting", Some(err), cx);
+                    // A missing formatter is told once per language: every
+                    // later save would only repeat it.
+                    let repeat = match &result {
+                        Err(FormatError::NoFormatter(language)) if ws.no_formatter_told.contains(language) => true,
+                        Err(FormatError::NoFormatter(language)) => {
+                            ws.no_formatter_told.push(*language);
+                            false
+                        }
+                        _ => false,
+                    };
+                    if let Err(err) = result
+                        && !repeat
+                    {
+                        ws.toast(ToastKind::Info, "Saved without formatting", Some(err.to_string()), cx);
                     }
                     ws.save_editor(&editor, window, cx);
                 })
