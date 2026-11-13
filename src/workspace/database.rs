@@ -395,7 +395,7 @@ impl Workspace {
     }
 
     pub(super) fn sync_sql_gutters(&mut self, cx: &mut Context<Self>) {
-        for editor in self.editors.clone() {
+        for editor in self.shown_editors(cx) {
             self.sync_sql_gutter(&editor, cx);
         }
     }

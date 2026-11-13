@@ -32,7 +32,7 @@ use crate::{
         ToggleAutoSave, ToggleSidebar, ToggleSidebarPosition, ToggleSecondSidebar, ToggleClassicLayout, CheckForUpdates, WelcomeSetup, GoToSymbol, SplitTerminal, RenameTerminal, SelectOpenedFile, InstallShellCommand,
         ToggleDatabase, NewDatabaseConnection, ToggleDatabaseResults, RunSqlStatement, RunSqlScript, NewSqlScript,
         ToggleBookmark, ToggleBookmarkWithMnemonic, EditBookmarkDescription, ShowBookmarks, NextBookmark, PreviousBookmark, GoToBookmark, ShowTodo,
-        OpenResultsInEditor, ProblemsInEditor,
+        OpenResultsInEditor, ProblemsInEditor, CompareWithClipboard, CompareWithFile, CompareWithBranch, NewScratchFile, ShowScratches,
     },
 };
 
@@ -358,6 +358,7 @@ fn jetbrains(mac: bool) -> Vec<KeyBinding> {
         ]);
     } else {
         b.extend([
+            KeyBinding::new("ctrl-alt-shift-insert", NewScratchFile, None),
             KeyBinding::new("f3", FindNext, None),
             KeyBinding::new("f11", ToggleBookmark, None),
             KeyBinding::new("ctrl-f11", ToggleBookmarkWithMnemonic, None),
@@ -782,6 +783,11 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Show TODO", ShowTodo),
         a("Open Results in Editor", OpenResultsInEditor),
         a("Problems in Editor", ProblemsInEditor),
+        a("Compare with Clipboard", CompareWithClipboard),
+        a("Compare With…", CompareWithFile),
+        a("Compare with Branch…", CompareWithBranch),
+        a("New Scratch File…", NewScratchFile),
+        a("Scratch Files…", ShowScratches),
         a("Open Excerpt in File", crate::multibuffer::OpenInFile),
         a("Add Logpoint…", AddLogpoint),
         a("Attach to Process…", AttachToProcess),

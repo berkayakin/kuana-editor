@@ -296,6 +296,11 @@ impl LanguageDef {
         Ok(Loaded { language, highlights: Box::leak(Box::new(highlights)), outline, queries: Box::leak(Box::new(queries)) })
     }
 
+    /// The suffix a new file in this language gets (a scratch file's).
+    pub fn file_suffix(&self) -> Option<&str> {
+        self.suffixes.first().map(String::as_str)
+    }
+
     /// The length of the longest of its suffixes that names `path` (the whole
     /// file name, or what follows a dot in it).
     fn suffix_len(&self, path: &Path) -> Option<usize> {

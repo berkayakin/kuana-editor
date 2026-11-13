@@ -123,7 +123,11 @@ impl Workspace {
             }
             PickerEvent::SymbolQuery(query) => ws.query_symbols(query.clone(), cx),
             // Only a Choices or Bookmarks picker (with its own subscription) has these.
-            PickerEvent::Chosen(_) | PickerEvent::OpenBookmark { .. } | PickerEvent::RemoveBookmark { .. } | PickerEvent::Dismissed => {
+            PickerEvent::Chosen(_)
+            | PickerEvent::OpenBookmark { .. }
+            | PickerEvent::RemoveBookmark { .. }
+            | PickerEvent::RemoveChoice(_)
+            | PickerEvent::Dismissed => {
                 ws.close_modal(window, cx)
             }
         });
@@ -360,6 +364,11 @@ impl Workspace {
             }
             ProjectSearchEvent::ReplaceAll { query, replacement, files } => {
                 ws.confirm_replace_in_files(query.clone(), replacement.clone(), files.clone(), window, cx);
+            }
+            ProjectSearchEvent::OpenInEditor { title, query, matches } => {
+                let (title, query, matches) = (title.clone(), query.clone(), matches.clone());
+                ws.close_modal(window, cx);
+                ws.open_search_results(title, query, &matches, window, cx);
             }
             ProjectSearchEvent::Dismissed => ws.close_modal(window, cx),
         });

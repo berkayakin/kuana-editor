@@ -67,7 +67,7 @@ Everything Kuana does, in one list. Each area has its own page with the details.
 - Search Everywhere (double Shift, or the magnifier at the top right), fuzzy Go to File
   (git-ignored files included, ignored folders skipped), Recent Files, Find Action, Go to Line,
   and File Structure: the current file's functions, classes, headings, selectors or keys
-- Multibuffers: Find Usages, TODO items, test results or every open file's problems as excerpts
+- Multibuffers: Find in Files' matches, Find Usages, TODO items, test results or every open file's problems as excerpts
   in one tab, each editable in place with everything a file's tab has (highlighting, problems,
   completion, Rename, Undo); ↑/↓ go from excerpt to excerpt, "⋯" strips show more, F4 opens the
   file; see [Multibuffers](editing.md#multibuffers)
@@ -146,6 +146,10 @@ Everything Kuana does, in one list. Each area has its own page with the details.
 - Local History: earlier versions of each file (on save, before and after outside changes, before a
   rollback), listed by day with a diff against the file as it is and Restore; see
   [Local History](editing.md#local-history)
+- Compare a file with the clipboard, another file or itself on a branch or tag, in a diff tab that
+  follows your edits; see [Comparing files](editing.md#comparing-files)
+- Scratch files: throwaway files in any language, kept between runs outside the project, runnable
+  with a ▶ for script languages and Rust; see [Scratch files](editing.md#scratch-files)
 - A Settings window for every option, with search across its pages; see [Settings](settings.md)
 - Project settings in `.kuana/settings.json`, shared through the repository: indentation, formatters,
   language server settings and run configurations over each person's own; see

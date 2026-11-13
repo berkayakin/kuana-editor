@@ -81,6 +81,50 @@ pub enum DiffSource {
     /// A Local History version (`label`: when and why it was kept) → the
     /// file as it is (the open document's text, so unsaved edits show).
     History { path: PathBuf, label: String, text: Arc<str> },
+    /// Something else → the file as it is (the open document's text): the
+    /// clipboard, another file, the file at a branch or revision.
+    Compare { path: PathBuf, with: Compared },
+}
+
+/// What a file is compared with (`DiffSource::Compare`), the "before" side.
+#[derive(Clone, Debug)]
+pub enum Compared {
+    /// Text taken when the comparison opened: the clipboard, or another
+    /// file's open document with unsaved edits (`label` names it).
+    Text { label: String, text: Arc<str> },
+    /// Another file, read from disk each time the diff reloads.
+    File(PathBuf),
+    /// The file at a Git revision (a branch, a tag, a commit), `rel` to the repository.
+    Revision { rev: String, rel: String },
+}
+
+impl Compared {
+    /// What the header calls it.
+    pub fn label(&self, repo: &Path) -> String {
+        match self {
+            Compared::Text { label, .. } => label.clone(),
+            Compared::File(path) => path.strip_prefix(repo).unwrap_or(path).to_string_lossy().replace('\\', "/"),
+            Compared::Revision { rev, .. } => rev.clone(),
+        }
+    }
+
+    /// The "before" text (blocking: run it in the background).
+    fn text(&self, repo: &Path) -> String {
+        match self {
+            Compared::Text { text, .. } => text.to_string(),
+            Compared::File(path) => std::fs::read(path).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default(),
+            Compared::Revision { rev, rel } => git::text_at(repo, rev, rel).unwrap_or_default(),
+        }
+    }
+
+    fn same(&self, other: &Compared) -> bool {
+        match (self, other) {
+            (Compared::Text { label: a, .. }, Compared::Text { label: b, .. }) => a == b,
+            (Compared::File(a), Compared::File(b)) => a == b,
+            (Compared::Revision { rev: a, .. }, Compared::Revision { rev: b, .. }) => a == b,
+            _ => false,
+        }
+    }
 }
 
 impl DiffSource {
@@ -92,6 +136,7 @@ impl DiffSource {
             (DiffSource::Working { file: a, staged: x }, DiffSource::Working { file: b, staged: y }) => a.rel == b.rel && x == y,
             (DiffSource::Commit { sha: a, file: f, .. }, DiffSource::Commit { sha: b, file: g, .. }) => a == b && f.rel == g.rel,
             (DiffSource::History { path: a, .. }, DiffSource::History { path: b, .. }) => a == b,
+            (DiffSource::Compare { path: a, with: x }, DiffSource::Compare { path: b, with: y }) => a == b && x.same(y),
             _ => false,
         }
     }
@@ -101,7 +146,7 @@ impl DiffSource {
     pub fn live_file(&self) -> Option<&Path> {
         match self {
             DiffSource::Working { file, staged: false } => Some(&file.path),
-            DiffSource::History { path, .. } => Some(path),
+            DiffSource::History { path, .. } | DiffSource::Compare { path, .. } => Some(path),
             _ => None,
         }
     }
@@ -269,6 +314,10 @@ impl DiffView {
                             let read = || std::fs::read(path).ok().map(|b| String::from_utf8_lossy(&b).into_owned());
                             (text.to_string(), buffer.clone().or_else(read).unwrap_or_default(), path.clone())
                         }
+                        DiffSource::Compare { path, with } => {
+                            let read = || std::fs::read(path).ok().map(|b| String::from_utf8_lossy(&b).into_owned());
+                            (with.text(&repo), buffer.clone().or_else(read).unwrap_or_default(), path.clone())
+                        }
                     };
                     if git::is_binary(&base) || git::is_binary(&current) {
                         return Loaded {
@@ -318,11 +367,15 @@ impl DiffView {
         }
     }
 
-    /// The working tree file an unstaged diff shows, which it reloads with.
-    pub fn working_tree_file(&self) -> Option<&Path> {
+    /// Files on disk this diff reads on each reload, so a change from
+    /// outside (a formatter, another editor) reloads it: an unstaged diff's
+    /// file, a comparison's files.
+    pub fn disk_files(&self) -> Vec<&Path> {
         match &self.source {
-            DiffSource::Working { file, staged: false, .. } => Some(&file.path),
-            _ => None,
+            DiffSource::Working { file, staged: false, .. } => vec![&file.path],
+            DiffSource::Compare { path, with: Compared::File(other) } => vec![path, other],
+            DiffSource::Compare { path, .. } => vec![path],
+            _ => Vec::new(),
         }
     }
 
@@ -338,7 +391,7 @@ impl DiffView {
                 (file.path.clone(), file.rel.clone(), change)
             }
             DiffSource::Commit { file, .. } => (self.repo.join(&file.rel), file.rel.clone(), file.change),
-            DiffSource::History { path, .. } => {
+            DiffSource::History { path, .. } | DiffSource::Compare { path, .. } => {
                 let rel = path.strip_prefix(&self.repo).unwrap_or(path).to_string_lossy().replace('\\', "/");
                 (path.clone(), rel, Change::Modified)
             }
@@ -420,7 +473,7 @@ fn load_images(repo: &Path, source: &DiffSource) -> Option<ImageSides> {
             (file.path.clone(), before, std::fs::read(&file.path).ok())
         }
         // Kept as text: no pictures.
-        DiffSource::History { .. } => return None,
+        DiffSource::History { .. } | DiffSource::Compare { .. } => return None,
         DiffSource::Commit { sha, file, .. } => {
             let old_rel = file.old_rel.as_deref().unwrap_or(&file.rel);
             let before = (file.change != Change::Added).then(|| git::blob_bytes(repo, &format!("{sha}^:{old_rel}"))).flatten();
@@ -579,6 +632,7 @@ impl Render for DiffView {
             DiffSource::Working { staged, .. } => format!("{} · {}", change.label(), if *staged { "Staged" } else { "Unstaged" }),
             DiffSource::Commit { sha, summary, .. } => format!("{} · {}", &sha[..sha.len().min(8)], summary),
             DiffSource::History { label, .. } => format!("Local History · {label}"),
+            DiffSource::Compare { with, .. } => format!("Compared with {}", with.label(&self.repo)),
         };
         // Side by side / Unified switch.
         let segment = |id: &'static str, label: &'static str, on: bool| {
@@ -633,7 +687,7 @@ impl Render for DiffView {
             .when_some(
                 match &self.source {
                     DiffSource::Working { file, staged, .. } => Some((file.clone(), *staged)),
-                    DiffSource::Commit { .. } | DiffSource::History { .. } => None,
+                    DiffSource::Commit { .. } | DiffSource::History { .. } | DiffSource::Compare { .. } => None,
                 },
                 |el, (file, staged)| {
                     let rel = file.rel.clone();

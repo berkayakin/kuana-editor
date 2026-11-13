@@ -76,6 +76,8 @@ pub struct Choice {
     pub detail: Option<SharedString>,
     /// An asset path for `svg()`.
     pub icon: Option<SharedString>,
+    /// A file whose type's (full-color) icon shows instead of `icon`.
+    pub file: Option<PathBuf>,
 }
 
 /// One place in a [`PickerMode::Locations`] list.
@@ -125,6 +127,8 @@ pub enum PickerEvent {
     OpenBookmark { path: PathBuf, row: usize },
     /// Bookmarks: ⌫ with nothing typed removes the selected one.
     RemoveBookmark { path: PathBuf, row: usize },
+    /// A removable Choices list: ⌫ with nothing typed on this row's id.
+    RemoveChoice(String),
     Dismissed,
 }
 
@@ -186,9 +190,13 @@ pub struct Picker {
     locations: Arc<Vec<LocationRow>>,
     run_targets: Arc<Vec<RunTarget>>,
     choices: Arc<Vec<Choice>>,
+    /// Choices: ⌫ with nothing typed asks to remove the selected row.
+    removable: bool,
     bookmarks: Arc<Vec<BookmarkRow>>,
     /// Overrides the mode's title (Locations: "Usages of foo").
     title: Option<SharedString>,
+    /// The title's icon, in place of the mode's.
+    title_icon: Option<Icon>,
     items: Arc<Vec<Item>>,
     selected: usize,
     scroll: UniformListScrollHandle,
@@ -259,8 +267,10 @@ impl Picker {
 
             run_targets: Arc::new(Vec::new()),
             choices: Arc::new(Vec::new()),
+            removable: false,
             bookmarks: Arc::new(Vec::new()),
             title: None,
+            title_icon: None,
             items: Arc::new(Vec::new()),
             selected: 0,
             scroll: UniformListScrollHandle::new(),
@@ -301,6 +311,18 @@ impl Picker {
         self.update_items(cx);
     }
 
+    /// Replaces the mode's title (a Files picker that picks a file to compare).
+    pub fn set_title(&mut self, title: SharedString, cx: &mut Context<Self>) {
+        self.title = Some(title);
+        cx.notify();
+    }
+
+    /// Replaces the mode's title icon (a Choices list Kuana itself shows).
+    pub fn set_title_icon(&mut self, icon: Icon, cx: &mut Context<Self>) {
+        self.title_icon = Some(icon);
+        cx.notify();
+    }
+
     /// Fills a Choices picker: its title, what the empty field says, the rows.
     pub fn set_choices(&mut self, title: SharedString, placeholder: &str, choices: Vec<Choice>, cx: &mut Context<Self>) {
         self.title = Some(title);
@@ -309,6 +331,21 @@ impl Picker {
         }
         self.choices = Arc::new(choices);
         self.update_items(cx);
+    }
+
+    /// Lets ⌫ remove a Choices row (`PickerEvent::RemoveChoice`).
+    pub fn set_removable(&mut self, cx: &mut Context<Self>) {
+        self.removable = true;
+        cx.notify();
+    }
+
+    /// Refills a Choices picker after a removal, keeping the selection where it was.
+    pub fn refill_choices(&mut self, choices: Vec<Choice>, cx: &mut Context<Self>) {
+        let selected = self.selected;
+        self.choices = Arc::new(choices);
+        self.update_items(cx);
+        self.selected = selected.min(self.items.len().saturating_sub(1));
+        self.move_selection(0, cx);
     }
 
     /// Fills (or refills, after a removal) a Bookmarks picker, keeping the
@@ -330,6 +367,13 @@ impl Picker {
         {
             let row = &self.bookmarks[*ix];
             cx.emit(PickerEvent::RemoveBookmark { path: row.path.clone(), row: row.row });
+            return;
+        }
+        if self.removable
+            && self.query.read(cx).text(cx).is_empty()
+            && let Some(Item::Choice { ix, .. }) = self.items.get(self.selected)
+        {
+            cx.emit(PickerEvent::RemoveChoice(self.choices[*ix].id.clone()));
             return;
         }
         cx.propagate();
@@ -820,6 +864,7 @@ impl Render for Picker {
             PickerMode::Choices => ("", Icon::Puzzle, ""),
             PickerMode::Bookmarks => ("Bookmarks", Icon::Bookmark, ""),
         };
+        let icon = self.title_icon.unwrap_or(icon);
         let title: SharedString = match &self.title {
             Some(t) => t.clone(),
             None => title.into(),
@@ -828,6 +873,8 @@ impl Render for Picker {
             PickerMode::Locations => format!("{} found", self.locations.len()),
             PickerMode::Symbols if !self.locations.is_empty() => format!("{} found", self.locations.len()),
             PickerMode::Bookmarks if self.bookmarks.is_empty() => "None yet".to_string(),
+            PickerMode::Choices if self.removable && self.choices.is_empty() => "None yet".to_string(),
+            PickerMode::Choices if self.removable => "⌫ removes".to_string(),
             PickerMode::Bookmarks => "⌫ removes".to_string(),
             _ => hint.to_string(),
         };
@@ -953,9 +1000,10 @@ impl Render for Picker {
                                     }
                                     Item::Choice { ix, hl } => {
                                         let choice = &choices[*ix];
-                                        row.when_some(choice.icon.clone(), |row, icon| {
-                                            row.child(gpui::svg().path(icon).size(px(14.)).flex_shrink_0().text_color(theme.text_muted))
-                                        })
+                                        row.when_some(choice.file.as_ref(), |row, file| row.child(crate::ui::file_icon(file, px(14.), &theme)))
+                                            .when_some(choice.icon.clone().filter(|_| choice.file.is_none()), |row, icon| {
+                                                row.child(gpui::svg().path(icon).size(px(14.)).flex_shrink_0().text_color(theme.text_muted))
+                                            })
                                         .child(div().flex_shrink_0().text_color(theme.text).child(highlighted(choice.label.clone(), hl, theme.accent.into())))
                                         .when_some(choice.detail.clone(), |row, detail| {
                                             row.child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme.text_dim).child(detail))

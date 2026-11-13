@@ -8,13 +8,17 @@
 //! status bar lists it), and its language server hears it as open while an
 //! excerpt shows it.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, ops::Range};
 
 use super::*;
 use crate::{
     multibuffer::{FilePlaces, Marks, MultiBufferEvent, MultiBufferView},
     results_panel::ResultTarget,
+    search::{ProjectMatch, SearchQuery},
 };
+
+/// Works out a file's places from its document.
+type PlacesOf = Box<dyn FnOnce(&Document) -> FilePlaces>;
 
 impl Workspace {
     /// A tab of excerpts around `targets`, by file in path order.
@@ -23,12 +27,49 @@ impl Workspace {
         for target in targets {
             files.entry(target.path.clone()).or_default().push(target);
         }
+        let files = files
+            .into_iter()
+            .map(|(path, targets)| {
+                let places: PlacesOf = Box::new(move |doc: &Document| {
+                    let mut places = places_in(doc, &targets);
+                    if marks == Marks::None {
+                        places.marks.clear();
+                    }
+                    places
+                });
+                (path, places)
+            })
+            .collect();
+        self.open_places(title, files, window, cx);
+    }
+
+    /// Find in Files' results as a multibuffer, each match marked. The
+    /// search read open files' unsaved text, so its offsets are the
+    /// documents'; a file whose text changed since is searched again.
+    pub(super) fn open_search_results(&mut self, title: SharedString, query: SearchQuery, matches: &[ProjectMatch], window: &mut Window, cx: &mut Context<Self>) {
+        let mut files: BTreeMap<PathBuf, (Arc<str>, Vec<Range<usize>>)> = BTreeMap::new();
+        for m in matches {
+            files.entry(m.path.clone()).or_insert_with(|| (m.contents.clone(), Vec::new())).1.push(m.range.clone());
+        }
+        let files = files
+            .into_iter()
+            .map(|(path, (searched, ranges))| {
+                let query = query.clone();
+                let places: PlacesOf = Box::new(move |doc: &Document| match_places(doc, &searched, ranges, &query));
+                (path, places)
+            })
+            .collect();
+        self.open_places(title, files, window, cx);
+    }
+
+    /// A tab of excerpts, a file's places worked out once its document is read.
+    fn open_places(&mut self, title: SharedString, files: Vec<(PathBuf, PlacesOf)>, window: &mut Window, cx: &mut Context<Self>) {
         if files.is_empty() {
             return;
         }
         let view = cx.new(|cx| MultiBufferView::new(title, self.root.clone(), files.len(), cx));
         self.add_tab(PaneItem::Excerpts(view.clone()), window, cx);
-        for (path, targets) in files {
+        for (path, places_of) in files {
             // A restored tab not read yet: read now, its document is the file's.
             if let Some(tab) = self.tab_for(&path, cx).filter(|t| !t.read(cx).is_loaded()) {
                 self.load_tab(&tab, cx);
@@ -41,10 +82,7 @@ impl Workspace {
                     let Some(view) = view.upgrade() else { return };
                     match loaded {
                         Ok(doc) if !doc.read(cx).is_stand_in() => {
-                            let mut places = places_in(doc.read(cx), &targets);
-                            if marks == Marks::None {
-                                places.marks.clear();
-                            }
+                            let places = places_of(doc.read(cx));
                             view.update(cx, |v, cx| v.add_file(path, doc, places, cx));
                         }
                         _ => view.update(cx, |v, cx| v.file_failed(cx)),
@@ -243,6 +281,15 @@ impl Workspace {
         self.editors.iter().any(|e| e.read(cx).is_loaded() && e.read(cx).doc == *doc)
     }
 
+    /// Every editor showing a file: the tabs', then the multibuffers'
+    /// excerpts'. For what reaches every shown editor (settings, trust,
+    /// languages, test results, reloads); `editors` is the files' tabs only.
+    pub(super) fn shown_editors(&self, cx: &App) -> Vec<Entity<Editor>> {
+        let mut all = self.editors.clone();
+        all.extend(self.excerpt_editors(cx));
+        all
+    }
+
     /// Every multibuffer's excerpt editors.
     pub(super) fn excerpt_editors(&self, cx: &App) -> Vec<Entity<Editor>> {
         self.items(cx).iter().filter_map(PaneItem::excerpts).flat_map(|v| v.read(cx).editors().cloned().collect::<Vec<_>>()).collect()
@@ -282,4 +329,16 @@ fn places_in(doc: &Document, targets: &[ResultTarget]) -> FilePlaces {
         }
     }
     places
+}
+
+/// A file's search matches as places: the ranges found when the document
+/// still has the text that was `searched`, else the query's matches in its
+/// text now.
+fn match_places(doc: &Document, searched: &str, ranges: Vec<Range<usize>>, query: &SearchQuery) -> FilePlaces {
+    let ranges = if *doc.rope() == *searched {
+        ranges
+    } else {
+        query.find_all(&doc.rope().to_string())
+    };
+    FilePlaces { rows: ranges.iter().map(|r| doc.row_of(r.start)).collect(), marks: ranges }
 }

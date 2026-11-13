@@ -190,6 +190,10 @@ fn cargo_package_name(crate_dir: &Path) -> Option<String> {
 
 /// Runnable things in a file, for the gutter and Run at caret.
 pub fn file_targets(language: Language, path: &Path, text: &str, tree: &Tree) -> Vec<RunTarget> {
+    // A scratch file runs as a whole, outside any project.
+    if crate::scratch::is_scratch(path) {
+        return crate::scratch::run_target(language, path, text.lines().count()).into_iter().collect();
+    }
     let root = tree.root_node();
     let mut out = Vec::new();
     match language {
@@ -439,7 +443,7 @@ fn single_file_plan(path: &Path, cpp: bool) -> Option<NativePlan> {
 /// The commands in order, each only after the one before succeeded, then
 /// `then`: `a && b && c` for a POSIX shell, nested `if ($?)` in PowerShell
 /// (Windows PowerShell 5 has no `&&`).
-fn chain(steps: &[Vec<String>], then: &[String]) -> String {
+pub fn chain(steps: &[Vec<String>], then: &[String]) -> String {
     let line = |argv: &[String]| argv.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
     let all: Vec<&[String]> = steps.iter().map(Vec::as_slice).chain(std::iter::once(then)).filter(|s| !s.is_empty()).collect();
     if cfg!(windows) {

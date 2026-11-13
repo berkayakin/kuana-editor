@@ -133,6 +133,18 @@ fn dir(language: Language) -> Option<&'static str> {
 static BUILTINS: LazyLock<Vec<BuiltinDef>> =
     LazyLock::new(|| Language::ALL.into_iter().filter_map(|l| Some(read(l, dir(l)?))).collect());
 
+impl BuiltinDef {
+    /// The suffix a new file in this language gets (a scratch file's).
+    pub fn file_suffix(&self) -> Option<&str> {
+        self.suffixes.first().map(String::as_str)
+    }
+}
+
+/// Every built-in language's definition.
+pub fn all() -> &'static [BuiltinDef] {
+    &BUILTINS
+}
+
 /// The built-in definition of `language`.
 pub fn def(language: Language) -> Option<&'static BuiltinDef> {
     BUILTINS.iter().find(|d| d.language == language)
