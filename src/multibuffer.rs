@@ -84,6 +84,22 @@ pub fn excerpt_rows(rows: impl IntoIterator<Item = usize>, context: usize, line_
     out
 }
 
+/// `runs` (sorted, apart) with `extra` added: runs it overlaps or comes
+/// within a line of become one, as in `excerpt_rows`.
+fn merge_runs(runs: Vec<RangeInclusive<usize>>, extra: RangeInclusive<usize>) -> Vec<RangeInclusive<usize>> {
+    let mut all = runs;
+    let at = all.partition_point(|r| r.start() < extra.start());
+    all.insert(at, extra);
+    let mut out: Vec<RangeInclusive<usize>> = Vec::with_capacity(all.len());
+    for run in all {
+        match out.last_mut() {
+            Some(prev) if *run.start() <= prev.end() + 2 => *prev = *prev.start()..=(*run.end()).max(*prev.end()),
+            _ => out.push(run),
+        }
+    }
+    out
+}
+
 /// An excerpt's rows with a lone line left at the file's start or end taken in.
 fn edges(start: usize, end: usize, last: usize) -> (usize, usize) {
     (if start == 1 { 0 } else { start }, if end + 1 == last { last } else { end })
@@ -221,6 +237,90 @@ impl MultiBufferView {
         }
         self.list.splice(at..at, editors.len());
         cx.emit(MultiBufferEvent::Added(editors));
+        cx.notify();
+    }
+
+    /// The files it shows, in order.
+    pub fn paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self.items.iter().map(|i| i.path.clone()).collect();
+        paths.dedup();
+        paths
+    }
+
+    /// Whether the keyboard is in one of its excerpts.
+    pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus_handle.contains_focused(window, cx) || self.items.iter().any(|i| i.editor.focus_handle(cx).is_focused(window))
+    }
+
+    /// Shows a file's `places` as they are now (problems come and go): an
+    /// excerpt overlapping one of the new runs of lines stays, with its
+    /// editor (caret, scroll, undo) and the new run's lines; runs no excerpt
+    /// overlaps get new ones; excerpts left over go. `hold`: the excerpt the
+    /// keyboard is in stays as it is or grows, whatever the places say, so
+    /// what's being typed in doesn't move or vanish. A file not shown yet
+    /// goes in at its place in path order; one with no places and no held
+    /// excerpt goes away.
+    pub fn set_file_places(&mut self, path: PathBuf, doc: Entity<Document>, places: FilePlaces, hold: bool, cx: &mut Context<Self>) {
+        // One of the files it was made for (later updates find none waiting).
+        self.loading = self.loading.saturating_sub(1);
+        let line_count = doc.read(cx).line_count();
+        let from = self.items.partition_point(|i| i.path < path);
+        let to = self.items.partition_point(|i| i.path <= path);
+        let held = (hold && (from..to).contains(&self.active)).then(|| self.rows(self.active, cx).0);
+        let mut runs = excerpt_rows(places.rows.iter().copied(), CONTEXT, line_count);
+        if let Some(held) = &held {
+            runs = merge_runs(runs, held.clone());
+        }
+        let mut old: Vec<Option<Item>> = self.items.drain(from..to).map(Some).collect();
+        let old_rows: Vec<RangeInclusive<usize>> =
+            old.iter().map(|i| i.as_ref().and_then(|i| i.editor.read(cx).excerpt_rows(cx)).unwrap_or(0..=0)).collect();
+        let was_active = (from..to).contains(&self.active).then(|| self.active - from);
+        let mut active_at = None;
+        let (mut items, mut added) = (Vec::with_capacity(runs.len()), Vec::new());
+        for run in runs {
+            let reuse = (0..old.len()).find(|&n| old[n].is_some() && old_rows[n].start() <= run.end() && run.start() <= old_rows[n].end());
+            let item = match reuse.and_then(|n| old[n].take().map(|item| (n, item))) {
+                Some((n, item)) => {
+                    if old_rows[n] != run {
+                        item.editor.update(cx, |e, cx| e.set_excerpt_rows(run.clone(), cx));
+                    }
+                    if was_active == Some(n) {
+                        active_at = Some(items.len());
+                    }
+                    item
+                }
+                None => {
+                    let editor = cx.new(|cx| {
+                        let mut editor = Editor::excerpt_of(doc.clone(), run.clone(), cx);
+                        if let Some(row) = places.rows.iter().copied().filter(|r| run.contains(r)).min() {
+                            let at = editor.doc.read(cx).line_start(row);
+                            editor.set_caret(at, cx);
+                        }
+                        editor
+                    });
+                    added.push(editor.clone());
+                    Item { path: path.clone(), editor, _subscriptions: Vec::new() }
+                }
+            };
+            items.push(item);
+        }
+        let removed: Vec<Entity<Editor>> = old.into_iter().flatten().map(|i| i.editor).collect();
+        let count = items.len();
+        self.items.splice(from..from, items);
+        self.list.splice(from..to, count);
+        // The keyboard's excerpt: where its editor went, else the file's
+        // first (or the next file's) excerpt.
+        if was_active.is_some() {
+            self.active = if count > 0 { from + active_at.unwrap_or(0) } else { from.min(self.items.len().saturating_sub(1)) };
+        } else if self.active >= to {
+            self.active = self.active - (to - from) + count;
+        }
+        if !added.is_empty() {
+            cx.emit(MultiBufferEvent::Added(added));
+        }
+        if !removed.is_empty() {
+            cx.emit(MultiBufferEvent::Removed(removed));
+        }
         cx.notify();
     }
 
@@ -510,5 +610,52 @@ mod tests {
         assert_eq!(excerpt_rows([2, 8], 2, 100), [0..=10]);
         assert_eq!(excerpt_rows([2, 9], 2, 100), [0..=4, 7..=11]);
         assert!(excerpt_rows([], 2, 10).is_empty());
+    }
+
+    #[test]
+    fn held_runs_merge_with_their_neighbors() {
+        assert_eq!(merge_runs(vec![0..=4, 20..=24], 10..=12), [0..=4, 10..=12, 20..=24]);
+        assert_eq!(merge_runs(vec![0..=4, 20..=24], 6..=18), [0..=24]);
+        assert_eq!(merge_runs(vec![], 3..=5), [3..=5]);
+    }
+
+    #[gpui::test]
+    fn a_files_places_are_replaced_keeping_editors(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        let text: String = (0..60).map(|n| format!("line {n}\n")).collect();
+        let doc = cx.new(|_| Document::from_text(text, None));
+        let other = cx.new(|_| Document::from_text("x\n".into(), None));
+        let view = cx.new(|cx| MultiBufferView::new("Problems", None, 2, cx));
+        let (a, b) = (PathBuf::from("/p/a.rs"), PathBuf::from("/p/b.rs"));
+        let places = |rows: &[usize]| FilePlaces { rows: rows.to_vec(), marks: Vec::new() };
+        view.update(cx, |v, cx| {
+            v.add_file(a.clone(), doc.clone(), places(&[10, 40]), cx);
+            v.add_file(b.clone(), other.clone(), places(&[0]), cx);
+        });
+        let rows = |cx: &mut gpui::TestAppContext| {
+            view.read_with(cx, |v, cx| v.items.iter().map(|i| (i.path.clone(), i.editor.read(cx).excerpt_rows(cx).unwrap())).collect::<Vec<_>>())
+        };
+        assert_eq!(rows(cx), [(a.clone(), 8..=12), (a.clone(), 38..=42), (b.clone(), 0..=1)]);
+        let first = view.read_with(cx, |v, _| v.items[0].editor.clone());
+
+        // The problem at 10 moved to 11, the one at 40 went, one at 25 came.
+        view.update(cx, |v, cx| v.set_file_places(a.clone(), doc.clone(), places(&[11, 25]), false, cx));
+        assert_eq!(rows(cx), [(a.clone(), 9..=13), (a.clone(), 23..=27), (b.clone(), 0..=1)]);
+        view.read_with(cx, |v, _| assert_eq!(v.items[0].editor, first, "the overlapping excerpt kept its editor"));
+
+        // The keyboard's excerpt stays while held, even with nothing left in it.
+        view.update(cx, |v, cx| {
+            v.active = 1;
+            v.set_file_places(a.clone(), doc.clone(), places(&[]), true, cx);
+        });
+        assert_eq!(rows(cx), [(a.clone(), 23..=27), (b.clone(), 0..=1)]);
+        view.read_with(cx, |v, _| assert_eq!(v.active, 0));
+        // Not held: the file goes; a new file goes in by path.
+        view.update(cx, |v, cx| {
+            v.set_file_places(a.clone(), doc.clone(), places(&[]), false, cx);
+            v.set_file_places(PathBuf::from("/p/0.rs"), other.clone(), places(&[0]), false, cx);
+        });
+        assert_eq!(rows(cx), [(PathBuf::from("/p/0.rs"), 0..=1), (b.clone(), 0..=1)]);
+        view.read_with(cx, |v, _| assert_eq!(v.paths().len(), 2));
     }
 }

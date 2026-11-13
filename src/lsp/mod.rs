@@ -16,7 +16,7 @@ pub mod rpc;
 pub mod servers;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -225,6 +225,9 @@ pub struct LspStore {
     /// Latest diagnostics per file and server, open or not, so a file gets
     /// them when it opens later.
     diagnostics: HashMap<(PathBuf, ServerKey), Value>,
+    /// Changes with `diagnostics` (a publish, a pull, a server gone), for
+    /// what lists them project-wide (the live Problems in Editor).
+    diagnostics_generation: u64,
     /// The real path of each path servers named (`registered_path`): a server
     /// publishes for the same files again and again, thousands of them.
     real_paths: HashMap<PathBuf, PathBuf>,
@@ -324,6 +327,7 @@ impl LspStore {
             servers: HashMap::new(),
             documents: HashMap::new(),
             diagnostics: HashMap::new(),
+            diagnostics_generation: 0,
             real_paths: HashMap::new(),
             progress: HashMap::new(),
             progress_redraw: None,
@@ -748,6 +752,7 @@ impl LspStore {
                     };
                     let path = self.registered_path(path);
                     self.diagnostics.insert((path.clone(), key.clone()), params);
+                    self.diagnostics_generation += 1;
                     self.apply_diagnostics(&path, key, cx);
                 }
                 "$/progress" => {
@@ -1014,6 +1019,35 @@ impl LspStore {
         editor.update(cx, |e, cx| e.set_server_diagnostics(source, cx));
     }
 
+    pub fn diagnostics_generation(&self) -> u64 {
+        self.diagnostics_generation
+    }
+
+    /// Where running servers last reported errors and warnings, in files
+    /// other than `skip` (the open ones, whose documents have them, moved
+    /// by edits since): servers that check the whole project publish for
+    /// files nobody opened.
+    pub fn problem_places(&self, skip: &HashSet<PathBuf>) -> Vec<(PathBuf, protocol::Position, Encoding)> {
+        let mut out = Vec::new();
+        for ((path, key), params) in &self.diagnostics {
+            if skip.contains(path) {
+                continue;
+            }
+            let Some(ServerState::Running(server)) = self.servers.get(key) else { continue };
+            for d in params.get("diagnostics").and_then(Value::as_array).into_iter().flatten() {
+                // No severity: the client decides; Kuana shows those as errors.
+                if !matches!(d.get("severity").and_then(Value::as_u64), None | Some(1) | Some(2)) {
+                    continue;
+                }
+                let Some(start) = d.get("range").and_then(|r| r.get("start")) else { continue };
+                let line = start.get("line").and_then(Value::as_u64).unwrap_or(0) as u32;
+                let character = start.get("character").and_then(Value::as_u64).unwrap_or(0) as u32;
+                out.push((path.clone(), protocol::Position { line, character }, server.encoding));
+            }
+        }
+        out
+    }
+
     /// What server `id` last published for `path` (raw LSP diagnostics),
     /// for code action requests: a server gets its own back.
     pub fn published(&self, path: &Path, id: &str) -> Vec<Value> {
@@ -1028,6 +1062,7 @@ impl LspStore {
     /// A server stopped (or restarts): its diagnostics go, everywhere.
     fn forget_diagnostics(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
         self.diagnostics.retain(|(_, k), _| k != key);
+        self.diagnostics_generation += 1;
         self.pulls.retain(|(_, k), _| k != key);
         self.result_ids.retain(|(_, k), _| k != key);
         let docs: Vec<Entity<Document>> = self.documents.values().filter(|d| d.has(key)).filter_map(|d| d.doc.upgrade()).collect();
@@ -1121,6 +1156,7 @@ impl LspStore {
                 params["version"] = version.into();
             }
             self.diagnostics.insert(slot, params);
+            self.diagnostics_generation += 1;
             self.apply_diagnostics(path, key, cx);
         }
         for (uri, related) in report.get("relatedDocuments").and_then(Value::as_object).into_iter().flatten() {
