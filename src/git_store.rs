@@ -822,6 +822,22 @@ mod tests {
         );
         assert!(events.iter().any(|e| e == "status changed"), "the status is read again after an operation");
 
+        // `git init` in a project folder without a repository finds the new one.
+        let plain = std::env::temp_dir().join(format!("kuana-git-store-plain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&plain);
+        std::fs::create_dir_all(&plain).unwrap();
+        let fresh = cx.new(|_| GitStore::new());
+        fresh.update(cx, |s, cx| s.detect(plain.clone(), Some(plain.clone()), cx));
+        cx.run_until_parked();
+        // (A temp folder inside some repository would make this test meaningless.)
+        if fresh.read_with(cx, |s, _| s.repo().is_none()) {
+            fresh.update(cx, |s, cx| s.execute(GitOp::Init, cx));
+            cx.run_until_parked();
+            assert!(plain.join(".git").exists(), "git init ran in the project folder");
+            assert_eq!(fresh.read_with(cx, |s, _| s.repo().cloned()), git::discover(&plain));
+        }
+        std::fs::remove_dir_all(&plain).ok();
+
         // A closed project has no repository, and nothing runs for it.
         store.update(cx, |s, cx| {
             s.close(cx);
