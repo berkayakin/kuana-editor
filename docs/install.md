@@ -38,7 +38,8 @@ Get the latest build from [GitHub Releases](https://github.com/berkayakin/kuana-
 
 - **macOS** (Apple silicon and Intel): `Kuana-<version>-macos.dmg`, or the `.zip`
 - **Windows** (x64 or Arm64: `x86_64` or `aarch64` in the file name): the `-setup.exe` installer
-  (per user, no admin rights needed), or the `.zip`
+  (per user, no admin rights needed), or the `.zip`. Windows builds are signed through the
+  SignPath Foundation (see [Code signing policy](#code-signing-policy)).
 - **Linux** (x64 or Arm64): the `.tar.gz`
 
 macOS is where Kuana is used every day. Windows and Linux builds work but have had much less
@@ -86,3 +87,33 @@ Until the macOS app is signed with a Developer ID, it's only ad-hoc signed, so m
 blocks the first launch of a copy downloaded with a browser or Homebrew: allow it under System Settings →
 Privacy & Security → **Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/Kuana.app`.
 The [install script](#install-script-macos-linux) and updates don't need this.
+
+## Code signing policy
+
+Free code signing for Windows is provided by [SignPath.io](https://about.signpath.io), with a
+certificate by the [SignPath Foundation](https://signpath.org).
+
+- **What is signed:** only Kuana's own Windows release files (`kuana.exe` and the `-setup.exe`
+  installer), built by [GitHub Actions](../.github/workflows/release.yml) from this repository's
+  public source when a version tag is pushed. Nothing built on a personal machine is signed.
+- **Committers and reviewers:** [@berkayakin](https://github.com/berkayakin). Contributions from
+  others are reviewed before they're merged.
+- **Approvers:** [@berkayakin](https://github.com/berkayakin) approves every signing request.
+
+### Privacy
+
+Kuana has no account and no telemetry, and it never sends information about you or your code
+to Kuana's developers. It connects to other services only for these:
+
+- **Updates:** checks [GitHub Releases](https://github.com/berkayakin/kuana-editor/releases) for a
+  new version (`auto_update: false` turns this off).
+- **Extensions:** reads the [extension registry](https://github.com/berkayakin/kuana-extensions)
+  and downloads the extensions you install, and their updates.
+- **Language servers and tools:** downloads one you install with a click (from GitHub, npm or
+  Go's module proxy), and the WebAssembly toolchain for extension grammars after asking.
+- **GitHub Copilot:** only when you turn it on and sign in; it then sends your code to GitHub
+  under GitHub's terms.
+- **Git:** fetches, pulls and pushes to the remotes your repositories name, and fetches in the
+  background in trusted projects (`auto_fetch: false` turns this off).
+- **Crash reports:** after a crash Kuana offers to open a prefilled GitHub issue in your browser;
+  nothing is sent unless you submit it there.
