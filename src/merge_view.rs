@@ -186,18 +186,23 @@ impl MergeView {
     }
 
     fn column(&self, i: usize, title: &str, label: Option<&str>, deleted: bool, theme: &Theme) -> impl IntoElement {
+        // Modern: a title over an island. Classic: flush squares side by
+        // side, a separator line between them and under each title's strip.
+        let line = crate::ui::separator(theme);
         div()
             .flex_1()
             .min_w_0()
             .flex()
             .flex_col()
-            .gap_1()
+            .when(!theme.classic, |el| el.gap_1())
+            .when(theme.classic && i > 0, |el| el.border_l_1().border_color(line))
             .child(
                 div()
                     .flex()
+                    .flex_shrink_0()
                     .items_center()
                     .gap_1p5()
-                    .px_1()
+                    .map(|el| if theme.classic { el.h(px(28.)).px_3().border_b_1().border_color(line) } else { el.px_1() })
                     .text_size(px(12.))
                     .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(title.to_string()))
                     .when_some(label.filter(|l| !l.is_empty()), |el, label| {
@@ -205,15 +210,7 @@ impl MergeView {
                     })
                     .when(deleted, |el| el.child(div().text_color(theme.git_deleted).child("deleted on this side"))),
             )
-            // An island; Classic, a square in separator lines.
-            .child(
-                crate::ui::area(theme)
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .when(theme.classic, |el| el.border_1().border_color(crate::ui::separator(theme)))
-                    .child(self.editors[i].clone()),
-            )
+            .child(crate::ui::area(theme).flex_1().min_h_0().overflow_hidden().child(self.editors[i].clone()))
     }
 }
 
@@ -260,14 +257,15 @@ impl Render for MergeView {
             .size_full()
             .flex()
             .flex_col()
-            .px_3()
-            .pb_3()
-            .gap_2()
+            .when(!theme.classic, |el| el.pb_3().gap_2())
             .child(
                 div()
                     .flex()
+                    .flex_shrink_0()
                     .items_center()
                     .gap_2()
+                    .px_3()
+                    .when(theme.classic, |el| el.pb_2())
                     .child(icon_el(Icon::GitCompare, px(15.), theme.text_muted.into()))
                     .child(div().text_size(px(12.)).text_color(if left == 0 { theme.text_dim } else { theme.git_conflict }).child(status))
                     .child(step("merge-previous", Icon::ChevronUp, "Previous Conflict", false, cx))
@@ -288,7 +286,7 @@ impl Render for MergeView {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .gap_2()
+                    .map(|el| if theme.classic { el.border_t_1().border_color(crate::ui::separator(&theme)) } else { el.px_3().gap_2() })
                     .child(self.column(0, "Yours", Some(&self.sides[0].label), self.sides[0].text.is_none(), &theme))
                     .child(self.column(1, "Result", None, false, &theme))
                     .child(self.column(2, "Theirs", Some(&self.sides[1].label), self.sides[1].text.is_none(), &theme)),
