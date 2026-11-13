@@ -369,7 +369,11 @@ impl Workspace {
                 }
                 cx.notify();
             }
-            Request::AppendPanel { extension, panel, lines, .. } => {
+            Request::AppendPanel { extension, panel, lines, ended, .. } => {
+                // A program's lines from after the code ended it (`kill-process`).
+                if ended.as_ref().is_some_and(crate::extensions::processes::Ended::is_set) {
+                    return;
+                }
                 let Some(c) = contribution(&extension) else { return };
                 let title = c.panel(&panel).map_or_else(|| panel.clone(), |p| p.title.clone());
                 // Only the panel is told (it redraws alone); the window hears of a new one.
@@ -416,7 +420,7 @@ impl Workspace {
                 }
                 _ => continue,
             };
-            let event = Event { name, path: path.map(Path::to_path_buf), language: language.map(str::to_string), data: None };
+            let event = Event { name, path: path.map(Path::to_path_buf), language: language.map(str::to_string), data: None, ended: None };
             self.deliver_extension_event(Delivery { extension: c, event, needs, done: None }, cx);
         }
     }
@@ -534,7 +538,7 @@ impl Workspace {
                 let (done, answered) = oneshot::channel();
                 let told = ws.update(cx, |ws, cx| {
                     let Some(c) = contribution(&extension).filter(|c| c.api >= Api::V2 && c.code.is_some()) else { return false };
-                    let event = Event { name: "timer", path: None, language: None, data: Some(name.clone()) };
+                    let event = Event { name: "timer", path: None, language: None, data: Some(name.clone()), ended: None };
                     ws.deliver_extension_event(Delivery { extension: c, event, needs: None, done: Some(done) }, cx);
                     true
                 });
@@ -670,7 +674,7 @@ impl Workspace {
         }
         for (c, name, path) in events {
             if c.hears(name) {
-                let event = Event { name, path: Some(path), language: None, data: None };
+                let event = Event { name, path: Some(path), language: None, data: None, ended: None };
                 self.deliver_extension_event(Delivery { extension: c, event, needs: None, done: None }, cx);
             }
         }
@@ -833,7 +837,7 @@ impl Workspace {
             let now = c.settings_json(user.get(&c.extension));
             if *told != now {
                 *told = now;
-                let event = Event { name: "settings-changed", path: None, language: None, data: None };
+                let event = Event { name: "settings-changed", path: None, language: None, data: None, ended: None };
                 self.deliver_extension_event(Delivery { extension: c, event, needs: None, done: None }, cx);
             }
         }

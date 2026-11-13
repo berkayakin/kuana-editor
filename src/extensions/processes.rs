@@ -4,7 +4,9 @@
 //! `BATCH_EVERY`, so a program that prints fast costs the UI a few updates a
 //! second, not one per line. A program ends when its extension asks
 //! (`kill-process`), when the extension goes, when its window closes and when
-//! Kuana quits.
+//! Kuana quits. One its extension ends is gone at once: its name is free for
+//! the next, and nothing more of it is told (`Ended`), so the code never takes
+//! the old program's last lines or its end for the new one's.
 
 use std::{
     collections::HashMap,
@@ -12,7 +14,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         Arc, LazyLock, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     time::{Duration, Instant},
@@ -42,6 +44,36 @@ struct Running {
     id: u64,
     window: u64,
     child: Arc<Mutex<Child>>,
+    ended: Ended,
+}
+
+/// Set when the extension ended the program with `kill`: what it printed or
+/// how it ended is dropped from then on, also where it waits to be handed to
+/// the code (the requests and events carry a copy and check it).
+#[derive(Clone, Default)]
+pub struct Ended(Arc<AtomicBool>);
+
+impl std::fmt::Debug for Ended {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Ended({})", self.is_set())
+    }
+}
+
+/// The same flag (events compare equal in tests by what they say).
+impl PartialEq for Ended {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Ended {
+    pub fn is_set(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    fn set(&self) {
+        self.0.store(true, Ordering::Release);
+    }
 }
 
 /// The programs running, by (extension, name).
@@ -52,8 +84,9 @@ fn running() -> std::sync::MutexGuard<'static, HashMap<(String, String), Running
 }
 
 /// Starts `command` as `extension`'s program `name`, for `window`. `tell`
-/// gets its output and its end, on a thread of the program's own.
-pub fn start(extension: &str, name: &str, window: u64, mut command: Command, tell: impl Fn(Told) + Send + 'static) -> Result<(), String> {
+/// gets its output and its end, on a thread of the program's own, until
+/// `ended` is set.
+pub fn start(extension: &str, name: &str, window: u64, mut command: Command, ended: Ended, tell: impl Fn(Told) + Send + 'static) -> Result<(), String> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let key = (extension.to_string(), name.to_string());
     let mut all = running();
@@ -75,8 +108,13 @@ pub fn start(extension: &str, name: &str, window: u64, mut command: Command, tel
     drop(lines);
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     let child = Arc::new(Mutex::new(child));
-    all.insert(key.clone(), Running { id, window, child: child.clone() });
+    all.insert(key.clone(), Running { id, window, child: child.clone(), ended: ended.clone() });
     drop(all);
+    let tell = move |told: Told| {
+        if !ended.is_set() {
+            tell(told)
+        }
+    };
     std::thread::Builder::new()
         .name(format!("extension process {extension}/{name}"))
         .spawn(move || {
@@ -162,12 +200,14 @@ fn end(child: &Arc<Mutex<Child>>) {
     crate::process::kill_tree(&mut child);
 }
 
-/// Ends `extension`'s program `name`, if it's running. Its owner hears
-/// `Exited` like for one that ended by itself.
+/// Ends `extension`'s program `name`, if it's running. It's forgotten at
+/// once (a program can start under that name right away) and its owner hears
+/// nothing more of it: not its last lines, not its end.
 pub fn kill(extension: &str, name: &str) {
-    let child = running().get(&(extension.to_string(), name.to_string())).map(|r| r.child.clone());
-    if let Some(child) = child {
-        end(&child);
+    let gone = running().remove(&(extension.to_string(), name.to_string()));
+    if let Some(running) = gone {
+        running.ended.set();
+        end(&running.child);
     }
 }
 
@@ -187,7 +227,7 @@ mod tests {
         let (send, told) = mpsc::channel();
         let mut command = Command::new("sh");
         command.args(["-c", script]);
-        start(extension, name, 7, command, move |t| {
+        start(extension, name, 7, command, Ended::default(), move |t| {
             send.send(t).ok();
         })
         .unwrap();
@@ -225,13 +265,38 @@ mod tests {
         // The shell starts a sleep of its own: both go, or the pipe would stay open for a minute.
         let told = collect("test-kill", "wait", "echo started; sleep 60 & wait");
         assert_eq!(told.recv_timeout(Duration::from_secs(20)).unwrap(), Told::Lines(vec!["started".into()]));
-        let again = start("test-kill", "wait", 7, Command::new("true"), |_| {});
+        let again = start("test-kill", "wait", 7, Command::new("true"), Ended::default(), |_| {});
         assert!(again.unwrap_err().contains("already running"));
         let started = Instant::now();
         kill_where(|extension, window| extension == "test-kill" && window == 7);
         let (lines, status) = until_exit(&told);
         assert!(lines.is_empty() && status == -1, "{lines:?} {status}");
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_killed_program_is_gone_at_once_and_says_nothing_more() {
+        let first = Ended::default();
+        let (send, told) = mpsc::channel();
+        let mut command = Command::new("sh");
+        command.args(["-c", "while true; do echo old; sleep 0.01; done"]);
+        start("test-replace", "follow", 7, command, first.clone(), move |t| {
+            send.send(t).ok();
+        })
+        .unwrap();
+        assert!(matches!(told.recv_timeout(Duration::from_secs(20)).unwrap(), Told::Lines(_)));
+        kill("test-replace", "follow");
+        assert!(first.is_set());
+        // The name is free right away, for the program that replaces it.
+        let replaced = collect("test-replace", "follow", "echo new");
+        let (lines, status) = until_exit(&replaced);
+        assert_eq!((lines, status), (vec!["new".to_string()], 0));
+        // Nothing of the old one came after the kill: no last lines, no end.
+        std::thread::sleep(Duration::from_millis(300));
+        while let Ok(t) = told.try_recv() {
+            assert!(matches!(t, Told::Lines(_)), "{t:?} after the kill");
+        }
+        assert!(told.recv_timeout(Duration::from_millis(300)).is_err());
     }
 
     #[test]

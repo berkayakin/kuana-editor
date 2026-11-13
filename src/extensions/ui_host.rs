@@ -211,6 +211,9 @@ pub struct Event {
     pub path: Option<PathBuf>,
     pub language: Option<String>,
     pub data: Option<String>,
+    /// For a program's events: set once the code ended it (`kill-process`),
+    /// so one still waiting to be told is dropped.
+    pub ended: Option<processes::Ended>,
 }
 
 /// What a call asks of the UI. `window` is the workspace window the call is
@@ -235,7 +238,7 @@ pub enum Request {
     /// What a status bar item shows in the window (none: nothing).
     Status { window: u64, extension: String, item: String, status: Option<StatusItem> },
     /// Lines for the end of a panel's text.
-    AppendPanel { window: u64, extension: String, panel: String, lines: Vec<String> },
+    AppendPanel { window: u64, extension: String, panel: String, lines: Vec<String>, ended: Option<processes::Ended> },
     /// Something a program the code started did (`process-output`,
     /// `process-exited`), for its `on-event`.
     ProcessEvent { window: u64, extension: String, event: Event },
@@ -321,6 +324,10 @@ pub fn event(
 ) -> impl Future<Output = Result<(), String>> + Send + 'static {
     run(extension, caller, EVENT_DEADLINE, move |bindings, store| {
         if needs.is_some_and(|permission| store.data_mut().allow(permission).is_err()) {
+            return Ok(Ok(()));
+        }
+        // A program the code ended meanwhile: it has heard the last of it.
+        if event.ended.as_ref().is_some_and(processes::Ended::is_set) {
             return Ok(Ok(()));
         }
         bindings.event(store, &event)
@@ -951,15 +958,19 @@ impl v2::kuana::extension::host::Host for HostState {
         let mut command = crate::process::command(path);
         command.args(&args).env("PATH", servers::search_path()).current_dir(dir);
         let (window, extension, hears_output, process) = (self.caller.window, self.extension.clone(), self.hears_output, name.clone());
-        let event = |name: &'static str, data: serde_json::Value| Event { name, path: None, language: None, data: Some(data.to_string()) };
-        processes::start(&self.extension, &name, window, command, move |told| match told {
+        let ended = processes::Ended::default();
+        let event = {
+            let ended = ended.clone();
+            move |name: &'static str, data: serde_json::Value| Event { name, path: None, language: None, data: Some(data.to_string()), ended: Some(ended.clone()) }
+        };
+        processes::start(&self.extension, &name, window, command, ended.clone(), move |told| match told {
             processes::Told::Lines(lines) => {
                 if hears_output {
                     let event = event("process-output", serde_json::json!({ "name": process, "lines": lines }));
                     send(Request::ProcessEvent { window, extension: extension.clone(), event });
                 }
                 if let Some(panel) = panel.clone() {
-                    send(Request::AppendPanel { window, extension: extension.clone(), panel, lines });
+                    send(Request::AppendPanel { window, extension: extension.clone(), panel, lines, ended: Some(ended.clone()) });
                 }
             }
             processes::Told::Exited(status) => {
@@ -1007,7 +1018,7 @@ impl v2::kuana::extension::host::Host for HostState {
 
     fn append_panel(&mut self, panel: String, lines: Vec<String>) {
         if self.panels.contains(&panel) && !lines.is_empty() {
-            send(Request::AppendPanel { window: self.caller.window, extension: self.extension.clone(), panel, lines });
+            send(Request::AppendPanel { window: self.caller.window, extension: self.extension.clone(), panel, lines, ended: None });
         }
     }
 }
