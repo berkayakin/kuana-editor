@@ -128,12 +128,31 @@ impl Workspace {
             git::Side::Ours => (ours, theirs),
             git::Side::Theirs => (theirs, ours),
         };
+        // Already merging it: forward. Another file's merge gives way.
+        if let Some((handle, merging, _)) = &self.merge_window
+            && *merging == path
+            && tool_window::activate(handle, cx)
+        {
+            return;
+        }
+        self.close_merge_window(cx);
         self.close_modal(window, cx);
-        let view = cx.new(|cx| crate::merge_view::MergeView::new(rel.clone(), &file, base, mine, other, window, cx));
+        let title = format!("Merge {rel}");
+        let result = file.clone();
+        let Some(handle) = tool_window::open(tool_window::Kind::Merge, title, window, cx, move |window, cx| {
+            cx.new(|cx| crate::merge_view::MergeView::new(&result, base, mine, other, window, cx))
+        }) else {
+            return;
+        };
+        let Some(view) = tool_window::view(&handle, cx) else { return };
         let subscription = cx.subscribe_in(&view, window, move |ws, _, event: &crate::merge_view::MergeViewEvent, window, cx| match event {
-            crate::merge_view::MergeViewEvent::Close => ws.close_modal(window, cx),
+            crate::merge_view::MergeViewEvent::Close => {
+                ws.close_merge_window(cx);
+                window.activate_window();
+            }
             crate::merge_view::MergeViewEvent::AcceptDeletion { yours } => {
-                ws.close_modal(window, cx);
+                ws.close_merge_window(cx);
+                window.activate_window();
                 ws.run_git(GitOp::AcceptSide { rels: vec![rel.clone()], yours: *yours }, window, cx);
             }
             crate::merge_view::MergeViewEvent::Apply => {
@@ -144,7 +163,8 @@ impl Workspace {
                     let saved = saving.await;
                     this.update_in(cx, |ws, window, cx| match saved {
                         Ok(()) => {
-                            ws.close_modal(window, cx);
+                            ws.close_merge_window(cx);
+                            window.activate_window();
                             ws.run_git(GitOp::Stage(vec![rel]), window, cx);
                         }
                         Err(err) => {
@@ -156,8 +176,7 @@ impl Workspace {
                 .detach();
             }
         });
-        self.modals.open(Modal::Merge(view), subscription);
-        cx.notify();
+        self.merge_window = Some((handle, path, subscription));
     }
 
     /// Asks the user what Git or SSH asks (`askpass`): a password or
@@ -703,6 +722,10 @@ impl Workspace {
         if let Some(Modal::Remotes(dialog)) = &self.modals.current {
             dialog.update(cx, |d, cx| d.reload(cx));
         }
+        // A remote added or changed: where a push goes, and what it sends.
+        if let Some(dialog) = self.push_window.as_ref().and_then(|(handle, _)| tool_window::view(handle, cx)) {
+            dialog.update(cx, |d, cx| d.reload(cx));
+        }
         cx.notify();
     }
 
@@ -919,30 +942,66 @@ impl Workspace {
             self.toast(ToastKind::Error, "Not a Git repository", None, cx);
             return;
         };
-        self.close_modal(window, cx);
         self.diff_return = None;
-        let dialog = cx.new(|cx| PushDialog::new(repo, window, cx));
-        self.open_push_modal(dialog, window, cx);
-    }
-
-    pub(super) fn open_push_modal(&mut self, dialog: Entity<PushDialog>, window: &mut Window, cx: &mut Context<Self>) {
-        let subscription = cx.subscribe_in(&dialog, window, |ws, dialog, event: &PushDialogEvent, window, cx| match event {
+        // Already open: forward, with what a push would send now.
+        if let Some((handle, _)) = &self.push_window
+            && let Some(dialog) = tool_window::view(handle, cx)
+        {
+            dialog.update(cx, |d, cx| d.reload(cx));
+            tool_window::activate(handle, cx);
+            return;
+        }
+        self.close_modal(window, cx);
+        let Some(handle) = tool_window::open(tool_window::Kind::Push, "Push Commits", window, cx, |window, cx| {
+            cx.new(|cx| PushDialog::new(repo, window, cx))
+        }) else {
+            return;
+        };
+        let Some(dialog) = tool_window::view(&handle, cx) else { return };
+        let subscription = cx.subscribe_in(&dialog, window, |ws, _, event: &PushDialogEvent, window, cx| match event {
             PushDialogEvent::Push { force, remote, tags } => {
-                ws.close_modal(window, cx);
+                ws.close_push_window(cx);
+                window.activate_window();
                 ws.run_git(GitOp::PushNow { force: *force, remote: remote.clone(), tags: tags.clone() }, window, cx);
             }
+            // In this window, which comes forward; closing the diff's tab
+            // brings the Push window back (`close_diff`).
             PushDialogEvent::OpenDiff(source) => {
-                ws.close_modal(window, cx);
+                window.activate_window();
                 if let Some(diff) = ws.show_diff(source.clone(), window, cx) {
-                    ws.diff_return = Some((diff.entity_id(), dialog.clone()));
+                    ws.diff_return = Some(diff.entity_id());
                 }
             }
-            PushDialogEvent::ManageRemotes => ws.manage_remotes(&ManageRemotes, window, cx),
-            PushDialogEvent::Dismissed => ws.close_modal(window, cx),
+            // Here too; the Push window reads the remotes again after a change (`git_finished`).
+            PushDialogEvent::ManageRemotes => {
+                window.activate_window();
+                ws.manage_remotes(&ManageRemotes, window, cx);
+            }
+            PushDialogEvent::Dismissed => {
+                ws.close_push_window(cx);
+                window.activate_window();
+            }
         });
-        dialog.read(cx).focus(window);
-        self.modals.open(Modal::Push(dialog), subscription);
-        cx.notify();
+        self.push_window = Some((handle, subscription));
+    }
+
+    fn close_push_window(&mut self, cx: &mut App) {
+        self.diff_return = None;
+        if let Some((handle, _)) = self.push_window.take() {
+            tool_window::close(handle, cx);
+        }
+    }
+
+    fn close_merge_window(&mut self, cx: &mut App) {
+        if let Some((handle, _, _)) = self.merge_window.take() {
+            tool_window::close(handle, cx);
+        }
+    }
+
+    /// Closes the Push and Merge windows this window opened.
+    pub(super) fn close_tool_windows(&mut self, cx: &mut App) {
+        self.close_push_window(cx);
+        self.close_merge_window(cx);
     }
 
     /// Shows a diff in a tab of the current pane, as opening a file does:
@@ -996,12 +1055,12 @@ impl Workspace {
         self.tab_subscriptions.insert(diff.entity_id(), vec![subscription]);
     }
 
-    /// Closes a diff's tab; one opened from the Push dialog goes back to it.
+    /// Closes a diff's tab; one opened from the Push window brings it forward.
     pub(super) fn close_diff(&mut self, diff: &Entity<DiffView>, window: &mut Window, cx: &mut Context<Self>) {
-        let back = self.diff_return.take_if(|(id, _)| *id == diff.entity_id());
+        let back = self.diff_return.take_if(|id| *id == diff.entity_id()).is_some();
         self.remove_item(&PaneItem::Diff(diff.clone()), window, cx);
-        if let Some((_, dialog)) = back {
-            self.open_push_modal(dialog, window, cx);
+        if back && let Some((handle, _)) = &self.push_window {
+            tool_window::activate(handle, cx);
         }
     }
 

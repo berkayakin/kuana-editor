@@ -6,6 +6,8 @@ impl Workspace {
     // ---- File tree --------------------------------------------------------------
 
     pub fn set_root(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        // They belong to the project that was open.
+        self.close_tool_windows(cx);
         self.update_recent_projects(
             |list| {
                 list.retain(|p| p != &root);

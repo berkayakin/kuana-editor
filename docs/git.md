@@ -66,7 +66,8 @@ background fetch never does, and stays quiet instead.
   demand). Kuana also turns on Git's rerere (unless your Git config sets it), so a conflict you
   resolved once, in a rebase you run again, is resolved the same way the next time.
   Click a conflicted file in the Commit panel (or right-click → **Merge…**) for the **Merge
-  view**: yours on the left, theirs on the right and the result between them, scrolling
+  view**, in a window of its own that you can move, resize or put on another display while the
+  project window stays usable: yours on the left, theirs on the right and the result between them, scrolling
   together line by line, with what each side changed from the common version marked in its
   gutter. The result is the file itself, editable as in its tab and with the same undo; the
   header steps through the conflicts left (↑ / ↓), resolves the simple ones, takes **Accept
@@ -123,12 +124,13 @@ background fetch never does, and stays quiet instead.
   dialog) lists each remote with its URL; add one, or hover one to **Edit** its name and URL or
   **Remove** it (after asking; the remote repository isn't touched). A new branch is pushed to
   `origin`, else the first remote; with several, the Push dialog lets you pick.
-- **Push** (⌘⇧K / Ctrl+Shift+K) first opens a dialog with the branch and where it goes (a new
+- **Push** (⌘⇧K / Ctrl+Shift+K) first opens a window with the branch and where it goes (a new
   branch is marked, with a choice of remote when there are several), and the commits to push. Click a commit for its message and files, and a
-  file for its diff (closing that tab returns to the dialog). It warns when the remote has commits you
+  file for its diff, which opens in the project window while the Push window stays open
+  (closing that tab brings the Push window forward again). It warns when the remote has commits you
   don't have; **Force push** replaces them only if the remote hasn't moved since your last fetch
   (`--force-with-lease`). Tags you made that the remote doesn't have yet (Kuana asks it when
-  the dialog opens) are listed as **Push tags (…)**, checked; they go with the branch, or on their
+  the window opens) are listed as **Push tags (…)**, checked; they go with the branch, or on their
   own when there are no new commits. Enter pushes, Esc cancels.
 
 - **Clone:** **Clone Repository…** on the welcome screen, in the File and Git menus, or Find Action

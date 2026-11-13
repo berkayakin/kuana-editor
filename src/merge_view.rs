@@ -25,7 +25,7 @@ use crate::{
     document_diff::DocumentDiff,
     editor::{Cancel, Editor},
     theme::Theme,
-    ui::{icon_button, icon_el, modal_panel, text_button, tooltip_view},
+    ui::{icon_button, icon_el, text_button, tooltip_view},
 };
 
 pub enum MergeViewEvent {
@@ -52,7 +52,6 @@ struct Maps {
 }
 
 pub struct MergeView {
-    rel: String,
     /// Yours, the result, theirs.
     editors: [Entity<Editor>; 3],
     sides: [Version; 2],
@@ -68,7 +67,7 @@ impl EventEmitter<MergeViewEvent> for MergeView {}
 impl MergeView {
     /// `file` is the conflicted file's editor (its tab), `base` the version
     /// both sides started from.
-    pub fn new(rel: String, file: &Entity<Editor>, base: String, yours: Version, theirs: Version, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(file: &Entity<Editor>, base: String, yours: Version, theirs: Version, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let language = file.read(cx).doc.read(cx).language;
         let marked = |editor: &Entity<Editor>, cx: &mut Context<Self>| {
             let doc = editor.read(cx).doc.clone();
@@ -89,7 +88,7 @@ impl MergeView {
         window.focus(&result.focus_handle(cx));
         let editors = [left, result, right];
         let subscriptions = editors.iter().enumerate().map(|(i, e)| cx.observe(e, move |this, _, cx| this.scrolled(i, cx))).collect();
-        Self { rel, editors, sides: [yours, theirs], maps: None, tops: [None; 3], expected: [None; 3], _subscriptions: subscriptions }
+        Self { editors, sides: [yours, theirs], maps: None, tops: [None; 3], expected: [None; 3], _subscriptions: subscriptions }
     }
 
     fn result(&self) -> &Entity<Editor> {
@@ -206,7 +205,15 @@ impl MergeView {
                     })
                     .when(deleted, |el| el.child(div().text_color(theme.git_deleted).child("deleted on this side"))),
             )
-            .child(crate::ui::island(theme).flex_1().min_h_0().overflow_hidden().child(self.editors[i].clone()))
+            // An island; Classic, a square in separator lines.
+            .child(
+                crate::ui::area(theme)
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .when(theme.classic, |el| el.border_1().border_color(crate::ui::separator(theme)))
+                    .child(self.editors[i].clone()),
+            )
     }
 }
 
@@ -231,9 +238,8 @@ impl Focusable for MergeView {
 }
 
 impl Render for MergeView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
-        let viewport = window.viewport_size();
         let left = self.conflicts(cx).len();
         let status = match left {
             0 => "No conflicts left".to_string(),
@@ -246,12 +252,16 @@ impl Render for MergeView {
                 .tooltip(move |_, cx| tooltip_view(tip, cx))
                 .on_click(cx.listener(move |this, _, window, cx| this.step(forward, window, cx)))
         };
-        modal_panel(cx)
+        // The whole of its window (`tool_window.rs`), under the title bar
+        // that names the file.
+        div()
             .key_context("MergeView")
             .on_action(cx.listener(Self::on_cancel))
-            .w(viewport.width - px(64.))
-            .h(crate::workspace::modal_max_height(window))
-            .p_3()
+            .size_full()
+            .flex()
+            .flex_col()
+            .px_3()
+            .pb_3()
             .gap_2()
             .child(
                 div()
@@ -259,7 +269,6 @@ impl Render for MergeView {
                     .items_center()
                     .gap_2()
                     .child(icon_el(Icon::GitCompare, px(15.), theme.text_muted.into()))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(format!("Merge {}", self.rel)))
                     .child(div().text_size(px(12.)).text_color(if left == 0 { theme.text_dim } else { theme.git_conflict }).child(status))
                     .child(step("merge-previous", Icon::ChevronUp, "Previous Conflict", false, cx))
                     .child(step("merge-next", Icon::ChevronDown, "Next Conflict", true, cx))

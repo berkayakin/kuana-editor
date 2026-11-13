@@ -77,6 +77,7 @@ mod terminal;
 mod test_run;
 mod theme;
 mod theme_picker;
+mod tool_window;
 mod transition;
 mod ui;
 mod updater;

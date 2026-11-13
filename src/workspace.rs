@@ -30,6 +30,7 @@ use crate::{
     onboarding::{Onboarding, OnboardingEvent},
     diff_view::{DiffSource, DiffView, DiffViewEvent},
     push_dialog::{PushDialog, PushDialogEvent},
+    tool_window::{self, ToolWindow},
     remotes_dialog::{RemotesDialog, RemotesEvent},
     git_log::{GitLog, GitLogEvent},
     debugger::{DebugEvent, DebugSession, launch},
@@ -132,7 +133,7 @@ pub use self::{
     extension_ui::{ToggleExtensionView, handle_extension_request},
     sessions::update_recent_projects,
     title_bar::{window_controls, window_drag_area},
-    windows::{modal_max_height, open_window, placement_bounds, placement_of, quit},
+    windows::{open_window, placement_bounds, placement_of, quit},
 };
 
 actions!(
@@ -642,10 +643,8 @@ enum Modal {
     Branches(Entity<BranchPicker>),
     Input(Entity<InputDialog>),
     Clone(Entity<CloneDialog>),
-    Push(Entity<PushDialog>),
     Remotes(Entity<RemotesDialog>),
     Trust(Entity<crate::trust_dialog::TrustDialog>),
-    Merge(Entity<crate::merge_view::MergeView>),
 }
 
 /// The modal over the workspace, if any, with its subscription: they're
@@ -847,9 +846,14 @@ pub struct Workspace {
     test_statuses: Arc<crate::test_run::Statuses>,
     last_tests: Option<(RunTarget, crate::test_run::TestRun)>,
     git_log: Entity<GitLog>,
-    /// The diff tab opened from the Push dialog, and the dialog: it comes back
-    /// when that tab closes while still the current one.
-    diff_return: Option<(gpui::EntityId, Entity<PushDialog>)>,
+    /// The diff tab opened from the Push window: closing it while it's still
+    /// the current tab brings that window forward again.
+    diff_return: Option<gpui::EntityId>,
+    /// The Push and Merge windows this window opened (`tool_window.rs`),
+    /// with the subscription to their view's events; the Merge one with the
+    /// file it merges. Closed with this window and on a project change.
+    push_window: Option<(WindowHandle<ToolWindow<PushDialog>>, Subscription)>,
+    merge_window: Option<(WindowHandle<ToolWindow<crate::merge_view::MergeView>>, PathBuf, Subscription)>,
     /// The project's Git repository: its status and the running operation.
     git: Entity<GitStore>,
     /// Project folders opened before, newest first.
@@ -942,6 +946,8 @@ impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle);
+        // Its Push and Merge windows go with it.
+        cx.on_release(|ws: &mut Self, cx| ws.close_tool_windows(cx)).detach();
         let find_bar = cx.new(FindBar::new);
         let find_subscription = cx.subscribe_in(&find_bar, window, |ws, _, event: &FindBarEvent, window, cx| match event {
             FindBarEvent::Dismissed => {
@@ -1267,6 +1273,8 @@ impl Workspace {
             last_tests: None,
             git_log,
             diff_return: None,
+            push_window: None,
+            merge_window: None,
             git,
             recent_projects: state.recent_projects.clone(),
             toasts: Vec::new(),
@@ -1647,7 +1655,7 @@ impl Workspace {
                 self.auto_save(&previous, cx);
             }
             // Another tab: the diff opened from the Push dialog no longer goes back to it.
-            if self.diff_return.as_ref().is_some_and(|(id, _)| *id != item.entity_id()) {
+            if self.diff_return.is_some_and(|id| id != item.entity_id()) {
                 self.diff_return = None;
             }
             self.active_pane = pane.clone();

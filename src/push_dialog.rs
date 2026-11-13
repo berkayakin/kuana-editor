@@ -16,7 +16,7 @@ use crate::{
     git::{self, CommitFile, PushPreview},
     git_panel::change_color,
     theme::Theme,
-    ui::{HoverFill, icon_el, modal_panel, text_button, tooltip_view},
+    ui::{GAP, HoverFill, area, icon_el, separator, text_button, tooltip_view},
 };
 
 actions!(push_dialog, [ConfirmPush]);
@@ -49,6 +49,7 @@ pub struct PushDialog {
     scroll: UniformListScrollHandle,
     details_scroll: gpui::ScrollHandle,
     details_task: Option<Task<()>>,
+    load_task: Task<()>,
 }
 
 impl EventEmitter<PushDialogEvent> for PushDialog {}
@@ -57,8 +58,29 @@ impl PushDialog {
     pub fn new(repo: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle);
-        let root = repo.clone();
-        cx.spawn(async move |this, cx| {
+        let mut dialog = Self {
+            repo,
+            preview: None,
+            selected: 0,
+            details: None,
+            force: false,
+            remote: None,
+            tags: None,
+            push_tags: false,
+            focus_handle,
+            scroll: UniformListScrollHandle::new(),
+            details_scroll: gpui::ScrollHandle::new(),
+            details_task: None,
+            load_task: Task::ready(()),
+        };
+        dialog.reload(cx);
+        dialog
+    }
+
+    /// Reads what a push would send (again: after the remotes changed).
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        let root = self.repo.clone();
+        self.load_task = cx.spawn(async move |this, cx| {
             let preview = cx.background_executor().spawn(async move { git::push_preview(&root) }).await;
             this.update(cx, |this, cx| {
                 if let Ok(p) = &preview {
@@ -86,25 +108,10 @@ impl PushDialog {
                 cx.notify();
             })
             .ok();
-        })
-        .detach();
-        Self {
-            repo,
-            preview: None,
-            selected: 0,
-            details: None,
-            force: false,
-            remote: None,
-            tags: None,
-            push_tags: false,
-            focus_handle,
-            scroll: UniformListScrollHandle::new(),
-            details_scroll: gpui::ScrollHandle::new(),
-            details_task: None,
-        }
+        });
     }
 
-    /// Focus returns here after a diff opened from the dialog closes.
+    /// Gives the dialog the keyboard (a click on a commit's row).
     pub fn focus(&self, window: &mut Window) {
         window.focus(&self.focus_handle);
     }
@@ -177,8 +184,6 @@ impl PushDialog {
         let panel = div()
             .id("push-details")
             .size_full()
-            .border_l_1()
-            .border_color(theme.border_subtle)
             .overflow_y_scroll()
             .track_scroll(&self.details_scroll);
         let entry = self.commits().get(self.selected).cloned();
@@ -256,7 +261,7 @@ impl Focusable for PushDialog {
 }
 
 impl Render for PushDialog {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
         let preview = self.preview.clone();
 
@@ -328,12 +333,10 @@ impl Render for PushDialog {
             .px_3()
             .h(px(46.))
             .flex_shrink_0()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(icon_el(Icon::ArrowUp, px(15.), theme.text_muted.into()))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Push Commits"))
-            .child(div().flex_1())
+            .when(theme.classic, |el| el.border_b_1().border_color(separator(&theme)))
+            // Named by the window's title bar ("Push Commits").
             .children(route)
+            .child(div().flex_1())
             .child(
                 crate::ui::icon_button("push-remotes", Icon::Cloud, theme.text_muted.into(), cx)
                     .tooltip(|_, cx| tooltip_view("Manage Remotes…", cx))
@@ -455,8 +458,7 @@ impl Render for PushDialog {
             .px_3()
             .h(px(52.))
             .flex_shrink_0()
-            .border_t_1()
-            .border_color(theme.border)
+            .when(theme.classic, |el| el.border_t_1().border_color(separator(&theme)))
             .child(
                 div()
                     // Auto basis: a zero one (`flex_1`) can wrap the note a letter per line.
@@ -495,26 +497,29 @@ impl Render for PushDialog {
                     .on_click(cx.listener(|this, _, _, cx| this.confirm(cx))),
             );
 
-        modal_panel(cx)
+        // The whole of its window (`tool_window.rs`), under the title bar.
+        div()
             .key_context("PushDialog")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_confirm))
             .on_action(cx.listener(Self::on_escape))
             .on_action(cx.listener(Self::on_up))
             .on_action(cx.listener(Self::on_down))
-            .w(px(920.))
-            .max_w(window.viewport_size().width - px(48.))
-            .h(px(520.).min(crate::workspace::modal_max_height(window)))
+            .size_full()
+            .flex()
+            .flex_col()
             .child(header)
+            // Like the main window: the commits and the selected one's
+            // details on islands over the chrome; Classic, flush squares
+            // between separator lines.
             .child(
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
+                    .when(!theme.classic, |el| el.gap(px(GAP)).px(px(GAP)))
                     .child(
-                        div()
-                            .relative()
-                            .flex()
+                        area(&theme)
                             .flex_1()
                             .min_w_0()
                             .h_full()
@@ -522,11 +527,11 @@ impl Render for PushDialog {
                             .child(crate::ui::list_scrollbar("push-commits-scrollbar", &self.scroll, cx)),
                     )
                     .child(
-                        div()
-                            .relative()
+                        area(&theme)
                             .w(px(340.))
                             .flex_shrink_0()
                             .h_full()
+                            .when(theme.classic, |el| el.border_l_1().border_color(separator(&theme)))
                             .child(self.render_details(&theme, cx))
                             .child(crate::ui::scrollbar("push-details-scrollbar", &self.details_scroll, cx)),
                     ),
