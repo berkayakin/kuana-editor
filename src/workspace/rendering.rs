@@ -443,6 +443,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::previous_bookmark))
             .on_action(cx.listener(Self::go_to_bookmark))
             .on_action(cx.listener(Self::show_todo))
+            .on_action(cx.listener(Self::open_results_in_editor))
+            .on_action(cx.listener(Self::problems_in_editor))
             .on_action(cx.listener(Self::open_extensions))
             .on_action(cx.listener(Self::project_trust))
             .on_action(cx.listener(Self::vim_command_line))

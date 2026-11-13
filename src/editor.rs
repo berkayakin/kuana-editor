@@ -2,6 +2,7 @@
 //! custom element that paints only the visible lines straight to the GPU.
 
 mod bookmarks;
+mod excerpt;
 mod fold;
 mod format;
 mod conflict;
@@ -18,6 +19,7 @@ mod unloaded;
 mod vim;
 
 pub use bookmarks::EditorBookmarksChanged;
+pub use excerpt::ExcerptEvent;
 pub use lsp::EditorLspEvent;
 pub use run::{EditorBreakpointMenu, EditorBreakpointsChanged, EditorRunEvent, EditorRunSql};
 pub use sticky::Crumb;
@@ -475,6 +477,8 @@ pub struct Editor {
     lens_hits: Vec<(Bounds<Pixels>, crate::document::CodeLens)>,
     /// A restored tab whose file isn't read yet (`load` reads it).
     unloaded: Option<Unloaded>,
+    /// Showing only some lines of the document (see `excerpt.rs`).
+    excerpt: Option<excerpt::Excerpt>,
     /// The document's id and version as this editor last saw them (its own
     /// edits included): another editor's edits move its carets from there.
     seen: (u64, u64),
@@ -609,6 +613,7 @@ impl Editor {
             conflict_hits: Vec::new(),
             lens_hits: Vec::new(),
             unloaded: None,
+            excerpt: None,
         }
     }
 
@@ -644,6 +649,9 @@ impl Editor {
     /// Changes the text (or replaces it). This editor places its own carets,
     /// so its change isn't replayed onto them when the document notifies.
     fn change_doc<R>(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Document) -> R) -> R {
+        if let Some(excerpt) = self.excerpt.as_mut() {
+            excerpt.growing = true;
+        }
         let result = f(&mut self.doc.as_mut(cx));
         let doc = self.doc.read(cx);
         if doc.id() == self.seen.0 {
@@ -657,6 +665,7 @@ impl Editor {
     /// Moves what this editor keeps in the text (folds, a snippet's stops,
     /// closing characters it typed) across the document's edits since `version`.
     fn follow_edits(&mut self, version: u64, cx: &App) {
+        self.follow_excerpt(version, cx);
         let doc = self.doc.read(cx);
         self.folds.follow(doc, version);
         if !self.autoclosed.is_empty() {
@@ -1304,6 +1313,7 @@ impl Editor {
     // ---- Selection management ----------------------------------------------
 
     fn set_selections(&mut self, mut selections: Vec<Selection>, primary: usize, cx: &mut Context<Self>) {
+        self.hold_in_excerpt(&mut selections, cx);
         let primary_sel = selections[primary.min(selections.len() - 1)];
         selections.sort_by_key(|s| s.range().start);
         // Merge overlapping selections.
@@ -1342,6 +1352,9 @@ impl Editor {
         }
         self.marked_range = None;
         self.autoscroll = true;
+        if self.excerpt.is_some() {
+            cx.emit(ExcerptEvent::CaretMoved);
+        }
         self.cursor_visible = true;
         self.blink_epoch += 1;
         self.blink_task = None;
@@ -1941,7 +1954,7 @@ impl Editor {
         let wrap = self.soft_wrap && !self.is_single_line();
         let blocks = self.block_rows(cx);
         // Without wrapping, folds, long lines or blocks, display rows are buffer lines.
-        if !wrap && blocks.is_empty() && self.folds.is_empty() && !self.doc.read(cx).has_long_lines() {
+        if !wrap && blocks.is_empty() && self.folds.is_empty() && self.excerpt.is_none() && !self.doc.read(cx).has_long_lines() {
             self.wrap = None;
             self.wrap_job = None;
             return;
@@ -1974,7 +1987,12 @@ impl Editor {
         }
         let text_system = cx.text_system().clone();
         let doc = self.doc.read(cx);
-        let (version, folds, rope) = (doc.version(), self.folds.ranges(), doc.rope());
+        // An excerpt's other lines hide like folded ones.
+        let hidden = self.excerpt_hidden(doc).map(|mut h| {
+            h.extend_from_slice(self.folds.ranges());
+            h
+        });
+        let (version, folds, rope) = (doc.version(), hidden.as_deref().unwrap_or(self.folds.ranges()), doc.rope());
         let inlays = self.inlays(cx);
         // Edits, folds and new hints re-measure only their lines, at the
         // map's width: an older one's while a new one's measure runs, so the
@@ -2007,7 +2025,8 @@ impl Editor {
             // quick, then wrapped when the measure lands.
             None if !caught_up => {
                 let unwrapped = WrapKey { width: px(0.), wrap: false, ..key };
-                WrapMap::new(unwrapped, version, self.folds.ranges(), self.inlays(cx), rope, &text_system, font, char_width)
+                let folds = hidden.as_deref().unwrap_or(self.folds.ranges());
+                WrapMap::new(unwrapped, version, folds, self.inlays(cx), rope, &text_system, font, char_width)
             }
             None => return,
         };
@@ -2020,7 +2039,9 @@ impl Editor {
     /// in `wrap_job` (redrawing the editor) when it is.
     fn start_wrap_job(&mut self, key: WrapKey, font: Font, char_width: Pixels, cx: &mut Context<Self>) -> Option<WrapMap> {
         let doc = self.doc.read(cx);
-        let (version, folds, rope) = (doc.version(), self.folds.ranges().to_vec(), doc.rope().clone());
+        let mut folds = self.excerpt_hidden(doc).unwrap_or_default();
+        folds.extend_from_slice(self.folds.ranges());
+        let (version, rope) = (doc.version(), doc.rope().clone());
         let inlays = self.inlays(cx);
         let (hints, generation) = (inlays.hints.to_vec(), inlays.generation);
         let text_system = cx.text_system().clone();
@@ -2401,6 +2422,9 @@ impl Editor {
             })
             .collect();
         let goal = goals[self.primary];
+        if !extend && self.leaves_excerpt(rows, goal, cx) {
+            return;
+        }
         self.set_selections(selections, self.primary, cx);
         self.goal_x = Some(goal);
     }
@@ -3173,6 +3197,9 @@ impl Editor {
     // ---- Mouse ---------------------------------------------------------------
 
     fn scrollbar_geometry(&self, cx: &App) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+        if self.excerpt.is_some() {
+            return None;
+        }
         let l = self.layout.as_ref()?;
         let viewport = l.bounds.size.height;
         let content = l.line_height * self.display_row_count(cx) as f32 + viewport - l.line_height;
@@ -3657,6 +3684,13 @@ impl Editor {
         } else {
             delta.x = px(0.);
         }
+        if self.excerpt.is_some() {
+            // The view around it scrolls up and down.
+            if delta.x == px(0.) {
+                return;
+            }
+            cx.stop_propagation();
+        }
         self.scroll.y -= delta.y;
         self.scroll.x -= delta.x;
         self.clamp_scroll(cx);
@@ -3668,7 +3702,8 @@ impl Editor {
 
     fn clamp_scroll(&mut self, cx: &App) {
         let Some(l) = self.layout.as_ref() else { return };
-        let max_y = l.line_height * (self.display_row_count(cx).saturating_sub(1)) as f32;
+        // An excerpt shows all its rows; the view around it scrolls.
+        let max_y = if self.excerpt.is_some() { px(0.) } else { l.line_height * (self.display_row_count(cx).saturating_sub(1)) as f32 };
         self.scroll.y = self.scroll.y.clamp(px(0.), max_y.max(px(0.)));
         if self.wrap.as_ref().is_some_and(|w| w.key.wrap) {
             self.scroll.x = px(0.);
@@ -3774,8 +3809,15 @@ impl Editor {
 
         // Visible display rows, and the buffer lines they show.
         let display_rows = self.display_row_count(cx);
-        let first_drow = (self.scroll.y / line_height).floor() as usize;
-        let visible_rows = (bounds.size.height / line_height).ceil() as usize + 1;
+        let mut first_drow = (self.scroll.y / line_height).floor() as usize;
+        let mut visible_rows = (bounds.size.height / line_height).ceil() as usize + 1;
+        if self.excerpt.is_some() {
+            // A long excerpt in a scrolled view: only its rows in the view.
+            self.note_excerpt_rows(cx);
+            let clip = window.content_mask().bounds;
+            first_drow = ((clip.top() - bounds.top()).max(px(0.)) / line_height).floor() as usize;
+            visible_rows = ((clip.bottom().min(bounds.bottom()) - bounds.top() - line_height * first_drow as f32).max(px(0.)) / line_height).ceil() as usize + 1;
+        }
         let last_drow = (first_drow + visible_rows).min(display_rows);
         let first_drow = first_drow.min(last_drow);
         let first_row = self.line_of_display_row(first_drow, cx).0;
@@ -4131,7 +4173,8 @@ impl Editor {
                 }
 
                 // Current line highlight.
-                if is_cursor_row && self.selections.len() == 1 && !single && row_once {
+                // In a multibuffer, only the excerpt with the keyboard marks its line.
+                if is_cursor_row && self.selections.len() == 1 && !single && row_once && (focused || self.excerpt.is_none()) {
                     frame.backgrounds.push(fill(
                         Bounds::from_corners(point(bounds.left(), y), point(bounds.right(), y + line_height)),
                         theme.current_line,
@@ -4662,6 +4705,8 @@ impl Editor {
 
         if !single {
             self.request_blame(window, cx);
+        }
+        if !single && self.excerpt.is_none() {
             let number_right = bounds.left() + gutter_width - px(FOLD_ZONE_RIGHT + 18.);
             self.layout_sticky(&mut frame, bounds, first_row, text_left, number_right, window, cx);
         }
@@ -6091,7 +6136,7 @@ impl Render for Editor {
         }
         let popover = self.render_hunk_popover(cx);
         let lsp_popovers = self.render_lsp_popovers(window, cx);
-        let preview_toggle = self.is_markdown(cx).then(|| {
+        let preview_toggle = (self.is_markdown(cx) && self.excerpt.is_none()).then(|| {
             let theme = Theme::get(cx);
             let on = self.previewed;
             div()
@@ -6123,6 +6168,7 @@ impl Render for Editor {
             .key_context("Editor")
             .track_focus(&self.focus_handle)
             .map(|el| match self.mode {
+                EditorMode::Full if self.excerpt.is_some() => el.w_full().h(self.excerpt_height(cx)).bg(theme.background),
                 EditorMode::Full => el.size_full().bg(theme.background),
                 EditorMode::SingleLine => el.w_full().h(px(20.)),
                 EditorMode::MultiLine => el.size_full(),

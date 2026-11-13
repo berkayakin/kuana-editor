@@ -43,6 +43,7 @@ The table below is the JetBrains keymap.
 | Toggle line breakpoint / conditional breakpoint | ⌘F8 / ⇧⌘F8 | Ctrl+F8 / Ctrl+Shift+F8 |
 | Toggle bookmark / with mnemonic | F3 / ⌥F3 | F11 / Ctrl+F11 |
 | Show Bookmarks | ⌘F3 | Shift+F11 |
+| Open the file at the caret (in a multibuffer's excerpt) | F4 | F4 |
 | Go to bookmark 0–9 | ⌃0–⌃9 | Ctrl+0–Ctrl+9 |
 | Attach to Process… | ⌥⇧F5 | Ctrl+Alt+F5 |
 | Resume / Step Over / Into / Out | ⌥⌘R / F8 / F7 / ⇧F8 | F9 / F8 / F7 / Shift+F8 |

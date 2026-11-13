@@ -163,7 +163,17 @@ impl Workspace {
     }
 
     pub(super) fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(view) = self.active_item(cx).and_then(|i| i.excerpts().cloned()) {
+            self.save_multibuffer(&view, window, cx);
+            return;
+        }
         let Some(editor) = self.active_editor(cx) else { return };
+        self.save_one(editor, window, cx);
+    }
+
+    /// Saves one editor's file (Save As for an untitled one), asking first
+    /// when it changed on disk.
+    pub(super) fn save_one(&mut self, editor: Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) {
         if editor.read(cx).doc.read(cx).path.is_none() {
             self.save_as(&SaveAs, window, cx);
             return;

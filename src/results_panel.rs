@@ -339,6 +339,8 @@ pub enum ResultsEvent {
     Close,
     /// The last tab closed.
     Emptied,
+    /// Open in Editor: the current tab's places as a multibuffer.
+    OpenInEditor { title: SharedString, targets: Vec<ResultTarget> },
 }
 
 impl EventEmitter<ResultsEvent> for ResultsPanel {}
@@ -435,6 +437,21 @@ impl ResultsPanel {
         *tab = fresh;
         cx.notify();
         true
+    }
+
+    /// The current tab's title and the places it lists (loaded ones, in
+    /// tree order), for a multibuffer; None when it lists none.
+    pub fn current_places(&self) -> Option<(SharedString, Vec<ResultTarget>)> {
+        fn walk(nodes: &[ResultNode], out: &mut Vec<ResultTarget>) {
+            for node in nodes {
+                out.extend(node.target.clone());
+                walk(&node.children, out);
+            }
+        }
+        let tab = self.tabs.get(self.active)?;
+        let mut targets = Vec::new();
+        walk(&tab.nodes, &mut targets);
+        (!targets.is_empty()).then(|| (tab.title.clone(), targets))
     }
 
     /// Drops every tab (another project replaced this one: its results
@@ -766,6 +783,17 @@ impl Render for ResultsPanel {
                     .child(button.label.clone())
                     .on_click(move |_, window, cx| on_click(window, cx))
             }))
+            .when(self.current_places().is_some(), |el| {
+                el.child(
+                    crate::ui::icon_button("results-open-editor", Icon::FileText, theme.text_dim.into(), cx)
+                        .tooltip(|_, cx| crate::ui::tooltip_view("Open in Editor: these places as excerpts, editable in one tab", cx))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some((title, targets)) = this.current_places() {
+                                cx.emit(ResultsEvent::OpenInEditor { title, targets });
+                            }
+                        })),
+                )
+            })
             .when(!self.tabs.is_empty(), |el| {
                 el.child(
                     crate::ui::icon_button("results-pin", Icon::Pin, if pinned { theme.accent } else { theme.text_dim }.into(), cx)

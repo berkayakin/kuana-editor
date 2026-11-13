@@ -85,6 +85,26 @@ For chat and agents, use the tools you already have: Claude Code, Codex or Gemin
 Kuana's terminal, and Kuana picks up the files they change (the Git gutter and the Commit view show
 what they did, Local History undoes it).
 
+## Multibuffers
+
+A multibuffer puts places from many files in one tab, each as an excerpt: a few lines around
+the place, editable right there. **Open in Editor** (the page button in the Find panel's header,
+or **Open Results in Editor** in Find Action) opens what the Find panel lists: usages from Find
+Usages, the TODO list, test results. **Problems in Editor** (View menu, the Problems panel's
+header, Find Action) does the same for the errors and warnings of every open file and the last
+Run's.
+
+- Each file has a header with its name and folder; clicking it, or **F4** in an excerpt, opens the
+  file's tab at the caret.
+- Excerpts show two lines around each place; nearby places share one. A **⋯ N lines** strip marks
+  what's left out: clicking it shows up to five more lines, and excerpts that meet become one.
+- ↑ and ↓ go from one excerpt into the next, as if the lines were one file.
+- An excerpt is the file itself, not a copy: highlighting, problems, Git marks, completion,
+  quick fixes, Rename and Undo work as in its tab, and an edit is at once in the file's tab too.
+  **Save** saves every file the multibuffer changed; closing it keeps unsaved edits (the status bar
+  lists them, as for files changed without a tab).
+- Multiple carets stay within one excerpt.
+
 ## Bookmarks
 
 A bookmark marks a line to come back to, in any file. **Toggle Bookmark** (F3 on macOS, F11 on

@@ -48,6 +48,7 @@ mod local_history;
 mod lint;
 mod lsp;
 mod markdown_preview;
+mod multibuffer;
 mod merge_view;
 mod onboarding;
 mod pane_item;
@@ -102,7 +103,7 @@ use crate::{
         Replace, ReplaceInFiles, Save, SaveAs, SearchEverywhere, SelectTheme, ShowCommit,
         ToggleProblems, ToggleResults, ToggleSidebar, ToggleSecondSidebar, WelcomeSetup, GoToSymbol, InstallShellCommand,
         DebugConfiguration, Resume, PauseProgram, StepOver, StepInto, StepOut, AttachToProcess, AddConditionalBreakpoint, AddLogpoint,
-        ToggleBookmark, ToggleBookmarkWithMnemonic, ShowBookmarks, NextBookmark, PreviousBookmark, ShowTodo,
+        ToggleBookmark, ToggleBookmarkWithMnemonic, ShowBookmarks, NextBookmark, PreviousBookmark, ShowTodo, ProblemsInEditor,
     },
 };
 
@@ -217,6 +218,7 @@ fn menus_for(mac: bool) -> Vec<Menu> {
                 MenuItem::action("Toggle Second Sidebar", ToggleSecondSidebar),
                 MenuItem::action("Toggle Problems", ToggleProblems),
                 MenuItem::action("TODO", ShowTodo),
+                MenuItem::action("Problems in Editor", ProblemsInEditor),
                 MenuItem::action("Find Panel", ToggleResults),
                 MenuItem::action("Terminal", ToggleTerminal),
                 MenuItem::action("Soft-Wrap", ToggleSoftWrap),
