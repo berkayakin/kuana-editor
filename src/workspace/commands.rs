@@ -134,6 +134,8 @@ impl Workspace {
         self.hide_bottom(BottomPanel::Debug);
         self.debug_location = None;
         self.breakpoints.clear();
+        self.bookmarks.clear();
+        self.reset_todos();
         // Searches, test results and Local History list the old project's files.
         self.results.update(cx, |p, cx| p.clear(cx));
         self.has_results = false;

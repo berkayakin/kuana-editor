@@ -16,6 +16,8 @@ impl Workspace {
             cx,
         );
         self.breakpoints.clear();
+        self.bookmarks.clear();
+        self.reset_todos();
         self.problems.update(cx, |p, cx| {
             p.set_run(None, cx);
             p.set_root(Some(root.clone()), cx);
@@ -25,6 +27,7 @@ impl Workspace {
         let expanded: Vec<PathBuf> = session.iter().flat_map(|s| s.expanded.iter().map(|p| root.join(p))).filter(|p| p.is_dir()).collect();
         if let Some(session) = &mut session {
             self.breakpoints = session.breakpoints.iter().map(|b| (root.join(&b.path), b.breakpoints.clone())).collect();
+            self.bookmarks = session.bookmarks.iter().map(|b| (root.join(&b.path), b.bookmarks.clone())).collect();
             // The project's own terminal panel, unless this window has shells already.
             if let Some(terminals) = session.terminals.take()
                 && self.terminals.read(cx).is_empty()

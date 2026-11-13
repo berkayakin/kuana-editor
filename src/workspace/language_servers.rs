@@ -84,7 +84,7 @@ impl Workspace {
     /// Each location's line (as it reads today, untrimmed): from the tab's
     /// text where the file is open, else read in the background, only as far
     /// as the last line wanted.
-    fn location_lines(&self, locations: &[Location], cx: &App) -> Task<Vec<String>> {
+    pub(super) fn location_lines(&self, locations: &[Location], cx: &App) -> Task<Vec<String>> {
         let mut tabs: HashMap<PathBuf, Option<Entity<Editor>>> = HashMap::new();
         // Per file not open: the lines wanted, and the locations wanting them.
         let mut unread: HashMap<PathBuf, Vec<(usize, usize)>> = HashMap::new();

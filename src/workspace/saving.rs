@@ -526,7 +526,11 @@ impl Workspace {
             self.lsp.update(cx, |s, _| s.did_close(&path));
             let breakpoints = editor.read(cx).breakpoints(cx);
             if !breakpoints.is_empty() {
-                self.breakpoints.insert(path, breakpoints);
+                self.breakpoints.insert(path.clone(), breakpoints);
+            }
+            let bookmarks = editor.read(cx).bookmarks(cx);
+            if !bookmarks.is_empty() {
+                self.bookmarks.insert(path, bookmarks);
             }
         }
         self.auto_save_tasks.remove(&editor.entity_id());

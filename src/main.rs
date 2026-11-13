@@ -6,6 +6,7 @@ mod askpass;
 mod autopilot;
 mod python;
 mod assets;
+mod bookmark_dialog;
 mod branch_picker;
 mod busy;
 mod cli;
@@ -59,6 +60,7 @@ mod project;
 mod project_settings;
 mod project_tree;
 mod process;
+mod todo;
 mod trust;
 mod trust_dialog;
 mod preferences;
@@ -100,6 +102,7 @@ use crate::{
         Replace, ReplaceInFiles, Save, SaveAs, SearchEverywhere, SelectTheme, ShowCommit,
         ToggleProblems, ToggleResults, ToggleSidebar, ToggleSecondSidebar, WelcomeSetup, GoToSymbol, InstallShellCommand,
         DebugConfiguration, Resume, PauseProgram, StepOver, StepInto, StepOut, AttachToProcess, AddConditionalBreakpoint, AddLogpoint,
+        ToggleBookmark, ToggleBookmarkWithMnemonic, ShowBookmarks, NextBookmark, PreviousBookmark, ShowTodo,
     },
 };
 
@@ -198,6 +201,12 @@ fn menus_for(mac: bool) -> Vec<Menu> {
                 MenuItem::action("Next Problem", NextProblem),
                 MenuItem::action("Previous Problem", PreviousProblem),
                 MenuItem::separator(),
+                MenuItem::action("Toggle Bookmark", ToggleBookmark),
+                MenuItem::action("Toggle Bookmark with Mnemonic…", ToggleBookmarkWithMnemonic),
+                MenuItem::action("Show Bookmarks…", ShowBookmarks),
+                MenuItem::action("Next Bookmark", NextBookmark),
+                MenuItem::action("Previous Bookmark", PreviousBookmark),
+                MenuItem::separator(),
                 MenuItem::action("Find Action…", FindAction),
             ],
         },
@@ -207,6 +216,7 @@ fn menus_for(mac: bool) -> Vec<Menu> {
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
                 MenuItem::action("Toggle Second Sidebar", ToggleSecondSidebar),
                 MenuItem::action("Toggle Problems", ToggleProblems),
+                MenuItem::action("TODO", ShowTodo),
                 MenuItem::action("Find Panel", ToggleResults),
                 MenuItem::action("Terminal", ToggleTerminal),
                 MenuItem::action("Soft-Wrap", ToggleSoftWrap),

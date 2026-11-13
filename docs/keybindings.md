@@ -21,7 +21,7 @@ The table below is the JetBrains keymap.
 | Go to Line:Column | ⌘L | Ctrl+G |
 | File Structure | ⌘F12 | Ctrl+F12 |
 | Find / Replace | ⌘F / ⌘R | Ctrl+F / Ctrl+R |
-| Next / previous occurrence | ⌘G / ⌘⇧G, F3 / ⇧F3 | F3 / Shift+F3 |
+| Next / previous occurrence | ⌘G / ⌘⇧G, ⇧F3 for previous | F3 / Shift+F3 |
 | Find / Replace in Files | ⌘⇧F / ⌘⇧R | Ctrl+Shift+F / Ctrl+Shift+R |
 | Extend / shrink selection | ⌥↑ / ⌥↓ | Ctrl+W / Ctrl+Shift+W |
 | Add next occurrence / unselect / select all | ⌃G / ⌃⇧G / ⌃⌘G | Alt+J / Alt+Shift+J / Ctrl+Alt+Shift+J |
@@ -41,6 +41,9 @@ The table below is the JetBrains keymap.
 | Stop | ⌘F2 | Ctrl+F2 |
 | Debug… / Debug at caret | ⌃⌥D / ⌃⇧D | Alt+Shift+F9 / Ctrl+Shift+F9 |
 | Toggle line breakpoint / conditional breakpoint | ⌘F8 / ⇧⌘F8 | Ctrl+F8 / Ctrl+Shift+F8 |
+| Toggle bookmark / with mnemonic | F3 / ⌥F3 | F11 / Ctrl+F11 |
+| Show Bookmarks | ⌘F3 | Shift+F11 |
+| Go to bookmark 0–9 | ⌃0–⌃9 | Ctrl+0–Ctrl+9 |
 | Attach to Process… | ⌥⇧F5 | Ctrl+Alt+F5 |
 | Resume / Step Over / Into / Out | ⌥⌘R / F8 / F7 / ⇧F8 | F9 / F8 / F7 / Shift+F8 |
 | Split Right / Down | ⌘\\ / ⌘⇧\\ | Ctrl+\\ / Ctrl+Shift+\\ |

@@ -61,6 +61,12 @@ impl Workspace {
             .filter_map(|(path, breakpoints)| Some(FileBreakpoints { path: path.strip_prefix(&root).ok()?.to_path_buf(), breakpoints }))
             .collect();
         breakpoints.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut bookmarks: Vec<FileBookmarks> = self
+            .all_bookmarks(cx)
+            .into_iter()
+            .filter_map(|(path, bookmarks)| Some(FileBookmarks { path: path.strip_prefix(&root).ok()?.to_path_buf(), bookmarks }))
+            .collect();
+        bookmarks.sort_by(|a, b| a.path.cmp(&b.path));
         let python_venv = crate::python::choice(&root).map(|c| c.to_saved());
         let terminals = Some(self.terminal_layout(cx));
         let last_run = self.last_run.clone();
@@ -72,6 +78,7 @@ impl Workspace {
             panes: pane_layout,
             expanded,
             breakpoints,
+            bookmarks,
             python_venv,
             terminals,
             last_run,

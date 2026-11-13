@@ -122,7 +122,8 @@ impl Workspace {
                 }
             }
             PickerEvent::SymbolQuery(query) => ws.query_symbols(query.clone(), cx),
-            PickerEvent::Dismissed => ws.close_modal(window, cx),
+            // Only a Bookmarks picker (with its own subscription) has these.
+            PickerEvent::OpenBookmark { .. } | PickerEvent::RemoveBookmark { .. } | PickerEvent::Dismissed => ws.close_modal(window, cx),
         });
         self.modals.open(Modal::Picker(picker), subscription);
         cx.notify();

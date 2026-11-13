@@ -142,6 +142,7 @@ enum Setting {
     SoftWrap,
     Rulers,
     ShowWhitespace,
+    TodoPatterns,
     InlayHints,
     CodeLens,
     Minimap,
@@ -165,7 +166,7 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Setting; 37] = [
+    const ALL: [Setting; 38] = [
         Setting::Theme,
         Setting::IconTheme,
         Setting::VisualEffects,
@@ -189,6 +190,7 @@ impl Setting {
         Setting::MinimapWidth,
         Setting::EditPredictions,
         Setting::VimMode,
+        Setting::TodoPatterns,
         Setting::AutoSave,
         Setting::AutoSaveDelay,
         Setting::FormatOnSave,
@@ -216,7 +218,7 @@ impl Setting {
             Setting::BaseKeymap => Page::Keymap,
             Setting::FontFamily | Setting::FontSize | Setting::LineHeight => Page::Editor,
             Setting::TabSize | Setting::HardTabs | Setting::SoftWrap => Page::Editor,
-            Setting::Rulers | Setting::ShowWhitespace | Setting::InlayHints | Setting::CodeLens | Setting::VimMode => Page::Editor,
+            Setting::Rulers | Setting::ShowWhitespace | Setting::InlayHints | Setting::CodeLens | Setting::VimMode | Setting::TodoPatterns => Page::Editor,
             Setting::Minimap | Setting::MinimapWidth | Setting::EditPredictions => Page::Editor,
             Setting::AutoSave
             | Setting::AutoSaveDelay
@@ -245,6 +247,7 @@ impl Setting {
             Setting::Minimap | Setting::MinimapWidth => "Minimap",
             Setting::EditPredictions => "Edit predictions",
             Setting::VimMode => "Vim",
+            Setting::TodoPatterns => "TODO",
             Setting::AutoSave | Setting::AutoSaveDelay => "Auto-save",
             Setting::FormatOnSave | Setting::TrimWhitespace | Setting::FinalNewline => "On save",
             Setting::Shell | Setting::OptionAsMeta => "Terminal",
@@ -274,6 +277,7 @@ impl Setting {
             Setting::HardTabs => "Indent with tabs",
             Setting::SoftWrap => "Soft wrap",
             Setting::Rulers => "Rulers",
+            Setting::TodoPatterns => "TODO patterns",
             Setting::ShowWhitespace => "Show whitespace",
             Setting::InlayHints => "Inlay hints",
             Setting::CodeLens => "Code lens",
@@ -316,6 +320,7 @@ impl Setting {
             Setting::HardTabs => "Use tab characters when a file doesn't show a style of its own.",
             Setting::SoftWrap => "Wrap long lines at the edge of the editor. Markdown and plain text wrap either way.",
             Setting::Rulers => "Columns for vertical guides, e.g. 80, 120. Empty uses .editorconfig's max_line_length.",
+            Setting::TodoPatterns => "Words that make a comment a TODO item, in any case, e.g. TODO, FIXME. Listed by Show TODO and highlighted in the editor.",
             Setting::ShowWhitespace => "Mark spaces with dots and tabs with lines.",
             Setting::InlayHints => "Types and parameter names from the language server, shown in the code.",
             Setting::CodeLens => "The language server's links above lines: references, implementations, Run and Debug.",
@@ -361,6 +366,7 @@ impl Setting {
             Setting::HardTabs => "indentation spaces hard tabs",
             Setting::SoftWrap => "word wrap lines",
             Setting::Rulers => "ruler guide column line length margin 80",
+            Setting::TodoPatterns => "todo fixme hack xxx comments tasks patterns",
             Setting::ShowWhitespace => "whitespace spaces tabs invisible characters dots render",
             Setting::InlayHints => "inlay hints types parameters names language server",
             Setting::CodeLens => "code lens references implementations run debug language server",
@@ -589,6 +595,7 @@ pub struct Preferences {
     language: Language,
     shell: Entity<Editor>,
     rulers: Entity<Editor>,
+    todo_patterns: Entity<Editor>,
     server_command: Entity<Editor>,
     formatter_command: Entity<Editor>,
     /// "Custom command" was picked for this tool but there's no command yet.
@@ -629,6 +636,7 @@ impl Preferences {
         let shell = cx.new(|cx| Editor::single_line(format!("{login_shell} (login shell)"), cx));
         let server_command = cx.new(|cx| Editor::single_line("Command and arguments", cx));
         let rulers = cx.new(|cx| Editor::single_line("None", cx));
+        let todo_patterns = cx.new(|cx| Editor::single_line(crate::todo::DEFAULT_PATTERNS.join(", "), cx));
         let formatter_command = cx.new(|cx| Editor::single_line("Command and arguments ({file} is the file's path)", cx));
         let keymap = cx.new(|cx| KeymapPage::new(window, cx));
         let extension_url = cx.new(|cx| Editor::single_line("Git URL of an extension (Zed extensions work too)", cx));
@@ -650,12 +658,13 @@ impl Preferences {
             cx.subscribe(&registry_query, |_, _, _: &EditorEvent, cx| cx.notify()),
             cx.subscribe(&keymap, |_, _, event: &PreferencesEvent, cx| cx.emit(clone_event(event))),
         ];
-        for field in [&shell, &rulers, &server_command, &formatter_command] {
+        for field in [&shell, &rulers, &todo_patterns, &server_command, &formatter_command] {
             subscriptions.push(cx.subscribe(field, |this, _, _: &EditorEvent, cx| this.schedule_commit(cx)));
         }
         let settings = Settings::get(cx).clone();
         set_field(&shell, &settings.terminal_shell.as_deref().map(join_command).unwrap_or_default(), cx);
         set_field(&rulers, &rulers_text(settings.editor.rulers.as_deref()), cx);
+        set_field(&todo_patterns, &settings.todo_patterns.as_deref().unwrap_or_default().join(", "), cx);
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             page,
@@ -674,6 +683,7 @@ impl Preferences {
             language: Language::JavaScript,
             shell,
             rulers,
+            todo_patterns,
             server_command,
             formatter_command,
             pending_custom: None,
@@ -801,6 +811,9 @@ impl Preferences {
         if key == "rulers" {
             set_field(&self.rulers, "", cx);
         }
+        if key == "todo_patterns" {
+            set_field(&self.todo_patterns, "", cx);
+        }
         if key == "editor_font_size" {
             theme::zoom(None, cx);
         }
@@ -843,6 +856,16 @@ impl Preferences {
             results.push(match &rulers {
                 Some(rulers) => Settings::set("rulers", json!(rulers)),
                 None => Settings::remove("rulers"),
+            });
+        }
+
+        // Empty is the defaults (an empty list would find nothing).
+        let words: Vec<String> = self.todo_patterns.read(cx).text(cx).split([',', ' ']).map(str::trim).filter(|w| !w.is_empty()).map(String::from).collect();
+        let words = (!words.is_empty()).then_some(words);
+        if words != settings.todo_patterns {
+            results.push(match &words {
+                Some(words) => Settings::set("todo_patterns", json!(words)),
+                None => Settings::remove("todo_patterns"),
             });
         }
 
@@ -1429,6 +1452,7 @@ impl Preferences {
             Setting::HardTabs => self.bool_switch("pref-hard-tabs", "hard_tabs", settings.editor.hard_tabs, cx),
             Setting::SoftWrap => self.bool_switch("pref-soft-wrap", "soft_wrap", settings.editor.soft_wrap, cx),
             Setting::Rulers => div().w(px(160.)).flex().child(input_box(&self.rulers, None, window, cx)).into_any_element(),
+            Setting::TodoPatterns => div().w(px(240.)).flex().child(input_box(&self.todo_patterns, None, window, cx)).into_any_element(),
             Setting::ShowWhitespace => {
                 let current = settings.editor.show_whitespace.unwrap_or_default();
                 let options = ShowWhitespace::ALL.iter().map(|w| (w.label().into(), *w == current)).collect();
@@ -2695,6 +2719,7 @@ fn setting_key(setting: Setting) -> &'static str {
         Setting::CompactActivityBar => "compact_activity_bar",
         Setting::SoftWrap => "soft_wrap",
         Setting::Rulers => "rulers",
+        Setting::TodoPatterns => "todo_patterns",
         Setting::ShowWhitespace => "show_whitespace",
         Setting::InlayHints => "inlay_hints",
         Setting::CodeLens => "code_lens",

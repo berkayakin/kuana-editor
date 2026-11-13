@@ -1,4 +1,4 @@
-//! The scrollbar's markers: problems, Git changes, search matches and carets,
+//! The scrollbar's markers: problems, Git changes, search matches, bookmarks and carets,
 //! at whole-document scale in the track (or the minimap's lane). A document
 //! can have hundreds of thousands of matches or thousands of carets, so a
 //! frame doesn't walk them: each kind's lines are found when what they come
@@ -30,6 +30,8 @@ pub(super) struct Markers {
     changes: Layer<Same<Vec<Hunk>>>,
     /// For the search's lines.
     matches: Layer<Same<Vec<usize>>>,
+    /// For (document, version, bookmarks generation): bookmarked lines.
+    bookmarks: Layer<(u64, u64, u64)>,
     /// For (document, version, selections generation): the carets' lines.
     carets: Layer<(u64, u64, u64)>,
 }
@@ -95,6 +97,7 @@ impl Editor {
         markers.changes.update(Same(hunks.clone()), || hunks.iter().map(|h| (h.new_rows.clone(), h.kind as u8)).collect());
         let rows = self.search_matches.rows.clone();
         markers.matches.update(Same(rows.clone()), || rows.iter().map(|&row| (row..row + 1, 0)).collect());
+        markers.bookmarks.update((id, version, doc.bookmarks_generation()), || doc.bookmark_rows().map(|row| (row..row + 1, 0)).collect());
         markers.carets.update((id, version, self.selections_generation), || {
             heads_rows(doc, self.selections.iter().map(|s| s.head)).into_iter().map(|row| (row..row + 1, 0)).collect()
         });
@@ -104,6 +107,7 @@ impl Editor {
         markers.problems.lay_out(display, height, &first_display_row, true);
         markers.changes.lay_out_spans(display, height, &first_display_row);
         markers.matches.lay_out(display, height, &first_display_row, false);
+        markers.bookmarks.lay_out(display, height, &first_display_row, false);
         markers.carets.lay_out(display, height, &first_display_row, false);
 
         let (top, left, right) = (track.top(), track.left(), track.right());
@@ -123,6 +127,9 @@ impl Editor {
         for &(y, h, _) in &markers.matches.marks {
             frame.scrollbar.push(fill(Bounds::new(point(left + px(3.), top + y), size(px(6.), h)), match_color));
         }
+        for &(y, h, _) in &markers.bookmarks.marks {
+            frame.scrollbar.push(fill(Bounds::new(point(left + px(3.), top + y), size(px(6.), h.max(px(3.)))), theme.accent).corner_radii(px(1.)));
+        }
         for &(y, h, _) in &markers.carets.marks {
             frame.scrollbar.push(fill(Bounds::new(point(left + px(1.), top + y), size(px(4.), h)), theme.accent));
         }
@@ -135,7 +142,7 @@ impl Markers {
     /// changed nothing does neither).
     #[cfg(test)]
     pub(super) fn rebuilds(&self) -> usize {
-        self.problems.built + self.changes.built + self.matches.built + self.carets.built
+        self.problems.built + self.changes.built + self.matches.built + self.bookmarks.built + self.carets.built
     }
 }
 

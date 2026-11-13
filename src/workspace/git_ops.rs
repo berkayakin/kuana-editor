@@ -36,6 +36,7 @@ impl Workspace {
                 if let Some(changed) = changed {
                     self.show_status(changed, cx);
                 }
+                self.todo_scope_input_changed(super::todo::TodoScope::ChangedFiles, cx);
             }
             GitEvent::Started(label) => self.git_panel.update(cx, |p, cx| p.set_busy(Some(label.clone()), cx)),
             GitEvent::Finished { op, result } => self.git_finished(op, result, window, cx),

@@ -16,6 +16,9 @@ use ropey::Rope;
 use serde::{Deserialize, Serialize};
 use tree_sitter::InputEdit;
 
+mod line_marks;
+pub use line_marks::{LineMarks, OnRow};
+
 use crate::{
     encoding::{self, TextEncoding},
     lint::Diagnostic,
@@ -65,6 +68,42 @@ pub struct Breakpoint {
 impl Breakpoint {
     pub fn at(row: usize) -> Self {
         Self { row, ..Self::default() }
+    }
+}
+
+impl OnRow for Breakpoint {
+    fn row(&self) -> usize {
+        self.row
+    }
+    fn set_row(&mut self, row: usize) {
+        self.row = row;
+    }
+}
+
+/// A bookmarked line. A `mnemonic` (0–9, A–Z; one per project) lets Go to
+/// Bookmark jump straight to it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bookmark {
+    /// 0-based.
+    pub row: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mnemonic: Option<char>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl Bookmark {
+    pub fn at(row: usize) -> Self {
+        Self { row, ..Self::default() }
+    }
+}
+
+impl OnRow for Bookmark {
+    fn row(&self) -> usize {
+        self.row
+    }
+    fn set_row(&mut self, row: usize) {
+        self.row = row;
     }
 }
 
@@ -184,9 +223,13 @@ pub struct Document {
     pub large: bool,
     /// Edits since the language server last heard about this document.
     lsp_changes: LspChanges,
-    /// Line breakpoints with the offsets their lines start at (sorted), so
-    /// they stay on their lines as text is edited above them.
-    breakpoints: Vec<(usize, Breakpoint)>,
+    /// Line breakpoints, staying on their lines as text is edited above them.
+    breakpoints: LineMarks<Breakpoint>,
+    /// Bookmarked lines, the same way.
+    bookmarks: LineMarks<Bookmark>,
+    /// Changes whenever bookmarks are set or removed (not when edits move
+    /// them: the version does), for the scrollbar's markers.
+    bookmarks_generation: u64,
     /// Where the line a debug session is paused on starts.
     debug_line: Option<usize>,
     /// What each edit did to lines, tagged with the version it led to, so
@@ -364,7 +407,9 @@ impl Document {
             encoding: TextEncoding::UTF8,
             large,
             lsp_changes: LspChanges::default(),
-            breakpoints: Vec::new(),
+            breakpoints: LineMarks::default(),
+            bookmarks: LineMarks::default(),
+            bookmarks_generation: 0,
             debug_line: None,
             line_edits: Vec::new(),
             line_edits_base: 0,
@@ -930,11 +975,17 @@ impl Document {
         self.reparse();
     }
 
-    /// The tracked line starts (breakpoints, the debug line, code lenses)
+    /// The tracked line starts (breakpoints, bookmarks, the debug line, code lenses)
     /// that `composed` edits reach where they touch each other or merged,
     /// moved through `edits` one by one (see `line_starts_one_by_one`).
     fn exact_line_starts(&self, composed: &[Composed], edits: &[Replaced]) -> ExactLines {
-        let mut starts: Vec<usize> = self.breakpoints.iter().map(|(start, _)| *start).chain(self.debug_line).chain(self.code_lenses.iter().map(|l| l.line_start)).collect();
+        let mut starts: Vec<usize> = self
+            .breakpoints
+            .starts()
+            .chain(self.bookmarks.starts())
+            .chain(self.debug_line)
+            .chain(self.code_lenses.iter().map(|l| l.line_start))
+            .collect();
         if starts.is_empty() {
             return ExactLines::new();
         }
@@ -1105,7 +1156,7 @@ impl Document {
         Some(self.line_edits[first..].iter().map(|(_, edit)| edit))
     }
 
-    /// Moves what follows the text (breakpoints, the debug line, inlay
+    /// Moves what follows the text (breakpoints, bookmarks, the debug line, inlay
     /// hints, code lenses, diagnostics) across a transaction's
     /// edits, once for all of them. Runs after the rope changed; `old` is
     /// the text before.
@@ -1115,10 +1166,17 @@ impl Document {
         }
         #[cfg(test)]
         {
-            let tracked = self.breakpoints.len() + self.inlay_hints.len() + self.code_lenses.len() + self.diagnostics.len();
+            let tracked = self.breakpoints.count() + self.bookmarks.count() + self.inlay_hints.len() + self.code_lenses.len() + self.diagnostics.len();
             WORK.with(|work| work.set(work.get() + 1 + tracked));
         }
-        self.shift_breakpoints(patch, old, exact);
+        // Marks follow their line's text: an edit before a line moves them,
+        // one that removes the line (see `shift_line`) removes them.
+        let mut breakpoints = std::mem::take(&mut self.breakpoints);
+        breakpoints.shift(|offset| self.line_moved(offset, patch, old, exact), |start| self.row_of(start));
+        self.breakpoints = breakpoints;
+        let mut bookmarks = std::mem::take(&mut self.bookmarks);
+        bookmarks.shift(|offset| self.line_moved(offset, patch, old, exact), |start| self.row_of(start));
+        self.bookmarks = bookmarks;
         self.debug_line = self.debug_line.and_then(|offset| self.line_moved(offset, patch, old, exact));
         self.shift_inlay_hints(patch);
         self.code_lenses = std::mem::take(&mut self.code_lenses)
@@ -1347,22 +1405,17 @@ impl Document {
 
     /// The breakpoints, by row.
     pub fn breakpoints(&self) -> Vec<Breakpoint> {
-        self.breakpoints.iter().map(|(_, b)| b.clone()).collect()
+        self.breakpoints.to_vec()
     }
 
     pub fn breakpoint(&self, row: usize) -> Option<&Breakpoint> {
-        // Sorted by line start, so by row: drawing asks for every line on screen.
-        let ix = self.breakpoints.partition_point(|(_, b)| b.row < row);
-        self.breakpoints.get(ix).map(|(_, b)| b).filter(|b| b.row == row)
+        self.breakpoints.at(row)
     }
 
     pub fn set_breakpoints(&mut self, breakpoints: &[Breakpoint]) {
         let lines = self.line_count();
-        let mut placed: Vec<(usize, Breakpoint)> =
-            breakpoints.iter().filter(|b| b.row < lines).map(|b| (self.line_start(b.row), b.clone())).collect();
-        placed.sort_by_key(|(start, _)| *start);
-        placed.dedup_by_key(|(start, _)| *start);
-        self.breakpoints = placed;
+        let placed: Vec<_> = breakpoints.iter().filter(|b| b.row < lines).map(|b| (self.line_start(b.row), b.clone())).collect();
+        self.breakpoints.replace(placed);
     }
 
     /// Puts `breakpoint` on its row, replacing the one there.
@@ -1370,43 +1423,62 @@ impl Document {
         if breakpoint.row >= self.line_count() {
             return;
         }
-        let start = self.line_start(breakpoint.row);
-        match self.breakpoints.binary_search_by_key(&start, |(s, _)| *s) {
-            Ok(ix) => self.breakpoints[ix].1 = breakpoint,
-            Err(ix) => self.breakpoints.insert(ix, (start, breakpoint)),
-        }
+        self.breakpoints.set(self.line_start(breakpoint.row), breakpoint);
     }
 
     /// Adds or removes the breakpoint on `row`; true when one is there now.
     pub fn toggle_breakpoint(&mut self, row: usize) -> bool {
         let start = self.line_start(row);
-        match self.breakpoints.binary_search_by_key(&start, |(s, _)| *s) {
-            Ok(ix) => {
-                self.breakpoints.remove(ix);
-                false
-            }
-            Err(ix) => {
-                self.breakpoints.insert(ix, (start, Breakpoint::at(row)));
-                true
-            }
+        if self.breakpoints.remove(start).is_some() {
+            return false;
         }
+        self.breakpoints.set(start, Breakpoint::at(row));
+        true
     }
 
-    /// Breakpoints follow their line's text: an edit before a line moves
-    /// it, one that removes the line (see `shift_line`) removes it. (Runs
-    /// after the rope changed, so lines can be looked up again.)
-    fn shift_breakpoints(&mut self, patch: &Patch, old: &Rope, exact: &ExactLines) {
-        if self.breakpoints.is_empty() {
+    /// The bookmarks, by row.
+    pub fn bookmarks(&self) -> Vec<Bookmark> {
+        self.bookmarks.to_vec()
+    }
+
+    pub fn bookmark(&self, row: usize) -> Option<&Bookmark> {
+        self.bookmarks.at(row)
+    }
+
+    pub fn bookmark_rows(&self) -> impl Iterator<Item = usize> + '_ {
+        self.bookmarks.iter().map(|b| b.row)
+    }
+
+    pub fn bookmarks_generation(&self) -> u64 {
+        self.bookmarks_generation
+    }
+
+    pub fn set_bookmarks(&mut self, bookmarks: &[Bookmark]) {
+        let lines = self.line_count();
+        let placed: Vec<_> = bookmarks.iter().filter(|b| b.row < lines).map(|b| (self.line_start(b.row), b.clone())).collect();
+        self.bookmarks.replace(placed);
+        self.bookmarks_generation += 1;
+    }
+
+    /// Puts `bookmark` on its row, replacing the one there.
+    pub fn set_bookmark(&mut self, bookmark: Bookmark) {
+        if bookmark.row >= self.line_count() {
             return;
         }
-        let mut moved = Vec::with_capacity(self.breakpoints.len());
-        for (offset, breakpoint) in std::mem::take(&mut self.breakpoints) {
-            if let Some(start) = self.line_moved(offset, patch, old, exact) {
-                moved.push((start, Breakpoint { row: self.row_of(start), ..breakpoint }));
-            }
+        self.bookmarks.set(self.line_start(bookmark.row), bookmark);
+        self.bookmarks_generation += 1;
+    }
+
+    /// Removes the bookmark on `row`, if any.
+    pub fn remove_bookmark(&mut self, row: usize) -> Option<Bookmark> {
+        if row >= self.line_count() {
+            return None;
         }
-        moved.dedup_by_key(|(start, _)| *start);
-        self.breakpoints = moved;
+        let removed = self.bookmarks.remove(self.line_start(row));
+        if removed.is_some() {
+            self.bookmarks_generation += 1;
+        }
+        removed
     }
 
     /// Where the line starting at `offset` starts after `patch` (see
@@ -2675,6 +2747,36 @@ mod tests {
         doc.set_breakpoints(&[Breakpoint::at(0), Breakpoint::at(9)]);
         assert_eq!(rows(&doc), [0]);
         assert!(!doc.toggle_breakpoint(0));
+    }
+
+    #[test]
+    fn bookmarks_follow_their_lines() {
+        let mut doc = Document::from_text("a\nb\nc\nd\n".into(), None);
+        let rows = |doc: &Document| doc.bookmark_rows().collect::<Vec<_>>();
+        let generation = doc.bookmarks_generation();
+        doc.set_bookmark(Bookmark { mnemonic: Some('A'), description: Some("entry".into()), ..Bookmark::at(1) });
+        doc.set_bookmark(Bookmark::at(3));
+        assert!(doc.bookmarks_generation() > generation);
+        // Lines added above move them (with their mnemonic and description),
+        // as breakpoints on the same lines do.
+        doc.toggle_breakpoint(1);
+        doc.edit(vec![(0..0, "new\nnew\n".into())], &[], EditKind::Other);
+        assert_eq!(rows(&doc), [3, 5]);
+        assert_eq!(doc.bookmark(3), Some(&Bookmark { row: 3, mnemonic: Some('A'), description: Some("entry".into()) }));
+        assert_eq!(doc.breakpoints().iter().map(|b| b.row).collect::<Vec<_>>(), [3]);
+        // An edit doesn't count as a change of bookmarks (the version covers it).
+        let generation = doc.bookmarks_generation();
+        // Removing the line removes its bookmark.
+        let start = doc.line_start(5);
+        doc.edit(vec![(start..start + 2, String::new())], &[], EditKind::Other);
+        assert_eq!(rows(&doc), [3]);
+        assert_eq!(doc.bookmarks_generation(), generation);
+        assert_eq!(doc.remove_bookmark(3).and_then(|b| b.mnemonic), Some('A'));
+        assert_eq!(doc.remove_bookmark(3), None);
+        assert!(doc.bookmarks_generation() > generation);
+        // Restored ones past the end are dropped.
+        doc.set_bookmarks(&[Bookmark::at(0), Bookmark::at(99)]);
+        assert_eq!(rows(&doc), [0]);
     }
 
     /// An editor's folds follow the document's edits (through its patches).

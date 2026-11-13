@@ -63,6 +63,8 @@ pub struct TabButton {
     pub icon: Icon,
     pub label: SharedString,
     pub on_click: Rc<dyn Fn(&mut Window, &mut App)>,
+    /// Drawn as chosen (the TODO list's scope).
+    pub on: bool,
 }
 
 /// What a node's children take to load: the workspace or a hierarchy hands
@@ -166,6 +168,8 @@ struct ResultTab {
     selected: Option<usize>,
     pinned: bool,
     buttons: Vec<TabButton>,
+    /// A tab that's kept up to date (the TODO list): found again by this.
+    kind: Option<&'static str>,
 }
 
 impl ResultTab {
@@ -181,7 +185,7 @@ impl ResultTab {
                 }
             })
         }
-        let mut tab = ResultTab { id, title, count: leaves(&nodes), nodes, rows: Vec::new(), selected: None, pinned: false, buttons: Vec::new() };
+        let mut tab = ResultTab { id, title, count: leaves(&nodes), nodes, rows: Vec::new(), selected: None, pinned: false, buttons: Vec::new(), kind: None };
         tab.relayout();
         tab
     }
@@ -385,6 +389,52 @@ impl ResultsPanel {
             self.load(self.next_id, path, loader, cx);
         }
         cx.notify();
+    }
+
+    /// Shows a tab that's kept up to date (`kind`): fills the one there is in
+    /// place (it stays where it is, pinned or not) and makes it current, else
+    /// opens it like a search's.
+    pub fn show_kind(&mut self, kind: &'static str, title: SharedString, nodes: Vec<ResultNode>, buttons: Vec<TabButton>, cx: &mut Context<Self>) {
+        if let Some(ix) = self.tabs.iter().position(|t| t.kind == Some(kind)) {
+            self.active = ix;
+            self.update_kind(kind, title, nodes, buttons, cx);
+            return;
+        }
+        self.show(title, nodes, buttons, true, cx);
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.kind = Some(kind);
+        }
+    }
+
+    /// Fills the `kind` tab with new nodes, if it's open: groups closed
+    /// before stay closed, and the selected place stays selected. False when
+    /// there's no such tab.
+    pub fn update_kind(&mut self, kind: &'static str, title: SharedString, mut nodes: Vec<ResultNode>, buttons: Vec<TabButton>, cx: &mut Context<Self>) -> bool {
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.kind == Some(kind)) else { return false };
+        let closed: Vec<&Leading> = tab.nodes.iter().filter(|n| !n.expanded && !n.children.is_empty()).map(|n| &n.leading).collect();
+        for node in &mut nodes {
+            if closed.contains(&&node.leading) {
+                node.expanded = false;
+            }
+        }
+        let selected = tab.selected.and_then(|s| tab.rows.get(s)).map(|r| tab.node(&r.path).clone());
+        let mut fresh = ResultTab::new(tab.id, title, nodes);
+        fresh.pinned = tab.pinned;
+        fresh.buttons = buttons;
+        fresh.kind = tab.kind;
+        fresh.selected = selected.and_then(|old| {
+            fresh.rows.iter().position(|r| {
+                let node = fresh.node(&r.path);
+                match (&old.target, &node.target) {
+                    (Some(a), Some(b)) => a == b,
+                    (None, None) => node.leading == old.leading,
+                    _ => false,
+                }
+            })
+        });
+        *tab = fresh;
+        cx.notify();
+        true
     }
 
     /// Drops every tab (another project replaced this one: its results
@@ -698,6 +748,7 @@ impl Render for ResultsPanel {
             .child(div().flex_1())
             .children(self.tabs.get(self.active).into_iter().flat_map(|t| t.buttons.clone()).enumerate().map(|(ix, button)| {
                 let on_click = button.on_click.clone();
+                let (text, rest) = if button.on { (theme.accent, Hsla::from(theme.accent_soft)) } else { (theme.text_muted, Hsla::from(theme.accent_soft).alpha(0.)) };
                 div()
                     .id(("results-button", ix))
                     .flex()
@@ -709,9 +760,9 @@ impl Render for ResultsPanel {
                     .rounded_full()
                     .cursor_pointer()
                     .text_size(px(12.))
-                    .text_color(theme.text_muted)
-                    .hover_bg(theme.hover)
-                    .child(icon_el(button.icon, px(13.), theme.text_muted.into()))
+                    .text_color(text)
+                    .hover_fill(rest, theme.hover)
+                    .child(icon_el(button.icon, px(13.), text.into()))
                     .child(button.label.clone())
                     .on_click(move |_, window, cx| on_click(window, cx))
             }))
@@ -932,6 +983,46 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(opened.get(), Some((false, 1)));
+    }
+
+    /// A kept-up-to-date tab (the TODO list) is filled in place: groups
+    /// closed stay closed, the selected place stays selected, and another
+    /// search doesn't replace it once it's filled again elsewhere.
+    #[gpui::test]
+    fn kind_tabs_update_in_place(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        let place = |file: &str, line: u32| ResultNode {
+            leading: Leading::Line(line + 1),
+            label: format!("TODO {line}").into(),
+            target: Some(ResultTarget { path: file.into(), position: Position { line, character: 0 }, encoding: Encoding::Utf8 }),
+            ..ResultNode::message("")
+        };
+        let file = |name: &str, lines: &[u32]| ResultNode {
+            leading: Leading::File(name.into()),
+            label: name.to_string().into(),
+            children: lines.iter().map(|&l| place(name, l)).collect(),
+            expanded: true,
+            ..ResultNode::message("")
+        };
+        let panel = cx.new(ResultsPanel::new);
+        panel.update(cx, |p, cx| {
+            p.show_kind("todo", "TODO".into(), vec![file("a", &[1]), file("b", &[2, 5])], Vec::new(), cx);
+            let tab = &mut p.tabs[0];
+            tab.set_expanded(0, false);
+            tab.selected = tab.rows.iter().position(|r| tab.node(&r.path).target.as_ref().is_some_and(|t| t.position.line == 5));
+            // A line is added above in b, and a file comes before both.
+            assert!(p.update_kind("todo", "TODO".into(), vec![file("0", &[0]), file("a", &[1]), file("b", &[2, 3, 5])], Vec::new(), cx));
+            let tab = &p.tabs[0];
+            assert_eq!(tab.count, Some(5));
+            assert!(!tab.nodes[1].expanded, "a stays closed");
+            let selected = tab.selected.map(|s| tab.node(&tab.rows[s].path).label.clone());
+            assert_eq!(selected.as_ref().map(|s| s.as_ref()), Some("TODO 5"));
+            // A search opens its own tab only when this one is pinned; showing
+            // the list again finds it.
+            p.show("Usages".into(), vec![file("c", &[0])], Vec::new(), true, cx);
+            assert_eq!(p.tabs.len(), 1);
+            assert!(!p.update_kind("todo", "TODO".into(), Vec::new(), Vec::new(), cx));
+        });
     }
 
     #[test]

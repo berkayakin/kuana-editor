@@ -49,6 +49,7 @@ and theme colors.
 | `edit_predictions` | `true` | ghost-text suggestions from `edit_prediction_provider`; `false` turns them off per language or in a project's settings |
 | `languages` | | per-language overrides of the thirteen above (all but `minimap_width`), by the name in the status bar |
 | `vim_mode` | `false` | Vim's modes and keys; see [Vim mode](editing.md#vim-mode) |
+| `todo_patterns` | `["TODO", "FIXME", "HACK", "XXX"]` | words that make a comment a TODO item, in any case; see [TODO list](editing.md#todo-list) |
 | `edit_prediction_provider` | `"none"` | where ghost-text suggestions come from: `"none"` or `"copilot"` (GitHub Copilot); Settings → Editor → Edit predictions. Only your own settings can choose one, not a project's; see [Edit predictions](editing.md#edit-predictions) |
 | `icon_theme` | built-in | an extension's icon theme by name, e.g. `"Soft Charmed Icons"` |
 | `visual_effects` | `"full"` | how much decoration the interface draws: `"full"`, `"reduced"` (solid colors instead of gradients) or `"minimal"` (also no shadows, glows or animations); Settings → Appearance. The older `"reduce_visual_effects": true` still works, as `"minimal"` |

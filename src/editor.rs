@@ -1,6 +1,7 @@
 //! The text editor view: multi-cursor editing, keyboard/mouse/IME input and a
 //! custom element that paints only the visible lines straight to the GPU.
 
+mod bookmarks;
 mod fold;
 mod format;
 mod conflict;
@@ -16,6 +17,7 @@ mod transform;
 mod unloaded;
 mod vim;
 
+pub use bookmarks::EditorBookmarksChanged;
 pub use lsp::EditorLspEvent;
 pub use run::{EditorBreakpointMenu, EditorBreakpointsChanged, EditorRunEvent, EditorRunSql};
 pub use sticky::Crumb;
@@ -3414,8 +3416,13 @@ impl Editor {
 
     /// The row whose line number is at `position`, where clicks set breakpoints.
     fn breakpoint_row_at(&self, position: Point<Pixels>, layout: &LayoutSnapshot, cx: &App) -> Option<usize> {
+        self.can_break(cx).then(|| self.line_number_row_at(position, layout, cx)).flatten()
+    }
+
+    /// The row whose line number is at `position`.
+    fn line_number_row_at(&self, position: Point<Pixels>, layout: &LayoutSnapshot, cx: &App) -> Option<usize> {
         let number_right = layout.bounds.left() + layout.gutter_width - px(FOLD_ZONE_RIGHT + 18.);
-        if !self.can_break(cx) || position.x < layout.bounds.left() + px(5. + RUN_ICON + 4.) || position.x > number_right + px(4.) {
+        if self.mode != EditorMode::Full || position.x < layout.bounds.left() + px(5. + RUN_ICON + 4.) || position.x > number_right + px(4.) {
             return None;
         }
         let y = position.y - layout.bounds.top() + self.scroll.y;
@@ -3425,7 +3432,7 @@ impl Editor {
 
     /// Right-click: place the caret (unless clicking inside a selection, so
     /// Cut/Copy apply to it) and ask the workspace for the context menu. On
-    /// a line number, the breakpoint menu instead.
+    /// a line number, the line's menu (breakpoints, bookmarks) instead.
     fn on_right_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.mode != EditorMode::Full {
             return;
@@ -3434,7 +3441,7 @@ impl Editor {
         self.sync_wrap(cx);
         self.open_hunk = None;
         if let Some(layout) = self.layout.clone()
-            && let Some(row) = self.breakpoint_row_at(event.position, &layout, cx)
+            && let Some(row) = self.line_number_row_at(event.position, &layout, cx).filter(|_| self.can_break(cx) || self.can_bookmark(cx))
         {
             cx.emit(EditorBreakpointMenu { row, position: event.position });
             return;
@@ -3932,6 +3939,9 @@ impl Editor {
         }
 
         let mut hl_ix = 0;
+        // TODO items in comments (see `crate::todo`), colored to the comment's end.
+        let todo_regex = if single { None } else { crate::todo::regex(&Settings::get(cx).todo_patterns()) };
+        let block_close = self.doc.read(cx).language.block_comment().map(|(_, close)| close.trim());
         for row in first_row..last_row {
             if self.row_hidden(row) {
                 continue;
@@ -3977,6 +3987,14 @@ impl Editor {
                 cuts.push(col_of(link.start));
                 cuts.push(col_of(link.end));
             }
+            let todos = match &todo_regex {
+                Some(regex) => todo_ranges(regex, &highlights[hl_ix..], part_start..part_end, block_close, self.doc.read(cx).rope()),
+                None => Vec::new(),
+            };
+            for r in &todos {
+                cuts.push(col_of(r.start));
+                cuts.push(col_of(r.end));
+            }
             cuts.sort_unstable();
             cuts.dedup();
 
@@ -4014,6 +4032,9 @@ impl Editor {
                     severity.map(|sev| UnderlineStyle { thickness: px(1.), color: Some(severity_color(&theme, sev)), wavy: true })
                 };
                 let mut color = theme.highlight_color(kind);
+                if todos.iter().any(|r| r.start <= abs && abs < r.end) {
+                    color = theme.info.into();
+                }
                 if faded {
                     color.a *= UNNECESSARY_OPACITY;
                 }
@@ -4393,6 +4414,42 @@ impl Editor {
                     let foldable = !folded
                         && self.gutter_hovered
                         && fold_regions.as_ref().is_some_and(|r| r.binary_search_by_key(&row, |region| region.start).is_ok());
+                    let bookmark = self.doc.read(cx).bookmark(row).cloned();
+                    if let Some(bookmark) = bookmark.filter(|_| !folded && !foldable) {
+                        // In the fold arrows' place: the arrow wins while it shows.
+                        let center = point(bounds.left() + gutter_width - px(FOLD_ZONE_RIGHT + FOLD_ICON / 2.), y + line_height / 2.);
+                        match bookmark.mnemonic {
+                            Some(mnemonic) => {
+                                let d = (line_height * 0.78).min(px(15.)).max(px(11.));
+                                let chip = Bounds::new(point(center.x - d / 2., center.y - d / 2.), size(d, d));
+                                frame.gutter_marks.push(fill(chip, theme.accent_soft).corner_radii(px(3.)));
+                                let label = SharedString::from(mnemonic.to_string());
+                                let shaped = text_system.shape_line(
+                                    label.clone(),
+                                    d * 0.72,
+                                    &[TextRun {
+                                        len: label.len(),
+                                        font: Font { weight: gpui::FontWeight::BOLD, ..editor_font.clone() },
+                                        color: theme.accent.into(),
+                                        background_color: None,
+                                        underline: None,
+                                        strikethrough: None,
+                                    }],
+                                    None,
+                                );
+                                let origin = point(center.x - shaped.width / 2., y);
+                                frame.gutter_labels.push((origin, shaped));
+                            }
+                            None => {
+                                let icon_size = px(FOLD_ICON);
+                                frame.fold_icons.push((
+                                    Bounds::new(point(center.x - icon_size / 2., center.y - icon_size / 2.), size(icon_size, icon_size)),
+                                    Icon::Bookmark.path(),
+                                    theme.accent.into(),
+                                ));
+                            }
+                        }
+                    }
                     if folded || foldable {
                         let icon_size = px(FOLD_ICON);
                         let x = bounds.left() + gutter_width - px(FOLD_ZONE_RIGHT) - icon_size;
@@ -5101,6 +5158,32 @@ fn slice_runs(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
 /// Runs for a line with inlay hints (covering `dl.text`): the hints' text in
 /// `color`, plain, and a run for hints after the last character (the text's
 /// runs end there).
+/// The TODO items among `highlights` (sorted) in `part` of a line: in each
+/// comment, from the first pattern match to the comment's end there, without
+/// trailing space or the block comment's closing token.
+fn todo_ranges(
+    regex: &regex::Regex,
+    highlights: &[(Range<usize>, crate::syntax::Highlight)],
+    part: Range<usize>,
+    block_close: Option<&str>,
+    rope: &ropey::Rope,
+) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    for (r, kind) in highlights.iter().take_while(|(r, _)| r.start < part.end) {
+        let (start, end) = (r.start.max(part.start), r.end.min(part.end));
+        if kind.base() != crate::syntax::Highlight::Comment || start >= end {
+            continue;
+        }
+        let Some(text) = rope.get_byte_slice(start..end).map(String::from) else { continue };
+        let text = text.lines().next().unwrap_or_default();
+        let Some(m) = regex.find(text) else { continue };
+        let rest = text[m.start()..].trim_end();
+        let rest = block_close.and_then(|close| rest.strip_suffix(close)).unwrap_or(rest).trim_end();
+        ranges.push(start + m.start()..start + m.start() + rest.len().max(m.len()));
+    }
+    ranges
+}
+
 fn inlay_runs(runs: Vec<TextRun>, dl: &DisplayLine, font: Font, color: Hsla) -> Vec<TextRun> {
     let mut runs = runs;
     let total: usize = runs.iter().map(|r| r.len).sum();
@@ -6304,6 +6387,8 @@ pub struct FrameLayout {
     gutter_paths: Vec<(gpui::Path<Pixels>, Hsla)>,
     /// Fold arrows: bounds, icon and color.
     fold_icons: Vec<(Bounds<Pixels>, &'static str, Hsla)>,
+    /// Text over the gutter's marks (bookmarks' mnemonics).
+    gutter_labels: Vec<(Point<Pixels>, ShapedLine)>,
     inline_bgs: Vec<PaintQuad>,
     /// Code lens titles, for the pointer cursor.
     lens_bounds: Vec<Bounds<Pixels>>,
@@ -6472,6 +6557,9 @@ impl Element for EditorElement {
         }
         for (bounds, icon, color) in frame.fold_icons.drain(..) {
             window.paint_svg(bounds, icon.into(), gpui::TransformationMatrix::unit(), color, cx).ok();
+        }
+        for (origin, line) in &frame.gutter_labels {
+            line.paint(*origin, line_height, window, cx).ok();
         }
         // Sticky scroll's pinned lines, over everything but the scrollbar.
         for q in frame.sticky_bgs.drain(..) {
@@ -7086,6 +7174,26 @@ mod display_tests {
 /// document (carets, matches, problems, lenses) are looked up for the rows
 /// on screen, or kept from frame to frame until they change, and a long
 /// line is built only where it shows.
+#[cfg(test)]
+mod todo_tests {
+    use super::*;
+    use crate::syntax::Highlight;
+
+    #[test]
+    fn todo_ranges_cover_the_comment_from_the_word() {
+        let regex = crate::todo::regex(&crate::todo::DEFAULT_PATTERNS.map(String::from)).unwrap();
+        let rope = ropey::Rope::from_str("let todo = 1; /* fixme: later */ x\n");
+        let comment = 14..32;
+        let highlights = vec![(4..8, Highlight::Variable), (comment.clone(), Highlight::Comment)];
+        let line = 0..rope.len_bytes() - 1;
+        let ranges = todo_ranges(&regex, &highlights, line.clone(), Some("*/"), &rope);
+        let text = rope.to_string();
+        assert_eq!(ranges.iter().map(|r| &text[r.clone()]).collect::<Vec<_>>(), ["fixme: later"]);
+        // Only the part of a long line on screen.
+        assert!(todo_ranges(&regex, &highlights, 0..10, Some("*/"), &rope).is_empty());
+    }
+}
+
 #[cfg(test)]
 mod frame_tests {
     use std::{cell::RefCell, rc::Rc};

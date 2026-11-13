@@ -85,6 +85,45 @@ For chat and agents, use the tools you already have: Claude Code, Codex or Gemin
 Kuana's terminal, and Kuana picks up the files they change (the Git gutter and the Commit view show
 what they did, Local History undoes it).
 
+## Bookmarks
+
+A bookmark marks a line to come back to, in any file. **Toggle Bookmark** (F3 on macOS, F11 on
+Windows and Linux) adds one on the caret's line, or on every caret's line, and removes them when they
+all have one. A bookmarked line shows a bookmark in the gutter, where the fold arrows go (an arrow
+wins while it shows), and a mark on the scrollbar. Bookmarks move with their lines as you edit and
+go when their line is deleted.
+
+- **Toggle Bookmark with Mnemonic…** (⌥F3 / Ctrl+F11) picks a digit or letter for the line: type
+  it, or click it in the grid. Each mnemonic is used once per project, so picking one that's taken
+  moves it. A bookmark with a mnemonic shows its letter in the gutter.
+- **Go to Bookmark 0–9** (⌃0–⌃9 / Ctrl+0–Ctrl+9) jumps to the bookmark with that digit.
+- **Edit Bookmark Description…** adds a note, shown in Show Bookmarks.
+- **Show Bookmarks** (⌘F3 / Shift+F11) lists every bookmark in the project with its line;
+  type to filter, Enter goes there, and ⌫ with nothing typed removes the selected one.
+- **Next Bookmark** / **Previous Bookmark** go to the one after or before the caret, file by
+  file, starting over at the end.
+- Right-clicking a line number offers the same for that line (with the breakpoint options, in files
+  a debugger can stop in).
+
+These are in the Navigate menu and Find Action. With the VS Code or Zed keymap, Toggle Bookmark is
+⌥⌘K / Ctrl+Alt+K and Next / Previous Bookmark ⌥⌘L / ⌥⌘J (Ctrl+Alt+L / J), as in VS Code's
+Bookmarks extension; with Sublime Text's, they're ⌘F2 / Ctrl+F2, F2 and ⇧F2. Bookmarks are kept
+with the project, for open and closed files alike, and follow a file that's renamed or moved in
+Kuana.
+
+## TODO list
+
+**Show TODO** (View → TODO, or Find Action) lists the project's TODO items in the Find panel, as
+JetBrains IDEs do: comments that contain one of the words in `todo_patterns` (TODO, FIXME, HACK and
+XXX by default; in any case, as a whole word), grouped by file, each with the rest of its comment.
+↑/↓ show each one in its file and Enter goes there. The buttons in the panel's header switch between
+the whole project, the current file and the files with changes (Git's status).
+
+Only comments count: a TODO in a string or in plain text isn't listed. Files are read the way Find in
+Files reads them, so git-ignored files are skipped. The project is read the first time you open the
+list; after that, files are read again as they change, on disk or in a tab (unsaved edits included),
+and the list follows. The same words are highlighted in the editor, from the word to the comment's end.
+
 ## Local History
 
 Kuana keeps earlier versions of your files, whatever Git knows, as JetBrains IDEs do: when you save
@@ -137,7 +176,7 @@ position (on the same display while it's connected, full screen included). This 
 `state.json` next to `settings.json` in the config folder.
 
 Each project also reopens with the tabs it had, the active tab, each tab's caret and scroll
-position (a split of one file keeps both), the folders expanded in the file tree and the last
-run configuration. Unsaved edits
+position (a split of one file keeps both), the folders expanded in the file tree, breakpoints,
+bookmarks and the last run configuration. Unsaved edits
 are kept as well (like VS Code's hot exit) and undo goes back to the file's saved text. These
 live in `sessions/` in the config folder, one file per project.
