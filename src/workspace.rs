@@ -109,6 +109,7 @@ mod second_sidebar;
 mod sidebar;
 mod sidebar_tabs;
 mod status_bar;
+mod suggestions;
 mod tab_bar;
 mod terminal_panel;
 mod terminals;
@@ -332,6 +333,9 @@ enum ToastButton {
     SaveBackground,
     /// The last test run's results, in the Find panel.
     ShowTestResults,
+    /// Install the registry's extension with this id, offered for a file
+    /// (see `suggest_extension`).
+    InstallExtension(&'static str),
 }
 
 impl ToastButton {
@@ -340,6 +344,7 @@ impl ToastButton {
             ToastButton::UndoFile(_) => "Undo",
             ToastButton::SaveBackground => "Save All",
             ToastButton::ShowTestResults => "Show Results",
+            ToastButton::InstallExtension(_) => "Install",
         }
     }
 }
@@ -1543,6 +1548,7 @@ impl Workspace {
             }
         }
         self.lsp.update(cx, |s, cx| s.register(editor, cx));
+        self.suggest_extension(editor, cx);
         if !self.has_repo(cx) && self.root.is_none() {
             // A lone file: use the repository it lives in, if any.
             if let Some(dir) = editor.read(cx).doc.read(cx).path.as_deref().and_then(Path::parent) {

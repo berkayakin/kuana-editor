@@ -52,6 +52,7 @@ pub mod check;
 pub mod contrib;
 pub mod permissions;
 pub mod registry;
+pub mod suggest;
 pub mod updates;
 pub mod ui_host;
 pub mod wasm;

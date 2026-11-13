@@ -6,7 +6,8 @@ Everything Kuana does, in one list. Each area has its own page with the details.
 - Tree-sitter syntax highlighting for JavaScript/JSX, TypeScript/TSX, HTML (including `<script>` blocks),
   CSS, Rust, Go, Python, PHP, shell scripts, JSON, YAML, TOML and Markdown; any other language
   through [extensions](extensions.md), which use Zed's format (Zed's language and theme extensions work);
-  popular ones install from **Settings → Extensions → Available**
+  popular ones install from **Settings → Extensions → Available**, and opening a file one of them covers
+  (a `.sql` file, a `Makefile`) offers to install it
 - Linting off the main thread:
   - **JavaScript** — syntax errors plus `no-unused-vars`, `no-undef`, `no-const-assign`,
     `no-dupe-keys`, `eqeqeq`, `use-isnan`, `no-cond-assign`, `no-debugger`, `no-var` (built on oxc)
