@@ -133,14 +133,17 @@ interface types {
     record event {
         /// One of the manifest's `events` (`project-opened`, `project-closed`,
         /// `file-opened`, `file-closed`, `file-saved`, `editor-changed`,
-        /// `settings-changed`), or `timer`.
+        /// `settings-changed`, `process-output`), or `timer` and
+        /// `process-exited`, which are never listed.
         name: string,
         /// The file or project folder it's about.
         path: option<string>,
         /// The file's language, for the file and editor events.
         language: option<string>,
-        /// `timer`: the timer's name. Events may say more here later (as
-        /// JSON), without a new version of the interface.
+        /// `timer`: the timer's name. `process-output`: JSON, `{"name": "…",
+        /// "lines": ["…"]}`. `process-exited`: JSON, `{"name": "…", "status":
+        /// 0}`. Events may say more here later, without a new version of
+        /// the interface.
         data: option<string>,
     }
 }
@@ -227,6 +230,23 @@ interface host {
     /// `on-event` fails stops.
     set-timer: func(name: string, seconds: u32, repeat: bool);
     clear-timer: func(name: string);
+
+    // ---- New in 0.2: programs that keep running ----
+
+    /// Starts a program and comes back at once (`process`; trusted projects
+    /// only), where `run-process` waits for it to end. Its output (both
+    /// kinds, line by line) is added to `panel` as it comes, when one is
+    /// named, and told to `on-event` in batches (`process-output`) when the
+    /// manifest's `events` lists that. When it ends `on-event` hears
+    /// `process-exited`. `name` is the extension's name for it: one program
+    /// per name, four at a time. It's ended with the window the call is for.
+    spawn-process: func(name: string, program: string, args: list<string>, cwd: option<string>, panel: option<string>) -> result<_, string>;
+    /// Ends a program `spawn-process` started (and what it started).
+    kill-process: func(name: string);
+    /// Adds lines to the end of a panel's text, where `show-panel` replaces
+    /// it. The panel keeps its last 10,000 lines, and isn't brought forward
+    /// unless this is its first content.
+    append-panel: func(panel: string, lines: list<string>);
 }
 
 world extension {

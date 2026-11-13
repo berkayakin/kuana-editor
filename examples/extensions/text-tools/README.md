@@ -1,6 +1,6 @@
 # Text Tools: a sample Kuana extension for interface 0.2
 
-Where the [Docker sample](../docker) adds a view (interface 0.1), this one changes the open file and
+Where the [Docker sample](../docker) adds a view and follows a program's output, this one changes the open file and
 follows what you do, with what [interface 0.2](../../../docs/extension-ui.md#interface-02) adds:
 
 - **Transform Selection…** (the editor's right-click menu, Find Action, `Ctrl+Alt+Shift+T`) asks which

@@ -96,6 +96,9 @@ pub(super) struct ShownStatus {
 /// What extensions' code keeps in a window while it runs.
 #[derive(Default)]
 pub(super) struct ExtensionRuntime {
+    /// The window (its workspace's entity id): the programs extensions
+    /// started for it end with it.
+    window: Option<u64>,
     /// Status bar items the code has filled, in the order they first showed.
     pub status: Vec<ShownStatus>,
     /// Timers by (extension, name): dropping one ends it.
@@ -117,6 +120,22 @@ pub(super) struct ExtensionRuntime {
     told_project: Vec<(String, PathBuf)>,
     /// The settings each listening extension has, as it last heard.
     told_settings: HashMap<String, String>,
+}
+
+impl ExtensionRuntime {
+    pub(super) fn for_window(window: u64) -> Self {
+        let mut runtime = Self::default();
+        runtime.window = Some(window);
+        runtime
+    }
+}
+
+impl Drop for ExtensionRuntime {
+    fn drop(&mut self) {
+        if let Some(window) = self.window {
+            ui_host::window_closed(window);
+        }
+    }
 }
 
 // ---- View slots ------------------------------------------------------------------------
@@ -186,6 +205,8 @@ pub fn handle_extension_request(request: Request, cx: &mut App) {
         | Request::SetSelections { window, .. }
         | Request::Pick { window, .. }
         | Request::Status { window, .. }
+        | Request::AppendPanel { window, .. }
+        | Request::ProcessEvent { window, .. }
         | Request::Timer { window, .. }
         | Request::OpenFile { window, .. }
         | Request::Notify { window, .. }
@@ -331,6 +352,21 @@ impl Workspace {
                     (None, None) => return,
                 }
                 cx.notify();
+            }
+            Request::AppendPanel { extension, panel, lines, .. } => {
+                let Some(c) = contribution(&extension) else { return };
+                let title = c.panel(&panel).map_or_else(|| panel.clone(), |p| p.title.clone());
+                // Only the panel is told (it redraws alone); the window hears of a new one.
+                if self.ext_panels.update(cx, |p, cx| p.append(extension, panel, title, lines, cx)) {
+                    self.has_ext_panel = true;
+                    self.bottom = Some(BottomPanel::Extension);
+                    cx.notify();
+                }
+            }
+            Request::ProcessEvent { extension, event, .. } => {
+                if let Some(c) = contribution(&extension).filter(|c| c.api >= Api::V2 && c.code.is_some()) {
+                    self.deliver_extension_event(Delivery { extension: c, event, needs: None, done: None }, cx);
+                }
             }
             Request::Timer { extension, name, every, .. } => self.set_extension_timer(extension, name, every, window, cx),
             Request::Refresh { .. } | Request::Diagnostics { .. } => self.extension_broadcast(&request, window, cx),
@@ -530,6 +566,7 @@ impl Workspace {
                 label: item.label.into(),
                 detail: item.detail.map(SharedString::from),
                 icon: item.icon.and_then(|icon| c.as_ref().and_then(|c| crate::extension_view::icon_path(c, &icon))),
+                file: None,
             })
             .collect();
         let picker = cx.new(|cx| {

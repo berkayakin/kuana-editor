@@ -1,15 +1,17 @@
 //! A sample Kuana extension: the Docker containers on this machine as a
-//! view, with Start, Stop, Show Logs and Inspect on each, and Docker Compose
-//! Up from a compose file's right-click menu. It runs the `docker` command
-//! through Kuana (`run-process`, the `process` permission) and answers with
-//! data; Kuana draws the view, menus, panel and prompts.
+//! view, with Start, Stop, Show Logs, Follow Logs and Inspect on each, and
+//! Docker Compose Up from a compose file's right-click menu. It runs the
+//! `docker` command through Kuana (`run-process`, the `process` permission)
+//! and answers with data; Kuana draws the view, menus, panel and prompts.
+//! Follow Logs leaves `docker logs --follow` running (`spawn-process`, of
+//! interface 0.2): Kuana adds its lines to the panel as they come.
 //!
 //! Build: `cargo build --release --target wasm32-wasip2`, then copy
 //! `target/wasm32-wasip2/release/kuana_docker.wasm` to `kuana.wasm` beside
 //! `extension.toml`.
 
 wit_bindgen::generate!({
-    path: "../../../src/extensions/kuana-wit",
+    path: "../../../src/extensions/kuana-wit/v0.2",
     world: "extension",
 });
 
@@ -22,6 +24,8 @@ use serde_json::Value;
 struct Docker;
 
 const VIEW: &str = "containers";
+/// The extension's name for the one program it leaves running.
+const FOLLOWING: &str = "follow";
 
 /// `docker <args>`'s output, or its error output as the error.
 fn docker(args: &[&str]) -> Result<String, String> {
@@ -115,6 +119,19 @@ impl Guest for Docker {
                 let title = name(&id).map(|n| format!("Logs: {n}"));
                 host::show_panel("logs", title.as_deref(), &PanelContent::Text(if lines.is_empty() { vec!["(no output)".into()] } else { lines }));
             }
+            // One container at a time: following another ends the first.
+            ("follow", Some(id)) => {
+                host::kill_process(FOLLOWING);
+                let title = name(&id).map(|n| format!("Following: {n}"));
+                host::show_panel("logs", title.as_deref(), &PanelContent::Text(Vec::new()));
+                let args = ["logs", "--follow", "--tail", "100", &id].map(str::to_string);
+                // It comes back at once; the lines go to the panel as the container prints them.
+                if let Err(err) = host::spawn_process(FOLLOWING, "docker", &args, None, Some("logs")) {
+                    // The one just ended may not be gone yet.
+                    host::append_panel("logs", &[format!("Couldn't follow the logs: {err}. Try again.")]);
+                }
+            }
+            ("stop-following", _) => host::kill_process(FOLLOWING),
             ("inspect", Some(id)) => {
                 let json = docker(&["inspect", &id])?;
                 let file = format!("inspect-{}.json", name(&id).unwrap_or_else(|| id.chars().take(12).collect()));
@@ -151,7 +168,11 @@ impl Guest for Docker {
         Ok(())
     }
 
-    fn file_saved(_path: String) -> Result<(), String> {
+    fn on_event(event: Event) -> Result<(), String> {
+        // `docker logs --follow` ended: the container stopped, or Stop Following.
+        if event.name == "process-exited" {
+            host::append_panel("logs", &["(no longer following)".to_string()]);
+        }
         Ok(())
     }
 }

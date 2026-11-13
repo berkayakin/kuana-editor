@@ -52,7 +52,8 @@ pub enum Api {
 
 /// What `events` may list (0.2). A timer and a save of the extension's own
 /// file are told without being listed.
-pub const EVENTS: &[&str] = &["project-opened", "project-closed", "file-opened", "file-closed", "file-saved", "editor-changed", "settings-changed"];
+pub const EVENTS: &[&str] =
+    &["project-opened", "project-closed", "file-opened", "file-closed", "file-saved", "editor-changed", "settings-changed", "process-output"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Permission {
@@ -560,7 +561,10 @@ mod tests {
     use super::*;
 
     fn parsed(text: &str) -> (Contributions, Vec<String>) {
-        let dir = std::env::temp_dir().join(format!("kuana-contrib-{}", std::process::id()));
+        // A folder per call: tests run side by side, and each removes its own.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("kuana-contrib-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("kuana.wasm"), b"").unwrap();
         std::fs::write(dir.join("logo.svg"), b"<svg/>").unwrap();

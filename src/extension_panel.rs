@@ -1,6 +1,7 @@
 //! Extensions' panels in the bottom area (`[kuana.panels.<id>]`): what their
 //! code shows there (`show-panel`), lines of text or a table, one tab per
-//! panel. Showing a panel again replaces its content.
+//! panel. Showing a panel again replaces its content; `append` adds lines to
+//! its text (a running program's output), keeping the last `MAX_LINES`.
 
 use std::ops::Range;
 
@@ -16,6 +17,10 @@ use crate::{
     theme::Theme,
     ui::{HoverFill, tooltip_view},
 };
+
+/// How many lines of appended text a panel keeps: a program left running
+/// prints without end, a panel shouldn't grow with it.
+const MAX_LINES: usize = 10_000;
 
 enum Body {
     Text(Vec<SharedString>),
@@ -77,6 +82,43 @@ impl ExtensionPanels {
         }
         self.scroll = UniformListScrollHandle::new();
         cx.notify();
+    }
+
+    /// Adds lines to the end of a panel's text (making the panel, or turning
+    /// a table into text, when there's none). The view stays at the end if it
+    /// was there, and where the user scrolled otherwise. True when the panel
+    /// is new: the workspace brings it forward then, and only then.
+    pub fn append(&mut self, extension: String, panel: String, title: String, lines: Vec<String>, cx: &mut Context<Self>) -> bool {
+        let at = self.tabs.iter().position(|t| t.extension == extension && t.panel == panel);
+        let new = at.is_none();
+        let ix = at.unwrap_or_else(|| {
+            self.tabs.push(Tab { extension, panel, title, subtitle: None, body: Body::Text(Vec::new()) });
+            self.active = self.tabs.len() - 1;
+            self.scroll = UniformListScrollHandle::new();
+            self.tabs.len() - 1
+        });
+        if !matches!(self.tabs[ix].body, Body::Text(_)) {
+            self.tabs[ix].body = Body::Text(Vec::new());
+        }
+        let Body::Text(text) = &mut self.tabs[ix].body else { return new };
+        // At the end (or not scrolled at all yet): it follows the output.
+        let follows = ix == self.active && {
+            let handle = self.scroll.0.borrow().base_handle.clone();
+            handle.max_offset().height + handle.offset().y <= px(20.)
+        };
+        text.extend(lines.into_iter().map(SharedString::from));
+        if text.len() > MAX_LINES {
+            let extra = text.len() - MAX_LINES;
+            text.drain(..extra);
+        }
+        if follows {
+            self.scroll.scroll_to_item(text.len().saturating_sub(1), gpui::ScrollStrategy::Bottom);
+        }
+        // A tab that isn't showing has nothing to redraw.
+        if ix == self.active {
+            cx.notify();
+        }
+        new
     }
 
     /// An extension went: its tabs go too.

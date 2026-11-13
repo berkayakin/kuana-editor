@@ -17,7 +17,7 @@ a panel, ask the user). It's written in Rust and compiled to WebAssembly, and ru
 
 This page walks through a small extension from an empty folder, then lists everything in [the reference](#reference).
 For a larger example, see [`examples/extensions/docker`](../examples/extensions/docker): a Docker containers view with
-logs, inspect, start and stop.
+logs (shown once, or followed as they come), inspect, start and stop.
 
 ## Tutorial: a Notes view
 
@@ -365,6 +365,9 @@ is a small extension that uses them: it transforms the selection and counts word
 | `pick(placeholder, items)` | A list to pick from, narrowed by typing, like Find Action. The picked item's id, or none. | |
 | `set-status(item, status)` | What a `[kuana.status.<id>]` item shows in this window: text (up to 40 characters), an icon, a tone, a tooltip. None hides it. | |
 | `set-timer(name, seconds, repeat)`, `clear-timer(name)` | Tells `on-event` in `seconds` (1 at least), again and again with `repeat`. | |
+| `spawn-process(name, program, args, cwd, panel)` | Starts a program and comes back at once. Its output goes to `panel` as it comes, when one is named. | `process`, trusted project |
+| `kill-process(name)` | Ends a program `spawn-process` started, and what it started. | |
+| `append-panel(panel, lines)` | Adds lines to the end of a panel's text, where `show-panel` replaces it. | |
 
 **Places in text** are spans of UTF-8 byte offsets (`end` not included), so in Rust `&text[start..end]` is the
 selection. An edit replaces its span with its text; an empty span inserts. Edits can't overlap and can't cut a
@@ -377,6 +380,14 @@ fails saying the text has changed, and nothing is edited. Read the editor again 
 **Timers** belong to the window that set them and end with it. One that comes due while the window isn't the
 active one waits until it is, and the next wait starts only once your code has answered, so a slow tick never piles
 up. A timer whose `on-event` fails stops.
+
+**Programs that keep running.** `run-process` waits for a program and hands back all it printed; `spawn-process`
+is for one you follow: a log, a build, a watcher. Each has a name of yours (one program per name, four at a time).
+Its lines reach the panel a few times a second however fast it prints, the panel keeps the last 10,000 and stays at
+the end unless the user scrolled up. With `"process-output"` in `events`, `on-event` gets the same lines in batches,
+its `data` being `{"name": "…", "lines": ["…"]}`; when the program ends it gets `process-exited` with
+`{"name": "…", "status": 0}` (-1 when it was ended). Kuana ends the program with its window, with the extension,
+and when it quits.
 
 ### Events
 
@@ -399,6 +410,8 @@ events = ["file-saved", "editor-changed"]
 | `editor-changed` | The user moved to another file's tab and stayed 200 ms | the file | yes |
 | `settings-changed` | The extension's own settings changed | | |
 | `timer` | A timer is due (never listed); its name is in `data` | | |
+| `process-output` | A program started with `spawn-process` printed lines; `data` is JSON | | |
+| `process-exited` | Such a program ended (never listed); `data` is JSON | | |
 
 File events come only for files the code can reach: ones in its own folder, and project files when it has
 `workspace-files` (the user is asked before the first one). A save of a file in the extension's own folder always
@@ -436,7 +449,8 @@ extension's permissions with a **Revoke** link. A call without its permission re
 | `children` | 15 s |
 | `run-command` | 10 minutes (it may wait for the user) |
 | `file-saved`, `on-event` | 2 minutes |
-| A program it runs | 10 minutes |
+| A program it runs (`run-process`) | 10 minutes |
+| Programs left running (`spawn-process`) | 4 per extension, no time limit |
 | Computation per call | about 10 billion WebAssembly instructions |
 | Memory | 512 MB |
 

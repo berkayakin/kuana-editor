@@ -48,7 +48,7 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, W
 
 use super::{
     contrib::{Api, Contributions, Permission},
-    permissions,
+    permissions, processes,
     wasm::{self, ENGINE},
 };
 use crate::lsp::servers;
@@ -230,6 +230,11 @@ pub enum Request {
     Pick { window: u64, extension: String, placeholder: String, items: Vec<PickItem>, answer: oneshot::Sender<Option<String>> },
     /// What a status bar item shows in the window (none: nothing).
     Status { window: u64, extension: String, item: String, status: Option<StatusItem> },
+    /// Lines for the end of a panel's text.
+    AppendPanel { window: u64, extension: String, panel: String, lines: Vec<String> },
+    /// Something a program the code started did (`process-output`,
+    /// `process-exited`), for its `on-event`.
+    ProcessEvent { window: u64, extension: String, event: Event },
     /// Sets the window's timer `name` (`every`: seconds, and whether it
     /// repeats), or clears it.
     Timer { window: u64, extension: String, name: String, every: Option<(u32, bool)> },
@@ -394,6 +399,17 @@ fn abandon(id: &str, generation: u64) {
 /// calls it has queued.
 pub fn forget(id: &str) {
     WORKERS.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+    processes::kill_where(|extension, _| extension == id);
+}
+
+/// A window closed: the programs extensions started for it end.
+pub fn window_closed(window: u64) {
+    processes::kill_where(|_, of| of == window);
+}
+
+/// Kuana quits: every program extensions started ends.
+pub fn quitting() {
+    processes::kill_where(|_, _| true);
 }
 
 /// The host calls of each version of the interface, set up when the first
@@ -491,6 +507,7 @@ impl Instance {
             declared: extension.permissions.clone(),
             panels: extension.panels.iter().map(|p| p.id.clone()).collect(),
             status: extension.status.iter().map(|s| s.id.clone()).collect(),
+            hears_output: extension.hears("process-output"),
             work,
             caller,
         };
@@ -567,6 +584,8 @@ pub struct HostState {
     panels: Vec<String>,
     /// Its status bar items' ids.
     status: Vec<String>,
+    /// Whether its `on-event` is told what its programs print.
+    hears_output: bool,
     /// Its work folder (its sandbox).
     work: PathBuf,
     /// The call in progress.
@@ -859,6 +878,48 @@ impl v2::kuana::extension::host::Host for HostState {
 
     fn clear_timer(&mut self, name: String) {
         send(Request::Timer { window: self.caller.window, extension: self.extension.clone(), name, every: None });
+    }
+
+    fn spawn_process(&mut self, name: String, program: String, args: Vec<String>, cwd: Option<String>, panel: Option<String>) -> Result<(), String> {
+        self.allow(Permission::Process)?;
+        self.trusted()?;
+        if let Some(panel) = panel.as_ref().filter(|p| !self.panels.contains(p)) {
+            return Err(format!("the extension has no panel {panel}"));
+        }
+        let dir = match cwd {
+            Some(cwd) => self.resolve(&cwd)?,
+            None => self.caller.root.clone().unwrap_or_else(|| self.work.clone()),
+        };
+        let mut command = crate::process::command(wasm::program_path(&self.work, &program));
+        command.args(&args).env("PATH", servers::search_path()).current_dir(dir);
+        let (window, extension, hears_output, process) = (self.caller.window, self.extension.clone(), self.hears_output, name.clone());
+        let event = |name: &'static str, data: serde_json::Value| Event { name, path: None, language: None, data: Some(data.to_string()) };
+        processes::start(&self.extension, &name, window, command, move |told| match told {
+            processes::Told::Lines(lines) => {
+                if hears_output {
+                    let event = event("process-output", serde_json::json!({ "name": process, "lines": lines }));
+                    send(Request::ProcessEvent { window, extension: extension.clone(), event });
+                }
+                if let Some(panel) = panel.clone() {
+                    send(Request::AppendPanel { window, extension: extension.clone(), panel, lines });
+                }
+            }
+            processes::Told::Exited(status) => {
+                let event = event("process-exited", serde_json::json!({ "name": process, "status": status }));
+                send(Request::ProcessEvent { window, extension: extension.clone(), event });
+            }
+        })
+        .map_err(|e| format!("{program}: {e}"))
+    }
+
+    fn kill_process(&mut self, name: String) {
+        processes::kill(&self.extension, &name);
+    }
+
+    fn append_panel(&mut self, panel: String, lines: Vec<String>) {
+        if self.panels.contains(&panel) && !lines.is_empty() {
+            send(Request::AppendPanel { window: self.caller.window, extension: self.extension.clone(), panel, lines });
+        }
     }
 }
 
