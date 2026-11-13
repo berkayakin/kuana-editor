@@ -367,7 +367,7 @@ is a small extension that uses them: it transforms the selection and counts word
 | `set-status(item, status)` | What a `[kuana.status.<id>]` item shows in this window: text (up to 40 characters), an icon, a tone, a tooltip. None hides it. | |
 | `set-timer(name, seconds, repeat)`, `clear-timer(name)` | Tells `on-event` in `seconds` (1 at least), again and again with `repeat`. | |
 | `spawn-process(name, program, args, cwd, panel)` | Starts a program and comes back at once. Its output goes to `panel` as it comes, when one is named. | `process`, trusted project |
-| `kill-process(name)` | Ends a program `spawn-process` started, and what it started. | |
+| `kill-process(name)` | Ends a program `spawn-process` started, and what it started. The name is free when it returns, and nothing more of that program arrives. | |
 | `append-panel(panel, lines)` | Adds lines to the end of a panel's text, where `show-panel` replaces it. | |
 | `show-results(title, nodes)` | Shows a tree in the Find panel, like Find Usages' results: rows with a label, detail, icon, tone and a place to go (a file, line and column). Same title again: that tab is filled in place. | `workspace-files` for places in project files |
 
@@ -398,8 +398,11 @@ up. A timer whose `on-event` fails stops.
 is for one you follow: a log, a build, a watcher. Each has a name of yours (one program per name, four at a time).
 Its lines reach the panel a few times a second however fast it prints, the panel keeps the last 10,000 and stays at
 the end unless the user scrolled up. With `"process-output"` in `events`, `on-event` gets the same lines in batches,
-its `data` being `{"name": "…", "lines": ["…"]}`; when the program ends it gets `process-exited` with
-`{"name": "…", "status": 0}` (-1 when it was ended). Kuana ends the program with its window, with the extension,
+its `data` being `{"name": "…", "lines": ["…"]}`; when the program ends by itself it gets `process-exited` with
+`{"name": "…", "status": 0}` (-1 when a signal from elsewhere ended it). A program your code ends with `kill-process`
+is gone when the call returns: its name is free at once (a new follow can start under the same name right away), and
+nothing more of it reaches the panel or `on-event`, neither its last lines nor `process-exited`, so they're never
+taken for the new program's. Kuana ends the program with its window, with the extension,
 and when it quits.
 
 ### Events

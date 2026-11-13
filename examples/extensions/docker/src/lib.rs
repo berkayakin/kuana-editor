@@ -126,12 +126,16 @@ impl Guest for Docker {
                 host::show_panel("logs", title.as_deref(), &PanelContent::Text(Vec::new()));
                 let args = ["logs", "--follow", "--tail", "100", &id].map(str::to_string);
                 // It comes back at once; the lines go to the panel as the container prints them.
+                // The one just ended is gone (and says nothing more), so the name is free.
                 if let Err(err) = host::spawn_process(FOLLOWING, "docker", &args, None, Some("logs")) {
-                    // The one just ended may not be gone yet.
-                    host::append_panel("logs", &[format!("Couldn't follow the logs: {err}. Try again.")]);
+                    host::append_panel("logs", &[format!("Couldn't follow the logs: {err}")]);
                 }
             }
-            ("stop-following", _) => host::kill_process(FOLLOWING),
+            // A program the code ends says nothing more: the panel's note is ours.
+            ("stop-following", _) => {
+                host::kill_process(FOLLOWING);
+                host::append_panel("logs", &["(stopped following)".to_string()]);
+            }
             ("inspect", Some(id)) => {
                 let json = docker(&["inspect", &id])?;
                 let file = format!("inspect-{}.json", name(&id).unwrap_or_else(|| id.chars().take(12).collect()));
@@ -169,7 +173,7 @@ impl Guest for Docker {
     }
 
     fn on_event(event: Event) -> Result<(), String> {
-        // `docker logs --follow` ended: the container stopped, or Stop Following.
+        // `docker logs --follow` ended by itself: the container stopped.
         if event.name == "process-exited" {
             host::append_panel("logs", &["(no longer following)".to_string()]);
         }
