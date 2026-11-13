@@ -335,9 +335,10 @@ pub fn event(
 }
 
 /// Whether `path` is in extension `id`'s work folder (a save of its files
-/// goes to its code).
+/// goes to its code). Only a question of paths: asked for every file event,
+/// the tabs a window opens with too, it never makes the folder.
 pub fn in_work_folder(id: &str, path: &Path) -> bool {
-    wasm::work_dir(id).is_ok_and(|work| path.starts_with(&work))
+    wasm::work_dir_of(id).is_some_and(|work| path.starts_with(&work))
 }
 
 /// Runs `call` on the extension's thread with its instance, answered with an

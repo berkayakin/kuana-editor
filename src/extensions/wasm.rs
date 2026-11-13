@@ -343,7 +343,7 @@ pub fn work_dir(id: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn work_dir_of(id: &str) -> Option<PathBuf> {
+pub(super) fn work_dir_of(id: &str) -> Option<PathBuf> {
     let usable = !id.is_empty() && !id.contains(['/', '\\']) && !id.starts_with('.');
     usable.then(|| Some(super::extensions_dir()?.join("work").join(id))).flatten()
 }
