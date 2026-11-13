@@ -746,6 +746,26 @@ impl Settings {
         crate::state::write_atomic(&path, updated.as_bytes())
     }
 
+    /// Sets (`Some`) or removes `extensions.<extension>.<key>`, keeping the
+    /// rest of the file (its comments too) as it is.
+    pub fn set_extension_setting(extension: &str, key: &str, value: Option<Value>) -> std::io::Result<()> {
+        let path = Self::path().ok_or_else(|| std::io::Error::other("no config directory"))?;
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        if !text.trim().is_empty() {
+            match serde_json::from_str::<Value>(&strip_jsonc(&text)) {
+                Ok(Value::Object(_)) => {}
+                Ok(_) => return Err(std::io::Error::other("settings.json should contain an object")),
+                Err(err) => return Err(std::io::Error::other(format!("settings.json has an error: {err}"))),
+            }
+        }
+        let base = if text.trim().is_empty() { "{\n}\n".to_string() } else { text.clone() };
+        let updated = set_key_path(&base, &["extensions", extension, key], value.as_ref());
+        if updated == text || (text.trim().is_empty() && value.is_none()) {
+            return Ok(());
+        }
+        crate::state::write_atomic(&path, updated.as_bytes())
+    }
+
     /// Whether `key` is set in the top level of `settings.json`.
     pub fn is_set(&self, key: &str) -> bool {
         match key {
@@ -1470,6 +1490,13 @@ pub fn remove_top_level_key(text: &str, key: &str) -> String {
 /// Replaces (or adds) `"key": value` in the top-level object of a JSONC
 /// document, leaving the rest of the text untouched.
 pub fn set_top_level_key(text: &str, key: &str, value: &str) -> String {
+    set_key_indented(text, key, value, 0)
+}
+
+/// `set_top_level_key` for an object whose own lines are indented `depth`
+/// spaces (an object nested in the file): a new entry goes `depth + 2` in.
+fn set_key_indented(text: &str, key: &str, value: &str, depth: usize) -> String {
+    let pad = " ".repeat(depth + 2);
     let bytes = text.as_bytes();
     let open = skip_trivia(text, 0);
     if bytes.get(open) != Some(&b'{') {
@@ -1508,15 +1535,15 @@ pub fn set_top_level_key(text: &str, key: &str, value: &str) -> String {
         Some(end) => {
             let after = skip_trivia(text, end);
             if bytes.get(after) == Some(&b',') {
-                format!("{}\n  {entry},{}", &text[..after + 1], &text[after + 1..])
+                format!("{}\n{pad}{entry},{}", &text[..after + 1], &text[after + 1..])
             } else {
                 // Keep a comment that ends the last entry's line on that line.
                 let line_end = text[end..].find('\n').map_or(text.len(), |n| end + n);
                 let rest = text[end..line_end].trim();
                 if rest.is_empty() || rest.starts_with("//") {
-                    format!("{},{}\n  {entry}{}", &text[..end], &text[end..line_end], &text[line_end..])
+                    format!("{},{}\n{pad}{entry}{}", &text[..end], &text[end..line_end], &text[line_end..])
                 } else {
-                    format!("{},\n  {entry}{}", &text[..end], &text[end..])
+                    format!("{},\n{pad}{entry}{}", &text[..end], &text[end..])
                 }
             }
         }
@@ -1525,14 +1552,92 @@ pub fn set_top_level_key(text: &str, key: &str, value: &str) -> String {
             let close = text[open..].rfind('}').map_or(text.len(), |c| open + c);
             let before = text[..close].trim_end_matches([' ', '\t']);
             let newline = if before.ends_with('\n') { "" } else { "\n" };
-            format!("{before}{newline}  {entry}\n{}", &text[close..])
+            // A nested `{}` closes on a line of its own, at its key's indent.
+            let close_pad = if depth > 0 && !before.ends_with('\n') { " ".repeat(depth) } else { String::new() };
+            format!("{before}{newline}{pad}{entry}\n{close_pad}{}", &text[close..])
         }
     }
+}
+
+/// Where the value of the top-level `key` is in a JSONC object's text.
+fn value_span(text: &str, key: &str) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let open = skip_trivia(text, 0);
+    if bytes.get(open) != Some(&b'{') {
+        return None;
+    }
+    let mut i = open + 1;
+    loop {
+        i = skip_trivia(text, i);
+        if bytes.get(i) != Some(&b'"') {
+            return None;
+        }
+        let key_end = skip_string(bytes, i);
+        let found: Option<String> = serde_json::from_str(&text[i..key_end]).ok();
+        let colon = skip_trivia(text, key_end);
+        if bytes.get(colon) != Some(&b':') {
+            return None;
+        }
+        let value_start = skip_trivia(text, colon + 1);
+        let value_end = skip_value(text, value_start);
+        if found.as_deref() == Some(key) {
+            return Some((value_start, value_end));
+        }
+        i = skip_trivia(text, value_end);
+        if bytes.get(i) == Some(&b',') {
+            i += 1;
+        }
+    }
+}
+
+/// Sets (`Some`) or removes the key at `path` (`["extensions", id, key]`)
+/// in a JSONC document, editing only the innermost object that already
+/// exists, so comments and order elsewhere, nested ones included, stay.
+/// Objects left empty by a removal go too.
+pub fn set_key_path(text: &str, path: &[&str], value: Option<&Value>) -> String {
+    set_path_at(text, path, value, 0)
+}
+
+fn set_path_at(text: &str, path: &[&str], value: Option<&Value>, depth: usize) -> String {
+    let Some((&key, rest)) = path.split_first() else { return text.to_string() };
+    if rest.is_empty() {
+        return match value {
+            Some(value) => set_key_indented(text, key, &format_value(value, depth + 2), depth),
+            None => remove_top_level_key(text, key),
+        };
+    }
+    match value_span(text, key) {
+        Some((start, end)) if text.as_bytes().get(start) == Some(&b'{') => {
+            let inner = set_path_at(&text[start..end], rest, value, depth + 2);
+            let empty = serde_json::from_str::<Value>(&strip_jsonc(&inner)).is_ok_and(|v| v.as_object().is_some_and(|m| m.is_empty()));
+            if value.is_none() && empty {
+                remove_top_level_key(text, key)
+            } else {
+                format!("{}{inner}{}", &text[..start], &text[end..])
+            }
+        }
+        // Missing (or not an object, which is replaced): nothing to remove,
+        // else the rest of the path as a new object.
+        _ => match value {
+            None => text.to_string(),
+            Some(value) => set_key_indented(text, key, &nested_object(rest, value, depth + 2), depth),
+        },
+    }
+}
+
+/// `{ "a": { "b": value } }` for `path` = `[a, b]`, an entry per line, so
+/// keys added to these objects later line up (`format_value` would put a
+/// short one on one line).
+fn nested_object(path: &[&str], value: &Value, depth: usize) -> String {
+    let Some((&key, rest)) = path.split_first() else { return format_value(value, depth) };
+    let inner = nested_object(rest, value, depth + 2);
+    format!("{{\n{}{}: {inner}\n{}}}", " ".repeat(depth + 2), Value::from(key), " ".repeat(depth))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn a_wrong_value_loses_only_its_own_setting() {
@@ -1720,5 +1825,32 @@ mod tests {
         s.editor.soft_wrap = Some(false);
         assert!(!s.for_file(Language::Markdown, None).soft_wrap);
         assert_eq!(Settings::default().for_file(Language::Json, None).tab_size, 2);
+    }
+
+    #[test]
+    fn sets_and_removes_a_nested_key_keeping_comments() {
+        let path = ["extensions", "text-tools", "case"];
+        // Nothing there yet: the objects are made.
+        let made = set_key_path("{\n  \"theme\": \"A\" // mine\n}\n", &path, Some(&json!("upper")));
+        assert_eq!(made, "{\n  \"theme\": \"A\", // mine\n  \"extensions\": {\n    \"text-tools\": {\n      \"case\": \"upper\"\n    }\n  }\n}\n");
+        // An existing object is edited in place, its comments kept.
+        let text = "{\n  // tools\n  \"extensions\": {\n    // one\n    \"text-tools\": {\n      \"x\": 1 // keep\n    }\n  }\n}\n";
+        let set = set_key_path(text, &path, Some(&json!("lower")));
+        assert_eq!(set, "{\n  // tools\n  \"extensions\": {\n    // one\n    \"text-tools\": {\n      \"x\": 1, // keep\n      \"case\": \"lower\"\n    }\n  }\n}\n");
+        assert_eq!(set_key_path(&set, &path, Some(&json!("title"))), set.replace("\"lower\"", "\"title\""));
+        // Removing it goes back to what was there.
+        assert_eq!(set_key_path(&set, &path, None), text);
+        // An empty extension object goes, and then an empty `extensions`.
+        let only = set_key_path("{\n  \"extensions\": {\n    \"text-tools\": {}\n  }\n}\n", &path, Some(&json!(true)));
+        assert_eq!(only, "{\n  \"extensions\": {\n    \"text-tools\": {\n      \"case\": true\n    }\n  }\n}\n");
+        assert_eq!(set_key_path(&only, &path, None), "{\n}\n");
+        // A key added later lines up with the first.
+        let second = set_key_path(&made, &["extensions", "text-tools", "wrap"], Some(&json!(false)));
+        assert!(second.contains("      \"case\": \"upper\",\n      \"wrap\": false\n    }"), "{second}");
+        // Removing what isn't there changes nothing.
+        assert_eq!(set_key_path(text, &["extensions", "other", "y"], None), text);
+        for result in [&made, &set, &only] {
+            assert!(serde_json::from_str::<Value>(&strip_jsonc(result)).is_ok(), "{result}");
+        }
     }
 }

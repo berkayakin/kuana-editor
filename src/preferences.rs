@@ -8,7 +8,7 @@ mod window;
 
 pub use window::{Shown, open};
 
-use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
+use std::{cell::Cell, collections::HashMap, rc::Rc, sync::Arc, time::Duration};
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Corner, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
@@ -21,7 +21,11 @@ use crate::{
     assets::Icon,
     busy::Busy,
     editor::{Cancel, Editor, EditorEvent, MoveDown, MoveUp},
-    extensions::{self, ExtensionInfo, ExtensionsChanged, registry},
+    extensions::{
+        self, ExtensionInfo, ExtensionsChanged,
+        contrib::{SettingDef, SettingKind},
+        registry,
+    },
     format,
     git::PullStrategy,
     lsp::servers,
@@ -421,11 +425,13 @@ enum Menu {
     EditPredictions,
     LanguageServer,
     Formatter,
+    /// One of an extension's settings (which one: `Preferences::ext_menu`).
+    ExtensionSetting,
 }
 
 impl Menu {
     /// How many menus there are (sizes `menu_anchors`); keep it the last variant + 1.
-    const COUNT: usize = Menu::Formatter as usize + 1;
+    const COUNT: usize = Menu::ExtensionSetting as usize + 1;
 }
 
 /// How a language picks its server or formatter (`language_servers` and
@@ -557,6 +563,17 @@ impl LanguageOption {
     }
 }
 
+/// An extension's setting, by extension id and key.
+type ExtKey = (String, String);
+
+/// The text field of an extension's string or number setting.
+struct ExtField {
+    editor: Entity<Editor>,
+    number: bool,
+    default: Option<Value>,
+    _subscription: Subscription,
+}
+
 struct RunRow {
     name: Entity<Editor>,
     command: Entity<Editor>,
@@ -622,6 +639,12 @@ pub struct Preferences {
     registry_busy: Busy,
     registry_fetch: Option<Task<()>>,
     registry_installing: Vec<String>,
+    /// Extensions' string and number settings' fields, made when first drawn.
+    ext_fields: HashMap<ExtKey, ExtField>,
+    /// The extension setting whose dropdown is open (with `Menu::ExtensionSetting`),
+    /// and where each extension dropdown's button was last drawn.
+    ext_menu: Option<ExtKey>,
+    ext_anchors: HashMap<ExtKey, Rc<Cell<Bounds<Pixels>>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -646,6 +669,9 @@ impl Preferences {
             cx.observe_global::<ExtensionsChanged>(|this, cx| {
                 this.icon_themes = None;
                 (this.zed_extensions, this.zed_extensions_task) = (None, None);
+                // Their settings may have changed: fields are made again.
+                this.flush(cx);
+                this.ext_fields.clear();
                 cx.notify();
             }),
             cx.observe_global::<crate::trust::TrustChanged>(|_, cx| cx.notify()),
@@ -701,6 +727,9 @@ impl Preferences {
             registry_busy: Busy::default(),
             registry_fetch: None,
             registry_installing: Vec::new(),
+            ext_fields: HashMap::new(),
+            ext_menu: None,
+            ext_anchors: HashMap::new(),
             _subscriptions: subscriptions,
         };
         if page == Page::Extensions {
@@ -922,9 +951,139 @@ impl Preferences {
                 Settings::set("run_configurations", Value::Array(list))
             });
         }
+        for ((extension, key), field) in &self.ext_fields {
+            let text = field.editor.read(cx).text(cx);
+            let value = if field.number {
+                match parse_number(&text) {
+                    Ok(value) => value,
+                    // Not saved until it's a number (the row says so).
+                    Err(()) => continue,
+                }
+            } else {
+                (!text.is_empty()).then(|| Value::String(text.to_string()))
+            };
+            let value = value.filter(|v| !same_value(v, field.default.as_ref()));
+            let current = ext_value(&settings, extension, key);
+            if value != current {
+                results.push(Settings::set_extension_setting(extension, key, value));
+            }
+        }
         if !results.is_empty() {
             self.applied(results, cx);
         }
+    }
+
+    // ---- Extensions' settings ------------------------------------------------------
+
+    /// Writes an extension's setting, or removes it when it's the default.
+    fn write_ext_setting(&mut self, extension: &str, key: &str, value: Value, default: Option<&Value>, cx: &mut Context<Self>) {
+        let value = (!same_value(&value, default)).then_some(value);
+        self.write(Settings::set_extension_setting(extension, key, value), cx);
+    }
+
+    fn reset_ext_setting(&mut self, extension: &str, key: &str, cx: &mut Context<Self>) {
+        self.write(Settings::set_extension_setting(extension, key, None), cx);
+        if let Some(field) = self.ext_fields.get(&(extension.to_string(), key.to_string())) {
+            set_field(&field.editor, "", cx);
+        }
+    }
+
+    /// The field for a string or number setting, kept across frames.
+    fn ext_field(&mut self, extension: &str, def: &SettingDef, cx: &mut Context<Self>) -> Entity<Editor> {
+        let id = (extension.to_string(), def.key.clone());
+        if let Some(field) = self.ext_fields.get(&id) {
+            return field.editor.clone();
+        }
+        // The default shows as the placeholder: an empty field is the default.
+        let placeholder = def.default.as_ref().map(value_text).unwrap_or_default();
+        let editor = cx.new(|cx| Editor::single_line(placeholder, cx));
+        let current = ext_value(Settings::get(cx), extension, &def.key);
+        set_field(&editor, &current.as_ref().map(value_text).unwrap_or_default(), cx);
+        let subscription = cx.subscribe(&editor, |this, _, _: &EditorEvent, cx| this.schedule_commit(cx));
+        let field = ExtField { editor: editor.clone(), number: def.kind == SettingKind::Number, default: def.default.clone(), _subscription: subscription };
+        self.ext_fields.insert(id, field);
+        editor
+    }
+
+    /// One of an extension's settings: its control, and a reset button
+    /// while settings.json sets it. `full` is a page's row (search results),
+    /// else the compact one under the extension's own row.
+    fn render_ext_setting(&mut self, extension: &str, def: &SettingDef, description: Option<SharedString>, full: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::get(cx).clone();
+        let user = ext_value(Settings::get(cx), extension, &def.key);
+        let name = format!("{extension}.{}", def.key);
+        let id = |what: &str| gpui::ElementId::Name(format!("ext-{what}-{name}").into());
+        let reset = user.is_some().then(|| {
+            let (extension, key) = (extension.to_string(), def.key.clone());
+            self.reset_button(id("reset"), cx, move |this, cx| this.reset_ext_setting(&extension, &key, cx)).into_any_element()
+        });
+        let control: AnyElement = match &def.kind {
+            SettingKind::Boolean => {
+                let default = def.default.as_ref().and_then(Value::as_bool).unwrap_or(false);
+                let on = user.as_ref().and_then(Value::as_bool).unwrap_or(default);
+                let (extension, key, default_value) = (extension.to_string(), def.key.clone(), def.default.clone());
+                div()
+                    .id(id("switch"))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.write_ext_setting(&extension, &key, json!(!on), default_value.as_ref().or(Some(&json!(false))), cx);
+                    }))
+                    .child(switch(on, &theme))
+                    .into_any_element()
+            }
+            SettingKind::Text | SettingKind::Number => {
+                let editor = self.ext_field(extension, def, cx);
+                let invalid = def.kind == SettingKind::Number && parse_number(&editor.read(cx).text(cx)).is_err();
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap_1()
+                    .child(div().w(px(if def.kind == SettingKind::Number { 120. } else { 220. })).flex().child(input_box(&editor, None, window, cx)))
+                    .when(invalid, |el| el.child(div().text_size(px(12.)).text_color(theme.error).child("Not a number")))
+                    .into_any_element()
+            }
+            SettingKind::Choice(values) => {
+                let current = user
+                    .as_ref()
+                    .or(def.default.as_ref())
+                    .and_then(Value::as_str)
+                    .filter(|v| values.iter().any(|x| x == v))
+                    .or(values.first().map(String::as_str))
+                    .unwrap_or_default()
+                    .to_string();
+                let options = values.iter().map(|v| (v.clone().into(), *v == current)).collect();
+                let ext_key = (extension.to_string(), def.key.clone());
+                let open = self.menu == Some(Menu::ExtensionSetting) && self.ext_menu.as_ref() == Some(&ext_key);
+                let anchor = self.ext_anchors.entry(ext_key.clone()).or_default().clone();
+                let (values, default) = (values.clone(), def.default.clone());
+                let toggle_key = ext_key.clone();
+                self.dropdown_at(
+                    open,
+                    anchor,
+                    id("menu"),
+                    current.into(),
+                    px(200.),
+                    options,
+                    cx,
+                    move |this, _, cx| {
+                        let open = this.menu == Some(Menu::ExtensionSetting) && this.ext_menu.as_ref() == Some(&toggle_key);
+                        this.menu = (!open).then_some(Menu::ExtensionSetting);
+                        this.ext_menu = (!open).then(|| toggle_key.clone());
+                        cx.notify();
+                    },
+                    move |this, ix, _, cx| {
+                        this.menu = None;
+                        this.ext_menu = None;
+                        if let Some(value) = values.get(ix) {
+                            this.write_ext_setting(&ext_key.0, &ext_key.1, Value::String(value.clone()), default.as_ref(), cx);
+                        }
+                    },
+                )
+            }
+        };
+        let row = setting_row(def.title.clone(), description, control, reset, self.stacked.get(), &theme);
+        if full { row.into_any_element() } else { row.px_0().py_2().min_h(px(0.)).into_any_element() }
     }
 
     // ---- Fonts --------------------------------------------------------------------
@@ -1350,6 +1509,23 @@ impl Preferences {
                 groups.push(section(page.title(), rows, &theme).into_any_element());
             }
         }
+        // Extensions' settings, by title, description, key or extension.
+        let mut ext_rows: Vec<AnyElement> = Vec::new();
+        for ui in extensions::contributions() {
+            for def in &ui.settings {
+                let haystack = format!("{} {} {} {}", def.title, def.description.as_deref().unwrap_or(""), def.key, ui.name).to_lowercase();
+                if words.iter().all(|w| haystack.contains(w.as_str())) {
+                    let description = match &def.description {
+                        Some(d) => format!("{}: {d}", ui.name),
+                        None => ui.name.clone(),
+                    };
+                    ext_rows.push(self.render_ext_setting(&ui.extension, def, Some(description.into()), true, window, cx));
+                }
+            }
+        }
+        if !ext_rows.is_empty() {
+            groups.push(section(Page::Extensions.title(), ext_rows, &theme).into_any_element());
+        }
         let languages: Vec<Language> = Language::all()
             .into_iter()
             .filter(|l| {
@@ -1718,8 +1894,28 @@ impl Preferences {
         cx: &mut Context<Self>,
         on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
-        let theme = Theme::get(cx).clone();
         let open = self.menu == Some(menu);
+        let anchor = self.menu_anchors[menu as usize].clone();
+        let toggle = move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| this.toggle_menu(menu, window, cx);
+        self.dropdown_at(open, anchor, ("pref-menu", menu as usize).into(), label, width, options, cx, toggle, on_pick)
+    }
+
+    /// `dropdown` for a button that isn't one of the fixed `Menu`s: `anchor`
+    /// is where it's drawn, `on_toggle` opens or closes it.
+    #[allow(clippy::too_many_arguments)]
+    fn dropdown_at(
+        &mut self,
+        open: bool,
+        anchor: Rc<Cell<Bounds<Pixels>>>,
+        id: gpui::ElementId,
+        label: SharedString,
+        width: Pixels,
+        options: Vec<(SharedString, bool)>,
+        cx: &mut Context<Self>,
+        on_toggle: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        on_pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let theme = Theme::get(cx).clone();
         let on_pick = Rc::new(on_pick);
         let list = open.then(|| {
             let items = options.into_iter().enumerate().map(|(ix, (text, selected))| {
@@ -1739,7 +1935,7 @@ impl Preferences {
                     .child(div().flex_1().min_w_0().truncate().child(text))
                     .when(selected, |el| el.child(icon_el(Icon::Check, px(13.), theme.accent.into())))
             });
-            let anchor = self.menu_anchors[menu as usize].clone();
+            let anchor = anchor.clone();
             let trigger = anchor.get();
             anchored()
                 .position(point(trigger.right(), trigger.bottom() + px(4.)))
@@ -1765,14 +1961,13 @@ impl Preferences {
                 )
                 .into_any_element()
         });
-        let anchor = self.menu_anchors[menu as usize].clone();
         if list.is_some() {
             self.overlay = list;
         }
         div()
             .relative()
-            .child(dropdown_trigger(("pref-menu", menu as usize), label, width, open, &theme).on_click(cx.listener(
-                move |this, _: &ClickEvent, window, cx| this.toggle_menu(menu, window, cx),
+            .child(dropdown_trigger(id, label, width, open, &theme).on_click(cx.listener(
+                move |this, _: &ClickEvent, window, cx| on_toggle(this, window, cx),
             )))
             // Pinned to the corner: an absolute child without insets sits where
             // it would in the flow, below the button, and the list would open
@@ -2238,7 +2433,7 @@ impl Preferences {
             installed
                 .into_iter()
                 .enumerate()
-                .map(|(ix, extension)| self.render_extension(ix, extension, &theme, cx))
+                .map(|(ix, extension)| self.render_extension(ix, extension, &theme, window, cx))
                 .collect()
         };
 
@@ -2379,7 +2574,7 @@ impl Preferences {
             .into_any_element()
     }
 
-    fn render_extension(&self, ix: usize, extension: ExtensionInfo, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_extension(&mut self, ix: usize, extension: ExtensionInfo, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let mut provides: Vec<String> = Vec::new();
         if !extension.languages.is_empty() {
             provides.push(extension.languages.join(", "));
@@ -2393,23 +2588,14 @@ impl Preferences {
         provides.extend(extension.servers.iter().map(|s| format!("server: {s}")));
         // Its views (Kuana's extension UI), and what its code may do.
         let mut permissions_line = None;
-        let mut settings_line = None;
+        let mut settings_rows: Vec<AnyElement> = Vec::new();
         let mut keys_line = None;
         if let Some(ui) = &extension.ui {
             provides.extend(ui.views.iter().map(|v| format!("view: {}", v.title)));
-            // Its settings, as they are now (the user's, else the defaults).
-            if !ui.settings.is_empty() {
-                let user = Settings::get(cx).extensions.as_ref().and_then(|map| map.get(&ui.extension));
-                let words: Vec<String> = ui
-                    .settings
-                    .iter()
-                    .map(|s| match user.and_then(|u| u.get(&s.key)).or(s.default.as_ref()) {
-                        Some(serde_json::Value::String(text)) => format!("{}: {text}", s.title),
-                        Some(value) => format!("{}: {value}", s.title),
-                        None => s.title.clone(),
-                    })
-                    .collect();
-                settings_line = Some(format!("Settings: {}", words.join(" · ")));
+            // Its settings, each with its control, under the row.
+            for def in &ui.settings {
+                let description = def.description.clone().map(SharedString::from);
+                settings_rows.push(self.render_ext_setting(&ui.extension, def, description, false, window, cx));
             }
             // Shortcuts it asks for that the keymap already uses.
             let skipped = crate::keymap::skipped_extension_keys(&ui.extension);
@@ -2440,7 +2626,7 @@ impl Preferences {
         };
         let problems = extension.problems.join("\n");
         let header = format!("{}{}", extension.name, if extension.version.is_empty() { String::new() } else { format!("  {}", extension.version) });
-        div()
+        let row = div()
             .flex()
             .items_start()
             .gap_2p5()
@@ -2485,27 +2671,6 @@ impl Preferences {
                                 }),
                         )
                     })
-                    .when_some(settings_line, |el, text| {
-                        el.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .text_size(px(12.))
-                                .text_color(theme.text_dim)
-                                .child(div().min_w_0().truncate().child(text))
-                                .child(
-                                    div()
-                                        .id(("ext-settings", ix))
-                                        .flex_shrink_0()
-                                        .text_color(theme.accent)
-                                        .cursor_pointer()
-                                        .hover(|s| s.underline())
-                                        .child("Edit in settings.json")
-                                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(PreferencesEvent::OpenSettingsFile))),
-                                ),
-                        )
-                    })
                     .when_some(keys_line, |el, text| el.child(div().text_size(px(12.)).text_color(theme.text_dim).child(text)))
                     .when_some(status, |el, (color, text)| {
                         el.child(
@@ -2523,7 +2688,20 @@ impl Preferences {
                 icon_button(("ext-remove", ix), Icon::Trash, theme.text_muted.into(), cx)
                     .tooltip(|_, cx| tooltip_view("Remove", cx))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.uninstall(extension.clone(), window, cx))),
-            )
+            );
+        if settings_rows.is_empty() {
+            return row.into_any_element();
+        }
+        // Lined up with the row's text (its padding, icon and gap), reaching
+        // to the row's right edge like the controls on other pages.
+        let rows = settings_rows
+            .into_iter()
+            .map(|r| div().border_t_1().border_color(theme.border_subtle).child(r));
+        div()
+            .flex()
+            .flex_col()
+            .child(row)
+            .child(div().flex().flex_col().ml(px(37.)).mr_3().mb_1().children(rows))
             .into_any_element()
     }
 
@@ -2867,6 +3045,43 @@ fn tool_description(tool: Tool, language: Language, mode: ToolMode) -> (&'static
             };
             ("Which formatter", detail)
         }
+    }
+}
+
+/// An extension's setting as settings.json has it (`extensions.<id>.<key>`).
+fn ext_value(settings: &Settings, extension: &str, key: &str) -> Option<Value> {
+    settings.extensions.as_ref()?.get(extension)?.get(key).cloned()
+}
+
+/// A setting's value as a field shows it: strings without quotes.
+fn value_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        value => value.to_string(),
+    }
+}
+
+/// A number field's text: nothing (the default), a number, or not one.
+fn parse_number(text: &str) -> Result<Option<Value>, ()> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(n) = text.parse::<i64>() {
+        return Ok(Some(json!(n)));
+    }
+    match text.parse::<f64>() {
+        Ok(n) if n.is_finite() => Ok(Some(json!(n))),
+        _ => Err(()),
+    }
+}
+
+/// Whether `value` is the default (numbers by value, so 3 and 3.0 agree).
+fn same_value(value: &Value, default: Option<&Value>) -> bool {
+    match (value, default) {
+        (Value::Number(a), Some(Value::Number(b))) => a.as_f64() == b.as_f64(),
+        (value, Some(default)) => value == default,
+        (_, None) => false,
     }
 }
 
