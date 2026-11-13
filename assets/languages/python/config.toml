@@ -21,3 +21,21 @@ decrease_indent_patterns = [
 [queries]
 highlights = ["crate:python/highlights"]
 outline = ["crate:python/tags"]
+
+# Kuana's key: postfix completion (`expr.if`): bodies in snippet syntax, $EXPR is the expression.
+[postfix]
+if = { body = "if $EXPR:\n\t$0", description = "if expr:" }
+else = { body = "if not $EXPR:\n\t$0", description = "if not expr:" }
+ifn = { body = "if $EXPR is None:\n\t$0", description = "if expr is None:" }
+ifnn = { body = "if $EXPR is not None:\n\t$0", description = "if expr is not None:" }
+not = { body = "not $EXPR", description = "not expr" }
+while = { body = "while $EXPR:\n\t$0", description = "while expr:" }
+for = { body = "for ${1:item} in $EXPR:\n\t$0", description = "for item in expr:" }
+enum = { body = "for ${1:i}, ${2:item} in enumerate($EXPR):\n\t$0", description = "for i, item in enumerate(expr):" }
+var = { body = "${1:name} = $EXPR", description = "name = expr" }
+return = { body = "return $EXPR", description = "return expr" }
+par = { body = "($EXPR)", description = "(expr)" }
+print = { body = "print($EXPR)", description = "print(expr)" }
+len = { body = "len($EXPR)", description = "len(expr)" }
+list = { body = "list($EXPR)", description = "list(expr)" }
+str = { body = "str($EXPR)", description = "str(expr)" }

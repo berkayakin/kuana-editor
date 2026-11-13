@@ -299,7 +299,12 @@ fn rank_completions(items: &[CompletionItem], typed: &str, cancel: &AtomicBool) 
 /// `completionItem/resolve`: it has none, isn't the user's snippet, and its
 /// server resolves items.
 fn needs_resolve(item: &CompletionItem, server: &Server) -> bool {
-    item.additional_edits.is_empty() && item.raw.get("kuanaUserSnippet").is_none() && server.resolves("completionProvider")
+    item.additional_edits.is_empty() && !is_local(item) && server.resolves("completionProvider")
+}
+
+/// Kuana's own items (user snippets, postfix templates), which no server knows.
+fn is_local(item: &CompletionItem) -> bool {
+    item.raw.get("kuanaUserSnippet").is_some() || item.raw.get("kuanaPostfix").is_some()
 }
 
 /// Where `range` of the text of `version` is now, if what it holds wasn't
@@ -540,7 +545,12 @@ impl Editor {
             .filter(|s| s.capability("completionProvider"))
             .flat_map(|s| s.completion_triggers())
             .find(|t| head >= t.len() && self.doc.read(cx).slice(head - t.len()..head) == *t);
-        if servers.iter().any(|s| s.capability("completionProvider")) {
+        if !servers.iter().any(|s| s.capability("completionProvider")) {
+            // No server completes: the menu is postfix templates, after `expr.`.
+            if self.lsp.completion.is_none() && last == '.' && !crate::postfix::templates(self.doc.read(cx).language).is_empty() {
+                self.request_completion(None, cx);
+            }
+        } else {
             match (&self.lsp.completion, trigger) {
                 (_, Some(trigger)) => self.request_completion(Some(trigger), cx),
                 (Some(menu), None) if is_word_char(last) && menu.incomplete => self.request_completion(None, cx),
@@ -581,7 +591,9 @@ impl Editor {
                 Some((server, params))
             })
             .collect();
-        if requests.is_empty() {
+        // Postfix templates after `expr.`, listed even without a server.
+        let postfix = self.postfix_items(start, cx);
+        if requests.is_empty() && postfix.is_empty() {
             return;
         }
         let language = self.doc.read(cx).language;
@@ -605,7 +617,8 @@ impl Editor {
                     sources.extend(std::iter::repeat_n(ix, found.len()));
                     items.extend(found);
                 }
-                let snippets = super::snippet::user_snippet_items(language);
+                let mut snippets = super::snippet::user_snippet_items(language);
+                snippets.extend(postfix);
                 sources.extend(std::iter::repeat_n(0, snippets.len()));
                 items.extend(snippets);
                 let (matches, selected) = rank_completions(&items, &typed, &cancel)?;
@@ -639,6 +652,24 @@ impl Editor {
             })
             .ok();
         }));
+    }
+
+    /// The language's postfix templates as items when the word at `start`
+    /// follows `expr.` (on its line).
+    fn postfix_items(&self, start: usize, cx: &App) -> Vec<CompletionItem> {
+        let doc = self.doc.read(cx);
+        if doc.char_before(start) != Some('.') {
+            return Vec::new();
+        }
+        let templates = crate::postfix::templates(doc.language);
+        if templates.is_empty() {
+            return Vec::new();
+        }
+        let dot = start - 1;
+        let line_start = doc.line_start(doc.row_of(dot));
+        let before = doc.slice(line_start..dot);
+        let Some(at) = crate::postfix::expression_start(&before) else { return Vec::new() };
+        crate::postfix::items(&templates, line_start + at, &before[at..])
     }
 
     /// What's typed of the word from `start` to the caret; None when the
@@ -821,6 +852,12 @@ impl Editor {
         cx.notify();
         let Some(&i) = menu.matches.get(ix) else { return };
         let item = &menu.items[i];
+        // Kuana's own (a snippet, a postfix template): no server to ask, no
+        // other edits; listed also when no server completes.
+        if is_local(item) {
+            self.apply_completion(item, menu.start, Encoding::Utf8, replace, Vec::new(), cx);
+            return;
+        }
         // Positioned in the encoding of, and resolved by, the server it came from.
         let Some(server) = menu.servers.get(menu.sources[i]).cloned() else { return };
         let encoding = server.encoding;
@@ -916,7 +953,16 @@ impl Editor {
     ) -> Range<usize> {
         let head = self.primary_selection().head;
         let rope = self.doc.read(cx).rope().clone();
-        let from = item.edit.as_ref().map(|e| position_to_offset(&rope, e.range.start, encoding)).unwrap_or(start).min(head);
+        // A postfix template replaces its expression too, if it's still there.
+        let postfix = item.raw.get("kuanaPostfix").and_then(|p| {
+            let at = p.get("start")?.as_u64()? as usize;
+            let expr = p.get("expr")?.as_str()?;
+            (at + expr.len() < head && self.doc.read(cx).slice(at..at + expr.len()) == expr).then(|| (at, expr.to_string()))
+        });
+        let from = match &postfix {
+            Some((at, _)) => *at,
+            None => item.edit.as_ref().map(|e| position_to_offset(&rope, e.range.start, encoding)).unwrap_or(start).min(head),
+        };
         let mut to = head;
         if replace {
             while let Some(c) = self.doc.read(cx).char_at(to).filter(|c| is_word_char(*c)) {
@@ -924,7 +970,7 @@ impl Editor {
             }
         }
         let (text, stops) = match item.is_snippet {
-            true => protocol::expand_snippet(&self.indented_snippet(item.raw_text(), from, cx)),
+            true => self.expand_snippet_at(item.raw_text(), from, postfix.map(|(_, expr)| expr), cx),
             false => (item.raw_text().to_string(), Vec::new()),
         };
         let mut edits = vec![(from..to, text.clone())];
@@ -2791,12 +2837,17 @@ mod tests {
         let labels = |cx: &mut TestAppContext| {
             editor.read_with(cx, |e, _| {
                 let menu = e.lsp.completion.as_ref().unwrap();
-                let mut labels: Vec<String> = menu.items.iter().map(|i| i.label.clone()).collect();
+                // The servers' (TypeScript's postfix templates follow `x.` too).
+                let mut labels: Vec<String> = menu.items.iter().filter(|i| !is_local(i)).map(|i| i.label.clone()).collect();
                 labels.sort();
                 labels
             })
         };
         assert_eq!(labels(cx), ["extra-item", "main-item"]);
+        editor.read_with(cx, |e, _| {
+            let postfix = e.lsp.completion.as_ref().unwrap().items.iter().find(|i| i.label == "if").unwrap();
+            assert_eq!(postfix.raw["kuanaPostfix"]["expr"], "x");
+        });
 
         // A trigger character asks only the servers it triggers.
         editor.update(cx, |e, cx| {

@@ -216,6 +216,94 @@ pub fn indent_body(body: &str, line_indent: &str, indent_unit: &str) -> String {
 }
 
 /// Starts a snippet in the user's snippets folder when it has none, as an example.
+/// What snippets' variables are filled from, VS Code's set: the file, the
+/// selection and line at the caret, the clipboard, the date and time,
+/// comments, random values; and `EXPR`, a postfix template's expression.
+#[derive(Clone, Debug, Default)]
+pub struct Variables {
+    pub file: Option<PathBuf>,
+    /// The project folder.
+    pub workspace: Option<PathBuf>,
+    pub selected: String,
+    /// The caret's line, its word and number (1-based).
+    pub line: String,
+    pub word: String,
+    pub line_number: usize,
+    pub clipboard: Option<String>,
+    pub line_comment: Option<String>,
+    pub block_comment: Option<(String, String)>,
+    pub expr: Option<String>,
+    /// The time `CURRENT_*` show (now, unless a test sets it).
+    pub now: Option<crate::local_time::LocalTime>,
+}
+
+const DAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const MONTHS: [&str; 12] =
+    ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+impl Variables {
+    /// A variable's value; None for a name it doesn't know, so the snippet's
+    /// default is used.
+    pub fn get(&self, name: &str) -> Option<String> {
+        let path = |p: &Option<PathBuf>| p.as_ref().map(|p| p.to_string_lossy().into_owned());
+        let now = || self.now.unwrap_or_else(crate::local_time::LocalTime::now);
+        let random = || {
+            use std::hash::{BuildHasher, Hasher};
+            std::collections::hash_map::RandomState::new().build_hasher().finish()
+        };
+        Some(match name {
+            "EXPR" => self.expr.clone()?,
+            "TM_SELECTED_TEXT" | "SELECTION" => self.selected.clone(),
+            "TM_CURRENT_LINE" => self.line.clone(),
+            "TM_CURRENT_WORD" => self.word.clone(),
+            "TM_LINE_INDEX" => self.line_number.saturating_sub(1).to_string(),
+            "TM_LINE_NUMBER" => self.line_number.to_string(),
+            "TM_FILENAME" => self.file.as_ref()?.file_name()?.to_string_lossy().into_owned(),
+            "TM_FILENAME_BASE" => {
+                let name = self.file.as_ref()?.file_name()?.to_string_lossy().into_owned();
+                name.split_once('.').map_or(name.clone(), |(base, _)| base.to_string())
+            }
+            "TM_DIRECTORY" => self.file.as_ref()?.parent()?.to_string_lossy().into_owned(),
+            "TM_FILEPATH" => path(&self.file)?,
+            "RELATIVE_FILEPATH" => {
+                let file = self.file.as_ref()?;
+                match self.workspace.as_ref().and_then(|w| file.strip_prefix(w).ok()) {
+                    Some(rel) => rel.to_string_lossy().into_owned(),
+                    None => file.to_string_lossy().into_owned(),
+                }
+            }
+            "WORKSPACE_FOLDER" => path(&self.workspace)?,
+            "WORKSPACE_NAME" => self.workspace.as_ref()?.file_name()?.to_string_lossy().into_owned(),
+            "CLIPBOARD" => self.clipboard.clone().unwrap_or_default(),
+            "CURRENT_YEAR" => now().year.to_string(),
+            "CURRENT_YEAR_SHORT" => format!("{:02}", now().year.rem_euclid(100)),
+            "CURRENT_MONTH" => format!("{:02}", now().month),
+            "CURRENT_MONTH_NAME" => MONTHS[now().month as usize - 1].to_string(),
+            "CURRENT_MONTH_NAME_SHORT" => MONTHS[now().month as usize - 1][..3].to_string(),
+            "CURRENT_DATE" => format!("{:02}", now().day),
+            "CURRENT_DAY_NAME" => DAYS[now().weekday as usize].to_string(),
+            "CURRENT_DAY_NAME_SHORT" => DAYS[now().weekday as usize][..3].to_string(),
+            "CURRENT_HOUR" => format!("{:02}", now().hour),
+            "CURRENT_MINUTE" => format!("{:02}", now().minute),
+            "CURRENT_SECOND" => format!("{:02}", now().second),
+            "CURRENT_SECONDS_UNIX" => now().unix.to_string(),
+            "RANDOM" => format!("{:06}", random() % 1_000_000),
+            "RANDOM_HEX" => format!("{:06x}", random() & 0xff_ffff),
+            "UUID" => {
+                let (a, b) = (random(), random());
+                // Version 4, variant 1.
+                let b = (b & 0x3fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000;
+                let a = (a & 0xffff_ffff_ffff_0fff) | 0x4000;
+                format!("{:08x}-{:04x}-{:04x}-{:04x}-{:012x}", a >> 32, (a >> 16) & 0xffff, a & 0xffff, b >> 48, b & 0xffff_ffff_ffff)
+            }
+            "LINE_COMMENT" => self.line_comment.clone()?,
+            "BLOCK_COMMENT_START" => self.block_comment.as_ref()?.0.clone(),
+            "BLOCK_COMMENT_END" => self.block_comment.as_ref()?.1.clone(),
+            _ => return None,
+        })
+    }
+}
+
 pub fn ensure_snippets_dir() -> std::io::Result<PathBuf> {
     let dir = snippets_dir().ok_or_else(|| std::io::Error::other("no config directory"))?;
     std::fs::create_dir_all(&dir)?;
@@ -319,5 +407,33 @@ mod tests {
         rewrite("zz");
         assert_eq!(prefixes(), ["aa", "c"]);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn variables_fill_from_the_file_caret_and_time() {
+        let vars = Variables {
+            file: Some(PathBuf::from("/p/src/main.test.rs")),
+            workspace: Some(PathBuf::from("/p")),
+            selected: "sel".into(),
+            line_number: 4,
+            line_comment: Some("//".into()),
+            now: Some(crate::local_time::LocalTime { year: 2026, month: 11, day: 3, hour: 9, minute: 5, second: 7, weekday: 1, unix: 0 }),
+            ..Default::default()
+        };
+        let (text, _) = crate::lsp::protocol::expand_snippet_with(
+            "$TM_FILENAME_BASE|$TM_FILENAME|$RELATIVE_FILEPATH|$WORKSPACE_NAME|$TM_LINE_NUMBER|$SELECTION|$CLIPBOARD|$LINE_COMMENT",
+            &|n| vars.get(n),
+        );
+        assert_eq!(text, "main|main.test.rs|src/main.test.rs|p|4|sel||//");
+        let (date, _) = crate::lsp::protocol::expand_snippet_with(
+            "$CURRENT_YEAR-$CURRENT_MONTH-$CURRENT_DATE $CURRENT_HOUR:$CURRENT_MINUTE:$CURRENT_SECOND $CURRENT_DAY_NAME_SHORT $CURRENT_MONTH_NAME",
+            &|n| vars.get(n),
+        );
+        assert_eq!(date, "2026-11-03 09:05:07 Tue November");
+        // Unknown here: the default.
+        assert_eq!(crate::lsp::protocol::expand_snippet_with("${BLOCK_COMMENT_START:/*}", &|n| vars.get(n)).0, "/*");
+        let uuid = vars.get("UUID").unwrap();
+        assert_eq!(uuid.len(), 36);
+        assert_eq!(&uuid[14..15], "4");
     }
 }

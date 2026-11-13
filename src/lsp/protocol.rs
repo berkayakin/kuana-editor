@@ -360,13 +360,23 @@ fn completion_kind(kind: u64) -> &'static str {
 
 /// Expands snippet syntax to plain text and its tab stops in Tab order:
 /// `$1`, `$2`… then `$0` (the end of the text when there's none). A stop used
-/// in several places lists each. Plain text has no stops.
+/// in several places lists each. Plain text has no stops. Variables
+/// (`$NAME`, `${NAME:default}`) take their defaults; see [`expand_snippet_with`].
+#[cfg(test)]
 pub fn expand_snippet(snippet: &str) -> (String, Vec<Vec<Range<usize>>>) {
+    expand_snippet_with(snippet, &|_| None)
+}
+
+/// [`expand_snippet`] with variables' values from `vars` (`TM_FILENAME`,
+/// `CLIPBOARD`, a postfix template's `EXPR`…), inserted as they are; a
+/// variable `vars` doesn't know takes its default, else nothing.
+/// Transformations (`${NAME/regex/format/}`) are skipped: the value goes in as is.
+pub fn expand_snippet_with(snippet: &str, vars: &dyn Fn(&str) -> Option<String>) -> (String, Vec<Vec<Range<usize>>>) {
     let chars: Vec<char> = snippet.chars().collect();
     let mut out = String::new();
     // (tab stop number, range in `out`)
     let mut found: Vec<(u32, Range<usize>)> = Vec::new();
-    expand_into(&chars, &mut 0, &mut out, &mut found, false);
+    expand_into(&chars, &mut 0, &mut out, &mut found, false, vars);
     if found.is_empty() {
         return (out, Vec::new());
     }
@@ -386,7 +396,14 @@ pub fn expand_snippet(snippet: &str) -> (String, Vec<Vec<Range<usize>>>) {
     (out, stops)
 }
 
-fn expand_into(chars: &[char], i: &mut usize, out: &mut String, stops: &mut Vec<(u32, Range<usize>)>, nested: bool) {
+fn expand_into(
+    chars: &[char],
+    i: &mut usize,
+    out: &mut String,
+    stops: &mut Vec<(u32, Range<usize>)>,
+    nested: bool,
+    vars: &dyn Fn(&str) -> Option<String>,
+) {
     while *i < chars.len() {
         let c = chars[*i];
         match c {
@@ -410,7 +427,7 @@ fn expand_into(chars: &[char], i: &mut usize, out: &mut String, stops: &mut Vec<
                         match chars.get(*i) {
                             Some(':') => {
                                 *i += 1;
-                                expand_into(chars, i, out, stops, true);
+                                expand_into(chars, i, out, stops, true, vars);
                             }
                             // A choice: keep the first option.
                             Some('|') => {
@@ -430,13 +447,33 @@ fn expand_into(chars: &[char], i: &mut usize, out: &mut String, stops: &mut Vec<
                         }
                         stops.push((n, start..out.len()));
                     } else {
-                        // A variable: `${NAME}` or `${NAME:default}`; Kuana has none, so use the default.
+                        // A variable: `${NAME}`, `${NAME:default}` or `${NAME/regex/format/flags}`.
+                        let name_start = *i;
                         while *i < chars.len() && (chars[*i].is_alphanumeric() || chars[*i] == '_') {
                             *i += 1;
                         }
-                        if chars.get(*i) == Some(&':') {
-                            *i += 1;
-                            expand_into(chars, i, out, stops, true);
+                        let name: String = chars[name_start..*i].iter().collect();
+                        let value = vars(&name);
+                        match chars.get(*i) {
+                            Some(':') => {
+                                *i += 1;
+                                // The default is read either way; it's used only without a value.
+                                let (mut default, mut default_stops) = (String::new(), Vec::new());
+                                expand_into(chars, i, &mut default, &mut default_stops, true, vars);
+                                match &value {
+                                    Some(v) => out.push_str(v),
+                                    None => {
+                                        let base = out.len();
+                                        out.push_str(&default);
+                                        stops.extend(default_stops.into_iter().map(|(n, r)| (n, r.start + base..r.end + base)));
+                                    }
+                                }
+                            }
+                            Some('/') => {
+                                skip_transform(chars, i);
+                                out.push_str(value.as_deref().unwrap_or_default());
+                            }
+                            _ => out.push_str(value.as_deref().unwrap_or_default()),
                         }
                     }
                     // Skip to the closing brace.
@@ -445,9 +482,12 @@ fn expand_into(chars: &[char], i: &mut usize, out: &mut String, stops: &mut Vec<
                     }
                     *i += 1;
                 } else if *i < chars.len() && (chars[*i].is_alphabetic() || chars[*i] == '_') {
+                    let name_start = *i;
                     while *i < chars.len() && (chars[*i].is_alphanumeric() || chars[*i] == '_') {
                         *i += 1;
                     }
+                    let name: String = chars[name_start..*i].iter().collect();
+                    out.push_str(vars(&name).as_deref().unwrap_or_default());
                 } else {
                     out.push('$');
                 }
@@ -457,6 +497,22 @@ fn expand_into(chars: &[char], i: &mut usize, out: &mut String, stops: &mut Vec<
                 *i += 1;
             }
         }
+    }
+}
+
+/// Steps over a variable's transformation, `/regex/format/flags`, to the
+/// closing brace (not past it): escapes and the format's `${…}` included.
+fn skip_transform(chars: &[char], i: &mut usize) {
+    let mut depth = 0;
+    while *i < chars.len() {
+        match chars[*i] {
+            '\\' => *i += 1,
+            '{' => depth += 1,
+            '}' if depth == 0 => return,
+            '}' => depth -= 1,
+            _ => {}
+        }
+        *i += 1;
     }
 }
 
@@ -766,6 +822,25 @@ mod tests {
         assert_eq!(expand_snippet("a${1:b${2:c}}d"), ("abcd".to_string(), vec![vec![1..3], vec![2..3], vec![4..4]]));
         // Mirrors: both places of $1, in order.
         assert_eq!(expand_snippet("${1:x} = $1;"), ("x = x;".to_string(), vec![vec![0..1, 4..5], vec![6..6]]));
+    }
+
+    #[test]
+    fn expands_variables() {
+        let vars = |name: &str| match name {
+            "TM_FILENAME" => Some("main.rs".to_string()),
+            "EXPR" => Some("a.b($1)".to_string()),
+            _ => None,
+        };
+        let expand = |s: &str| expand_snippet_with(s, &vars);
+        // A value goes in as it is (snippet syntax in it isn't read).
+        assert_eq!(expand("if $EXPR {$0}"), ("if a.b($1) {}".to_string(), vec![vec![12..12]]));
+        assert_eq!(expand("// ${TM_FILENAME:x} ${UNKNOWN:none}"), ("// main.rs none".to_string(), Vec::new()));
+        // A known variable's default and the stops in it are dropped.
+        assert_eq!(expand("${TM_FILENAME:${1:d}}$0"), ("main.rs".to_string(), vec![vec![7..7]]));
+        assert_eq!(expand("${UNKNOWN:${1:d}}$0"), ("d".to_string(), vec![vec![0..1], vec![1..1]]));
+        // Transformations are skipped, the value kept.
+        assert_eq!(expand("${TM_FILENAME/(.*)\\.rs/${1:/upcase}/g}!"), ("main.rs!".to_string(), Vec::new()));
+        assert_eq!(expand("$UNKNOWN."), (".".to_string(), Vec::new()));
     }
 
     #[test]

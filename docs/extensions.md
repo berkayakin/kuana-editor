@@ -122,6 +122,11 @@ brackets = [
 ]
 # Lines that go back a level as they're typed, level with the nearest line above starting with a word of valid_after
 decrease_indent_patterns = [{ pattern = "^\\s*(else|end)\\b", valid_after = ["if", "do"] }]
+
+# Kuana only: postfix completion (`expr.if`), in snippet syntax with $EXPR for the expression
+[postfix]
+if = { body = "if $EXPR then\n\t$0\nend", description = "if expr then … end" }
+not = "not $EXPR"
 ```
 
 Without `brackets`, typing pairs `()`, `[]`, `{}` and quotes outside strings and comments. Editing follows the

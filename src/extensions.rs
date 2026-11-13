@@ -173,6 +173,8 @@ pub struct LanguageDef {
     dir: PathBuf,
     /// `tasks.json`: commands for `runnables.scm` tags (and untagged ones).
     pub tasks: Vec<Task>,
+    /// `[postfix]`: postfix completion templates (`crate::postfix`).
+    pub postfix: Vec<crate::postfix::Template>,
     /// Queries for this built-in language (named like it, without a grammar
     /// of its own): its files replace the built-in ones of the same kind.
     builtin: Option<Language>,
@@ -865,6 +867,7 @@ fn read_language(dir: &Path, grammars: &HashMap<String, Grammar>, extension: &st
         hard_tabs: config.get("hard_tabs").and_then(Value::as_bool),
         editing: crate::syntax::EditingRules::from_config(&config),
         formatter,
+        postfix: crate::postfix::parse(&config),
         extension: extension.to_string(),
         highlights: query("highlights.scm", "highlights.scm").unwrap_or_default(),
         outline: query("outline.scm", "tags.scm"),

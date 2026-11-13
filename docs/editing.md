@@ -50,6 +50,30 @@ Folder** (Find Action) opens `snippets/` in the config folder, with an example o
 with `"scope": "rust,go"`. Type a snippet's prefix and press Tab, or pick it from completion.
 Changes to the files apply right away.
 
+Snippets fill in VS Code's variables: `TM_FILENAME`, `TM_FILENAME_BASE`, `TM_DIRECTORY`,
+`TM_FILEPATH`, `TM_SELECTED_TEXT`, `TM_CURRENT_LINE`, `TM_CURRENT_WORD`, `TM_LINE_NUMBER`,
+`CLIPBOARD`, the date and time (`CURRENT_YEAR`, `CURRENT_MONTH`, `CURRENT_DATE`, `CURRENT_HOUR`,
+`CURRENT_DAY_NAME`… in local time), `LINE_COMMENT`, `BLOCK_COMMENT_START` / `_END`, `UUID`,
+`RANDOM` and `RANDOM_HEX`; for the others, the default (`${WORKSPACE_NAME:app}`) goes in.
+
+### Postfix completion
+
+After an expression and a dot, completion lists postfix templates, as in JetBrains IDEs: `items.for`
+becomes `for item in items { }`, `user.name.if` becomes `if user.name { }`, `x.not` becomes `!x`.
+The expression is what ends at the dot on its line: names, calls, indexes and literals joined by
+`.`, `::`, `->` or `?.` (`self.items[0].len()`, `read()?`). They're listed with the language
+server's items (after them, for the same letters) and also without a language server.
+
+| Language | Templates |
+| --- | --- |
+| Rust | `if`, `else`, `not`, `while`, `for`, `iter`, `match`, `let`, `letm`, `return`, `par`, `ref`, `refm`, `some`, `ok`, `err`, `box`, `dbg`, `println` |
+| Python | `if`, `else`, `ifn`, `ifnn`, `not`, `while`, `for`, `enum`, `var`, `return`, `par`, `print`, `len`, `list`, `str` |
+| JavaScript, TypeScript | `if`, `else`, `not`, `null`, `notnull`, `while`, `for`, `const`, `let`, `return`, `await`, `par`, `log`, `spread` |
+| Go | `if`, `else`, `not`, `nil`, `nn`, `for`, `forr`, `var`, `return`, `par`, `print`, `len` |
+
+An extension's language brings its own in a `[postfix]` table of its `config.toml` (see
+[Extensions](extensions.md)).
+
 ## Edit predictions
 
 Kuana can show code suggested after the caret as dimmed ghost text, from **GitHub Copilot**. It's
