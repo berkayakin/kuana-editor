@@ -37,7 +37,7 @@ use crate::{
     extensions,
     editor::{
         self, Cancel, Editor, EditorBookmarksChanged, EditorBreakpointMenu, EditorBreakpointsChanged, EditorContextMenu, EditorEvent, EditorGitEvent, EditorLoaded,
-        EditorLspEvent, EditorPreviewToggle, EditorRunEvent, EditorRunSql, GitFile, ToggleMarkdownPreview, Unloaded,
+        EditorLspEvent, EditorPreviewToggle, EditorRunEvent, EditorRunSql, FormatError, GitFile, ToggleMarkdownPreview, Unloaded,
     },
     image_view::ImageView,
     markdown_preview::{MarkdownPreview, PreviewEvent},
@@ -914,6 +914,8 @@ pub struct Workspace {
     auto_save_tasks: HashMap<EntityId, Task<()>>,
     /// Tabs whose auto-save failure was already reported, to avoid repeats.
     auto_save_warned: HashSet<EntityId>,
+    /// Languages format on save found no formatter for, already reported.
+    no_formatter_told: Vec<Language>,
     /// The user chose to discard unsaved changes, so closing goes ahead.
     close_confirmed: bool,
     /// Debounced write of the project session (see `save_session`).
@@ -1342,6 +1344,7 @@ impl Workspace {
             auto_save_delay: Duration::from_millis(settings.auto_save_delay.unwrap_or(1000).max(50)),
             auto_save_tasks: HashMap::new(),
             auto_save_warned: HashSet::new(),
+            no_formatter_told: Vec::new(),
             close_confirmed: false,
             session_task: None,
             real_paths: Default::default(),

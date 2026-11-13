@@ -12,6 +12,7 @@ use crate::{
     format,
     lsp::{Server, protocol},
     settings::Settings,
+    syntax::Language,
 };
 
 impl Editor {
@@ -22,7 +23,7 @@ impl Editor {
             this.update(cx, |_, cx| match result {
                 Ok(true) => {}
                 Ok(false) => cx.emit(EditorLspEvent::Message("Already formatted".into())),
-                Err(err) => cx.emit(EditorLspEvent::Message(err.into())),
+                Err(err) => cx.emit(EditorLspEvent::Message(err.to_string().into())),
             })
             .ok();
         })
@@ -39,18 +40,18 @@ impl Editor {
     /// the language server can. Prefers a formatter installed in the project,
     /// then the language server, then one on PATH. Resolves to whether the
     /// text changed.
-    pub fn format(&mut self, use_selection: bool, cx: &mut Context<Self>) -> Task<Result<bool, String>> {
+    pub fn format(&mut self, use_selection: bool, cx: &mut Context<Self>) -> Task<Result<bool, FormatError>> {
         let Some(path) = self.doc.read(cx).path.clone() else {
-            return Task::ready(Err("Save the file to format it".into()));
+            return Task::ready(Err("Save the file to format it".to_string().into()));
         };
         // Formatters and servers may run the project's code (Prettier plugins, say).
         if !crate::trust::is_trusted(&path) {
-            return Task::ready(Err("Formatting is off in Restricted Mode. Trust the project to use it.".into()));
+            return Task::ready(Err("Formatting is off in Restricted Mode. Trust the project to use it.".to_string().into()));
         }
         let language = self.doc.read(cx).language;
         let configured = Settings::get(cx).at(&path).formatters.get(language.name()).cloned();
         let command: Option<Vec<String>> = match &configured {
-            Some(Value::Bool(false)) => return Task::ready(Err(format!("Formatting is off for {}", language.name()))),
+            Some(Value::Bool(false)) => return Task::ready(Err(format!("Formatting is off for {}", language.name()).into())),
             Some(Value::Array(c)) => Some(c.iter().filter_map(Value::as_str).map(str::to_string).collect()),
             _ => None,
         };
@@ -94,10 +95,7 @@ impl Editor {
             } else if let Some(server) = server {
                 lsp_format(&server, &path, &text, range, options).await?
             } else {
-                return Err(format!(
-                    "No formatter for {}. Install one, or a language server that formats.",
-                    language.name()
-                ));
+                return Err(FormatError::NoFormatter(language));
             };
             let edits = cx.background_executor().spawn(async move { format::line_edits(&text, &formatted) }).await;
             this.update(cx, |e, cx| {
@@ -115,7 +113,35 @@ impl Editor {
                 Ok(true)
             })
             .map_err(|_| "The editor closed".to_string())?
+            .map_err(FormatError::from)
         })
+    }
+}
+
+/// Why formatting didn't happen.
+#[derive(Debug)]
+pub enum FormatError {
+    /// Nothing that formats this language is set up: no formatter found, no
+    /// server that formats. Saving again won't change that, so format on save
+    /// reports it once (`Workspace::format_and_save`).
+    NoFormatter(Language),
+    Failed(String),
+}
+
+impl From<String> for FormatError {
+    fn from(message: String) -> Self {
+        FormatError::Failed(message)
+    }
+}
+
+impl std::fmt::Display for FormatError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FormatError::NoFormatter(language) => {
+                write!(f, "No formatter for {}. Install one, or a language server that formats.", language.name())
+            }
+            FormatError::Failed(message) => f.write_str(message),
+        }
     }
 }
 

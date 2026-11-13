@@ -21,6 +21,7 @@ mod vim;
 
 pub use bookmarks::EditorBookmarksChanged;
 pub use excerpt::ExcerptEvent;
+pub use format::FormatError;
 pub use lsp::EditorLspEvent;
 pub use run::{EditorBreakpointMenu, EditorBreakpointsChanged, EditorRunEvent, EditorRunSql};
 pub use sticky::Crumb;
