@@ -58,6 +58,9 @@ pub(super) struct PaneChrome {
     /// when the sidebar shows or hides, which would put its first tabs under
     /// the title bar's lead for that frame.
     pub(super) left: Option<f32>,
+    /// A context menu is open: tabs show no tooltip, which would cover the
+    /// menu a right-click opens under the pointer.
+    pub(super) menu_open: bool,
 }
 
 /// Where a tab dragged over a pane's content would land: in this pane, or
@@ -381,7 +384,7 @@ impl Pane {
                     // only when the tab doesn't show it whole.
                     .when_some(
                         look.path.as_deref().map(crate::clone_dialog::display_path).or_else(|| (icon_only || compact).then(|| name.clone())),
-                        |el, tip| el.tooltip(move |_, cx| tooltip_view(tip.clone(), cx)),
+                        |el, tip| el.when(!self.chrome.menu_open, |el| el.tooltip(move |_, cx| tooltip_view(tip.clone(), cx))),
                     )
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(PaneEvent::Activate(ix))))
                     .on_mouse_down(
