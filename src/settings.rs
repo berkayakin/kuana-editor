@@ -61,6 +61,9 @@ pub struct Settings {
     pub extensions: Option<HashMap<String, serde_json::Value>>,
     /// The terminal's shell and arguments; the login shell by default.
     pub terminal_shell: Option<Vec<String>>,
+    /// macOS: Option sends Escape + the key to the terminal (Meta), as Alt
+    /// does elsewhere, instead of typing its character. Off by default.
+    pub terminal_option_as_meta: Option<bool>,
     /// Extra entries for Run…: a name, a shell command and an optional
     /// folder relative to the project.
     pub run_configurations: Vec<RunConfiguration>,
@@ -479,6 +482,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "extensions",
     "formatters",
     "terminal_shell",
+    "terminal_option_as_meta",
     "run_configurations",
     "auto_update",
     "auto_update_extensions",
@@ -767,6 +771,7 @@ impl Settings {
             "compact_activity_bar" => self.compact_activity_bar.is_some(),
             "tools_location" => self.tools_location.is_some(),
             "terminal_shell" => self.terminal_shell.is_some(),
+            "terminal_option_as_meta" => self.terminal_option_as_meta.is_some(),
             "run_configurations" => !self.run_configurations.is_empty(),
             "auto_update" => self.auto_update.is_some(),
             "auto_update_extensions" => !self.auto_update_extensions.is_empty(),
@@ -1190,6 +1195,11 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
 
   // The terminal's shell; your login shell by default.
   // "terminal_shell": ["/opt/homebrew/bin/fish", "--login"],
+
+  // macOS: Option acts as Meta in the terminal (Option+B sends Escape, b:
+  // the shell's word moves, Emacs keys) instead of typing ∫. Alt always
+  // does on Windows and Linux.
+  // "terminal_option_as_meta": true,
 
   // How Update Project (pull) combines incoming commits with yours when
   // both branches have new ones: "merge", "rebase" or "ff_only" (stop

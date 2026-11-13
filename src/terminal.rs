@@ -480,7 +480,8 @@ impl TerminalView {
                 return;
             }
         }
-        if let Some(bytes) = escape_for(keystroke, self.mode()) {
+        let option_as_meta = Settings::get(cx).terminal_option_as_meta == Some(true);
+        if let Some(bytes) = escape_for(keystroke, self.mode(), option_as_meta) {
             cx.stop_propagation();
             self.input(bytes, cx);
         }
@@ -1904,7 +1905,7 @@ fn palette(theme: &Theme, index: usize) -> Option<Rgb> {
 
 /// The bytes a key sends, for keys that aren't plain text. None for text
 /// (handled by the input handler) and for ⌘ shortcuts.
-fn escape_for(keystroke: &gpui::Keystroke, mode: TermMode) -> Option<Cow<'static, [u8]>> {
+fn escape_for(keystroke: &gpui::Keystroke, mode: TermMode, option_as_meta: bool) -> Option<Cow<'static, [u8]>> {
     let m = keystroke.modifiers;
     if m.platform {
         return None;
@@ -1991,9 +1992,24 @@ fn escape_for(keystroke: &gpui::Keystroke, mode: TermMode) -> Option<Cow<'static
             }
             meta(&[byte])
         }
-        // Option types characters on macOS (`@` on many layouts), so only
-        // elsewhere does Alt act as Meta.
-        _ if m.alt && !cfg!(target_os = "macos") => {
+        // Option types characters on macOS (`@` on many layouts), so there
+        // it acts as Meta only when `terminal_option_as_meta` says so.
+        _ if m.alt && cfg!(target_os = "macos") => {
+            if !option_as_meta {
+                return None;
+            }
+            // The key without Option (its `key_char` is what Option types: ∫
+            // for B), Shift applied (macOS reports Shift+letter as the
+            // lowercase letter and Shift; other shifted keys come shifted).
+            let key = match keystroke.key.as_str() {
+                "space" => " ".to_string(),
+                key if key.chars().count() == 1 && m.shift => key.to_uppercase(),
+                key if key.chars().count() == 1 => key.to_string(),
+                _ => return None,
+            };
+            meta(key.as_bytes())
+        }
+        _ if m.alt => {
             let text = keystroke.key_char.clone().unwrap_or_else(|| keystroke.key.clone());
             meta(text.as_bytes())
         }
@@ -2296,7 +2312,47 @@ mod tests {
     }
 
     fn keys(source: &str, mode: TermMode) -> Option<Vec<u8>> {
-        escape_for(&gpui::Keystroke::parse(source).unwrap(), mode).map(|c| c.into_owned())
+        escape_for(&gpui::Keystroke::parse(source).unwrap(), mode, false).map(|c| c.into_owned())
+    }
+
+    /// A key as the platform reports it: `key_char` is what it types.
+    fn typed(source: &str, key_char: &str, option_as_meta: bool) -> Option<Vec<u8>> {
+        let keystroke = gpui::Keystroke { key_char: Some(key_char.into()), ..gpui::Keystroke::parse(source).unwrap() };
+        escape_for(&keystroke, TermMode::empty(), option_as_meta).map(|c| c.into_owned())
+    }
+
+    /// Option types characters unless it's set to be Meta; keys with their
+    /// own sequences send them either way.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn option_is_meta_only_when_asked() {
+        assert_eq!(typed("alt-b", "∫", false), None);
+        assert_eq!(typed("alt-b", "∫", true).unwrap(), b"\x1bb");
+        assert_eq!(typed("alt-shift-b", "ı", true).unwrap(), b"\x1bB");
+        assert_eq!(typed("alt-?", "¿", true).unwrap(), b"\x1b?");
+        assert_eq!(typed("alt-.", "≥", true).unwrap(), b"\x1b.");
+        assert_eq!(typed("alt-space", " ", true).unwrap(), b"\x1b ");
+        assert_eq!(typed("cmd-alt-b", "∫", true), None);
+        for on in [false, true] {
+            assert_eq!(keys_with("alt-left", on).unwrap(), b"\x1b[1;3D");
+            assert_eq!(keys_with("alt-backspace", on).unwrap(), b"\x1b\x7f");
+            assert_eq!(keys_with("alt-enter", on).unwrap(), b"\x1b\r");
+        }
+    }
+
+    /// Alt is Meta on Windows and Linux whatever the macOS setting says.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn alt_is_meta_off_macos() {
+        for on in [false, true] {
+            assert_eq!(typed("alt-b", "b", on).unwrap(), b"\x1bb");
+            assert_eq!(typed("alt-shift-b", "B", on).unwrap(), b"\x1bB");
+            assert_eq!(keys_with("alt-left", on).unwrap(), b"\x1b[1;3D");
+        }
+    }
+
+    fn keys_with(source: &str, option_as_meta: bool) -> Option<Vec<u8>> {
+        escape_for(&gpui::Keystroke::parse(source).unwrap(), TermMode::empty(), option_as_meta).map(|c| c.into_owned())
     }
 
     #[test]
