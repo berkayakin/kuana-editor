@@ -17,6 +17,8 @@ info_plist_exts = ["assets/macos/document-types.plist"]
 
 [dependencies]
 alacritty_terminal = { version = "0.26.0", default-features = false }
+# alacritty_terminal's own, for wrapping its pty (`terminal::run_log::Teed`).
+polling = "3.11"
 # Run tabs on Windows hand PowerShell their script encoded (`-EncodedCommand`).
 base64 = "0.22"
 futures = "0.3.34"

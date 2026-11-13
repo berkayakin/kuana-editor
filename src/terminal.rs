@@ -41,6 +41,10 @@ use gpui::{
     Window, actions, div, fill, font, point, prelude::*, px, relative, size,
 };
 
+mod run_log;
+
+use run_log::{RunLog, Teed};
+
 use crate::{
     assets::Icon,
     editor::{Cancel, Editor, EditorEvent, MoveDown, MoveUp, Newline, NewlineBelow},
@@ -129,6 +133,8 @@ pub struct TerminalView {
     run: Option<(RunTarget, RunState)>,
     /// The program's exit code, from its exit until its output is all read.
     exit_code: Option<i32>,
+    /// A Run tab's whole output, past what the scrollback keeps.
+    run_log: Option<RunLog>,
     /// Where the shell started, for relative paths in its output.
     cwd: PathBuf,
     /// The link under the pointer while ⌘/Ctrl is held: screen row, columns.
@@ -233,10 +239,11 @@ impl TerminalView {
         let (tx, rx) = mpsc::unbounded();
         let listener = Listener(tx);
         let term = Arc::new(FairMutex::new(Term::new(Config::default(), &TermSize::new(80, 24), listener.clone())));
+        let run_log = run.is_some().then(RunLog::default);
         cx.new(|cx: &mut Context<Self>| {
             let start = {
-                let (term, cwd, run) = (term.clone(), cwd.clone(), run.clone());
-                cx.background_executor().spawn(async move { start_pty(configured, &cwd, run.as_ref(), term, listener) })
+                let (term, cwd, run, log) = (term.clone(), cwd.clone(), run.clone(), run_log.clone());
+                cx.background_executor().spawn(async move { start_pty(configured, &cwd, run.as_ref(), term, listener, log) })
             };
             cx.spawn(async move |this, cx| {
                 let mut started = Some(start.await);
@@ -253,6 +260,7 @@ impl TerminalView {
             })
             .detach();
             let mut view = Self::new(term, rx, cwd, cx);
+            view.run_log = run_log;
             if let Some(target) = run {
                 view.title = target.name.clone().into();
                 view.run = Some((target, RunState::Running));
@@ -289,7 +297,7 @@ impl TerminalView {
 
     /// The output, to read as text on another thread (a Run's problems).
     pub fn output(&self) -> Output {
-        Output(self.term.clone())
+        Output { term: self.term.clone(), log: self.run_log.clone() }
     }
 
     /// Interrupts the running program (Ctrl+C).
@@ -340,6 +348,7 @@ impl TerminalView {
             scroll_rest: 0.,
             run: None,
             exit_code: None,
+            run_log: None,
             cwd,
             link: None,
             last_mouse: None,
@@ -1335,13 +1344,20 @@ impl Drop for TerminalView {
 }
 
 /// A terminal's output, to read on another thread (`TerminalView::output`).
-pub struct Output(Arc<FairMutex<Term<Listener>>>);
+pub struct Output {
+    term: Arc<FairMutex<Term<Listener>>>,
+    log: Option<RunLog>,
+}
 
 impl Output {
-    /// Everything on screen and in the scrollback, as text (wrapped lines
-    /// joined, combining characters kept).
+    /// Everything the program printed (a Run tab's log), else everything on
+    /// screen and in the scrollback, as text (wrapped lines joined,
+    /// combining characters kept).
     pub fn text(&self) -> String {
-        let term = self.0.lock();
+        if let Some(log) = &self.log {
+            return log.text();
+        }
+        let term = self.term.lock();
         let columns = term.columns();
         let mut out = String::new();
         for line in term.topmost_line().0..=term.bottommost_line().0 {
@@ -1396,6 +1412,7 @@ fn start_pty(
     run: Option<&RunTarget>,
     term: Arc<FairMutex<Term<Listener>>>,
     listener: Listener,
+    log: Option<RunLog>,
 ) -> std::io::Result<Started> {
     let venv = crate::python::venv(cwd);
     let shell = match run {
@@ -1462,7 +1479,7 @@ fn start_pty(
     });
     #[cfg(not(unix))]
     let process = None;
-    let event_loop = EventLoop::new(term, listener, pty, false, false)?;
+    let event_loop = EventLoop::new(term, listener, Teed::new(pty, log), false, false)?;
     let notifier = Notifier(event_loop.channel());
     event_loop.spawn();
     if let Some(line) = activate {
@@ -2442,7 +2459,7 @@ mod tests {
         assert_eq!(pieces(&cells, 1), [(0, "\u{2764}\u{fe0f}", false), (1, "!", true)]);
         assert_eq!(pieces(&cells, 2), [(0, "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}", false), (6, "=3", true)]);
         // The text a Run's problems are read from keeps them too.
-        assert!(Output(Arc::new(FairMutex::new(term))).text().starts_with("cafe\u{301} ok\n\u{2764}\u{fe0f}!\n"));
+        assert!(Output { term: Arc::new(FairMutex::new(term)), log: None }.text().starts_with("cafe\u{301} ok\n\u{2764}\u{fe0f}!\n"));
     }
 
     #[test]
@@ -2705,7 +2722,7 @@ mod tests {
             let (tx, rx) = mpsc::unbounded();
             let term = Arc::new(FairMutex::new(Term::new(Config::default(), &TermSize::new(80, 24), Listener(tx.clone()))));
             let shell = Some(vec!["/bin/sleep".into(), "30".into()]);
-            (start_pty(shell, &std::env::temp_dir(), None, term, Listener(tx)).unwrap(), rx)
+            (start_pty(shell, &std::env::temp_dir(), None, term, Listener(tx), None).unwrap(), rx)
         })
         .join()
         .unwrap();
@@ -2722,6 +2739,35 @@ mod tests {
                 }
             }
         }
+        let _ = started.notifier.0.send(Msg::Shutdown);
+    }
+
+    /// A Run tab's problems are read from all of its output, also the lines
+    /// that scrolled out of the scrollback.
+    #[cfg(unix)]
+    #[test]
+    fn run_output_outlasts_the_scrollback() {
+        let (tx, mut events) = mpsc::unbounded();
+        let term = Arc::new(FairMutex::new(Term::new(Config::default(), &TermSize::new(80, 24), Listener(tx.clone()))));
+        let log = RunLog::default();
+        // Waits so the output is read before the pty closes.
+        let shell = Some(vec!["/bin/sh".into(), "-c".into(), "seq 1 15000; sleep 1".into()]);
+        let started = start_pty(shell, &std::env::temp_dir(), None, term.clone(), Listener(tx), Some(log.clone())).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            match events.try_recv() {
+                Ok(TermEvent::Exit) => break,
+                Ok(_) => {}
+                Err(_) => {
+                    assert!(std::time::Instant::now() < deadline, "the command didn't end");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
+        let text = Output { term: term.clone(), log: Some(log) }.text();
+        assert_eq!(text.lines().next(), Some("1"));
+        assert_eq!(text.lines().last(), Some("15000"));
+        assert!(!Output { term, log: None }.text().starts_with("1\n"), "the scrollback kept it all: the test shows nothing");
         let _ = started.notifier.0.send(Msg::Shutdown);
     }
 
@@ -2745,7 +2791,7 @@ mod tests {
     fn command_in_foreground(shell: Option<Vec<String>>) {
         let (tx, _events) = mpsc::unbounded();
         let term = Arc::new(FairMutex::new(Term::new(Config::default(), &TermSize::new(80, 24), Listener(tx.clone()))));
-        let started = start_pty(shell, &std::env::temp_dir(), None, term, Listener(tx)).unwrap();
+        let started = start_pty(shell, &std::env::temp_dir(), None, term, Listener(tx), None).unwrap();
         let process = started.process.as_ref().unwrap();
         let wait_for = |what: &str, done: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + Duration::from_secs(20);
