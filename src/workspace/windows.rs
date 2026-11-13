@@ -13,11 +13,6 @@ pub(super) fn modal_top(window: &Window) -> Pixels {
 }
 
 
-/// The tallest a modal can be and still end above the window's bottom edge.
-pub fn modal_max_height(window: &Window) -> Pixels {
-    (window.viewport_size().height - modal_top(window) - px(16.)).max(px(120.))
-}
-
 
 pub fn open_window(
     near: Option<Bounds<Pixels>>,

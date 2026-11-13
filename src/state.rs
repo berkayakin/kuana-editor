@@ -156,6 +156,12 @@ pub struct SessionState {
     /// Where the Preferences window was last, to reopen it there.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferences_window: Option<WindowPlacement>,
+    /// The Push and Merge windows' sizes (width, height): they reopen at
+    /// them, centered over their project window (`tool_window.rs`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub push_window_size: Option<(f32, f32)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_window_size: Option<(f32, f32)>,
     /// Keys this version doesn't know (a newer Kuana wrote them), kept so that
     /// saving here doesn't drop them.
     #[serde(flatten)]
