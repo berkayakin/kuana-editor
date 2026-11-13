@@ -291,8 +291,8 @@ impl Workspace {
                 })
                 .detach();
             }
-            Request::Permission { name, permission, answer, .. } => {
-                let message = format!("Allow the {name} extension to {}?", permission.describe());
+            Request::Permission { name, permission, scope, answer, .. } => {
+                let message = format!("Allow the {name} extension to {}?", permission.describe(scope.as_deref()));
                 let detail = "Kuana remembers your answer. You can revoke it from the extension's row in Settings → Extensions.";
                 let reply = window.prompt(PromptLevel::Info, &message, Some(detail), &["Allow", "Don't Allow"], cx);
                 cx.spawn(async move |_, _| {

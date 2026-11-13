@@ -2607,13 +2607,20 @@ impl Preferences {
                 keys_line = Some(format!("Not bound, the keymap uses them: {}. Bind them in keymap.json.", words.join(", ")));
             }
             if !ui.permissions.is_empty() {
-                let granted = crate::extensions::permissions::granted(&ui.extension);
+                use crate::extensions::permissions;
                 let words: Vec<String> = ui
                     .permissions
                     .iter()
-                    .map(|p| format!("{} ({})", p.key(), if granted.contains(p) { "allowed" } else { "asks first" }))
+                    .map(|&p| {
+                        let scope = ui.scope(p);
+                        let answer = if permissions::is_granted(&ui.extension, p, scope) { "allowed" } else { "asks first" };
+                        match p.scope_words(scope) {
+                            Some(words) => format!("{} {words} ({answer})", p.key()),
+                            None => format!("{} ({answer})", p.key()),
+                        }
+                    })
                     .collect();
-                permissions_line = Some((format!("Permissions: {}", words.join(", ")), !granted.is_empty(), ui.extension.clone()));
+                permissions_line = Some((format!("Permissions: {}", words.join(", ")), permissions::any_granted(&ui.extension), ui.extension.clone()));
             }
         }
         let status: Option<(Hsla, String)> = if !extension.building.is_empty() {

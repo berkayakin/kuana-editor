@@ -967,7 +967,15 @@ fn release(value: &Value) -> Option<GithubRelease> {
 
 /// An HTTP request for Kuana's own extension interface (`ui_host`): the
 /// status, the last response's headers and the body.
-pub(super) fn http(method: &str, url: &str, headers: Vec<(String, String)>, body: Option<Vec<u8>>) -> Result<(u16, Vec<(String, String)>, Vec<u8>), String> {
+/// `follow`: follow up to 10 redirects (off for an extension whose hosts are
+/// listed, since a redirect could lead anywhere).
+pub(super) fn http(
+    method: &str,
+    url: &str,
+    headers: Vec<(String, String)>,
+    body: Option<Vec<u8>>,
+    follow: bool,
+) -> Result<(u16, Vec<(String, String)>, Vec<u8>), String> {
     let method = match method.to_ascii_uppercase().as_str() {
         "GET" => HttpMethod::Get,
         "HEAD" => HttpMethod::Head,
@@ -978,7 +986,8 @@ pub(super) fn http(method: &str, url: &str, headers: Vec<(String, String)>, body
         "PATCH" => HttpMethod::Patch,
         other => return Err(format!("{other} isn't an HTTP method Kuana sends")),
     };
-    let request = HttpRequest { method, url: url.to_string(), headers, body, redirect_policy: RedirectPolicy::FollowLimit(10) };
+    let redirect_policy = if follow { RedirectPolicy::FollowLimit(10) } else { RedirectPolicy::NoFollow };
+    let request = HttpRequest { method, url: url.to_string(), headers, body, redirect_policy };
     let header_path = header_file()?;
     let result = (|| {
         let mut command = curl(&request, &header_path)?;
