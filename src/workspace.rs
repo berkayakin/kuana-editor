@@ -1836,6 +1836,7 @@ impl Workspace {
                 root: self.root.clone(),
                 title_ends: if at_top { self.title_ends_now() } else { (0., f32::INFINITY) },
                 left: (at_top && self.center.at_left(pane)).then(|| self.editor_left(cx)),
+                menu_open: self.context_menu.is_some(),
             };
             pane.update(cx, |p, cx| p.set_chrome(chrome, cx));
         }
