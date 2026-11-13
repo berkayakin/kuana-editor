@@ -9,7 +9,8 @@ An extension can add to Kuana's UI:
 - **status bar items**, and its own **settings**.
 
 Its code can also read and edit the open file, write project files, pick from a list, and hear about files being
-opened and saved or a timer coming due. Those need interface 0.2: see [Interface 0.2](#interface-02).
+opened and saved or a timer coming due. That's interface 0.2, which this page uses throughout; see
+[Interface 0.2](#interface-02) and [Versions](#versions).
 
 Kuana draws all of it in its own style and handles the keyboard, scrolling and themes. Your code answers with data
 ("these are the items", "this command did that") and asks Kuana for things through host calls (open a file, show
@@ -41,8 +42,8 @@ notes/
   kuana.wasm         the built code (step 6)
 ```
 
-Copy [`src/extensions/kuana-wit/kuana.wit`](../src/extensions/kuana-wit/kuana.wit) from the Kuana repository into
-`wit/`. It's licensed MIT OR Apache-2.0, so you can ship it with your extension.
+Copy [`src/extensions/kuana-wit/v0.2/kuana.wit`](../src/extensions/kuana-wit/v0.2/kuana.wit) (interface 0.2)
+from the Kuana repository into `wit/`. It's licensed MIT OR Apache-2.0, so you can ship it with your extension.
 
 ### 3. `extension.toml`
 
@@ -58,7 +59,7 @@ description = "Quick notes in a view of their own."
 authors = ["You"]
 
 [kuana]
-api = "0.1"
+api = "0.2"
 
 [kuana.views.notes]
 title = "Notes"
@@ -202,7 +203,8 @@ impl Guest for Notes {
         Ok(())
     }
 
-    fn file_saved(_path: String) -> Result<(), String> {
+    // A note saved in its tab: its word count may have changed.
+    fn on_event(_event: Event) -> Result<(), String> {
         host::refresh("notes", None);
         Ok(())
     }
@@ -223,6 +225,8 @@ What's going on:
   work there. It can't reach anything else on its own.
 - `refresh` tells Kuana to ask for items again. Kuana gathers refreshes that come close together into one.
 - Returning an error from a command shows it to the user as a notification.
+- `on_event` hears what the manifest's `events` lists; a save of a file in the extension's own folder (a note being
+  edited) always reaches it, so this one needs no list. See [Events](#events).
 
 ### 6. Build, check, install
 
@@ -340,7 +344,7 @@ A **tree item**:
 | `notify(tone, message, detail)` | A notification: `success`, `error`, or info for the other tones. | |
 | `ask-input(prompt, initial, secret)` | Asks for a line of text; `secret` makes it a password field. None when cancelled. | |
 | `confirm(message, detail, action)` | Asks to confirm; `action` names the button. | |
-| `settings()` | The extension's entry in settings.json, `"extensions": { "<id>": { … } }`, as JSON (`{}` when unset). | |
+| `settings()` | The extension's entry in settings.json, `"extensions": { "<id>": { … } }`, as JSON, with the defaults of `[kuana.settings]` for keys that aren't set (`{}` when there's neither). | |
 | `project-root()` | The open project's folder, if any. | |
 | `secret-get(key)`, `secret-set(key, value)` | A value in the system keychain, under the extension's own name; `secret-set` with none removes it. | |
 | `set-diagnostics(path, list)` | Replaces the extension's problems for a file: underlined in the editor and listed in Problems. 1-based line and column. | |
@@ -423,7 +427,7 @@ events = ["file-saved", "editor-changed"]
 | `file-opened` | A file is opened in a tab and read | the file | yes |
 | `file-closed` | Its last tab closes | the file | yes |
 | `file-saved` | An explicit Save (not auto-save) | the file | yes |
-| `editor-changed` | The user moved to another file's tab and stayed 200 ms | the file | yes |
+| `editor-changed` | The user moved to another file's tab and stayed 200 ms; also for the tab a window opens with | the file | yes |
 | `settings-changed` | The extension's own settings changed | | |
 | `timer` | A timer is due (never listed); its name is in `data` | | |
 | `process-output` | A program started with `spawn-process` printed lines; `data` is JSON | | |
