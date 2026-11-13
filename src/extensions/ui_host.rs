@@ -49,6 +49,7 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, W
 use super::{
     contrib::{Api, Contributions, Permission},
     permissions, processes,
+    results::{self, ResultItem},
     wasm::{self, ENGINE},
 };
 use crate::lsp::servers;
@@ -72,8 +73,9 @@ use v2::kuana::extension::types as wit2;
 
 // ---- What the UI gets -----------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tone {
+    #[default]
     Normal,
     Muted,
     Success,
@@ -238,6 +240,8 @@ pub enum Request {
     /// Sets the window's timer `name` (`every`: seconds, and whether it
     /// repeats), or clears it.
     Timer { window: u64, extension: String, name: String, every: Option<(u32, bool)> },
+    /// A tree for the Find panel, in the tab named `title`.
+    ShowResults { window: u64, extension: String, title: String, items: Vec<ResultItem> },
 }
 
 static REQUESTS: LazyLock<(UnboundedSender<Request>, Mutex<Option<UnboundedReceiver<Request>>>)> = LazyLock::new(|| {
@@ -914,6 +918,37 @@ impl v2::kuana::extension::host::Host for HostState {
 
     fn kill_process(&mut self, name: String) {
         processes::kill(&self.extension, &name);
+    }
+
+    fn show_results(&mut self, title: String, nodes: Vec<wit2::ResultNode>) -> Result<(), String> {
+        let title = title.lines().next().unwrap_or_default().trim().to_string();
+        if title.is_empty() {
+            return Err("the results need a title".into());
+        }
+        // Each file is checked once, and only for rows that will show.
+        let mut reached: HashMap<String, PathBuf> = HashMap::new();
+        let mut rows = Vec::with_capacity(nodes.len().min(results::MAX_NODES));
+        for (ix, node) in nodes.into_iter().enumerate() {
+            let place = match node.place.filter(|_| ix < results::MAX_NODES) {
+                Some(place) => {
+                    let path = match reached.get(&place.path) {
+                        Some(path) => path.clone(),
+                        None => {
+                            let path = self.resolve(&place.path).map_err(|e| format!("row {ix}: {e}"))?;
+                            reached.insert(place.path, path.clone());
+                            path
+                        }
+                    };
+                    Some((path, place.line.max(1), place.column))
+                }
+                None => None,
+            };
+            let item = ResultItem { label: node.label, detail: node.detail, icon: node.icon, tone: node.tone.into(), place, children: Vec::new() };
+            rows.push((node.parent, item));
+        }
+        let items = results::tree(rows)?;
+        send(Request::ShowResults { window: self.caller.window, extension: self.extension.clone(), title, items });
+        Ok(())
     }
 
     fn append_panel(&mut self, panel: String, lines: Vec<String>) {

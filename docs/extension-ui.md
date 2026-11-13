@@ -368,6 +368,7 @@ is a small extension that uses them: it transforms the selection and counts word
 | `spawn-process(name, program, args, cwd, panel)` | Starts a program and comes back at once. Its output goes to `panel` as it comes, when one is named. | `process`, trusted project |
 | `kill-process(name)` | Ends a program `spawn-process` started, and what it started. | |
 | `append-panel(panel, lines)` | Adds lines to the end of a panel's text, where `show-panel` replaces it. | |
+| `show-results(title, nodes)` | Shows a tree in the Find panel, like Find Usages' results: rows with a label, detail, icon, tone and a place to go (a file, line and column). Same title again: that tab is filled in place. | `workspace-files` for places in project files |
 
 **Places in text** are spans of UTF-8 byte offsets (`end` not included), so in Rust `&text[start..end]` is the
 selection. An edit replaces its span with its text; an empty span inserts. Edits can't overlap and can't cut a
@@ -376,6 +377,17 @@ character in two.
 **Versions of the text.** `editor` gives the text's version, and `apply-edits` and `set-selections` take the one
 they were worked out for. Your code runs beside the editor, so the user may have typed in between: then the call
 fails saying the text has changed, and nothing is edited. Read the editor again and retry.
+
+**Results in the Find panel.** `show-results` takes the tree as a flat list, since WIT has no nested records:
+each row comes after its parent and names it by its index in the list (`parent`, none for a top-level row).
+A row's `place` (a path as for `open-file`, a 1-based line and an optional 1-based column in characters) is
+where Enter, a click or Next / Previous Result goes; the keyboard works as for Find Usages, and Open in Editor
+shows the places in a multibuffer. Without an icon, a row with a place shows its line number, or its file's
+type icon when it has children (a file grouping its places). Groups start open. A new title opens a tab and
+gives it the keyboard; the same title again fills that tab in place, keeping its closed groups and selection,
+and leaves the keyboard where it is, so a timer can refresh it. Up to 5,000 rows show (the rest as one "more"
+row), nested at most 64 deep; a bad `parent` or a place the code can't reach fails the call and shows nothing.
+Children are given up front: rows can't load as they open yet.
 
 **Timers** belong to the window that set them and end with it. One that comes due while the window isn't the
 active one waits until it is, and the next wait starts only once your code has answered, so a slow tick never piles
