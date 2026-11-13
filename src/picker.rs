@@ -63,6 +63,19 @@ pub enum PickerMode {
     Symbols,
     /// The project's bookmarks; see [`Picker::set_bookmarks`].
     Bookmarks,
+    /// A list an extension's code asks the user to pick from; see
+    /// [`Picker::set_choices`].
+    Choices,
+}
+
+/// One row of a [`PickerMode::Choices`] list.
+pub struct Choice {
+    /// What [`PickerEvent::Chosen`] carries.
+    pub id: String,
+    pub label: SharedString,
+    pub detail: Option<SharedString>,
+    /// An asset path for `svg()`.
+    pub icon: Option<SharedString>,
 }
 
 /// One place in a [`PickerMode::Locations`] list.
@@ -106,6 +119,8 @@ pub enum PickerEvent {
     SymbolQuery(String),
     Run(RunTarget),
     Debug(RunTarget),
+    /// A [`PickerMode::Choices`] row's id.
+    Chosen(String),
     /// Bookmarks: go to this one (0-based row).
     OpenBookmark { path: PathBuf, row: usize },
     /// Bookmarks: ⌫ with nothing typed removes the selected one.
@@ -147,6 +162,10 @@ enum Item {
         ix: usize,
         hl: Vec<Range<usize>>,
     },
+    Choice {
+        ix: usize,
+        hl: Vec<Range<usize>>,
+    },
     Bookmark {
         ix: usize,
     },
@@ -166,6 +185,7 @@ pub struct Picker {
     current_symbol: Option<usize>,
     locations: Arc<Vec<LocationRow>>,
     run_targets: Arc<Vec<RunTarget>>,
+    choices: Arc<Vec<Choice>>,
     bookmarks: Arc<Vec<BookmarkRow>>,
     /// Overrides the mode's title (Locations: "Usages of foo").
     title: Option<SharedString>,
@@ -210,6 +230,7 @@ impl Picker {
             PickerMode::Debug => "Debug configuration",
             PickerMode::Attach => "Search processes by name, command or PID",
             PickerMode::Symbols => "Search symbols in the project",
+            PickerMode::Choices => "Filter",
             PickerMode::Bookmarks => "Filter bookmarks",
         };
         let query = cx.new(|cx| Editor::single_line(placeholder, cx));
@@ -237,6 +258,7 @@ impl Picker {
             locations: Arc::new(Vec::new()),
 
             run_targets: Arc::new(Vec::new()),
+            choices: Arc::new(Vec::new()),
             bookmarks: Arc::new(Vec::new()),
             title: None,
             items: Arc::new(Vec::new()),
@@ -276,6 +298,16 @@ impl Picker {
     /// Fills a Run picker.
     pub fn set_run_targets(&mut self, targets: Vec<RunTarget>, cx: &mut Context<Self>) {
         self.run_targets = Arc::new(targets);
+        self.update_items(cx);
+    }
+
+    /// Fills a Choices picker: its title, what the empty field says, the rows.
+    pub fn set_choices(&mut self, title: SharedString, placeholder: &str, choices: Vec<Choice>, cx: &mut Context<Self>) {
+        self.title = Some(title);
+        if !placeholder.is_empty() {
+            self.query.update(cx, |q, cx| q.set_placeholder(placeholder.to_string(), cx));
+        }
+        self.choices = Arc::new(choices);
         self.update_items(cx);
     }
 
@@ -524,6 +556,30 @@ impl Picker {
             items.extend(scored.into_iter().map(|(_, i)| i));
         }
 
+        if self.mode == PickerMode::Choices {
+            let choices = self.choices.clone();
+            let mut scored: Vec<(u32, Item)> = Vec::new();
+            for (ix, choice) in choices.iter().enumerate() {
+                let Some(p) = &pattern else {
+                    scored.push((0, Item::Choice { ix, hl: Vec::new() }));
+                    continue;
+                };
+                let mut buf = Vec::new();
+                let mut indices = Vec::new();
+                if let Some(score) = p.indices(Utf32Str::new(&choice.label, &mut buf), &mut self.matcher, &mut indices) {
+                    let hl = indices.into_iter().filter_map(|c| choice.label.char_indices().nth(c as usize).map(|(b, ch)| b..b + ch.len_utf8())).collect();
+                    scored.push((score + 1, Item::Choice { ix, hl }));
+                } else if choice.detail.as_ref().is_some_and(|d| d.to_lowercase().contains(&text.trim().to_lowercase())) {
+                    // Found by its detail too, after the ones whose label matches.
+                    scored.push((0, Item::Choice { ix, hl: Vec::new() }));
+                }
+            }
+            if pattern.is_some() {
+                scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+            }
+            items.extend(scored.into_iter().map(|(_, i)| i));
+        }
+
         if matches!(self.mode, PickerMode::Locations | PickerMode::Symbols) {
             let locations = self.locations.clone();
             let mut scored: Vec<(u32, Item)> = Vec::new();
@@ -649,6 +705,7 @@ impl Picker {
                 let target = self.run_targets[*ix].clone();
                 cx.emit(if self.mode == PickerMode::Run { PickerEvent::Run(target) } else { PickerEvent::Debug(target) })
             }
+            Some(Item::Choice { ix, .. }) => cx.emit(PickerEvent::Chosen(self.choices[*ix].id.clone())),
             Some(Item::Bookmark { ix }) => {
                 let row = &self.bookmarks[*ix];
                 cx.emit(PickerEvent::OpenBookmark { path: row.path.clone(), row: row.row })
@@ -760,6 +817,7 @@ impl Render for Picker {
             PickerMode::Debug => ("Debug", Icon::Bug, ""),
             PickerMode::Attach => ("Attach to Process", Icon::Bug, ""),
             PickerMode::Symbols => ("Symbols", Icon::Braces, ""),
+            PickerMode::Choices => ("", Icon::Puzzle, ""),
             PickerMode::Bookmarks => ("Bookmarks", Icon::Bookmark, ""),
         };
         let title: SharedString = match &self.title {
@@ -778,6 +836,7 @@ impl Render for Picker {
         let symbols = self.symbols.clone();
         let locations = self.locations.clone();
         let run_targets = self.run_targets.clone();
+        let choices = self.choices.clone();
         let bookmarks = self.bookmarks.clone();
         let shortcuts = self.shortcuts.clone();
         let selected = self.selected;
@@ -891,6 +950,16 @@ impl Render for Picker {
                                                         .child(target.command.clone()),
                                                 )
                                             })
+                                    }
+                                    Item::Choice { ix, hl } => {
+                                        let choice = &choices[*ix];
+                                        row.when_some(choice.icon.clone(), |row, icon| {
+                                            row.child(gpui::svg().path(icon).size(px(14.)).flex_shrink_0().text_color(theme.text_muted))
+                                        })
+                                        .child(div().flex_shrink_0().text_color(theme.text).child(highlighted(choice.label.clone(), hl, theme.accent.into())))
+                                        .when_some(choice.detail.clone(), |row, detail| {
+                                            row.child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme.text_dim).child(detail))
+                                        })
                                     }
                                     Item::Location { ix } => {
                                         let row_data = &locations[*ix];

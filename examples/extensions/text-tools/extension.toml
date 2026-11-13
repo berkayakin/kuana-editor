@@ -1,0 +1,45 @@
+id = "text-tools"
+name = "Text Tools"
+version = "0.1.0"
+schema_version = 1
+description = "Transform the selection and count words. A sample of interface 0.2 of Kuana's extension API."
+authors = ["Berkay Akin"]
+repository = "https://github.com/berkayakin/kuana-editor"
+
+[kuana]
+api = "0.2"
+# Reading the open file, and changing it.
+permissions = ["workspace-files", "workspace-write"]
+# What the code's on-event hears about: the count follows the file the user is in.
+events = ["editor-changed", "file-saved", "settings-changed"]
+
+[kuana.commands.transform]
+title = "Transform Selection…"
+key = "ctrl-alt-shift-t"
+
+[kuana.commands.stats]
+title = "Show Text Statistics"
+
+# The editor's and a tab's right-click menus.
+[[kuana.menus]]
+place = "editor"
+command = "transform"
+
+[[kuana.menus]]
+place = "editor-tab"
+command = "stats"
+
+# The status bar item the code fills; a click shows the statistics.
+[kuana.status.count]
+command = "stats"
+
+[kuana.panels.stats]
+title = "Text Statistics"
+
+# "extensions": { "text-tools": { "count": "characters" } } in settings.json.
+[kuana.settings.count]
+title = "Count"
+description = "What the status bar item counts."
+type = "enum"
+values = ["words", "characters", "lines"]
+default = "words"

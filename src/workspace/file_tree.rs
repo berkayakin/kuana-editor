@@ -185,6 +185,21 @@ impl Workspace {
             }
         }
 
+        // Extensions' commands for this file or folder.
+        let file = crate::extensions::contrib::FileSubject { path: &path, folder: is_dir, language: None };
+        let ext_entries = self.extension_menu_entries(&crate::extensions::contrib::MenuPlace::FileTree, &file);
+        if !ext_entries.is_empty() {
+            entries.push(MenuEntry::Separator);
+            actions.push(None);
+            for (entry, action) in ext_entries {
+                entries.push(entry);
+                actions.push(action);
+            }
+        }
+        let mut add = |entry: MenuEntry, action: Option<TreeAction>| {
+            entries.push(entry);
+            actions.push(action.map(MenuAction::Tree));
+        };
         if !is_root {
             add(MenuEntry::Separator, None);
             add(MenuEntry::item(if cfg!(windows) { "Move to Recycle Bin" } else { "Move to Trash" }, Icon::Trash).danger(), Some(TreeAction::Delete(path.clone())));

@@ -3,8 +3,13 @@
 An extension can add to Kuana's UI:
 
 - **views** on the activity bar: a tree of items, like Files or Database;
-- **commands**, in Find Action, a view's toolbar, the right-click menu of its items and the editor's right-click menu;
-- **panels** in the bottom area, showing lines of text or a table.
+- **commands**, in Find Action, a view's toolbar, the right-click menus of its items, the editor, tabs and the file
+  tree, with a default shortcut if you give one;
+- **panels** in the bottom area, showing lines of text or a table;
+- **status bar items**, and its own **settings**.
+
+Its code can also read and edit the open file, write project files, pick from a list, and hear about files being
+opened and saved or a timer coming due. Those need interface 0.2: see [Interface 0.2](#interface-02).
 
 Kuana draws all of it in its own style and handles the keyboard, scrolling and themes. Your code answers with data
 ("these are the items", "this command did that") and asks Kuana for things through host calls (open a file, show
@@ -265,12 +270,27 @@ Everything is under `[kuana]` in `extension.toml`.
 
 | Key | Meaning |
 | --- | --- |
-| `api` | The interface version the code is built for. `"0.1"`, the only one so far. |
-| `permissions` | What the code may do beyond its own folder: `"process"`, `"network"`, `"workspace-files"`. See [Permissions](#permissions). |
+| `api` | The interface version the code is built for: `"0.1"` (the default) or `"0.2"`. See [Versions](#versions). |
+| `permissions` | What the code may do beyond its own folder: `"process"`, `"network"`, `"workspace-files"`, `"workspace-write"` (0.2). See [Permissions](#permissions). |
+| `events` | 0.2: what the code's `on-event` hears about. See [Events](#events). |
 | `[kuana.views.<id>]` | A view. `title`; `icon`; `when`: `"always"` (the default), `"file:<name>"` (shown when the project has that file or folder, such as `compose.yaml`) or `"language:<name>"` (shown while a file in that language is open, such as `Go`). |
-| `[kuana.commands.<id>]` | A command. `title`; `icon` (shown when it's a toolbar button). Find Action lists it as "<extension name>: <title>". |
-| `[[kuana.menus]]` | Where a command shows. `place`: `"view-toolbar:<view>"`, `"view-item:<view>"` or `"editor"`. `command`: its id. `when`: for item menus, `"kind == '…'"`; for the editor, `"language == '…'"`; several joined with `\|\|`. |
+| `[kuana.commands.<id>]` | A command. `title`; `icon` (shown when it's a toolbar button); `key`: a default shortcut, see [Key bindings](#key-bindings). Find Action lists it as "<extension name>: <title>". |
+| `[[kuana.menus]]` | Where a command shows. `place`: `"view-toolbar:<view>"`, `"view-item:<view>"`, `"editor"`, `"editor-tab"` (a tab's right-click menu) or `"file-tree"`. `command`: its id. `when`: see below. |
 | `[kuana.panels.<id>]` | A bottom panel. `title`. |
+| `[kuana.status.<id>]` | 0.2: a status bar item, filled by the code with `set-status`. `command`: run when it's clicked; `when`: as a view's. |
+| `[kuana.settings.<key>]` | One of the extension's settings. See [Settings](#settings). |
+
+A menu entry's `when` is one or more conditions joined with `\|\|`:
+
+| Condition | Holds for |
+| --- | --- |
+| `kind == '…'` | a view item of that `kind` |
+| `language == '…'` | a file in that language (editor and tab menus) |
+| `name == '…'` | a file or folder with that whole name (`Makefile`) |
+| `extension == '…'` | a file with that extension (`json`) |
+| `type == 'folder'`, `type == 'file'` | a folder, or a file (the file tree's menu) |
+
+In the editor's, a tab's and the file tree's menus the command's `target` is the file's path.
 
 Ids are letters, digits, `-`, `_` and `.`.
 
@@ -293,7 +313,8 @@ An SVG of your own is drawn as a mask in the theme's colors, like Kuana's icons:
 | `activate() -> result` | Once, when the code is loaded, before anything else. An error here stops the extension. |
 | `children(view, parent) -> result<list<tree-item>>` | For a view's roots (`parent` is none) and when an item is opened. |
 | `run-command(command, target) -> result` | When a command runs. `target`: the item's id (item menu, click), the file's path (editor menu), or none. |
-| `file-saved(path) -> result` | When the user saves (explicitly) a file in the extension's folder: for files the extension opened for editing. |
+| `file-saved(path) -> result` | 0.1 only: when the user saves (explicitly) a file in the extension's folder, for files the extension opened for editing. |
+| `on-event(event) -> result` | 0.2, in place of `file-saved`: see [Events](#events). |
 
 A **tree item**:
 
@@ -327,7 +348,65 @@ A **tree item**:
 | `http-request(method, url, headers, body)` | An HTTP(S) request: status, headers, body. | `network` |
 | `read-project-file(path)` | Reads a file in the open project (up to 16 MB), by a path relative to the project or absolute in it. | `workspace-files` |
 
-Calls that wait for the user (`ask-input`, `confirm`, a permission) block only the extension's own thread.
+Calls that wait for the user (`ask-input`, `confirm`, `pick`, a permission) block only the extension's own thread.
+
+### Interface 0.2
+
+With `api = "0.2"` the code is built against
+[`kuana-wit/v0.2/kuana.wit`](../src/extensions/kuana-wit/v0.2/kuana.wit) and has these calls too: [`examples/extensions/text-tools`](../examples/extensions/text-tools)
+is a small extension that uses them: it transforms the selection and counts words in the status bar.
+
+| Call | What it does | Needs |
+| --- | --- | --- |
+| `editor(path, with-text)` | An open file's tab: `path`'s, or without one the tab the user is in. Its path, language, version, whether it's unsaved, its carets and selections (the main one first) and, when asked, its text. None when there's no such tab or the code can't reach the file. | `workspace-files` for project files |
+| `apply-edits(path, version, edits)` | Edits the open file as one undo step and answers with the new version. | `workspace-write` for project files |
+| `set-selections(path, version, selections)` | Sets the carets and selections, and scrolls to the main one. | `workspace-files` for project files |
+| `write-project-file(path, content)` | Writes a file in the project (up to 16 MB), making its folders. An open tab of it reloads as after any change on disk; Local History keeps the version before. | `workspace-write` |
+| `pick(placeholder, items)` | A list to pick from, narrowed by typing, like Find Action. The picked item's id, or none. | |
+| `set-status(item, status)` | What a `[kuana.status.<id>]` item shows in this window: text (up to 40 characters), an icon, a tone, a tooltip. None hides it. | |
+| `set-timer(name, seconds, repeat)`, `clear-timer(name)` | Tells `on-event` in `seconds` (1 at least), again and again with `repeat`. | |
+
+**Places in text** are spans of UTF-8 byte offsets (`end` not included), so in Rust `&text[start..end]` is the
+selection. An edit replaces its span with its text; an empty span inserts. Edits can't overlap and can't cut a
+character in two.
+
+**Versions of the text.** `editor` gives the text's version, and `apply-edits` and `set-selections` take the one
+they were worked out for. Your code runs beside the editor, so the user may have typed in between: then the call
+fails saying the text has changed, and nothing is edited. Read the editor again and retry.
+
+**Timers** belong to the window that set them and end with it. One that comes due while the window isn't the
+active one waits until it is, and the next wait starts only once your code has answered, so a slow tick never piles
+up. A timer whose `on-event` fails stops.
+
+### Events
+
+0.2 code exports `on-event(event)` and lists what it wants in the manifest:
+
+```toml
+[kuana]
+api = "0.2"
+permissions = ["workspace-files"]
+events = ["file-saved", "editor-changed"]
+```
+
+| Event | When | `path` | `language` |
+| --- | --- | --- | --- |
+| `project-opened` | A project opens in a window; also for the one already open when the extension is installed | its folder | |
+| `project-closed` | The project closes or another replaces it | its folder | |
+| `file-opened` | A file is opened in a tab and read | the file | yes |
+| `file-closed` | Its last tab closes | the file | yes |
+| `file-saved` | An explicit Save (not auto-save) | the file | yes |
+| `editor-changed` | The user moved to another file's tab and stayed 200 ms | the file | yes |
+| `settings-changed` | The extension's own settings changed | | |
+| `timer` | A timer is due (never listed); its name is in `data` | | |
+
+File events come only for files the code can reach: ones in its own folder, and project files when it has
+`workspace-files` (the user is asked before the first one). A save of a file in the extension's own folder always
+arrives, listed or not. There are no events for typing or moving the caret: a command asks for the selection when it
+runs. An error from `on-event` shows as a notification.
+
+Kuana doesn't load an extension's code while it starts: the first events are handed over two seconds after the
+first window opens, in order.
 
 ### Files and paths
 
@@ -344,7 +423,8 @@ The code can only use what the manifest declares, and Kuana asks the user the fi
 | --- | --- |
 | `process` | run programs (`run-process`, `run-in-terminal`), only for trusted projects or with none open |
 | `network` | make HTTP requests (`http-request`) |
-| `workspace-files` | read the open project's files and open them (`read-project-file`, project paths in `open-file`) |
+| `workspace-files` | read the open project's files and open them (`read-project-file`, project paths in `open-file`, `editor`, file events) |
+| `workspace-write` | change the open project's files (`write-project-file`, `apply-edits` on a project file); 0.2 |
 
 An allowed permission is remembered; a refused one is asked again after Kuana restarts. Settings → Extensions lists an
 extension's permissions with a **Revoke** link. A call without its permission returns an error saying so.
@@ -355,7 +435,7 @@ extension's permissions with a **Revoke** link. A call without its permission re
 | --- | --- |
 | `children` | 15 s |
 | `run-command` | 10 minutes (it may wait for the user) |
-| `file-saved` | 2 minutes |
+| `file-saved`, `on-event` | 2 minutes |
 | A program it runs | 10 minutes |
 | Computation per call | about 10 billion WebAssembly instructions |
 | Memory | 512 MB |
@@ -375,7 +455,25 @@ Users configure an extension in settings.json; the code reads its entry with `se
 }
 ```
 
-Document the keys your extension reads in its README.
+Declare the settings in the manifest and Kuana knows them: `settings()` then has each default for a key the user
+hasn't set, settings.json completes and checks them, and the extension's row in Settings → Extensions shows their
+values.
+
+```toml
+[kuana.settings.folder]
+title = "Notes folder"
+description = "Where notes are kept."
+type = "string"            # string (the default), boolean, number or enum
+default = "~/Notes"
+
+[kuana.settings.order]
+title = "Sort by"
+type = "enum"
+values = ["name", "date"]
+default = "name"
+```
+
+Keys you don't declare still reach `settings()`; document those in your README.
 
 ### Key bindings
 
@@ -392,6 +490,17 @@ Commands and views can be bound in `keymap.json`:
 
 `RunExtensionCommand` also takes a `target`, passed to the command as is.
 
+A command can come with a shortcut of its own:
+
+```toml
+[kuana.commands.new]
+title = "New Note"
+key = "secondary-alt-n"    # secondary is ⌘ on macOS, Ctrl elsewhere
+```
+
+Kuana binds it unless the user's keymap already uses that key anywhere: then it stays Kuana's, and the extension's
+row in Settings → Extensions says which shortcut wasn't bound. What the user binds in `keymap.json` always wins.
+
 ### Sharing your extension
 
 - **From a folder:** Settings → Extensions → Install from Folder….
@@ -403,5 +512,8 @@ Commands and views can be bound in `keymap.json`:
 
 ### Versions
 
-The interface is versioned (`kuana:extension@0.1.0`, `[kuana] api = "0.1"`). New Kuana versions keep running code
-built for older versions of it.
+The interface is versioned: `[kuana] api = "0.1"` is `kuana:extension@0.1.0`
+([`kuana-wit/kuana.wit`](../src/extensions/kuana-wit/kuana.wit)), `"0.2"` is `kuana:extension@0.2.0`
+([`kuana-wit/v0.2/kuana.wit`](../src/extensions/kuana-wit/v0.2/kuana.wit)). Kuana runs both, and new versions keep
+running code built for older ones. 0.2 has everything 0.1 has, with `on-event` in place of `file-saved`. What only
+the manifest declares (menu places, `key`, `[kuana.settings]`) works with either.

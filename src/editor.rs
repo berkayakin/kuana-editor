@@ -6,6 +6,7 @@ mod excerpt;
 mod fold;
 mod format;
 mod conflict;
+mod extension;
 pub(crate) mod derived;
 mod lsp;
 mod markers;

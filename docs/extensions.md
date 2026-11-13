@@ -180,15 +180,20 @@ its built-in Charmed Icons.
 ## Views, commands and panels
 
 Beyond Zed's format, an extension can add to Kuana's UI: **views** on the activity bar (a tree of
-items, like Files or Database), **commands** (in Find Action, view toolbars, tree items' right-click
-menus and the editor's right-click menu), and **panels** in the bottom area that show text or a table.
+items, like Files or Database), **commands** (in Find Action, view toolbars, and the right-click menus
+of tree items, the editor, tabs and the file tree, with default shortcuts), **panels** in the bottom
+area that show text or a table, **status bar items** and its own **settings**. Its code can read and
+edit the open file, write project files, and hear about files being opened and saved.
 Kuana draws all of it; the extension declares what it adds in a `[kuana]` table of `extension.toml`
 (Zed ignores it) and answers with data from its code, `kuana.wasm`, which runs sandboxed. Programs,
-the network and project files need a permission Kuana asks the user for.
+the network and project files need a permission Kuana asks the user for. Extensions' code is loaded
+when it's first needed, never while Kuana starts, and compiled once: later starts load the compiled
+code from `~/.config/kuana/extensions/.compiled/`.
 
 [Writing view extensions](extension-ui.md) walks through building one from an empty folder and lists
 the whole interface. [`examples/extensions/docker`](../examples/extensions/docker) is a complete
-example: a Docker containers view.
+example: a Docker containers view. [`examples/extensions/text-tools`](../examples/extensions/text-tools)
+shows the editor side: it transforms the selection and counts words in the status bar.
 
 Kuana reads Zed's extension format for compatibility; it isn't affiliated with or endorsed by Zed
 Industries. Extensions come from their authors' repositories, under their own licenses.

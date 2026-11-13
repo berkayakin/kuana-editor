@@ -105,7 +105,14 @@ pub fn check(dir: &Path) -> Vec<Finding> {
     }
     // Kuana's own UI contributions and their code (`[kuana]`, kuana.wasm).
     if let Some(ui) = &info.ui {
-        let parts = [("view", ui.views.len()), ("command", ui.commands.len()), ("panel", ui.panels.len())]
+        let parts = [
+            ("view", ui.views.len()),
+            ("command", ui.commands.len()),
+            ("panel", ui.panels.len()),
+            ("status item", ui.status.len()),
+            ("setting", ui.settings.len()),
+            ("event", ui.events.len()),
+        ]
             .iter()
             .filter(|(_, n)| *n > 0)
             .map(|(what, n)| format!("{n} {what}{}", if *n == 1 { "" } else { "s" }))

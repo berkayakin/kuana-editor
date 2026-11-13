@@ -2393,8 +2393,33 @@ impl Preferences {
         provides.extend(extension.servers.iter().map(|s| format!("server: {s}")));
         // Its views (Kuana's extension UI), and what its code may do.
         let mut permissions_line = None;
+        let mut settings_line = None;
+        let mut keys_line = None;
         if let Some(ui) = &extension.ui {
             provides.extend(ui.views.iter().map(|v| format!("view: {}", v.title)));
+            // Its settings, as they are now (the user's, else the defaults).
+            if !ui.settings.is_empty() {
+                let user = Settings::get(cx).extensions.as_ref().and_then(|map| map.get(&ui.extension));
+                let words: Vec<String> = ui
+                    .settings
+                    .iter()
+                    .map(|s| match user.and_then(|u| u.get(&s.key)).or(s.default.as_ref()) {
+                        Some(serde_json::Value::String(text)) => format!("{}: {text}", s.title),
+                        Some(value) => format!("{}: {value}", s.title),
+                        None => s.title.clone(),
+                    })
+                    .collect();
+                settings_line = Some(format!("Settings: {}", words.join(" · ")));
+            }
+            // Shortcuts it asks for that the keymap already uses.
+            let skipped = crate::keymap::skipped_extension_keys(&ui.extension);
+            if !skipped.is_empty() {
+                let words: Vec<String> = skipped
+                    .iter()
+                    .map(|k| format!("{} ({})", k.key, ui.command(&k.command).map_or(k.command.as_str(), |c| c.title.as_str())))
+                    .collect();
+                keys_line = Some(format!("Not bound, the keymap uses them: {}. Bind them in keymap.json.", words.join(", ")));
+            }
             if !ui.permissions.is_empty() {
                 let granted = crate::extensions::permissions::granted(&ui.extension);
                 let words: Vec<String> = ui
@@ -2460,6 +2485,28 @@ impl Preferences {
                                 }),
                         )
                     })
+                    .when_some(settings_line, |el, text| {
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_size(px(12.))
+                                .text_color(theme.text_dim)
+                                .child(div().min_w_0().truncate().child(text))
+                                .child(
+                                    div()
+                                        .id(("ext-settings", ix))
+                                        .flex_shrink_0()
+                                        .text_color(theme.accent)
+                                        .cursor_pointer()
+                                        .hover(|s| s.underline())
+                                        .child("Edit in settings.json")
+                                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(PreferencesEvent::OpenSettingsFile))),
+                                ),
+                        )
+                    })
+                    .when_some(keys_line, |el, text| el.child(div().text_size(px(12.)).text_color(theme.text_dim).child(text)))
                     .when_some(status, |el, (color, text)| {
                         el.child(
                             div()

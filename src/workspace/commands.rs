@@ -156,6 +156,8 @@ impl Workspace {
         self.watcher = None;
         self.watch_task = None;
         self.root = None;
+        // Extensions' views for the project go, and their code hears it closed.
+        self.refresh_extension_views(cx);
         self.show_sidebar = false;
         self.git.update(cx, |g, cx| g.close(cx));
         window.focus(&self.focus_handle);

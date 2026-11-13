@@ -292,14 +292,8 @@ impl ExtensionView {
         cx.emit(ExtensionViewEvent::Leave);
     }
 
-    /// An item's icon as an asset path: one of Kuana's, or an SVG in the
-    /// extension's folder (nothing outside it).
     fn icon_path(&self, icon: &str) -> Option<SharedString> {
-        if crate::assets::has_icon(icon) {
-            return Some(format!("icons/{icon}.svg").into());
-        }
-        let path = crate::extensions::wasm::inside(&self.extension.dir, icon).ok()?;
-        (path.extension().is_some_and(|e| e == "svg") && path.is_file()).then(|| format!("{FILE_ICON_PREFIX}{}", path.display()).into())
+        icon_path(&self.extension, icon)
     }
 
     /// A row, inset and rounded like the file tree's.
@@ -458,4 +452,15 @@ impl Render for ExtensionView {
                     .child(crate::ui::list_scrollbar("ext-scrollbar", &self.scroll, cx)),
             )
     }
+}
+
+/// An icon the code names (a tree item's, a pick list row's, a status
+/// item's) as an asset path: one of Kuana's, or an SVG in the extension's
+/// folder (nothing outside it).
+pub fn icon_path(extension: &Contributions, icon: &str) -> Option<SharedString> {
+    if crate::assets::has_icon(icon) {
+        return Some(format!("icons/{icon}.svg").into());
+    }
+    let path = crate::extensions::wasm::inside(&extension.dir, icon).ok()?;
+    (path.extension().is_some_and(|e| e == "svg") && path.is_file()).then(|| format!("{FILE_ICON_PREFIX}{}", path.display()).into())
 }

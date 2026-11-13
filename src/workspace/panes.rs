@@ -229,7 +229,17 @@ impl Workspace {
                 );
             }
             add(MenuEntry::item("Copy Path", Icon::Clipboard), Some(MenuAction::Tree(TreeAction::CopyPath(path.clone()))));
-            add(MenuEntry::item(reveal_label(), Icon::FolderOpen), Some(MenuAction::Tree(TreeAction::Reveal(path))));
+            add(MenuEntry::item(reveal_label(), Icon::FolderOpen), Some(MenuAction::Tree(TreeAction::Reveal(path.clone()))));
+            // Extensions' commands for the tab's file.
+            let language = item.editor().map(|e| e.read(cx).doc.read(cx).language.name());
+            let file = crate::extensions::contrib::FileSubject { path: &path, folder: false, language };
+            let ext_entries = self.extension_menu_entries(&crate::extensions::contrib::MenuPlace::EditorTab, &file);
+            if !ext_entries.is_empty() {
+                add(MenuEntry::Separator, None);
+                for (entry, action) in ext_entries {
+                    add(entry, action);
+                }
+            }
         }
         self.show_context_menu(entries, actions, position, None, window, cx);
     }
