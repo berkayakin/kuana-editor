@@ -470,8 +470,12 @@ Users configure an extension in settings.json; the code reads its entry with `se
 ```
 
 Declare the settings in the manifest and Kuana knows them: `settings()` then has each default for a key the user
-hasn't set, settings.json completes and checks them, and the extension's row in Settings → Extensions shows their
-values.
+hasn't set, settings.json completes and checks them, and the extension's row in Settings → Extensions lists them
+with a control each: a switch for a boolean, a text field for a string or number (a number field saves only a
+number), a dropdown for an enum. The title is the label and the description the line under it; Settings' search
+finds them too. A change is written to `extensions.<id>.<key>` at once (the file's comments kept) and the code hears
+`settings-changed`; picking the default, or emptying a field, removes the key, and the ↺ button beside a set one
+resets it.
 
 ```toml
 [kuana.settings.folder]
