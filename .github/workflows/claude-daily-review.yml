@@ -1,0 +1,131 @@
+# Reviews what was pushed to main since the last review, once a day, and opens one issue if it
+# finds real problems. When nothing new was pushed, the first job sees that in a few seconds and
+# the review job (the only part that uses the Anthropic API) does not run.
+#
+# Setup: add the Anthropic API key as the repository secret ANTHROPIC_API_KEY.
+# Manual run: Actions -> Claude daily review -> Run workflow (optionally from a given commit).
+
+name: Claude daily review
+
+on:
+  schedule:
+    - cron: "0 5 * * *" # 05:00 UTC
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "Review commits after this SHA (empty: since the last review)"
+        required: false
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: claude-daily-review
+  cancel-in-progress: false
+
+jobs:
+  changes:
+    name: Find new commits
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read # to find the last successful review run
+    outputs:
+      base: ${{ steps.range.outputs.base }}
+      head: ${{ steps.range.outputs.head }}
+      count: ${{ steps.range.outputs.count }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: range
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SINCE: ${{ inputs.since }}
+        run: |
+          head=$(git rev-parse HEAD)
+          base="$SINCE"
+          if [ -z "$base" ]; then
+            # The commit the last successful run of this workflow started from is where the
+            # previous review stopped. Runs that found nothing to review count too.
+            base=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow claude-daily-review.yml \
+              --status success --limit 1 --json headSha --jq '.[0].headSha // ""')
+          fi
+          if [ -n "$base" ] && ! git merge-base --is-ancestor "$base" "$head" 2>/dev/null; then
+            echo "::warning::$base is not in main's history (rewritten?); reviewing the last 24 hours instead."
+            base=""
+          fi
+          if [ -z "$base" ]; then
+            # First run, or history was rewritten: the last 24 hours.
+            base=$(git rev-list -1 --before="24 hours ago" "$head" || true)
+          fi
+          if [ -n "$base" ]; then
+            count=$(git rev-list --count "$base..$head")
+          else
+            count=$(git rev-list --count "$head") # repository younger than a day
+            base=$(git rev-list --max-parents=0 "$head" | tail -1)
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          if [ "$count" = "0" ]; then
+            echo "No new commits since ${base:0:7}; skipping the review." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "$count new commit(s): ${base:0:7}..${head:0:7}" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+  review:
+    name: Review
+    needs: changes
+    if: needs.changes.outputs.count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+      id-token: write # required by claude-code-action
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          settings: '{"effortLevel": "high"}'
+          claude_args: |
+            --model claude-opus-5-5
+            --max-turns 60
+            --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*),Bash(gh issue create:*),Bash(gh issue list:*)"
+          prompt: |
+            REPO: ${{ github.repository }}
+            RANGE: ${{ needs.changes.outputs.base }}..${{ needs.changes.outputs.head }} (${{ needs.changes.outputs.count }} commits on main)
+
+            You are reviewing the commits in RANGE of Kuana, a GPU-rendered code editor in Rust on
+            GPUI. Read CLAUDE.md first for how the code works. Start with
+            `git log --stat RANGE` and `git diff RANGE`, then read the surrounding code wherever a
+            change needs context. Review the range as a whole: a problem one commit introduced may
+            already be fixed by a later one.
+
+            Look only for real problems a maintainer would want to know about:
+            - bugs and regressions: wrong logic, off-by-one in text, cursor or selection handling,
+              broken undo/redo, lost edits, mishandled UTF-8 or grapheme boundaries
+            - panics reachable from user input or files on disk (unwrap, expect, indexing, slicing)
+            - data loss or corruption when saving, reloading or handling external file changes
+            - unsafe code, and anything that runs untrusted input (extensions, file contents, paths)
+            - performance traps on hot paths: rendering, typing, scrolling, large files
+            - changes that contradict CLAUDE.md or the docs in docs/
+            Do not report style, naming, formatting, missing comments or speculative refactors.
+            Only report a finding you can point to in the code, and say how confident you are.
+
+            If you find nothing worth reporting, do nothing: do not open an issue, and end with one
+            line saying the range looked fine.
+
+            Otherwise open exactly one issue with `gh issue create`:
+            - title: "Review of ${{ needs.changes.outputs.count }} commits up to ${{ needs.changes.outputs.head }}" with the SHA cut to 7 characters
+            - body in GitHub Markdown: findings ordered by severity. For each one: a short heading,
+              the commit that introduced it, a link to the line as
+              https://github.com/${{ github.repository }}/blob/${{ needs.changes.outputs.head }}/PATH#LNUMBER,
+              what goes wrong and when, and a suggested fix.
+            - no closing remarks, no attribution, and no mention of AI, Claude or Anthropic.
+            Before creating it, run `gh issue list --state open --search "Review of in:title"` and
+            do not repeat a finding that an open review issue already reports.
