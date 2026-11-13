@@ -34,6 +34,8 @@ impl Workspace {
         // The project and branch may take half the free room; the tools the rest.
         let chips_room = (free / 2.).max(0.);
         let chips_width = self.chip_fit(chips_room, false, window, cx).map_or(0., |(_, width)| width);
+        let theme = Theme::get(cx);
+        let line = theme.classic.then(|| crate::ui::separator(theme));
         div()
             .id("title-row")
             .flex()
@@ -41,6 +43,10 @@ impl Workspace {
             .items_center()
             .w_full()
             .h(px(TAB_STRIP_HEIGHT - 1.))
+            // Classic: a line under it, 1pt taller so its content stays put.
+            // The tab row's tabs start at its top, where without this row the
+            // window's edge is.
+            .when_some(line, |el, line| el.h(px(TAB_STRIP_HEIGHT)).border_b_1().border_color(line))
             .child(window_drag_area("title-row-lead").flex_shrink_0().w(px(lead)))
             .when(app_menu::APP_MENU_IN_TITLE_BAR, |el| el.child(self.render_app_menu(cx)).child(div().flex_shrink_0().w(px(GAP))))
             .children(self.render_title_chips(chips_room, false, window, cx))
