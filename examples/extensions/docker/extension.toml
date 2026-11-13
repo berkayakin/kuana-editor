@@ -10,6 +10,10 @@ repository = "https://github.com/berkayakin/kuana-editor"
 api = "0.2"
 permissions = ["process"]
 
+# Only the docker command: Kuana refuses any other program.
+[kuana.allow]
+process = ["docker"]
+
 [kuana.views.containers]
 title = "Containers"
 icon = "icons/container.svg"
