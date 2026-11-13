@@ -16,3 +16,25 @@ brackets = [
 highlights = ["crate:rust/highlights", "highlights.scm"]
 outline = ["crate:rust/tags", "outline.scm"]
 injections = ["crate:rust/injections"]
+
+# Kuana's key: postfix completion (`expr.if`): bodies in snippet syntax, $EXPR is the expression.
+[postfix]
+if = { body = "if $EXPR {\n\t$0\n}", description = "if expr { }" }
+else = { body = "if !$EXPR {\n\t$0\n}", description = "if !expr { }" }
+not = { body = "!$EXPR", description = "!expr" }
+while = { body = "while $EXPR {\n\t$0\n}", description = "while expr { }" }
+for = { body = "for ${1:item} in $EXPR {\n\t$0\n}", description = "for item in expr { }" }
+iter = { body = "for ${1:item} in $EXPR.iter() {\n\t$0\n}", description = "for item in expr.iter() { }" }
+match = { body = "match $EXPR {\n\t$0\n}", description = "match expr { }" }
+let = { body = "let ${1:name} = $EXPR;$0", description = "let name = expr;" }
+letm = { body = "let mut ${1:name} = $EXPR;$0", description = "let mut name = expr;" }
+return = { body = "return $EXPR;", description = "return expr;" }
+par = { body = "($EXPR)", description = "(expr)" }
+ref = { body = "&$EXPR", description = "&expr" }
+refm = { body = "&mut $EXPR", description = "&mut expr" }
+some = { body = "Some($EXPR)", description = "Some(expr)" }
+ok = { body = "Ok($EXPR)", description = "Ok(expr)" }
+err = { body = "Err($EXPR)", description = "Err(expr)" }
+box = { body = "Box::new($EXPR)", description = "Box::new(expr)" }
+dbg = { body = "dbg!($EXPR)", description = "dbg!(expr)" }
+println = { body = "println!(\"{:?}\", $EXPR);", description = "println!(\"{:?}\", expr);" }

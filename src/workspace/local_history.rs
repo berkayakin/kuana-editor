@@ -116,21 +116,7 @@ fn history_tree(versions: &[Version], now: SystemTime, open: impl Fn(&Version) -
 
 /// Local time as (days since the epoch, seconds into the day).
 fn local(time: SystemTime) -> (i64, i64) {
-    let secs = time.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64) + local_offset();
-    (secs.div_euclid(86_400), secs.rem_euclid(86_400))
-}
-
-/// The local time zone's offset from UTC, in seconds.
-fn local_offset() -> i64 {
-    #[cfg(unix)]
-    {
-        let now = unsafe { libc::time(std::ptr::null_mut()) };
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        if unsafe { !libc::localtime_r(&now, &mut tm).is_null() } {
-            return tm.tm_gmtoff;
-        }
-    }
-    0
+    crate::local_time::day_and_seconds(time)
 }
 
 /// "14:32:05".
@@ -146,16 +132,7 @@ fn day_label(time: SystemTime, now: SystemTime) -> String {
         0 => "Today".into(),
         1 => "Yesterday".into(),
         _ => {
-            // Days since the epoch to a civil date (Howard Hinnant's algorithm).
-            let z = day + 719_468;
-            let era = z.div_euclid(146_097);
-            let doe = z - era * 146_097;
-            let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-            let mp = (5 * doy + 2) / 153;
-            let d = doy - (153 * mp + 2) / 5 + 1;
-            let m = if mp < 10 { mp + 3 } else { mp - 9 };
-            let y = yoe + era * 400 + i64::from(m <= 2);
+            let (y, m, d) = crate::local_time::civil(day);
             format!("{y:04}-{m:02}-{d:02}")
         }
     }

@@ -8,3 +8,18 @@ hard_tabs = true
 [queries]
 highlights = ["highlights.scm"]
 outline = ["crate:go/tags"]
+
+# Kuana's key: postfix completion (`expr.if`): bodies in snippet syntax, $EXPR is the expression.
+[postfix]
+if = { body = "if $EXPR {\n\t$0\n}", description = "if expr { }" }
+else = { body = "if !$EXPR {\n\t$0\n}", description = "if !expr { }" }
+not = { body = "!$EXPR", description = "!expr" }
+nil = { body = "if $EXPR == nil {\n\t$0\n}", description = "if expr == nil { }" }
+nn = { body = "if $EXPR != nil {\n\t$0\n}", description = "if expr != nil { }" }
+for = { body = "for _, ${1:item} := range $EXPR {\n\t$0\n}", description = "for _, item := range expr { }" }
+forr = { body = "for ${1:i} := range $EXPR {\n\t$0\n}", description = "for i := range expr { }" }
+var = { body = "${1:name} := $EXPR", description = "name := expr" }
+return = { body = "return $EXPR", description = "return expr" }
+par = { body = "($EXPR)", description = "(expr)" }
+print = { body = "fmt.Println($EXPR)", description = "fmt.Println(expr)" }
+len = { body = "len($EXPR)", description = "len(expr)" }

@@ -36,7 +36,7 @@ const ZED_MANIFEST_KEYS: &[&str] =
     &["lib", "slash_commands", "context_servers", "indexed_docs_providers", "snippets", "capabilities", "agent_servers", "themes", "icon_themes", "languages", "debug_locators"];
 const LANGUAGE_KEYS: &[&str] = &[
     "name", "grammar", "path_suffixes", "line_comments", "line_comment", "block_comment", "tab_size", "hard_tabs", "formatter", "language_id",
-    "brackets", "decrease_indent_pattern", "decrease_indent_patterns",
+    "brackets", "decrease_indent_pattern", "decrease_indent_patterns", "postfix",
 ];
 const ZED_LANGUAGE_KEYS: &[&str] = &[
     "autoclose_before", "word_characters", "completion_query_characters", "linked_edit_characters", "code_fence_block_name",

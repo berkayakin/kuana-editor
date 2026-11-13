@@ -8,3 +8,20 @@ block_comment = { start = "/*", end = "*/" }
 highlights = ["crate:javascript/highlights", "crate:javascript/jsx", "crate:typescript/highlights", "highlights.scm"]
 outline = ["crate:javascript/tags", "crate:typescript/tags", "outline.scm"]
 injections = ["crate:javascript/injections"]
+
+# Kuana's key: postfix completion (`expr.if`): bodies in snippet syntax, $EXPR is the expression.
+[postfix]
+if = { body = "if ($EXPR) {\n\t$0\n}", description = "if (expr) { }" }
+else = { body = "if (!$EXPR) {\n\t$0\n}", description = "if (!expr) { }" }
+not = { body = "!$EXPR", description = "!expr" }
+null = { body = "if ($EXPR == null) {\n\t$0\n}", description = "if (expr == null) { }" }
+notnull = { body = "if ($EXPR != null) {\n\t$0\n}", description = "if (expr != null) { }" }
+while = { body = "while ($EXPR) {\n\t$0\n}", description = "while (expr) { }" }
+for = { body = "for (const ${1:item} of $EXPR) {\n\t$0\n}", description = "for (const item of expr) { }" }
+const = { body = "const ${1:name} = $EXPR;$0", description = "const name = expr;" }
+let = { body = "let ${1:name} = $EXPR;$0", description = "let name = expr;" }
+return = { body = "return $EXPR;", description = "return expr;" }
+await = { body = "await $EXPR", description = "await expr" }
+par = { body = "($EXPR)", description = "(expr)" }
+log = { body = "console.log($EXPR);", description = "console.log(expr);" }
+spread = { body = "...$EXPR", description = "...expr" }

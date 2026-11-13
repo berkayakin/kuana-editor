@@ -146,6 +146,9 @@ Everything Kuana does, in one list. Each area has its own page with the details.
 - Local History: earlier versions of each file (on save, before and after outside changes, before a
   rollback), listed by day with a diff against the file as it is and Restore; see
   [Local History](editing.md#local-history)
+- Postfix completion (`items.for`, `x.if`, `x.not`, `x.let`…) for Rust, Python, JavaScript/TypeScript
+  and Go, and snippets that fill in VS Code's variables (file name, selection, clipboard, date); see
+  [Snippets](editing.md#snippets)
 - Compare a file with the clipboard, another file or itself on a branch or tag, in a diff tab that
   follows your edits; see [Comparing files](editing.md#comparing-files)
 - Scratch files: throwaway files in any language, kept between runs outside the project, runnable

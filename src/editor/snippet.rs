@@ -10,11 +10,40 @@ use serde_json::json;
 use super::{Editor, Selection};
 use crate::{
     document::EditKind,
-    lsp::protocol::{CompletionItem, expand_snippet},
+    lsp::protocol::{CompletionItem, expand_snippet_with},
     snippets::{self, SnippetStops},
 };
 
 impl Editor {
+    /// What `body`'s variables are filled from, at the caret now; `expr`:
+    /// a postfix template's expression. The clipboard is read only when the
+    /// body uses it.
+    pub(super) fn snippet_variables(&self, body: &str, expr: Option<String>, cx: &App) -> snippets::Variables {
+        let doc = self.doc.read(cx);
+        let sel = self.primary_selection();
+        let row = doc.row_of(sel.head);
+        snippets::Variables {
+            file: doc.path.clone(),
+            workspace: None,
+            selected: doc.slice(sel.range()),
+            line: doc.line_text(row),
+            word: doc.slice(super::word_range(doc, sel.head)),
+            line_number: row + 1,
+            clipboard: body.contains("CLIPBOARD").then(|| cx.read_from_clipboard().and_then(|c| c.text())).flatten(),
+            line_comment: doc.language.line_comment().map(|c| c.trim_end().to_string()),
+            block_comment: doc.language.block_comment().map(|(start, end)| (start.to_string(), end.to_string())),
+            expr,
+            now: None,
+        }
+    }
+
+    /// A snippet body expanded for insertion at `at`: indented like its
+    /// line, its variables filled in.
+    pub(super) fn expand_snippet_at(&self, body: &str, at: usize, expr: Option<String>, cx: &App) -> (String, Vec<Vec<Range<usize>>>) {
+        let vars = self.snippet_variables(body, expr, cx);
+        expand_snippet_with(&self.indented_snippet(body, at, cx), &|name| vars.get(name))
+    }
+
     /// A snippet body indented for insertion at `at`: later lines start at
     /// that line's indentation, tabs become the file's indent unit.
     pub(super) fn indented_snippet(&self, body: &str, at: usize, cx: &App) -> String {
@@ -83,7 +112,7 @@ impl Editor {
             return false;
         };
         let start = head - snippet.prefix.len();
-        let (text, stops) = expand_snippet(&self.indented_snippet(&snippet.body, start, cx));
+        let (text, stops) = self.expand_snippet_at(&snippet.body, start, None, cx);
         let len = text.len();
         self.edit_and_remap(vec![(start..head, text)], EditKind::Other, cx);
         self.select_snippet(start, len, stops, cx);
