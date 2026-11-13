@@ -1916,10 +1916,14 @@ fn escape_for(keystroke: &gpui::Keystroke, mode: TermMode) -> Option<Cow<'static
         out.into()
     };
     Some(match keystroke.key.as_str() {
+        // Shift+Enter is a line feed, as in Zed and VS Code, so programs
+        // that read keys raw (Claude Code, other TUIs' prompts) can tell it
+        // from Enter and start a new line instead of submitting.
+        "enter" if m.shift && !m.alt && !m.control => b"\n"[..].into(),
         "enter" => meta(b"\r"),
         "tab" if m.shift => b"\x1b[Z"[..].into(),
         "tab" => b"\t"[..].into(),
-        "escape" => b"\x1b"[..].into(),
+        "escape" => meta(b"\x1b"),
         "backspace" if m.control => meta(b"\x08"),
         "backspace" => meta(b"\x7f"),
         "space" if m.control => b"\x00"[..].into(),
@@ -1937,12 +1941,15 @@ fn escape_for(keystroke: &gpui::Keystroke, mode: TermMode) -> Option<Cow<'static
             let letter = ['P', 'Q', 'R', 'S'][keystroke.key[1..].parse::<usize>().ok()? - 1];
             if param > 1 { format!("\x1b[1;{param}{letter}").into_bytes().into() } else { format!("\x1bO{letter}").into_bytes().into() }
         }
-        key if key.starts_with('f') && key.len() <= 3 => {
+        // F5–F20; a plain `f` (Ctrl+F) is a letter.
+        key if key.len() > 1 && key.len() <= 3 && key.starts_with('f') && key[1..].bytes().all(|b| b.is_ascii_digit()) => {
             let n: u8 = key[1..].parse().ok()?;
             let code = match n {
                 5 => 15,
                 6..=10 => n + 11,
-                11 | 12 => n + 12,
+                11..=14 => n + 12,
+                15 | 16 => n + 13,
+                17..=20 => n + 14,
                 _ => return None,
             };
             tilde(code)
@@ -2336,6 +2343,15 @@ mod tests {
     fn maps_special_keys() {
         let none = TermMode::empty();
         assert_eq!(keys("enter", none).unwrap(), b"\r");
+        assert_eq!(keys("shift-enter", none).unwrap(), b"\n");
+        assert_eq!(keys("alt-enter", none).unwrap(), b"\x1b\r");
+        assert_eq!(keys("alt-escape", none).unwrap(), b"\x1b\x1b");
+        assert_eq!(keys("f12", none).unwrap(), b"\x1b[24~");
+        assert_eq!(keys("f13", none).unwrap(), b"\x1b[25~");
+        assert_eq!(keys("f15", none).unwrap(), b"\x1b[28~");
+        assert_eq!(keys("f17", none).unwrap(), b"\x1b[31~");
+        assert_eq!(keys("shift-f20", none).unwrap(), b"\x1b[34;2~");
+        assert_eq!(keys("ctrl-f", none).unwrap(), &[6]);
         assert_eq!(keys("up", none).unwrap(), b"\x1b[A");
         assert_eq!(keys("up", TermMode::APP_CURSOR).unwrap(), b"\x1bOA");
         assert_eq!(keys("ctrl-left", none).unwrap(), b"\x1b[1;5D");
