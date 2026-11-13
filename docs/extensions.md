@@ -25,6 +25,10 @@ installed from the registry update, never one from Git or a folder. Kuana checks
 signature and each download's checksum. Every extension keeps its own license (shown on its row),
 which comes with it.
 
+When you open a file that Kuana has no language for and one of these extensions covers it (a `.sql`
+file, a `Makefile`), a notification offers to **Install** it; the file is highlighted as soon as it's
+there. Each extension is offered once: ignore the notification and it won't come back.
+
 An extension is a folder like this (Zed's layout; every part is optional):
 
 ```text

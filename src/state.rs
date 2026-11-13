@@ -141,6 +141,10 @@ pub struct SessionState {
     /// them over and clears this.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub trusted_folders: Vec<PathBuf>,
+    /// Registry extensions already offered for a file (`suggest_extension`):
+    /// each is offered once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested_extensions: Vec<String>,
     /// Welcome Setup was finished (Get Started or Escape). Only finishing it
     /// sets this; the older `onboarded` key was also set by guessing from
     /// existing files, so installs that never saw the setup missed it.
