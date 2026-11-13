@@ -32,6 +32,7 @@ use crate::{
         ToggleAutoSave, ToggleSidebar, ToggleSidebarPosition, ToggleSecondSidebar, ToggleClassicLayout, CheckForUpdates, WelcomeSetup, GoToSymbol, SplitTerminal, RenameTerminal, SelectOpenedFile, InstallShellCommand,
         ToggleDatabase, NewDatabaseConnection, ToggleDatabaseResults, RunSqlStatement, RunSqlScript, NewSqlScript,
         ToggleBookmark, ToggleBookmarkWithMnemonic, EditBookmarkDescription, ShowBookmarks, NextBookmark, PreviousBookmark, GoToBookmark, ShowTodo,
+        OpenResultsInEditor, ProblemsInEditor,
     },
 };
 
@@ -170,6 +171,8 @@ fn common(mac: bool) -> Vec<KeyBinding> {
         // Later than the field's own, so a picker hears them first (and passes them on).
         KeyBinding::new("backspace", crate::picker::RemoveSelected, Some("Picker > Editor")),
         KeyBinding::new("delete", crate::picker::RemoveSelected, Some("Picker > Editor")),
+        // In a multibuffer's excerpt: the file's tab at the caret (JetBrains' Jump to Source).
+        KeyBinding::new("f4", crate::multibuffer::OpenInFile, Some("MultiBuffer > Editor")),
         KeyBinding::new("enter", Newline, e),
         // New line below in code, "submit" in text fields.
         KeyBinding::new("secondary-enter", Submit, e),
@@ -777,6 +780,9 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Next Bookmark", NextBookmark),
         a("Previous Bookmark", PreviousBookmark),
         a("Show TODO", ShowTodo),
+        a("Open Results in Editor", OpenResultsInEditor),
+        a("Problems in Editor", ProblemsInEditor),
+        a("Open Excerpt in File", crate::multibuffer::OpenInFile),
         a("Add Logpoint…", AddLogpoint),
         a("Attach to Process…", AttachToProcess),
         a("Resume Program", Resume),

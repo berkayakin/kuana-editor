@@ -21,6 +21,8 @@ pub enum ProblemsEvent {
     /// A Run problem was clicked: open its file there (1-based).
     Open { path: PathBuf, line: u32, column: Option<u32> },
     Close,
+    /// Problems in Editor: every open file's problems and the Run's, as excerpts.
+    OpenInEditor,
 }
 
 impl EventEmitter<ProblemsEvent> for ProblemsPanel {}
@@ -71,6 +73,11 @@ impl ProblemsPanel {
     pub fn set_root(&mut self, root: Option<PathBuf>, cx: &mut Context<Self>) {
         self.root = root;
         cx.notify();
+    }
+
+    /// What the last Run printed, all of it.
+    pub fn run_problems(&self) -> &[OutputProblem] {
+        self.run.as_ref().map_or(&[], |(_, problems)| problems)
     }
 
     /// The last Run's problems, without the ones `doc` (the active file)
@@ -136,6 +143,11 @@ impl Render for ProblemsPanel {
                     .child((diag_count + run_count).to_string()),
             )
             .child(div().flex_1())
+            .child(
+                crate::ui::icon_button("problems-in-editor", Icon::FileText, theme.text_dim.into(), cx)
+                    .tooltip(|_, cx| crate::ui::tooltip_view("Problems in Editor: every open file's problems as excerpts", cx))
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ProblemsEvent::OpenInEditor))),
+            )
             .child(crate::ui::panel_close_button("close-problems", cx).on_click(cx.listener(|_, _, _, cx| cx.emit(ProblemsEvent::Close))));
 
         // Rows, top to bottom: the file's title when the last Run reported

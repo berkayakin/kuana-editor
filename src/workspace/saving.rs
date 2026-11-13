@@ -418,7 +418,7 @@ impl Workspace {
                             Some(Err(err)) => Err(err),
                             None => Ok(()),
                         },
-                        PaneItem::Preview(_) | PaneItem::Diff(_) => Ok(()),
+                        PaneItem::Preview(_) | PaneItem::Diff(_) | PaneItem::Excerpts(_) => Ok(()),
                     };
                     if let Err(err) = result {
                         let _ = window.prompt(PromptLevel::Critical, "Couldn't save file", Some(&err.to_string()), &["OK"], cx);
@@ -446,6 +446,7 @@ impl Workspace {
             // Nothing of their own to lose.
             PaneItem::Image(_) | PaneItem::Preview(_) => self.remove_item(item, window, cx),
             PaneItem::Diff(diff) => self.close_diff(diff, window, cx),
+            PaneItem::Excerpts(view) => self.close_multibuffer(view, window, cx),
         }
     }
 

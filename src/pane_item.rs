@@ -1,5 +1,5 @@
-//! What a pane's tab shows: a text editor, an image, a Markdown preview or a
-//! Git / Local History diff.
+//! What a pane's tab shows: a text editor, an image, a Markdown preview, a
+//! Git / Local History diff or a multibuffer (excerpts of many files).
 //! Each kind is its own view implementing
 //! [`Item`], the surface the workspace needs to draw its tab, save, close
 //! and keep it in the session; [`PaneItem`] is the handle panes hold.
@@ -24,6 +24,7 @@ use crate::{
     encoding::TextEncoding,
     image_view::ImageView,
     markdown_preview::MarkdownPreview,
+    multibuffer::MultiBufferView,
     state::{TabKind, TabSession},
 };
 
@@ -198,6 +199,38 @@ impl Item for DiffView {
     }
 }
 
+impl Item for MultiBufferView {
+    fn tab_title(&self, _: &App) -> String {
+        self.title().to_string()
+    }
+
+    fn path(&self, _: &App) -> Option<PathBuf> {
+        None
+    }
+
+    fn tab_icon(&self, _: &App) -> TabIcon {
+        TabIcon::Ui(Icon::FileText)
+    }
+
+    fn is_dirty(&self, cx: &App) -> bool {
+        MultiBufferView::is_dirty(self, cx)
+    }
+
+    fn has_errors(&self, cx: &App) -> bool {
+        self.editors().any(|e| e.read(cx).doc.read(cx).has_errors())
+    }
+
+    /// Save writes its files (the workspace does it); there's no one file to Save As.
+    fn saving(&self) -> Saving {
+        Saving::Nothing
+    }
+
+    fn session(&self, _: &App) -> Option<(TabSession, Option<Rope>)> {
+        // What it lists (usages, results) belongs to the moment it was made.
+        None
+    }
+}
+
 /// What a tab bar shows of an item. The workspace keeps it and updates it
 /// when the item changes, so drawing the tab bars reads no item: one that
 /// changes (diagnostics arriving for a tab out of sight) would redraw the
@@ -219,6 +252,7 @@ pub enum PaneItem {
     Image(Entity<ImageView>),
     Preview(Entity<MarkdownPreview>),
     Diff(Entity<DiffView>),
+    Excerpts(Entity<MultiBufferView>),
 }
 
 impl From<Entity<Editor>> for PaneItem {
@@ -253,6 +287,7 @@ impl PaneItem {
             PaneItem::Image(i) => i.read(cx),
             PaneItem::Preview(p) => p.read(cx),
             PaneItem::Diff(d) => d.read(cx),
+            PaneItem::Excerpts(m) => m.read(cx),
         }
     }
 
@@ -262,6 +297,7 @@ impl PaneItem {
             PaneItem::Image(i) => i.entity_id(),
             PaneItem::Preview(p) => p.entity_id(),
             PaneItem::Diff(d) => d.entity_id(),
+            PaneItem::Excerpts(m) => m.entity_id(),
         }
     }
 
@@ -275,6 +311,13 @@ impl PaneItem {
     pub fn preview(&self) -> Option<&Entity<MarkdownPreview>> {
         match self {
             PaneItem::Preview(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    pub fn excerpts(&self) -> Option<&Entity<MultiBufferView>> {
+        match self {
+            PaneItem::Excerpts(m) => Some(m),
             _ => None,
         }
     }
@@ -305,6 +348,7 @@ impl PaneItem {
             PaneItem::Image(i) => i.clone().into(),
             PaneItem::Preview(p) => p.clone().into(),
             PaneItem::Diff(d) => d.clone().into(),
+            PaneItem::Excerpts(m) => m.clone().into(),
         }
     }
 
@@ -348,6 +392,7 @@ impl PaneItem {
             }
             PaneItem::Preview(p) => PaneItem::Preview(cx.new(|cx| MarkdownPreview::split_of(p, cx))),
             PaneItem::Diff(d) => PaneItem::Diff(cx.new(|cx| DiffView::split_of(d, cx))),
+            PaneItem::Excerpts(m) => PaneItem::Excerpts(cx.new(|cx| MultiBufferView::split_of(m, cx))),
         }
     }
 }

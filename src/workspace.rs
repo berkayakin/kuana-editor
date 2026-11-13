@@ -97,6 +97,7 @@ mod language_servers;
 mod line_endings;
 mod local_history;
 mod menus;
+mod multibuffer;
 mod navigation;
 mod pane;
 mod pane_tree;
@@ -197,6 +198,10 @@ actions!(
         PreviousBookmark,
         /// The project's TODO comments in the Find panel.
         ShowTodo,
+        /// The Find panel's current places as a multibuffer.
+        OpenResultsInEditor,
+        /// Every open file's errors and warnings, and the last Run's, as a multibuffer.
+        ProblemsInEditor,
         OpenExtensions,
         ProjectTrust,
         UndoFileChange,
@@ -1052,6 +1057,7 @@ impl Workspace {
         let problems_subscription = cx.subscribe_in(&problems, window, |ws, _, event: &ProblemsEvent, window, cx| match event {
             ProblemsEvent::Open { path, line, column } => ws.open_at(path.clone(), Some(*line), *column, window, cx),
             ProblemsEvent::Close => ws.toggle_problems(&ToggleProblems, window, cx),
+            ProblemsEvent::OpenInEditor => ws.problems_in_editor(&ProblemsInEditor, window, cx),
         });
         let results = cx.new(ResultsPanel::new);
         let results_subscription = cx.subscribe_in(&results, window, |ws, _, event: &ResultsEvent, window, cx| match event {
@@ -1061,6 +1067,9 @@ impl Workspace {
             ResultsEvent::Emptied => {
                 ws.has_results = false;
                 ws.hide_results(window, cx);
+            }
+            ResultsEvent::OpenInEditor { title, targets } => {
+                ws.open_multibuffer(title.clone(), targets.clone(), crate::multibuffer::Marks::Words, window, cx)
             }
         });
         let database = cx.new(DatabaseView::new);
@@ -1474,6 +1483,7 @@ impl Workspace {
         match &item {
             PaneItem::Editor(editor) => self.add_editor(editor, window, cx),
             PaneItem::Diff(diff) => self.add_diff(diff, window, cx),
+            PaneItem::Excerpts(view) => self.add_multibuffer(view, window, cx),
             PaneItem::Preview(preview) => self.add_preview(preview, window, cx),
             PaneItem::Image(_) => {}
         }
@@ -1631,7 +1641,7 @@ impl Workspace {
                     self.load_tab(&editor, cx);
                 }
             }
-            PaneItem::Image(_) | PaneItem::Diff(_) => {}
+            PaneItem::Image(_) | PaneItem::Diff(_) | PaneItem::Excerpts(_) => {}
         }
     }
 
@@ -1713,9 +1723,13 @@ impl Workspace {
         self.active_pane.read(cx).active_item().cloned()
     }
 
-    /// The current tab, if it's a text editor.
+    /// The current tab, if it's a text editor; in a multibuffer, the
+    /// excerpt the keyboard is in (Save, Format, Rename and the like act there).
     fn active_editor(&self, cx: &App) -> Option<Entity<Editor>> {
-        self.active_item(cx)?.editor().cloned()
+        match self.active_item(cx)? {
+            PaneItem::Excerpts(view) => view.read(cx).active_editor().cloned(),
+            item => item.editor().cloned(),
+        }
     }
 
     /// Every tab, in pane order.
