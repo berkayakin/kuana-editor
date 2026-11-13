@@ -379,7 +379,9 @@ fn scan_plain(script: &str, start: usize, dialect: Dialect, delimiter: &str, com
     let mut depth = 0i32;
     let mut i = start;
     while i < bytes.len() {
-        if custom && script[i..].starts_with(delimiter) {
+        // Bytes, not `script[i..]`: the default arm below steps one byte at a
+        // time, so `i` can be inside a character (unquoted `ürün`).
+        if custom && bytes[i..].starts_with(delimiter.as_bytes()) {
             return (i, i + delimiter.len());
         }
         if let Some(end) = comment_end(script, i, dialect) {
@@ -543,6 +545,13 @@ mod tests {
                 "select 4",
             ]
         );
+    }
+
+    #[test]
+    fn mysql_custom_delimiter_with_non_ascii_text() {
+        let script = "DELIMITER //\nselect ürün, “x” from t//\nselect 'ğ'//\nDELIMITER ;\nselect ç;";
+        assert_eq!(plain(script, Dialect::Mysql), ["select ürün, “x” from t", "select 'ğ'", "select ç"]);
+        assert_eq!(starts(script, Dialect::Mysql).len(), 3);
     }
 
     #[test]
