@@ -154,6 +154,7 @@ enum Setting {
     TrimWhitespace,
     FinalNewline,
     Shell,
+    OptionAsMeta,
     RunConfigurations,
     TrustAll,
     NativeGrammars,
@@ -164,7 +165,7 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Setting; 36] = [
+    const ALL: [Setting; 37] = [
         Setting::Theme,
         Setting::IconTheme,
         Setting::VisualEffects,
@@ -194,6 +195,7 @@ impl Setting {
         Setting::TrimWhitespace,
         Setting::FinalNewline,
         Setting::Shell,
+        Setting::OptionAsMeta,
         Setting::RunConfigurations,
         Setting::TrustAll,
         Setting::NativeGrammars,
@@ -202,6 +204,11 @@ impl Setting {
         Setting::AutoFetch,
         Setting::AutoResolveConflicts,
     ];
+
+    /// The settings this platform has (Option is only on Macs).
+    fn listed() -> impl Iterator<Item = Setting> {
+        Self::ALL.into_iter().filter(|s| *s != Setting::OptionAsMeta || cfg!(target_os = "macos"))
+    }
 
     fn page(self) -> Page {
         match self {
@@ -216,7 +223,7 @@ impl Setting {
             | Setting::FormatOnSave
             | Setting::TrimWhitespace
             | Setting::FinalNewline => Page::Saving,
-            Setting::Shell | Setting::RunConfigurations => Page::Terminal,
+            Setting::Shell | Setting::OptionAsMeta | Setting::RunConfigurations => Page::Terminal,
             Setting::TrustAll | Setting::NativeGrammars => Page::Trust,
             Setting::AutoUpdate => Page::Updates,
             Setting::PullStrategy | Setting::AutoFetch | Setting::AutoResolveConflicts => Page::Git,
@@ -240,7 +247,7 @@ impl Setting {
             Setting::VimMode => "Vim",
             Setting::AutoSave | Setting::AutoSaveDelay => "Auto-save",
             Setting::FormatOnSave | Setting::TrimWhitespace | Setting::FinalNewline => "On save",
-            Setting::Shell => "Terminal",
+            Setting::Shell | Setting::OptionAsMeta => "Terminal",
             Setting::RunConfigurations => "Run configurations",
             Setting::TrustAll | Setting::NativeGrammars => "Restricted Mode",
             Setting::AutoUpdate => "Updates",
@@ -280,6 +287,7 @@ impl Setting {
             Setting::TrimWhitespace => "Trim trailing whitespace",
             Setting::FinalNewline => "Insert final newline",
             Setting::Shell => "Shell",
+            Setting::OptionAsMeta => "Use Option as Meta key",
             Setting::RunConfigurations => "Run configurations",
             Setting::TrustAll => "Trust all folders",
             Setting::NativeGrammars => "Native extension grammars",
@@ -323,6 +331,7 @@ impl Setting {
             Setting::TrimWhitespace => "Remove spaces at the ends of lines, except on lines with a caret.",
             Setting::FinalNewline => "End every file with a line break.",
             Setting::Shell => "Program and arguments for new terminals. Empty uses your login shell.",
+            Setting::OptionAsMeta => "Option+key sends Escape and the key, for the shell's word moves and Emacs keys, instead of typing a character like ∫.",
             Setting::RunConfigurations => "Commands for Run… next to the detected ones (cargo, npm scripts, go, make, pytest).",
             Setting::TrustAll => "Run language servers, formatters and project tools in every folder without asking. Not recommended.",
             Setting::NativeGrammars => "Compile extensions' grammars with your C compiler instead of WebAssembly, which runs them sandboxed. Only for extensions in trusted folders.",
@@ -365,6 +374,7 @@ impl Setting {
             Setting::TrimWhitespace => "spaces trailing whitespace",
             Setting::FinalNewline => "newline end of file eof",
             Setting::Shell => "terminal bash zsh fish powershell",
+            Setting::OptionAsMeta => "terminal option alt meta escape key emacs readline word",
             Setting::RunConfigurations => "run tasks commands scripts",
             Setting::TrustAll => "trust security restricted mode workspace untrusted safe",
             Setting::NativeGrammars => "extensions grammars tree-sitter native compiler wasm webassembly sandbox",
@@ -1287,7 +1297,7 @@ impl Preferences {
             _ => {}
         }
         let mut sections: Vec<(&'static str, Vec<Setting>)> = Vec::new();
-        for setting in Setting::ALL.into_iter().filter(|s| s.page() == self.page) {
+        for setting in Setting::listed().filter(|s| s.page() == self.page) {
             match sections.last_mut() {
                 Some((name, list)) if *name == setting.section() => list.push(setting),
                 _ => sections.push((setting.section(), vec![setting])),
@@ -1309,8 +1319,7 @@ impl Preferences {
         let theme = Theme::get(cx).clone();
         let mut groups: Vec<AnyElement> = Vec::new();
         for page in Page::ALL {
-            let rows: Vec<AnyElement> = Setting::ALL
-                .into_iter()
+            let rows: Vec<AnyElement> = Setting::listed()
                 .filter(|s| s.page() == page && s.matches(words))
                 .map(|s| self.render_setting(s, window, cx))
                 .collect();
@@ -1532,6 +1541,9 @@ impl Preferences {
                 })
             }
             Setting::AutoFetch => self.switch_with_default("pref-auto-fetch", "auto_fetch", settings.auto_fetch, true, cx),
+            Setting::OptionAsMeta => {
+                self.switch_with_default("pref-option-as-meta", "terminal_option_as_meta", settings.terminal_option_as_meta, false, cx)
+            }
             Setting::AutoResolveConflicts => {
                 self.switch_with_default("pref-auto-resolve-conflicts", "auto_resolve_conflicts", settings.auto_resolve_conflicts, true, cx)
             }
@@ -2656,7 +2668,7 @@ fn clone_event(event: &PreferencesEvent) -> PreferencesEvent {
 /// Section names of a page with settings rows, in order.
 fn page_sections(page: Page) -> Vec<&'static str> {
     let mut sections: Vec<&'static str> = Vec::new();
-    for setting in Setting::ALL.into_iter().filter(|s| s.page() == page) {
+    for setting in Setting::listed().filter(|s| s.page() == page) {
         if sections.last() != Some(&setting.section()) {
             sections.push(setting.section());
         }
@@ -2696,6 +2708,7 @@ fn setting_key(setting: Setting) -> &'static str {
         Setting::TrimWhitespace => "trim_trailing_whitespace",
         Setting::FinalNewline => "insert_final_newline",
         Setting::Shell => "terminal_shell",
+        Setting::OptionAsMeta => "terminal_option_as_meta",
         Setting::TrustAll => "trust_all_projects",
         Setting::NativeGrammars => "native_grammars",
         Setting::AutoUpdate => "auto_update",

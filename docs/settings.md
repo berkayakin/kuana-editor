@@ -61,6 +61,7 @@ and theme colors.
 | `extensions` | | per extension, by id: settings its code reads (see [Writing view extensions](extension-ui.md#settings)), as the extension documents them |
 | `lsp` | | per server, by id (Kuana's, e.g. `typescript`, or Zed's, e.g. `vtsls`, `basedpyright`): `settings` (what it asks for through `workspace/configuration`; a change is sent to it), `initialization_options` (applied when it restarts) and `binary` (`{ "path", "arguments" }`) |
 | `terminal_shell` | login shell | the terminal's shell and arguments, e.g. `["/opt/homebrew/bin/fish", "--login"]` |
+| `terminal_option_as_meta` | `false` | macOS: Option acts as Meta in the terminal, sending Escape and the key (Option+B is the shell's word back) instead of typing a character like `∫`; Settings → Terminal. Alt always does on Windows and Linux |
 | `run_configurations` | | `[{ "name", "command", "cwd" }]` added to Run…; see [Run and test](run-and-debug.md#run-and-test) |
 | `formatters` | | per language: `"language_server"`, a command reading stdin and writing stdout (`{file}` is the path), or `false` |
 | `trust_all_projects` | `false` | run language servers, formatters and project tools in every folder without asking; see [Project trust](#project-trust) |
