@@ -13,11 +13,13 @@ use serde_json::{Value, json};
 use crate::lint::{Diagnostic, Severity};
 
 /// How a server counts columns. LSP's default is UTF-16 code units; servers
-/// that offer UTF-8 save Kuana the conversion.
+/// that offer UTF-8 save Kuana the conversion. UTF-32 (characters) isn't
+/// offered to servers: extensions' places count that way.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Encoding {
     Utf8,
     Utf16,
+    Utf32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -66,6 +68,7 @@ pub fn offset_to_position(rope: &Rope, offset: usize, encoding: Encoding) -> Pos
             let (c0, c1) = (rope.byte_to_char(line_start), rope.byte_to_char(offset));
             rope.char_to_utf16_cu(c1) - rope.char_to_utf16_cu(c0)
         }
+        Encoding::Utf32 => rope.byte_to_char(offset) - rope.byte_to_char(line_start),
     };
     Position { line: line as u32, character: character as u32 }
 }
@@ -90,6 +93,10 @@ pub fn position_to_offset(rope: &Rope, position: Position, encoding: Encoding) -
             let end_char = rope.byte_to_char(line_start + content_len);
             let ch = rope.utf16_cu_to_char(target.min(rope.len_utf16_cu())).min(end_char);
             rope.char_to_byte(ch) - line_start
+        }
+        Encoding::Utf32 => {
+            let (c0, end_char) = (rope.byte_to_char(line_start), rope.byte_to_char(line_start + content_len));
+            rope.char_to_byte((c0 + position.character as usize).min(end_char)) - line_start
         }
     };
     // Snap to a char boundary in case a UTF-8 column lands mid-character.
@@ -712,6 +719,9 @@ mod tests {
         assert_eq!(offset_to_position(&rope, b_offset, Encoding::Utf8), Position { line: 0, character: 7 });
         assert_eq!(position_to_offset(&rope, Position { line: 0, character: 4 }, Encoding::Utf16), b_offset);
         assert_eq!(position_to_offset(&rope, Position { line: 0, character: 7 }, Encoding::Utf8), b_offset);
+        assert_eq!(offset_to_position(&rope, b_offset, Encoding::Utf32), Position { line: 0, character: 3 });
+        assert_eq!(position_to_offset(&rope, Position { line: 0, character: 3 }, Encoding::Utf32), b_offset);
+        assert_eq!(position_to_offset(&rope, Position { line: 1, character: 99 }, Encoding::Utf32), b_offset + 1 + 1 + 3);
         // Past the end of a line clamps to it; past the last line, to the end.
         assert_eq!(position_to_offset(&rope, Position { line: 1, character: 99 }, Encoding::Utf16), b_offset + 1 + 1 + 3);
         assert_eq!(position_to_offset(&rope, Position { line: 9, character: 0 }, Encoding::Utf16), rope.len_bytes());
