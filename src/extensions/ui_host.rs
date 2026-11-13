@@ -19,7 +19,8 @@
 //! (`workspace::extension_requests`); the ones that wait for an answer (a
 //! prompt, a permission) block only the extension's thread. Network, programs
 //! and project files need a permission the manifest declares and the user
-//! allows (`permissions`).
+//! allows (`permissions`); `[kuana.allow]` narrows programs and hosts to
+//! lists (`allow_program`, `allow_url`).
 
 use std::{
     collections::HashMap,
@@ -219,7 +220,8 @@ pub enum Request {
     Notify { window: u64, extension: String, tone: Tone, message: String, detail: Option<String> },
     AskInput { window: u64, extension: String, prompt: String, initial: String, secret: bool, answer: oneshot::Sender<Option<String>> },
     Confirm { window: u64, message: String, detail: String, action: String, answer: oneshot::Sender<bool> },
-    Permission { window: u64, name: String, permission: Permission, answer: oneshot::Sender<bool> },
+    /// `scope`: what the manifest narrows it to (`[kuana.allow]`).
+    Permission { window: u64, name: String, permission: Permission, scope: Option<Vec<String>>, answer: oneshot::Sender<bool> },
     Diagnostics { extension: String, path: PathBuf, problems: Vec<Problem> },
     RunInTerminal { window: u64, extension: String, title: String, command: String },
     /// `path`'s tab, or the one the user is in.
@@ -505,6 +507,7 @@ impl Instance {
             extension: id.clone(),
             name: extension.name.clone(),
             declared: extension.permissions.clone(),
+            allowed: extension.allow.clone(),
             panels: extension.panels.iter().map(|p| p.id.clone()).collect(),
             status: extension.status.iter().map(|s| s.id.clone()).collect(),
             hears_output: extension.hears("process-output"),
@@ -581,6 +584,8 @@ pub struct HostState {
     extension: String,
     name: String,
     declared: Vec<Permission>,
+    /// `[kuana.allow]`: the permissions narrowed to lists.
+    allowed: Vec<(Permission, Vec<String>)>,
     panels: Vec<String>,
     /// Its status bar items' ids.
     status: Vec<String>,
@@ -606,17 +611,56 @@ impl HostState {
         if !self.declared.contains(&permission) {
             return Err(format!("the extension doesn't declare the {} permission in [kuana] permissions", permission.key()));
         }
-        if permissions::is_granted(&self.extension, permission) {
+        let scope = self.scope(permission).map(<[String]>::to_vec);
+        if permissions::is_granted(&self.extension, permission, scope.as_deref()) {
             return Ok(());
         }
         if permissions::was_declined(&self.extension, permission) {
             return Err(refused());
         }
         let (answer, answered) = oneshot::channel();
-        send(Request::Permission { window: self.caller.window, name: self.name.clone(), permission, answer });
+        send(Request::Permission { window: self.caller.window, name: self.name.clone(), permission, scope: scope.clone(), answer });
         let allowed = futures::executor::block_on(answered).unwrap_or(false);
-        permissions::answer(&self.extension, permission, allowed);
+        permissions::answer(&self.extension, permission, scope.as_deref(), allowed);
         if allowed { Ok(()) } else { Err(refused()) }
+    }
+
+    fn scope(&self, permission: Permission) -> Option<&[String]> {
+        self.allowed.iter().find(|(p, _)| *p == permission).map(|(_, list)| list.as_slice())
+    }
+
+    /// `process` for `program`, and where it is: with a list, only a program
+    /// it names, found on PATH (never a copy in the work folder).
+    fn allow_program(&mut self, program: &str) -> Result<PathBuf, String> {
+        let Some(list) = self.scope(Permission::Process) else {
+            self.allow(Permission::Process)?;
+            return Ok(wasm::program_path(&self.work, program));
+        };
+        if !permissions::allows_program(list, program) {
+            return Err(format!("{program} isn't one of the programs the extension may run ([kuana.allow] process: {})", list.join(", ")));
+        }
+        self.allow(Permission::Process)?;
+        servers::which(program).ok_or_else(|| format!("{program} isn't installed (or isn't on PATH)"))
+    }
+
+    /// `network` for `url`, and the address to ask curl for: with a list, only
+    /// a host it names, as `url` reads it (curl then gets that reading, so the
+    /// two can't disagree on the host), and no redirects followed.
+    fn allow_url(&mut self, url: &str) -> Result<(String, bool), String> {
+        let Some(list) = self.scope(Permission::Network) else {
+            self.allow(Permission::Network)?;
+            return Ok((url.to_string(), true));
+        };
+        let parsed = url::Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(format!("{url} isn't an HTTP address"));
+        }
+        let host = parsed.host_str().unwrap_or_default();
+        if !permissions::allows_host(list, host) {
+            return Err(format!("{host} isn't one of the hosts the extension may reach ([kuana.allow] network: {})", list.join(", ")));
+        }
+        self.allow(Permission::Network)?;
+        Ok((parsed.to_string(), false))
     }
 
     /// A path the code names: relative ones are in its work folder; absolute
@@ -733,6 +777,16 @@ macro_rules! shared_host {
         }
 
         fn run_in_terminal(&mut self, title: String, command: String) -> Result<(), String> {
+            // A shell runs the line: with a list of programs, only a plain one
+            // (`permissions::plain_command`) starting one of them.
+            if let Some(list) = self.scope(Permission::Process) {
+                let program = permissions::plain_command(&command).ok_or_else(|| {
+                    "with [kuana.allow] process, run-in-terminal takes only a plain command line: a program and its arguments, no pipes, redirections, variables or second commands".to_string()
+                })?;
+                if !permissions::allows_program(list, program) {
+                    return Err(format!("{program} isn't one of the programs the extension may run ([kuana.allow] process: {})", list.join(", ")));
+                }
+            }
             self.allow(Permission::Process)?;
             self.trusted()?;
             send(Request::RunInTerminal { window: self.caller.window, extension: self.extension.clone(), title, command });
@@ -740,13 +794,13 @@ macro_rules! shared_host {
         }
 
         fn run_process(&mut self, program: String, args: Vec<String>, cwd: Option<String>) -> Result<$wit::ProcessOutput, String> {
-            self.allow(Permission::Process)?;
+            let path = self.allow_program(&program)?;
             self.trusted()?;
             let dir = match cwd {
                 Some(cwd) => self.resolve(&cwd)?,
                 None => self.caller.root.clone().unwrap_or_else(|| self.work.clone()),
             };
-            let mut command = crate::process::command(wasm::program_path(&self.work, &program));
+            let mut command = crate::process::command(path);
             command.args(&args).env("PATH", servers::search_path()).current_dir(dir);
             let output = wasm::output_within(command, PROCESS_TIMEOUT).map_err(|e| format!("{program}: {e}"))?;
             Ok($wit::ProcessOutput {
@@ -763,8 +817,8 @@ macro_rules! shared_host {
             headers: Vec<(String, String)>,
             body: Option<Vec<u8>>,
         ) -> Result<$wit::HttpResponse, String> {
-            self.allow(Permission::Network)?;
-            let (status, headers, body) = wasm::http(&method, &url, headers, body)?;
+            let (url, follow) = self.allow_url(&url)?;
+            let (status, headers, body) = wasm::http(&method, &url, headers, body, follow)?;
             Ok($wit::HttpResponse { status, headers, body })
         }
 
@@ -881,7 +935,7 @@ impl v2::kuana::extension::host::Host for HostState {
     }
 
     fn spawn_process(&mut self, name: String, program: String, args: Vec<String>, cwd: Option<String>, panel: Option<String>) -> Result<(), String> {
-        self.allow(Permission::Process)?;
+        let path = self.allow_program(&program)?;
         self.trusted()?;
         if let Some(panel) = panel.as_ref().filter(|p| !self.panels.contains(p)) {
             return Err(format!("the extension has no panel {panel}"));
@@ -890,7 +944,7 @@ impl v2::kuana::extension::host::Host for HostState {
             Some(cwd) => self.resolve(&cwd)?,
             None => self.caller.root.clone().unwrap_or_else(|| self.work.clone()),
         };
-        let mut command = crate::process::command(wasm::program_path(&self.work, &program));
+        let mut command = crate::process::command(path);
         command.args(&args).env("PATH", servers::search_path()).current_dir(dir);
         let (window, extension, hears_output, process) = (self.caller.window, self.extension.clone(), self.hears_output, name.clone());
         let event = |name: &'static str, data: serde_json::Value| Event { name, path: None, language: None, data: Some(data.to_string()) };
