@@ -946,17 +946,24 @@ pub fn text_button(id: impl Into<gpui::ElementId>, label: &'static str, primary:
     };
     div()
         .id(id)
-        .h(px(28.))
+        .min_h(px(28.))
         .px_3()
+        .py(px(3.))
         .flex()
         .flex_shrink_0()
         .items_center()
+        .justify_center()
         .rounded(px(14.))
         .cursor_pointer()
         .font_weight(gpui::FontWeight::MEDIUM)
         .when(primary, |el| el.text_color(theme.accent).border_1().border_color(Hsla::from(theme.accent).alpha(0.3)))
         .when(!primary, |el| el.text_color(theme.text))
-        .child(label)
+        // Narrower than its label (stretched in a narrow column, or given a
+        // width), the label wraps and the pill grows instead of the text running
+        // past it. Not an ellipsis: GPUI's `truncate` keeps the label's
+        // full-width measurement, so it only clipped the text.
+        .min_w_0()
+        .child(div().min_w_0().whitespace_normal().text_center().child(label))
         .hover_fill(rest, hover)
 }
 
