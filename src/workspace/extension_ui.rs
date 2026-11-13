@@ -208,6 +208,7 @@ pub fn handle_extension_request(request: Request, cx: &mut App) {
         | Request::AppendPanel { window, .. }
         | Request::ProcessEvent { window, .. }
         | Request::Timer { window, .. }
+        | Request::ShowResults { window, .. }
         | Request::OpenFile { window, .. }
         | Request::Notify { window, .. }
         | Request::AskInput { window, .. }
@@ -332,6 +333,21 @@ impl Workspace {
                 answer.send(result).ok();
             }
             Request::Pick { extension, placeholder, items, answer, .. } => self.extension_pick(extension, placeholder, items, answer, window, cx),
+            Request::ShowResults { extension, title, items, .. } => {
+                let Some(c) = contribution(&extension) else { return };
+                let nodes = crate::extensions::results::result_nodes(items, &c);
+                // Its tab is found again by extension and title, so showing them
+                // again (a refresh, maybe from a timer) leaves the keyboard be.
+                let kind = format!("extension:{extension}:{title}");
+                let new = !self.results.read(cx).has_kind(&kind);
+                self.results.update(cx, |p, cx| p.show_kind(kind, title.into(), nodes, Vec::new(), cx));
+                self.has_results = true;
+                self.bottom = Some(BottomPanel::Results);
+                if new {
+                    window.focus(&self.results.focus_handle(cx));
+                }
+                cx.notify();
+            }
             Request::Status { extension, item, status, .. } => {
                 let at = self.ext_runtime.status.iter().position(|s| s.extension.extension == extension && s.item == item);
                 let Some(c) = contribution(&extension) else { return };

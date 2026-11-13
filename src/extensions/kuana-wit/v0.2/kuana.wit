@@ -129,6 +129,32 @@ interface types {
         tooltip: option<string>,
     }
 
+    /// A place in a file: a 1-based line and an optional 1-based column, in
+    /// characters. `path` as for `open-file`.
+    record result-place {
+        path: string,
+        line: u32,
+        column: option<u32>,
+    }
+
+    /// A row of `show-results`' tree. WIT has no nested records, so a tree
+    /// comes as a flat list in order, each row after its parent: `parent` is
+    /// the index of its parent in the list (none for a top-level row), and a
+    /// parent's children show in list order.
+    record result-node {
+        parent: option<u32>,
+        label: string,
+        /// Dim text after the label.
+        detail: option<string>,
+        /// As a tree item's. Without one, a row with a place shows its line
+        /// number when it has no children, its file's type icon when it has.
+        icon: option<string>,
+        /// The icon's color.
+        tone: tone,
+        /// Where choosing it goes (Enter, a click, Next / Previous Result).
+        place: option<result-place>,
+    }
+
     /// Something that happened, told to `on-event`.
     record event {
         /// One of the manifest's `events` (`project-opened`, `project-closed`,
@@ -151,7 +177,7 @@ interface types {
 /// What Kuana does for the code. Calls that need a permission declared in
 /// `[kuana] permissions` fail with an error until the user allows it.
 interface host {
-    use types.{tone, panel-content, diagnostic, process-output, http-response, span, editor-state, text-edit, pick-item, status};
+    use types.{tone, panel-content, diagnostic, process-output, http-response, span, editor-state, text-edit, pick-item, status, result-node};
 
     // ---- As in 0.1 ----
 
@@ -216,6 +242,14 @@ interface host {
     /// Lets the user pick one of `items` from a list they can type to narrow
     /// down, like Find Action. The picked item's id; none when they cancel.
     pick: func(placeholder: string, items: list<pick-item>) -> option<string>;
+    /// Shows a tree in the Find panel (as Find Usages' results) under
+    /// `title`, and brings the panel forward. Showing results under the same
+    /// title again fills that tab in place (its closed groups and selected
+    /// row kept); a new title opens a tab, which also takes the keyboard.
+    /// At most 5,000 rows show (the rest as one "more" row) and rows nest at
+    /// most 64 deep. Fails, showing nothing, when a row's `parent` isn't an
+    /// earlier row or a place's file can't be reached.
+    show-results: func(title: string, nodes: list<result-node>) -> result<_, string>;
     /// What one of the extension's status bar items (`[kuana.status.<id>]`)
     /// shows in the window the call is for; none hides it.
     set-status: func(item: string, status: option<status>);
