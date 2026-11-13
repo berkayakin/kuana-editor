@@ -214,6 +214,8 @@ impl Workspace {
                 self.focus_active(window, cx);
                 cx.notify();
             }
+            QueryResultsEvent::TabMenu { id, position } => self.open_result_tab_menu(*id, *position, window, cx),
+            QueryResultsEvent::Rename(id) => self.open_rename_result(*id, window, cx),
             QueryResultsEvent::Commit => self.end_transaction(true, cx),
             QueryResultsEvent::Rollback => self.end_transaction(false, cx),
             QueryResultsEvent::Reveal(ix) => {
@@ -225,6 +227,55 @@ impl Workspace {
                 }
             }
         }
+    }
+
+    /// A Result tab's right-click menu.
+    fn open_result_tab_menu(&mut self, id: u64, position: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let results = self.db_results.read(cx);
+        let Some((_, named)) = results.name(id) else { return };
+        let pinned = results.is_pinned(id);
+        let count = results.result_count();
+        let mut entries = Vec::new();
+        let mut actions = Vec::new();
+        let mut add = |entry: MenuEntry, call: Rc<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>| {
+            entries.push(entry);
+            actions.push(Some(MenuAction::Call(call)));
+        };
+        add(
+            MenuEntry::item(if pinned { "Unpin" } else { "Pin" }, Icon::Pin),
+            Rc::new(move |ws, _, cx| ws.db_results.update(cx, |r, cx| r.toggle_pin(id, cx))),
+        );
+        add(MenuEntry::item("Rename…", Icon::Pencil), Rc::new(move |ws, window, cx| ws.open_rename_result(id, window, cx)));
+        if named {
+            add(MenuEntry::text("Reset Name"), Rc::new(move |ws, _, cx| ws.db_results.update(cx, |r, cx| r.rename(id, None, cx))));
+        }
+        entries.push(MenuEntry::Separator);
+        actions.push(None);
+        let mut add = |entry: MenuEntry, call: Rc<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>| {
+            entries.push(entry);
+            actions.push(Some(MenuAction::Call(call)));
+        };
+        add(MenuEntry::item("Close", Icon::X), Rc::new(move |ws, _, cx| ws.db_results.update(cx, |r, cx| r.close_results(Some(id), false, cx))));
+        if count > 1 {
+            add(MenuEntry::text("Close Others"), Rc::new(move |ws, _, cx| ws.db_results.update(cx, |r, cx| r.close_results(Some(id), true, cx))));
+            add(MenuEntry::text("Close All Results"), Rc::new(|ws, _, cx| ws.db_results.update(cx, |r, cx| r.close_results(None, false, cx))));
+        }
+        self.show_context_menu(entries, actions, position, None, window, cx);
+    }
+
+    fn open_rename_result(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((initial, _)) = self.db_results.read(cx).name(id) else { return };
+        self.close_modal(window, cx);
+        let hint = "Leave empty to go back to its number";
+        let dialog = cx.new(|cx| InputDialog::new("Rename Result", Icon::Database, hint, &initial, Some(0..initial.len()), window, cx).allow_empty());
+        let subscription = cx.subscribe_in(&dialog, window, move |ws, _, event: &InputDialogEvent, window, cx| {
+            if let InputDialogEvent::Confirm(name) = event {
+                ws.db_results.update(cx, |r, cx| r.rename(id, Some(name.clone()), cx));
+            }
+            ws.close_modal(window, cx);
+        });
+        self.modals.open(Modal::Input(dialog), subscription);
+        cx.notify();
     }
 
     fn end_transaction(&mut self, commit: bool, cx: &mut Context<Self>) {
