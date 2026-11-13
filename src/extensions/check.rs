@@ -120,6 +120,17 @@ pub fn check(dir: &Path) -> Vec<Finding> {
         if !parts.is_empty() {
             add(Level::Note, format!("[kuana]: {}", parts.join(", ")));
         }
+        if !ui.permissions.is_empty() {
+            let words: Vec<String> = ui
+                .permissions
+                .iter()
+                .map(|&p| match p.scope_words(ui.scope(p)) {
+                    Some(words) => format!("{}: {words}", p.key()),
+                    None => p.key().to_string(),
+                })
+                .collect();
+            add(Level::Note, format!("[kuana] permissions: {}", words.join("; ")));
+        }
         if ui.code.is_some() {
             match super::ui_host::check(ui) {
                 Ok(()) => add(Level::Note, "kuana.wasm: its code loads and activates".into()),

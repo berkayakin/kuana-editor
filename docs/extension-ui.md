@@ -272,6 +272,7 @@ Everything is under `[kuana]` in `extension.toml`.
 | --- | --- |
 | `api` | The interface version the code is built for: `"0.1"` (the default) or `"0.2"`. See [Versions](#versions). |
 | `permissions` | What the code may do beyond its own folder: `"process"`, `"network"`, `"workspace-files"`, `"workspace-write"` (0.2). See [Permissions](#permissions). |
+| `[kuana.allow]` | Narrows `process` to the programs and `network` to the hosts it lists: `process = ["docker"]`, `network = ["api.github.com", "*.example.com"]`. See [Narrowing permissions](#narrowing-permissions). |
 | `events` | 0.2: what the code's `on-event` hears about. See [Events](#events). |
 | `[kuana.views.<id>]` | A view. `title`; `icon`; `when`: `"always"` (the default), `"file:<name>"` (shown when the project has that file or folder, such as `compose.yaml`) or `"language:<name>"` (shown while a file in that language is open, such as `Go`). |
 | `[kuana.commands.<id>]` | A command. `title`; `icon` (shown when it's a toolbar button); `key`: a default shortcut, see [Key bindings](#key-bindings). Find Action lists it as "<extension name>: <title>". |
@@ -434,13 +435,47 @@ The code can only use what the manifest declares, and Kuana asks the user the fi
 
 | Permission | Lets the code |
 | --- | --- |
-| `process` | run programs (`run-process`, `run-in-terminal`), only for trusted projects or with none open |
+| `process` | run programs (`run-process`, `run-in-terminal`, `spawn-process`), only for trusted projects or with none open |
 | `network` | make HTTP requests (`http-request`) |
 | `workspace-files` | read the open project's files and open them (`read-project-file`, project paths in `open-file`, `editor`, file events) |
 | `workspace-write` | change the open project's files (`write-project-file`, `apply-edits` on a project file); 0.2 |
 
 An allowed permission is remembered; a refused one is asked again after Kuana restarts. Settings → Extensions lists an
 extension's permissions with a **Revoke** link. A call without its permission returns an error saying so.
+
+#### Narrowing permissions
+
+A bare `process` lets the code run any program, and a program can do anything the user can, so ask only for what the
+extension needs. `[kuana.allow]` narrows `process` and `network` to lists:
+
+```toml
+[kuana]
+api = "0.2"
+permissions = ["process"]
+
+[kuana.allow]
+process = ["docker", "git"]
+network = ["api.github.com", "*.example.com"]
+```
+
+A permission listed there is declared, whether or not `permissions` names it. Kuana enforces the lists, and the user is
+asked for exactly what they say ("Allow the Docker extension to run docker on this computer?" rather than "run any
+program"):
+
+- **Programs** are bare names, found on PATH (on Windows `docker.exe` matches `docker`). The code must name one of
+  them exactly: a path, or a program by another name, is refused, and so is a copy in the extension's own folder.
+  The list says which programs may start, not what they do: `docker` can still do whatever Docker can.
+- **`run-in-terminal`** runs its command line in a shell, so with a list it takes only a plain one: a listed program,
+  then words of letters, digits and `_-./:,+=%`, single-quoted text, or double-quoted text of those and spaces. Pipes,
+  redirections, `;` and `&&`, variables, `$(…)` and globs are refused. Without a list it runs any line, as before.
+- **Hosts** are names or addresses (any port), and `*.example.com` covers every name under `example.com`
+  (`api.example.com`, `a.b.example.com`) but not `example.com` itself. Only `http` and `https` addresses are allowed,
+  and redirects aren't followed (the response is the redirect itself), since one could lead to any host.
+
+A call outside the lists fails with an error naming what the manifest allows. Kuana remembers a grant per listed
+program or host, so when an update lists more, or drops the list (asking for anything), the user is asked again;
+a grant of a bare permission (from before the list, say) covers any list. `kuana extension check` and the
+extension's row in Settings → Extensions show the lists.
 
 ### Limits
 

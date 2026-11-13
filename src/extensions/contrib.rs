@@ -79,15 +79,57 @@ impl Permission {
         PERMISSIONS.into_iter().find(|p| p.key() == key)
     }
 
-    /// What it lets the extension do, as the permission prompt says it.
-    pub fn describe(self) -> &'static str {
-        match self {
-            Permission::Network => "connect to the internet and your network",
-            Permission::Process => "run programs on this computer",
-            Permission::WorkspaceFiles => "read the files of the open project",
-            Permission::WorkspaceWrite => "change the files of the open project",
+    /// Whether `[kuana.allow]` can narrow it to a list (of programs, of hosts).
+    pub fn takes_list(self) -> bool {
+        matches!(self, Permission::Process | Permission::Network)
+    }
+
+    /// What it lets the extension do, as the permission prompt says it;
+    /// `scope` is its `[kuana.allow]` list (None: anything).
+    pub fn describe(self, scope: Option<&[String]>) -> String {
+        match (self, scope) {
+            (Permission::Network, None) => "connect to any server on the internet and your network".into(),
+            (Permission::Network, Some(hosts)) => format!("connect to {}", and_list(hosts)),
+            (Permission::Process, None) => "run any program on this computer".into(),
+            (Permission::Process, Some(programs)) => format!("run {} on this computer", and_list(programs)),
+            (Permission::WorkspaceFiles, _) => "read the files of the open project".into(),
+            (Permission::WorkspaceWrite, _) => "change the files of the open project".into(),
         }
     }
+
+    /// Its scope in a few words (Settings, `kuana extension check`).
+    pub fn scope_words(self, scope: Option<&[String]>) -> Option<String> {
+        match (self, scope) {
+            (_, Some(list)) => Some(list.join(", ")),
+            (Permission::Process, None) => Some("any program".into()),
+            (Permission::Network, None) => Some("any host".into()),
+            _ => None,
+        }
+    }
+}
+
+/// "a", "a and b", "a, b and c".
+fn and_list(items: &[String]) -> String {
+    match items {
+        [] => "nothing".into(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// A program name `[kuana.allow] process` may list: a bare name, found on
+/// PATH (a path would let the code start a copy it wrote).
+pub fn valid_program(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+')) && !name.starts_with('.')
+}
+
+/// A host `[kuana.allow] network` may list: a name or address, or `*.` and
+/// a name for every name under it.
+pub fn valid_host(host: &str) -> bool {
+    let name = host.strip_prefix("*.").unwrap_or(host);
+    !name.is_empty()
+        && name.split('.').all(|label| !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        && (name.contains('.') || !host.starts_with("*."))
 }
 
 /// When a view shows on the activity bar.
@@ -222,6 +264,9 @@ pub struct Contributions {
     pub code: Option<PathBuf>,
     pub api: Api,
     pub permissions: Vec<Permission>,
+    /// `[kuana.allow]`: permissions narrowed to a list (programs for
+    /// `process`, hosts for `network`). One that isn't here is unrestricted.
+    pub allow: Vec<(Permission, Vec<String>)>,
     /// The events its code hears about (0.2), from `EVENTS`.
     pub events: Vec<&'static str>,
     pub views: Vec<ViewDef>,
@@ -233,6 +278,11 @@ pub struct Contributions {
 }
 
 impl Contributions {
+    /// What `permission` is narrowed to (None: anything it covers).
+    pub fn scope(&self, permission: Permission) -> Option<&[String]> {
+        self.allow.iter().find(|(p, _)| *p == permission).map(|(_, list)| list.as_slice())
+    }
+
     /// Whether its code is told about `event` (see `EVENTS`).
     pub fn hears(&self, event: &str) -> bool {
         self.code.is_some() && self.events.contains(&event)
@@ -382,6 +432,45 @@ pub fn parse(manifest: &toml::Table, extension: &str, name: &str, dir: &Path) ->
             Some(_) => {}
             None => problems.push(format!("[kuana] permissions: {value} isn't one of network, process, workspace-files, workspace-write")),
         }
+    }
+    // `[kuana.allow]` narrows a permission to a list; listing one declares it.
+    match table.get("allow") {
+        None => {}
+        Some(Value::Table(allow)) => {
+            for (key, value) in allow {
+                let Some(permission) = Permission::from_key(key).filter(|p| p.takes_list()) else {
+                    problems.push(format!("[kuana.allow] {key}: only process and network take a list"));
+                    continue;
+                };
+                let Some(items) = value.as_array() else {
+                    problems.push(format!("[kuana.allow] {key} must be a list of strings"));
+                    continue;
+                };
+                let (what, valid): (&str, fn(&str) -> bool) = match permission {
+                    Permission::Process => ("a program name (no path)", valid_program),
+                    _ => ("a host name, or *. and one", valid_host),
+                };
+                let mut list = Vec::new();
+                for item in items {
+                    match item.as_str().map(|s| if permission == Permission::Network { s.to_ascii_lowercase() } else { s.to_string() }) {
+                        Some(name) if valid(&name) => {
+                            if !list.contains(&name) {
+                                list.push(name);
+                            }
+                        }
+                        _ => problems.push(format!("[kuana.allow] {key}: {item} isn't {what}")),
+                    }
+                }
+                if list.is_empty() {
+                    problems.push(format!("[kuana.allow] {key} allows nothing; list what the code needs or leave the key out"));
+                }
+                if !out.permissions.contains(&permission) {
+                    out.permissions.push(permission);
+                }
+                out.allow.push((permission, list));
+            }
+        }
+        Some(_) => problems.push("[kuana.allow] must be a table".into()),
     }
     if out.permissions.contains(&Permission::WorkspaceWrite) {
         needs_v2("the workspace-write permission", &mut problems);
@@ -611,6 +700,57 @@ mod tests {
         assert_eq!(c.menu(&item, |c| *c == Condition::Kind("crate".into())).count(), 1);
         assert_eq!(c.menu(&item, |_| false).count(), 0);
         assert_eq!(c.panel("logs").unwrap().title, "Logs");
+    }
+
+    #[test]
+    fn narrows_process_and_network_to_lists() {
+        let (c, problems) = parsed(
+            r#"
+            [kuana]
+            api = "0.2"
+            permissions = ["process", "workspace-files"]
+            [kuana.allow]
+            process = ["docker", "git", "docker"]
+            network = ["API.GitHub.com", "*.example.com"]
+            "#,
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        // Listing network declares it.
+        assert_eq!(c.permissions, [Permission::Process, Permission::WorkspaceFiles, Permission::Network]);
+        assert_eq!(c.scope(Permission::Process), Some(&["docker".to_string(), "git".to_string()][..]));
+        assert_eq!(c.scope(Permission::Network), Some(&["api.github.com".to_string(), "*.example.com".to_string()][..]));
+        assert_eq!(c.scope(Permission::WorkspaceFiles), None);
+        assert_eq!(Permission::Process.describe(c.scope(Permission::Process)), "run docker and git on this computer");
+        assert_eq!(Permission::Process.describe(None), "run any program on this computer");
+        assert_eq!(Permission::Network.describe(c.scope(Permission::Network)), "connect to api.github.com and *.example.com");
+        assert_eq!(Permission::Network.scope_words(None).as_deref(), Some("any host"));
+        assert_eq!(Permission::WorkspaceFiles.scope_words(None), None);
+
+        // A bare permission stays unrestricted, as before lists.
+        let (c, _) = parsed("[kuana]\npermissions = [\"process\", \"network\"]");
+        assert!(c.allow.is_empty() && c.scope(Permission::Process).is_none());
+
+        let (_, problems) = parsed(
+            r#"
+            [kuana]
+            [kuana.allow]
+            process = ["/usr/bin/docker", "sh -c"]
+            network = ["*.com", "http://x.org", "ok.org"]
+            workspace-files = ["src"]
+            "#,
+        );
+        let expected = [
+            "/usr/bin/docker\" isn't a program",
+            "sh -c\" isn't a program",
+            "process allows nothing",
+            "\"*.com\" isn't a host",
+            "\"http://x.org\" isn't a host",
+            "workspace-files: only process and network take a list",
+        ];
+        for text in expected {
+            assert!(problems.iter().any(|p| p.contains(text)), "{text} not in {problems:?}");
+        }
+        assert_eq!(problems.len(), expected.len(), "{problems:?}");
     }
 
     #[test]
