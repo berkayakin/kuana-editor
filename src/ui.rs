@@ -301,22 +301,31 @@ pub fn soft_shadow(theme: &Theme, depth: u8) -> Vec<gpui::BoxShadow> {
     if theme.reduce_effects {
         return Vec::new();
     }
-    // On dark chrome an island's shadow only darkens the gap around it, so it
-    // stays light; things that float above the window need the depth.
-    let (alpha, y, blur): (f32, f32, f32) = match (theme.appearance, depth) {
-        (Appearance::Dark, 0 | 1) => (0.12, 2., 12.),
-        (Appearance::Dark, 2) => (0.35, 8., 24.),
-        (Appearance::Dark, _) => (0.45, 16., 48.),
-        (Appearance::Light, 0 | 1) => (0.07, 2., 12.),
-        (Appearance::Light, 2) => (0.1, 8., 24.),
-        (Appearance::Light, _) => (0.13, 16., 48.),
+    // Two layers, as macOS draws them: a tight contact shadow that marks the
+    // edge and a wider ambient one for the depth. GPUI's blur is the Gaussian's
+    // sigma (CSS's blur is twice it) and the shadow reaches 3 sigma, so these
+    // stay small: one wide layer spread a few 8-bit shades over a long way,
+    // which showed as bands on dark themes. On dark chrome an island's shadow
+    // only darkens the gap around it, so it stays light; things that float
+    // above the window need the depth.
+    // (alpha, y, blur) for the contact layer, then the ambient one.
+    let layers: [(f32, f32, f32); 2] = match (theme.appearance, depth) {
+        (Appearance::Dark, 0 | 1) => [(0.08, 1., 1.5), (0.10, 3., 6.)],
+        (Appearance::Dark, 2) => [(0.28, 1., 1.5), (0.28, 6., 10.)],
+        (Appearance::Dark, _) => [(0.30, 2., 2.), (0.38, 12., 20.)],
+        (Appearance::Light, 0 | 1) => [(0.05, 1., 1.), (0.05, 2., 5.)],
+        (Appearance::Light, 2) => [(0.08, 1., 1.5), (0.09, 6., 10.)],
+        (Appearance::Light, _) => [(0.10, 2., 2.), (0.12, 12., 20.)],
     };
-    vec![gpui::BoxShadow {
-        color: gpui::hsla(0., 0., 0., alpha),
-        offset: gpui::point(px(0.), px(y)),
-        blur_radius: px(blur),
-        spread_radius: px(0.),
-    }]
+    layers
+        .iter()
+        .map(|&(alpha, y, blur)| gpui::BoxShadow {
+            color: gpui::hsla(0., 0., 0., alpha),
+            offset: gpui::point(px(0.), px(y)),
+            blur_radius: px(blur),
+            spread_radius: px(0.),
+        })
+        .collect()
 }
 
 /// A rounded card on the chrome: the sidebar, each pane, each bottom panel,
