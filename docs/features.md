@@ -67,7 +67,7 @@ Everything Kuana does, in one list. Each area has its own page with the details.
 - Search Everywhere (double Shift, or the magnifier at the top right), fuzzy Go to File
   (git-ignored files included, ignored folders skipped), Recent Files, Find Action, Go to Line,
   and File Structure: the current file's functions, classes, headings, selectors or keys
-- Multibuffers: Find in Files' matches, Find Usages, TODO items, test results or every open file's problems as excerpts
+- Multibuffers: Find in Files' matches, Find Usages, TODO items, test results or the project's problems (kept up to date) as excerpts
   in one tab, each editable in place with everything a file's tab has (highlighting, problems,
   completion, Rename, Undo); ↑/↓ go from excerpt to excerpt, "⋯" strips show more, F4 opens the
   file; see [Multibuffers](editing.md#multibuffers)

@@ -885,6 +885,8 @@ pub struct Workspace {
     /// Whether it has any, for the title bar's toggle (the root render
     /// doesn't read the panel, which notifies as its selection moves).
     has_results: bool,
+    /// The Problems in Editor tab, kept up to date while it's open.
+    live_problems: Option<multibuffer::LiveProblems>,
     /// The last status of each test run here, for the gutter's marks
     /// (given to every editor), and the last test run, for Rerun Failed.
     test_statuses: Arc<crate::test_run::Statuses>,
@@ -1327,6 +1329,7 @@ impl Workspace {
             problems,
             results,
             has_results: false,
+            live_problems: None,
             test_statuses: Arc::default(),
             last_tests: None,
             git_log,

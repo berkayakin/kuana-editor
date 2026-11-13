@@ -1,5 +1,6 @@
 //! Multibuffer tabs (`crate::multibuffer`): made from places (a Find panel
-//! tab's), their excerpts' editors heard like tabs' editors are, and tidied
+//! tab's, Find in Files' matches, the project's problems, which stay up to
+//! date), their excerpts' editors heard like tabs' editors are, and tidied
 //! up when the tab closes. Excerpt editors aren't in `Workspace::editors`
 //! (that's the files' tabs: `tab_for` finds a file's tab there), so what's
 //! per document is handed over here: a file without a tab gets its
@@ -19,6 +20,17 @@ use crate::{
 
 /// Works out a file's places from its document.
 type PlacesOf = Box<dyn FnOnce(&Document) -> FilePlaces>;
+
+/// How often an open Problems tab checks whether what it lists changed.
+const LIVE_PROBLEMS_CHECK: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The Problems in Editor tab, kept up to date while it's open.
+pub(super) struct LiveProblems {
+    view: gpui::WeakEntity<MultiBufferView>,
+    /// What it was last refreshed for (`problems_signature`).
+    seen: Option<u64>,
+    _task: Task<()>,
+}
 
 impl Workspace {
     /// A tab of excerpts around `targets`, by file in path order.
@@ -102,39 +114,142 @@ impl Workspace {
         }
     }
 
-    /// Problems in Editor: the errors and warnings of every open file (tabs,
-    /// excerpts, files edited without a tab) and the last Run's, as excerpts.
+    /// Problems in Editor: the errors and warnings of the project, as
+    /// excerpts, kept up to date (`check_live_problems`). Again while it's
+    /// open: its tab.
     pub(super) fn problems_in_editor(&mut self, _: &ProblemsInEditor, window: &mut Window, cx: &mut Context<Self>) {
-        let mut docs: Vec<Entity<Document>> = self.editors.iter().map(|e| e.read(cx).doc.clone()).collect();
-        docs.extend(self.excerpt_editors(cx).iter().map(|e| e.read(cx).doc.clone()));
-        docs.extend(self.documents.read(cx).kept(cx));
-        let mut seen = HashSet::new();
-        let mut targets = Vec::new();
-        for doc in docs {
+        if let Some(view) = self.live_problems.as_ref().and_then(|l| l.view.upgrade()) {
+            self.activate_item(&PaneItem::Excerpts(view), window, cx);
+            return;
+        }
+        let files = self.problem_files(cx);
+        if files.is_empty() {
+            self.toast(ToastKind::Success, "No problems", Some("None in open files, the language servers' reports or the last Run".into()), cx);
+            return;
+        }
+        let view = cx.new(|cx| MultiBufferView::new("Problems", self.root.clone(), files.len(), cx));
+        self.add_tab(PaneItem::Excerpts(view.clone()), window, cx);
+        let task = cx.spawn_in(window, async move |ws, cx| {
+            loop {
+                cx.background_executor().timer(LIVE_PROBLEMS_CHECK).await;
+                match ws.update_in(cx, |ws, window, cx| ws.check_live_problems(window, cx)) {
+                    Ok(true) => {}
+                    _ => break,
+                }
+            }
+        });
+        self.live_problems = Some(LiveProblems { view: view.downgrade(), seen: None, _task: task });
+        self.update_live_problems(files, false, cx);
+    }
+
+    /// Whether the Problems tab is still open; refreshes it when what it
+    /// lists may have changed: a document's problems, a server's report, the
+    /// Run's, or the keyboard leaving it (the excerpt it held may go now).
+    fn check_live_problems(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(view) = self.live_problems.as_ref().and_then(|l| l.view.upgrade()) else {
+            self.live_problems = None;
+            return false;
+        };
+        let hold = view.read(cx).contains_focus(window, cx);
+        let signature = self.problems_signature(hold, cx);
+        if self.live_problems.as_ref().is_some_and(|l| l.seen == Some(signature)) {
+            return true;
+        }
+        if let Some(live) = self.live_problems.as_mut() {
+            live.seen = Some(signature);
+        }
+        let mut files = self.problem_files(cx);
+        // Files shown that have none now: their excerpts go (unless held).
+        for path in view.read(cx).paths() {
+            files.entry(path).or_default();
+        }
+        self.update_live_problems(files, hold, cx);
+        true
+    }
+
+    /// Gives the Problems tab each file's places, as its document has them.
+    fn update_live_problems(&mut self, files: BTreeMap<PathBuf, Vec<ResultTarget>>, hold: bool, cx: &mut Context<Self>) {
+        let Some(view) = self.live_problems.as_ref().and_then(|l| l.view.upgrade()) else { return };
+        for (path, targets) in files {
+            if let Some(tab) = self.tab_for(&path, cx).filter(|t| !t.read(cx).is_loaded()) {
+                self.load_tab(&tab, cx);
+            }
+            let load = self.documents.update(cx, |s, cx| s.open(&path, cx));
+            let view = view.downgrade();
+            cx.spawn(async move |_, cx| {
+                let loaded = load.await;
+                cx.update(|cx| {
+                    let Some(view) = view.upgrade() else { return };
+                    match loaded {
+                        Ok(doc) if !doc.read(cx).is_stand_in() => {
+                            let mut places = places_in(doc.read(cx), &targets);
+                            places.marks.clear();
+                            view.update(cx, |v, cx| v.set_file_places(path, doc, places, hold, cx));
+                        }
+                        _ => view.update(cx, |v, cx| v.file_failed(cx)),
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    /// The project's errors and warnings by file: open documents' (tabs,
+    /// excerpts, files edited without a tab), the language servers' reports
+    /// for files not open, and the last Run's.
+    fn problem_files(&self, cx: &App) -> BTreeMap<PathBuf, Vec<ResultTarget>> {
+        let mut files: BTreeMap<PathBuf, Vec<ResultTarget>> = BTreeMap::new();
+        let mut open = HashSet::new();
+        for doc in self.open_documents(cx) {
             let d = doc.read(cx);
-            let Some(path) = d.path.clone().filter(|_| seen.insert(d.id())) else { continue };
+            let Some(path) = d.path.clone().filter(|p| open.insert(p.clone())) else { continue };
             for problem in d.diagnostics.iter().filter(|p| p.severity.is_problem()) {
                 let row = d.row_of(problem.range.start);
                 let character = (problem.range.start - d.line_start(row)) as u32;
-                targets.push(ResultTarget { path: path.clone(), position: Position { line: row as u32, character }, encoding: Encoding::Utf8 });
+                files.entry(path.clone()).or_default().push(ResultTarget {
+                    path: path.clone(),
+                    position: Position { line: row as u32, character },
+                    encoding: Encoding::Utf8,
+                });
             }
         }
-        // The Run's, unless an open file shows the same line already.
+        for (path, position, encoding) in self.lsp.read(cx).problem_places(&open) {
+            files.entry(path.clone()).or_default().push(ResultTarget { path, position, encoding });
+        }
+        // The Run's, unless the file shows the same line already.
         for p in self.problems.read(cx).run_problems() {
-            let target = ResultTarget {
-                path: p.path.clone(),
-                position: Position { line: p.line.saturating_sub(1), character: 0 },
-                encoding: Encoding::Utf8,
-            };
-            if !targets.iter().any(|t| t.path == target.path && t.position.line == target.position.line) {
-                targets.push(target);
+            let line = p.line.saturating_sub(1);
+            let targets = files.entry(p.path.clone()).or_default();
+            if !targets.iter().any(|t| t.position.line == line) {
+                targets.push(ResultTarget { path: p.path.clone(), position: Position { line, character: 0 }, encoding: Encoding::Utf8 });
             }
         }
-        if targets.is_empty() {
-            self.toast(ToastKind::Success, "No problems in open files", None, cx);
-            return;
+        files.retain(|_, targets| !targets.is_empty());
+        files
+    }
+
+    /// What the Problems tab's contents depend on, as one number.
+    fn problems_signature(&self, hold: bool, cx: &App) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        hold.hash(&mut hasher);
+        self.lsp.read(cx).diagnostics_generation().hash(&mut hasher);
+        self.problems.read(cx).run_problems().len().hash(&mut hasher);
+        for doc in self.open_documents(cx) {
+            let d = doc.read(cx);
+            (d.id(), d.diagnostics_generation()).hash(&mut hasher);
         }
-        self.open_multibuffer("Problems".into(), targets, Marks::None, window, cx);
+        hasher.finish()
+    }
+
+    /// Every document open in this window: tabs', excerpts', and files
+    /// edited without a tab.
+    fn open_documents(&self, cx: &App) -> Vec<Entity<Document>> {
+        let mut docs: Vec<Entity<Document>> = self.editors.iter().filter(|e| e.read(cx).is_loaded()).map(|e| e.read(cx).doc.clone()).collect();
+        docs.extend(self.excerpt_editors(cx).iter().map(|e| e.read(cx).doc.clone()));
+        docs.extend(self.documents.read(cx).kept(cx));
+        docs
     }
 
     /// A new multibuffer tab: the workspace hears its excerpts and what it asks for.

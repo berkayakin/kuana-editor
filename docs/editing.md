@@ -115,8 +115,10 @@ A multibuffer puts places from many files in one tab, each as an excerpt: a few 
 the place, editable right there. **Open in Editor** (the page button in the Find panel's header,
 or **Open Results in Editor** in Find Action) opens what the Find panel lists: usages from Find
 Usages, the TODO list, test results. **Problems in Editor** (View menu, the Problems panel's
-header, Find Action) does the same for the errors and warnings of every open file and the last
-Run's. In Find in Files, **open all in editor** (⌘↩ / Ctrl+Enter) turns its results into a
+header, Find Action) does the same for the project's errors and warnings: open files', the language
+servers' reports for files you haven't opened (rust-analyzer, for one, checks the whole project) and
+the last Run's. It stays up to date while it's open: problems that come show up, files whose
+problems are fixed go, and the excerpt you're typing in stays put until you leave the tab. In Find in Files, **open all in editor** (⌘↩ / Ctrl+Enter) turns its results into a
 multibuffer with every match marked, so a search across the project can be edited in place.
 
 - Each file has a header with its name and folder; clicking it, or **F4** in an excerpt, opens the
