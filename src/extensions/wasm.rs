@@ -844,7 +844,7 @@ impl zed::extension::process::Host for State {
         // Extensions run tools the project may configure (its own binaries).
         let root = self.call.as_ref().map(|c| c.root.clone()).ok_or("programs only run during a call")?;
         if !crate::trust::is_trusted(&root) {
-            return Err(format!("{} isn't trusted, so extensions don't run programs for it", root.display()));
+            return Err(restricted_message(&root));
         }
         let mut program = crate::process::command(program_path(&self.work, &command.command));
         program.args(&command.args).env("PATH", servers::search_path()).envs(command.env).current_dir(&self.work);
@@ -1439,4 +1439,11 @@ mod tests {
         assert!(work.join("file").is_file());
         std::fs::remove_dir_all(&root).ok();
     }
+}
+
+/// Why a program isn't run for `root`, a project that isn't trusted: the
+/// reason first, since a notification cuts a long path short.
+pub fn restricted_message(root: &Path) -> String {
+    let name = root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into_owned());
+    format!("Extensions don't run programs for a project in Restricted Mode. Trust {name} to let them (Project Trust… in Find Action).")
 }

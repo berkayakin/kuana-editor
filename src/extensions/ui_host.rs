@@ -1029,7 +1029,7 @@ impl HostState {
     fn trusted(&self) -> Result<(), String> {
         match &self.caller.root {
             Some(root) if !crate::trust::is_trusted(root) => {
-                Err(format!("{} isn't trusted, so extensions don't run programs for it", root.display()))
+                Err(wasm::restricted_message(root))
             }
             _ => Ok(()),
         }
