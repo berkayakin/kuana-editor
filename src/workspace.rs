@@ -88,6 +88,7 @@ mod app_menu;
 mod background;
 mod bookmarks;
 mod commands;
+mod compare;
 mod file_tree;
 mod git_ops;
 mod copilot;
@@ -107,6 +108,7 @@ mod problems;
 mod rendering;
 mod running;
 mod saving;
+mod scratches;
 mod sessions;
 mod second_sidebar;
 mod sidebar;
@@ -202,6 +204,16 @@ actions!(
         OpenResultsInEditor,
         /// Every open file's errors and warnings, and the last Run's, as a multibuffer.
         ProblemsInEditor,
+        /// The active file with the clipboard's text.
+        CompareWithClipboard,
+        /// The active file with another file, picked from the project's.
+        CompareWithFile,
+        /// The active file with itself at a branch or tag.
+        CompareWithBranch,
+        /// An empty file in a language picked from a list, kept apart from projects.
+        NewScratchFile,
+        /// The scratch files, newest first.
+        ShowScratches,
         OpenExtensions,
         ProjectTrust,
         UndoFileChange,
@@ -443,6 +455,12 @@ enum TreeAction {
     CopyText(String),
     UndoFileChange,
     RedoFileChange,
+    /// Picks another file to compare this one with.
+    CompareWith(PathBuf),
+    /// This file → the active tab's file.
+    CompareWithEditor(PathBuf),
+    CompareWithClipboard(PathBuf),
+    CompareWithBranch(PathBuf),
 }
 
 /// What an open input dialog will do with the name it collects.
@@ -1171,7 +1189,7 @@ impl Workspace {
             let settings = Settings::get(cx).clone();
             ws.auto_save = settings.auto_save.unwrap_or_default();
             ws.auto_save_delay = Duration::from_millis(settings.auto_save_delay.unwrap_or(1000).max(50));
-            for tab in ws.editors.clone() {
+            for tab in ws.shown_editors(cx) {
                 tab.update(cx, |e, cx| e.apply_settings(cx));
             }
             ws.extension_callers_changed(cx);

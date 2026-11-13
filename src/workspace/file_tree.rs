@@ -132,6 +132,15 @@ impl Workspace {
         add(MenuEntry::item(reveal_label(), Icon::FolderOpen), Some(TreeAction::Reveal(path.clone())));
         if !is_dir {
             add(MenuEntry::item("Local History", Icon::History), Some(TreeAction::LocalHistory(path.clone())));
+            add(MenuEntry::item("Compare With…", Icon::GitCompare), Some(TreeAction::CompareWith(path.clone())));
+            let editor_file = self.active_editor(cx).and_then(|e| e.read(cx).doc.read(cx).path.clone());
+            if editor_file.as_ref().is_some_and(|f| *f != path) {
+                add(MenuEntry::item("Compare with Editor", Icon::GitCompare), Some(TreeAction::CompareWithEditor(path.clone())));
+            }
+            add(MenuEntry::item("Compare with Clipboard", Icon::GitCompare), Some(TreeAction::CompareWithClipboard(path.clone())));
+            if self.repo(cx).is_some_and(|r| path.starts_with(r)) {
+                add(MenuEntry::item("Compare with Branch…", Icon::GitBranch), Some(TreeAction::CompareWithBranch(path.clone())));
+            }
         }
         if is_dir {
             add(MenuEntry::item("Find in Folder…", Icon::TextSearch), Some(TreeAction::FindInFolder(path.clone())));

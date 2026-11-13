@@ -703,7 +703,7 @@ impl Workspace {
         let mut statuses = (*self.test_statuses).clone();
         test_run::record(&mut statuses, &run);
         self.test_statuses = Arc::new(statuses);
-        for editor in self.editors.clone() {
+        for editor in self.shown_editors(cx) {
             let statuses = self.test_statuses.clone();
             editor.update(cx, |e, cx| e.set_test_statuses(statuses, cx));
         }

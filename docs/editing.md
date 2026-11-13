@@ -92,7 +92,8 @@ the place, editable right there. **Open in Editor** (the page button in the Find
 or **Open Results in Editor** in Find Action) opens what the Find panel lists: usages from Find
 Usages, the TODO list, test results. **Problems in Editor** (View menu, the Problems panel's
 header, Find Action) does the same for the errors and warnings of every open file and the last
-Run's.
+Run's. In Find in Files, **open all in editor** (⌘↩ / Ctrl+Enter) turns its results into a
+multibuffer with every match marked, so a search across the project can be edited in place.
 
 - Each file has a header with its name and folder; clicking it, or **F4** in an excerpt, opens the
   file's tab at the caret.
@@ -158,6 +159,33 @@ takes back.
 Versions live in `~/.config/kuana/local_history/`, outside your projects. A version the same as
 the one before isn't kept again, saves less than a minute apart keep only the last (auto-save),
 and files over 2 MB have none. Versions go after 14 days, and a file keeps at most 200.
+
+## Comparing files
+
+Any file can be compared, in a diff tab like Git's, with:
+
+- **the clipboard**: **Compare with Clipboard** (the editor's or a file's right-click menu, Find
+  Action);
+- **another file**: **Compare With…** picks it from the project's files (Go to File's list); in the
+  file tree, **Compare with Editor** compares that file with the current tab's;
+- **itself on a branch or tag**: **Compare with Branch…** lists the repository's branches and tags.
+
+The file you compare from is the right side, as it is: unsaved edits show, and the diff follows as
+you type. The other side is the clipboard as it was, the other file as it is on disk (or its unsaved
+text, when its tab has edits), or Git's version.
+
+## Scratch files
+
+A scratch file is a throwaway file in any language, for trying something out apart from the
+project. **New Scratch File…** (File menu, Find Action; Ctrl+Alt+Shift+Insert on Windows and Linux)
+asks for the language (the current file's comes first) and opens an empty `scratch_<n>.<suffix>`.
+It's an ordinary file tab, with highlighting, completion and auto-save, kept in
+`~/.config/kuana/scratches/` between runs, outside any project. **Scratch Files…** lists them,
+newest first; ⌫ there moves one to the Trash.
+
+Python, JavaScript, TypeScript (Node 22.6 or later), shell, Go, PHP and Rust scratches have a ▶ on
+their first line that runs the file in a Run tab (Rust compiles it with `rustc` first). A language
+server may not know a file outside its project: it treats a scratch as a file of its own.
 
 ## Windows and projects
 

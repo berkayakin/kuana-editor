@@ -103,9 +103,17 @@ impl Workspace {
             add(entry, action);
             let (entry, action) = run(MenuEntry::item("Toggle Inline Git Blame", Icon::GitCommit), Box::new(editor::ToggleInlineBlame));
             add(entry, action);
+            let (entry, action) = run(MenuEntry::item("Compare with Branch…", Icon::GitBranch), Box::new(CompareWithBranch));
+            add(entry, action);
         }
         let (entry, action) = run(MenuEntry::item("Local History", Icon::History), Box::new(ShowLocalHistory));
         add(entry, action);
+        if path.is_some() {
+            let (entry, action) = run(MenuEntry::item("Compare with Clipboard", Icon::GitCompare), Box::new(CompareWithClipboard));
+            add(entry, action);
+            let (entry, action) = run(MenuEntry::item("Compare With…", Icon::GitCompare), Box::new(CompareWithFile));
+            add(entry, action);
+        }
 
         add(MenuEntry::Separator, None);
         let wrap_entry = if soft_wrap { MenuEntry::item("Soft-Wrap", Icon::Check) } else { MenuEntry::text("Soft-Wrap") };
@@ -334,6 +342,10 @@ impl Workspace {
             TreeAction::CopyText(text) => cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)),
             TreeAction::UndoFileChange => self.step_file_history(false, false, window, cx),
             TreeAction::RedoFileChange => self.step_file_history(true, false, window, cx),
+            TreeAction::CompareWith(path) => self.pick_file_to_compare(path, window, cx),
+            TreeAction::CompareWithEditor(path) => self.compare_with_editor(path, window, cx),
+            TreeAction::CompareWithClipboard(path) => self.compare_with_clipboard(path, window, cx),
+            TreeAction::CompareWithBranch(path) => self.pick_revision_to_compare(path, window, cx),
         }
     }
 
@@ -973,7 +985,7 @@ impl Workspace {
     }
 
     /// Moves a file or folder to the Trash (undoable), closing its tabs.
-    fn move_to_trash(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn move_to_trash(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
         let trashed = match crate::file_history::move_to_trash(path) {
             Ok(trashed) => trashed,
             Err(err) => {

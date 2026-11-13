@@ -23,6 +23,8 @@ The table below is the JetBrains keymap.
 | Find / Replace | ⌘F / ⌘R | Ctrl+F / Ctrl+R |
 | Next / previous occurrence | ⌘G / ⌘⇧G, ⇧F3 for previous | F3 / Shift+F3 |
 | Find / Replace in Files | ⌘⇧F / ⌘⇧R | Ctrl+Shift+F / Ctrl+Shift+R |
+| Open Find in Files' results in a multibuffer (in Find in Files) | ⌘↩ | Ctrl+Enter |
+| New Scratch File | (Find Action) | Ctrl+Alt+Shift+Insert |
 | Extend / shrink selection | ⌥↑ / ⌥↓ | Ctrl+W / Ctrl+Shift+W |
 | Add next occurrence / unselect / select all | ⌃G / ⌃⇧G / ⌃⌘G | Alt+J / Alt+Shift+J / Ctrl+Alt+Shift+J |
 | Duplicate / delete line | ⌘D / ⌘⌫ | Ctrl+D / Ctrl+Y |

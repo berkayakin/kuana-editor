@@ -47,9 +47,9 @@ impl Workspace {
     /// What sorting out a batch of changes goes by, as it is now.
     fn watch_state(&self, cx: &App) -> Option<WatchState> {
         let root = self.root.clone()?;
-        let mut open: HashSet<PathBuf> = self.editors.iter().filter_map(|e| e.read(cx).doc.read(cx).path.clone()).collect();
+        let mut open: HashSet<PathBuf> = self.shown_editors(cx).iter().filter_map(|e| e.read(cx).doc.read(cx).path.clone()).collect();
         open.extend(self.images(cx).iter().map(|i| i.read(cx).path().to_path_buf()));
-        open.extend(self.diff_views(cx).iter().filter_map(|d| d.read(cx).working_tree_file().map(Path::to_path_buf)));
+        open.extend(self.diff_views(cx).iter().flat_map(|d| d.read(cx).disk_files().into_iter().map(Path::to_path_buf).collect::<Vec<_>>()));
         Some(WatchState {
             root,
             ignore: self.ignore.clone(),
@@ -120,7 +120,7 @@ impl Workspace {
         // An edit from outside (a formatter in the terminal, another editor)
         // that leaves Git's status as it was: the diff of the file shows it.
         for diff in self.diff_views(cx) {
-            if diff.read(cx).working_tree_file().is_some_and(|p| paths.contains(p)) {
+            if diff.read(cx).disk_files().iter().any(|p| paths.contains(*p)) {
                 diff.update(cx, |v, cx| v.reload(cx));
             }
         }
@@ -130,7 +130,8 @@ impl Workspace {
     /// background), each through one of its tabs: splits share it.
     pub(super) fn reload_documents(&mut self, wanted: impl Fn(&Path) -> bool, cx: &mut Context<Self>) {
         let mut seen = HashSet::new();
-        for editor in self.editors.clone() {
+        // A file only an excerpt shows reloads through it.
+        for editor in self.shown_editors(cx) {
             let doc = editor.read(cx).doc.read(cx);
             if editor.read(cx).is_loaded() && doc.path.as_deref().is_some_and(&wanted) && seen.insert(doc.id()) {
                 editor.update(cx, |e, cx| e.reload_if_changed(cx));

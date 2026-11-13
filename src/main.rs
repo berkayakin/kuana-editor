@@ -66,6 +66,7 @@ mod trust;
 mod trust_dialog;
 mod preferences;
 mod run;
+mod scratch;
 mod schemas;
 mod project_search;
 mod push_dialog;
@@ -104,6 +105,7 @@ use crate::{
         ToggleProblems, ToggleResults, ToggleSidebar, ToggleSecondSidebar, WelcomeSetup, GoToSymbol, InstallShellCommand,
         DebugConfiguration, Resume, PauseProgram, StepOver, StepInto, StepOut, AttachToProcess, AddConditionalBreakpoint, AddLogpoint,
         ToggleBookmark, ToggleBookmarkWithMnemonic, ShowBookmarks, NextBookmark, PreviousBookmark, ShowTodo, ProblemsInEditor,
+        NewScratchFile,
     },
 };
 
@@ -117,6 +119,7 @@ fn menus() -> Vec<Menu> {
 fn menus_for(mac: bool) -> Vec<Menu> {
     let mut file = vec![
         MenuItem::action("New File", NewFile),
+        MenuItem::action("New Scratch File…", NewScratchFile),
         MenuItem::action("New Window", NewWindow),
         MenuItem::separator(),
         MenuItem::action("Open File…", OpenFile),

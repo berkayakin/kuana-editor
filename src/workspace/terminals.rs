@@ -268,7 +268,7 @@ impl Workspace {
         if self.restricted(cx) {
             self.lsp.update(cx, |s, _| s.shutdown_all());
         }
-        for editor in self.editors.clone() {
+        for editor in self.shown_editors(cx) {
             editor.update(cx, |e, cx| e.trust_changed(cx));
             // Starts its server when trusted now.
             self.lsp.update(cx, |s, cx| s.register(&editor, cx));
@@ -279,7 +279,7 @@ impl Workspace {
 
     pub(super) fn extensions_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.refresh_extension_views(cx);
-        for editor in self.editors.clone() {
+        for editor in self.shown_editors(cx) {
             if editor.update(cx, |e, cx| e.refresh_language(cx)) {
                 self.lsp.update(cx, |s, cx| s.register(&editor, cx));
             }

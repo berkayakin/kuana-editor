@@ -1011,7 +1011,9 @@ impl Workspace {
     pub(super) fn show_diff(&mut self, source: DiffSource, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<DiffView>> {
         // A Local History version needs no repository: paths show from the project.
         let repo = match &source {
-            DiffSource::History { path, .. } => self.root.clone().or_else(|| path.parent().map(Path::to_path_buf)),
+            DiffSource::History { path, .. } | DiffSource::Compare { path, with: crate::diff_view::Compared::Text { .. } | crate::diff_view::Compared::File(_) } => {
+                self.root.clone().or_else(|| path.parent().map(Path::to_path_buf))
+            }
             _ => self.repo(cx),
         };
         let repo = repo?;

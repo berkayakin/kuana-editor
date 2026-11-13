@@ -1050,6 +1050,12 @@ pub fn branches(root: &Path) -> Result<Vec<Branch>, String> {
         .collect())
 }
 
+/// The repository's tags, newest first.
+pub fn tags(root: &Path) -> Result<Vec<String>, String> {
+    let out = run(root, &["for-each-ref", "--sort=-creatordate", "--format=%(refname:short)", "refs/tags"])?;
+    Ok(out.lines().filter(|l| !l.is_empty()).map(str::to_string).collect())
+}
+
 pub fn checkout(root: &Path, branch: &Branch) -> Result<Switched, String> {
     switch_carrying(root, || {
         if branch.remote {

@@ -19,7 +19,7 @@ use gpui::{
 
 use crate::{
     assets::Icon,
-    editor::{Cancel, Editor, EditorEvent, Indent, MoveDown, MoveUp, Newline, Outdent, PageDown, PageUp},
+    editor::{Cancel, Editor, EditorEvent, Indent, MoveDown, MoveUp, Newline, Outdent, PageDown, PageUp, Submit},
     project::ProjectSnapshot,
     search::{ProjectMatch, SearchOptions, SearchQuery, context_lines, project_files, search_project},
     theme::Theme,
@@ -29,6 +29,9 @@ use crate::{
 pub enum ProjectSearchEvent {
     Open { path: PathBuf, range: Range<usize> },
     ReplaceAll { query: SearchQuery, replacement: String, files: Vec<PathBuf> },
+    /// The results as a multibuffer (`query` finds the matches again in a
+    /// file whose text changed since it was searched).
+    OpenInEditor { title: SharedString, query: SearchQuery, matches: Arc<Vec<ProjectMatch>> },
     Dismissed,
 }
 
@@ -204,6 +207,21 @@ impl ProjectSearch {
             replacement: self.replacement.read(cx).text(cx),
             files,
         });
+    }
+
+    fn open_in_editor(&mut self, cx: &mut Context<Self>) {
+        let text = self.query.read(cx).text(cx);
+        let Ok(Some(query)) = SearchQuery::new(&text, self.options) else {
+            return;
+        };
+        if self.matches.is_empty() {
+            return;
+        }
+        cx.emit(ProjectSearchEvent::OpenInEditor { title: format!("“{text}”").into(), query, matches: self.matches.clone() });
+    }
+
+    fn on_submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
+        self.open_in_editor(cx);
     }
 
     /// Re-runs the search after a replace, with fresh buffer contents.
@@ -489,6 +507,7 @@ impl Render for ProjectSearch {
             .on_action(cx.listener(Self::on_page_up))
             .on_action(cx.listener(Self::on_page_down))
             .on_action(cx.listener(Self::on_enter))
+            .on_action(cx.listener(Self::on_submit))
             .on_action(cx.listener(Self::on_escape))
             .on_action(cx.listener(Self::on_tab))
             .on_action(cx.listener(Self::on_shift_tab))
@@ -510,7 +529,19 @@ impl Render for ProjectSearch {
                     .text_color(theme.text_dim)
                     .child(div().flex_1().truncate().child(path_line))
                     .child(kbd("↩", cx))
-                    .child("open"),
+                    .child("open")
+                    .when(!self.matches.is_empty(), |el| {
+                        let key = crate::ui::binding_label_in(&Submit, "ProjectSearch Editor", window);
+                        el.when_some(key, |el, key| el.child(div().w(px(6.))).child(kbd(key, cx)))
+                            .child(
+                                div()
+                                    .id("ps-open-in-editor")
+                                    .cursor_pointer()
+                                    .hover(|s| s.text_color(theme.text))
+                                    .child("open all in editor")
+                                    .on_click(cx.listener(|this, _, _, cx| this.open_in_editor(cx))),
+                            )
+                    }),
             )
             .child(
                 crate::ui::island(&theme)
