@@ -3860,7 +3860,7 @@ dependencies = [
 
 [[package]]
 name = "kuana"
-version = "0.1.31"
+version = "0.1.32"
 dependencies = [
  "alacritty_terminal",
  "base64 0.22.1",
