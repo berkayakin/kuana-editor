@@ -970,13 +970,84 @@ pub fn install(cx: &mut App) -> Vec<String> {
     let (user, problems) = user_bindings(cx);
     let defaults = bindings(base);
     let passthrough = terminal_passthrough(&defaults);
+    let extensions = extension_bindings(&defaults, cx);
     cx.clear_key_bindings();
     cx.bind_keys(defaults);
     cx.bind_keys(passthrough);
+    // Above Kuana's own, under the user's.
+    cx.bind_keys(extensions);
     cx.bind_keys(user);
     // Menus show shortcuts and observe this to pick up new ones.
     cx.set_global(Installed(base));
     problems
+}
+
+// ---- Extensions' shortcuts ---------------------------------------------------------
+
+/// A shortcut an extension gives one of its commands (`key` in
+/// `[kuana.commands.<id>]`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtensionKey {
+    pub extension: String,
+    pub command: String,
+    pub key: String,
+}
+
+/// The extensions' shortcuts as of the last `install`, and the ones it left
+/// out because Kuana's keymap has the key.
+static EXTENSION_KEYS: std::sync::Mutex<(Vec<ExtensionKey>, Vec<ExtensionKey>)> = std::sync::Mutex::new((Vec::new(), Vec::new()));
+
+fn extension_keys() -> Vec<ExtensionKey> {
+    let mut keys = Vec::new();
+    for c in crate::extensions::contributions() {
+        for command in &c.commands {
+            if let Some(key) = &command.key {
+                keys.push(ExtensionKey { extension: c.extension.clone(), command: command.id.clone(), key: key.clone() });
+            }
+        }
+    }
+    keys
+}
+
+/// Extensions' default shortcuts for their commands. A key the built-in
+/// keymap uses anywhere stays Kuana's: an extension never takes over a
+/// shortcut the user knows (they can still bind it in `keymap.json`).
+fn extension_bindings(defaults: &[KeyBinding], cx: &App) -> Vec<KeyBinding> {
+    let wanted = extension_keys();
+    let mut bound = Vec::new();
+    let mut skipped = Vec::new();
+    if !wanted.is_empty() {
+        let mut taken: std::collections::HashSet<String> = defaults.iter().map(binding_keys).collect();
+        for key in &wanted {
+            let data = serde_json::json!({ "extension": key.extension, "command": key.command });
+            let binding = cx
+                .build_action("workspace::RunExtensionCommand", Some(data))
+                .ok()
+                .and_then(|action| KeyBinding::load(&key.key, action, None, false, None, cx.keyboard_mapper().as_ref()).ok());
+            match binding {
+                // The first extension to ask for a key has it.
+                Some(binding) if taken.insert(binding_keys(&binding)) => bound.push(binding),
+                _ => skipped.push(key.clone()),
+            }
+        }
+    }
+    *EXTENSION_KEYS.lock().unwrap_or_else(|e| e.into_inner()) = (wanted, skipped);
+    bound
+}
+
+/// The extensions changed: installs the keymap again if their shortcuts did
+/// (so with none, as at most starts, nothing happens).
+pub fn sync_extension_keys(cx: &mut App) {
+    let installed = EXTENSION_KEYS.lock().unwrap_or_else(|e| e.into_inner()).0.clone();
+    if cx.has_global::<Installed>() && extension_keys() != installed {
+        install(cx);
+    }
+}
+
+/// The shortcuts of `extension`'s commands that weren't bound, because the
+/// keymap already uses the key (for its row in Settings → Extensions).
+pub fn skipped_extension_keys(extension: &str) -> Vec<ExtensionKey> {
+    EXTENSION_KEYS.lock().unwrap_or_else(|e| e.into_inner()).1.iter().filter(|k| k.extension == extension).cloned().collect()
 }
 
 /// In the terminal, keys belong to the shell (Ctrl+R searches history, Ctrl+F

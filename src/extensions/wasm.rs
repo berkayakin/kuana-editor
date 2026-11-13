@@ -386,6 +386,89 @@ pub(super) static ENGINE: LazyLock<Engine> = LazyLock::new(|| {
     Engine::new(&config).expect("wasmtime's default configuration")
 });
 
+/// An extension's code, ready to run: compiled, or as an earlier run compiled
+/// it. Compiling a component takes Cranelift from a tenth of a second to
+/// seconds on every core, each time Kuana starts; loading what it made is a
+/// file mapping. The compiled code is kept beside the extensions, outside
+/// every extension's sandbox (their work folders), named after the code's
+/// path with its time and size, so new code is compiled again. `modified`
+/// is the code's time (none: compiled without keeping it, for a check).
+pub(super) fn component(wasm: &Path, modified: Option<SystemTime>) -> wasmtime::Result<WasmComponent> {
+    match (compiled_dir(), modified) {
+        (Some(dir), Some(modified)) => component_kept_in(&dir, wasm, modified),
+        _ => WasmComponent::from_file(&ENGINE, wasm),
+    }
+}
+
+fn component_kept_in(dir: &Path, wasm: &Path, modified: SystemTime) -> wasmtime::Result<WasmComponent> {
+    let name = compiled_name(wasm);
+    let Some(stamp) = compiled_stamp(wasm, modified) else {
+        return WasmComponent::from_file(&ENGINE, wasm);
+    };
+    let kept = dir.join(format!("{name}-{stamp}.cwasm"));
+    if kept.is_file() {
+        // Safety: the file is one this function wrote from `Component::serialize`,
+        // in Kuana's own config folder. Wasmtime checks it was made by this
+        // version with this configuration, and refuses it otherwise.
+        match unsafe { WasmComponent::deserialize_file(&ENGINE, &kept) } {
+            Ok(component) => return Ok(component),
+            Err(_) => {
+                std::fs::remove_file(&kept).ok();
+            }
+        }
+    }
+    let component = WasmComponent::from_file(&ENGINE, wasm)?;
+    if let Ok(bytes) = component.serialize()
+        && std::fs::create_dir_all(dir).is_ok()
+    {
+        // The code's earlier versions go.
+        remove_compiled(dir, &name);
+        crate::state::write_atomic(&kept, &bytes).ok();
+    }
+    Ok(component)
+}
+
+fn short_hash(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().take(12).map(|b| format!("{b:02x}")).collect()
+}
+
+/// Where compiled code is kept: no extension's folder (their ids don't
+/// start with a dot), and outside the work folders their code can write to.
+fn compiled_dir() -> Option<PathBuf> {
+    Some(super::extensions_dir()?.join(".compiled"))
+}
+
+/// A name for `wasm`'s compiled code, from its path.
+fn compiled_name(wasm: &Path) -> String {
+    short_hash(wasm.as_os_str().as_encoded_bytes())
+}
+
+/// What tells one version of the code from another: its time and size.
+fn compiled_stamp(wasm: &Path, modified: SystemTime) -> Option<String> {
+    let size = std::fs::metadata(wasm).ok()?.len();
+    let time = modified.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_nanos();
+    Some(short_hash(format!("{time}-{size}").as_bytes()))
+}
+
+fn remove_compiled(dir: &Path, name: &str) {
+    let prefix = format!("{name}-");
+    for old in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if old.file_name().to_str().is_some_and(|n| n.starts_with(&prefix)) {
+            std::fs::remove_file(old.path()).ok();
+        }
+    }
+}
+
+/// An uninstalled extension's compiled code (its Zed code's and its Kuana
+/// code's) goes with it. `dir` is the extension's folder.
+pub(super) fn forget_compiled(dir: &Path) {
+    let Some(kept) = compiled_dir() else { return };
+    for code in ["extension.wasm", "kuana.wasm"] {
+        remove_compiled(&kept, &compiled_name(&dir.join(code)));
+    }
+}
+
 static LINKER: LazyLock<Result<Linker<State>, String>> = LazyLock::new(|| {
     let mut linker = Linker::new(&ENGINE);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker).map_err(|e| e.to_string())?;
@@ -503,7 +586,7 @@ impl Instance {
 
     fn in_folder(extension: &WasmExtension, wasm: PathBuf, modified: Option<SystemTime>, work: PathBuf) -> Result<Self, String> {
         let failed = |e: wasmtime::Error| format!("couldn't run the {} extension's code: {e:#}", extension.id);
-        let component = WasmComponent::from_file(&ENGINE, &wasm).map_err(failed)?;
+        let component = component(&wasm, modified).map_err(failed)?;
         let linker = LINKER.as_ref().map_err(|e| format!("couldn't set up extensions' code: {e}"))?;
         // Its current directory is the work folder (the API reads PWD), which
         // it reaches by that path and as `.`.
@@ -1094,6 +1177,65 @@ fn remove_link(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The smallest component: the preamble (version 13, layer 1), nothing in it.
+    const EMPTY_COMPONENT: &[u8] = b"\0asm\x0d\0\x01\0";
+
+    #[test]
+    fn compiled_code_is_kept_and_reused() {
+        let dir = std::env::temp_dir().join(format!("kuana-compiled-{}", std::process::id()));
+        let kept = dir.join("kept");
+        std::fs::create_dir_all(&dir).unwrap();
+        let wasm = dir.join("kuana.wasm");
+        std::fs::write(&wasm, EMPTY_COMPONENT).unwrap();
+        let modified = std::fs::metadata(&wasm).unwrap().modified().unwrap();
+        let files = || -> Vec<PathBuf> { std::fs::read_dir(&kept).unwrap().flatten().map(|e| e.path()).collect() };
+
+        component_kept_in(&kept, &wasm, modified).unwrap();
+        let first = files();
+        assert_eq!(first.len(), 1, "{first:?}");
+
+        // The same code (its time and size) again: what was kept is loaded,
+        // not the file, which wouldn't compile now.
+        std::fs::write(&wasm, b"not wasm").unwrap();
+        component_kept_in(&kept, &wasm, modified).unwrap();
+        assert_eq!(files(), first);
+
+        // Newer code is compiled, and the older one's compiled code goes.
+        std::fs::write(&wasm, EMPTY_COMPONENT).unwrap();
+        let later = modified + Duration::from_secs(1);
+        component_kept_in(&kept, &wasm, later).unwrap();
+        let second = files();
+        assert!(second.len() == 1 && second != first, "{second:?}");
+
+        // A kept file that isn't Wasmtime's is dropped and made again.
+        std::fs::write(&second[0], b"junk").unwrap();
+        component_kept_in(&kept, &wasm, later).unwrap();
+        assert!(std::fs::metadata(&second[0]).unwrap().len() > 4);
+
+        // Other code's compiled code stays when this one's is removed.
+        std::fs::write(kept.join("0123-4567.cwasm"), b"other").unwrap();
+        remove_compiled(&kept, &compiled_name(&wasm));
+        assert_eq!(files(), [kept.join("0123-4567.cwasm")]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `KUANA_BENCH_WASM=<a component> cargo test bench_compiled_code -- --ignored --nocapture`:
+    /// how long an extension's code takes to compile, and to load once kept.
+    #[test]
+    #[ignore]
+    fn bench_compiled_code() {
+        let Some(wasm) = std::env::var_os("KUANA_BENCH_WASM").map(PathBuf::from) else { return };
+        let kept = std::env::temp_dir().join(format!("kuana-compiled-bench-{}", std::process::id()));
+        let modified = std::fs::metadata(&wasm).unwrap().modified().unwrap();
+        LazyLock::force(&ENGINE);
+        for run in ["compiled", "loaded", "loaded"] {
+            let start = Instant::now();
+            component_kept_in(&kept, &wasm, modified).unwrap();
+            println!("{run}: {:?}", start.elapsed());
+        }
+        std::fs::remove_dir_all(&kept).ok();
+    }
 
     #[test]
     fn runs_api_0_6_and_0_7() {

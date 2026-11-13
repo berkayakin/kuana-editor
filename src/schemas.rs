@@ -19,7 +19,55 @@ pub fn init(cx: &App) {
 /// The JSON server's `json.schemas` list (file patterns and schemas), or
 /// null before `init`.
 pub fn json_schemas() -> Value {
-    SCHEMAS.get().cloned().unwrap_or(Value::Null)
+    let mut schemas = SCHEMAS.get().cloned().unwrap_or(Value::Null);
+    // Extensions' own settings (`[kuana.settings]`), as installed now: asked
+    // when the JSON server starts, not while Kuana does.
+    let extensions: Vec<(String, Value)> = crate::extensions::contributions()
+        .iter()
+        .filter(|c| !c.settings.is_empty())
+        .map(|c| (c.extension.clone(), extension_settings_schema(&c.name, &c.settings)))
+        .collect();
+    if let Some(settings) = schemas.get_mut(0).and_then(|entry| entry.get_mut("schema"))
+        && !extensions.is_empty()
+    {
+        add_extension_settings(settings, extensions);
+    }
+    schemas
+}
+
+/// Puts each extension's settings under `extensions.<id>` of `settings.json`'s schema.
+fn add_extension_settings(settings: &mut Value, extensions: Vec<(String, Value)>) {
+    let properties: serde_json::Map<String, Value> = extensions.into_iter().collect();
+    settings["properties"]["extensions"] = json!({
+        "description": "Extensions' own settings, by extension id.",
+        "type": ["object", "null"],
+        "properties": properties,
+        "additionalProperties": true,
+    });
+}
+
+/// One extension's settings as a schema: its keys with their types, defaults
+/// and descriptions (other keys are let through: the code may read more).
+fn extension_settings_schema(name: &str, settings: &[crate::extensions::contrib::SettingDef]) -> Value {
+    use crate::extensions::contrib::SettingKind;
+    let mut properties = serde_json::Map::new();
+    for setting in settings {
+        let mut schema = match &setting.kind {
+            SettingKind::Text => json!({ "type": "string" }),
+            SettingKind::Boolean => json!({ "type": "boolean" }),
+            SettingKind::Number => json!({ "type": "number" }),
+            SettingKind::Choice(values) => json!({ "type": "string", "enum": values }),
+        };
+        schema["title"] = json!(setting.title);
+        if let Some(description) = &setting.description {
+            schema["description"] = json!(description);
+        }
+        if let Some(default) = &setting.default {
+            schema["default"] = default.clone();
+        }
+        properties.insert(setting.key.clone(), schema);
+    }
+    json!({ "description": format!("Settings of the {name} extension."), "type": "object", "properties": properties })
 }
 
 fn build(cx: &App) -> Value {
@@ -111,6 +159,23 @@ fn theme_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extensions_settings_join_the_settings_schema() {
+        use crate::extensions::contrib::{SettingDef, SettingKind};
+        let defs = [
+            SettingDef { key: "folder".into(), title: "Notes folder".into(), description: Some("Where notes are kept.".into()), kind: SettingKind::Text, default: Some(json!("~/Notes")) },
+            SettingDef { key: "order".into(), title: "Sort by".into(), description: None, kind: SettingKind::Choice(vec!["name".into(), "date".into()]), default: None },
+        ];
+        let mut settings = settings_schema();
+        add_extension_settings(&mut settings, vec![("notes".into(), extension_settings_schema("Notes", &defs))]);
+        let notes = &settings["properties"]["extensions"]["properties"]["notes"]["properties"];
+        assert_eq!(notes["folder"]["default"], json!("~/Notes"));
+        assert_eq!(notes["folder"]["description"], json!("Where notes are kept."));
+        assert_eq!(notes["order"]["enum"], json!(["name", "date"]));
+        // The rest of the settings are still described.
+        assert!(settings["properties"]["theme"].is_object());
+    }
 
     #[test]
     fn schemas_describe_kins_files() {

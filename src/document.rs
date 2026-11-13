@@ -762,6 +762,11 @@ impl Document {
         }
     }
 
+    /// Shown, never changed (the Merge view's versions of a file).
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
     /// Snaps an arbitrary byte offset to a char boundary at or before it.
     pub fn clip(&self, offset: usize) -> usize {
         let offset = offset.min(self.len());

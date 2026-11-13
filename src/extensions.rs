@@ -453,6 +453,8 @@ pub fn reload(cx: &mut App) {
     *WAITING.lock().unwrap() = waiting;
     apply_icon_theme(cx);
     changed(None, cx);
+    // Extensions' shortcuts for their commands (nothing to do when none has any).
+    crate::keymap::sync_extension_keys(cx);
     // At startup the themes load after this.
     if cx.has_global::<crate::theme::Theme>() {
         crate::theme::reload_themes(cx);
@@ -995,6 +997,7 @@ pub fn uninstall(path: &Path) -> Result<(), String> {
     } else {
         trash::delete(path).map_err(|e| e.to_string())?;
     }
+    wasm::forget_compiled(path);
     if let Some(id) = id {
         wasm::forget(&id);
         ui_host::forget(&id);

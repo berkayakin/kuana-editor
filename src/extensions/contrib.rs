@@ -24,6 +24,13 @@
 //! title = "Container Logs"
 //! ```
 //!
+//! With `api = "0.2"` (`kuana-wit/v0.2`), also `events = ["file-saved", …]`
+//! (what the code's `on-event` hears about), the `workspace-write` permission
+//! and `[kuana.status.<id>]` (a status bar item the code fills). For any
+//! version: `key` on a command (a default shortcut), the `file-tree` and
+//! `editor-tab` menu places, and `[kuana.settings.<key>]` (the extension's
+//! settings, with their defaults).
+//!
 //! The code that answers for views and commands is `kuana.wasm`
 //! (`ui_host`), beside any Zed `extension.wasm`.
 
@@ -33,14 +40,29 @@ use gpui::SharedString;
 use toml::Value;
 
 /// The interface versions Kuana hosts.
-pub const API_VERSIONS: &[&str] = &["0.1"];
+pub const API_VERSIONS: &[&str] = &["0.1", "0.2"];
+
+/// The interface an extension's `kuana.wasm` targets (`[kuana] api`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Api {
+    #[default]
+    V1,
+    V2,
+}
+
+/// What `events` may list (0.2). A timer and a save of the extension's own
+/// file are told without being listed.
+pub const EVENTS: &[&str] = &["project-opened", "project-closed", "file-opened", "file-closed", "file-saved", "editor-changed", "settings-changed"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Permission {
     Network,
     Process,
     WorkspaceFiles,
+    WorkspaceWrite,
 }
+
+const PERMISSIONS: [Permission; 4] = [Permission::Network, Permission::Process, Permission::WorkspaceFiles, Permission::WorkspaceWrite];
 
 impl Permission {
     pub fn key(self) -> &'static str {
@@ -48,11 +70,12 @@ impl Permission {
             Permission::Network => "network",
             Permission::Process => "process",
             Permission::WorkspaceFiles => "workspace-files",
+            Permission::WorkspaceWrite => "workspace-write",
         }
     }
 
     pub fn from_key(key: &str) -> Option<Self> {
-        [Permission::Network, Permission::Process, Permission::WorkspaceFiles].into_iter().find(|p| p.key() == key)
+        PERMISSIONS.into_iter().find(|p| p.key() == key)
     }
 
     /// What it lets the extension do, as the permission prompt says it.
@@ -61,6 +84,7 @@ impl Permission {
             Permission::Network => "connect to the internet and your network",
             Permission::Process => "run programs on this computer",
             Permission::WorkspaceFiles => "read the files of the open project",
+            Permission::WorkspaceWrite => "change the files of the open project",
         }
     }
 }
@@ -80,8 +104,36 @@ pub enum When {
 pub enum Condition {
     /// The tree item's `kind`.
     Kind(String),
-    /// The file's language (editor menus).
+    /// The file's language (editor and tab menus).
     Language(String),
+    /// The file's whole name.
+    Name(String),
+    /// Its extension, without the dot.
+    Extension(String),
+    /// A folder (the file tree's menu), or a file.
+    Folder(bool),
+}
+
+/// What a menu on a file is opened for.
+pub struct FileSubject<'a> {
+    pub path: &'a Path,
+    pub folder: bool,
+    /// Its language's name, when it's known (an open file's).
+    pub language: Option<&'a str>,
+}
+
+impl Condition {
+    /// Whether it holds for a file (never, for a view item's `kind`).
+    pub fn holds_for(&self, file: &FileSubject) -> bool {
+        let same = |part: Option<&std::ffi::OsStr>, wanted: &str| part.and_then(|p| p.to_str()).is_some_and(|p| p.eq_ignore_ascii_case(wanted));
+        match self {
+            Condition::Kind(_) => false,
+            Condition::Language(wanted) => file.language.is_some_and(|l| l.eq_ignore_ascii_case(wanted)),
+            Condition::Name(wanted) => same(file.path.file_name(), wanted),
+            Condition::Extension(wanted) => !file.folder && same(file.path.extension(), wanted),
+            Condition::Folder(folder) => file.folder == *folder,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -92,6 +144,10 @@ pub enum MenuPlace {
     ViewItem(String),
     /// The editor's right-click menu.
     Editor,
+    /// The file tree's right-click menu.
+    FileTree,
+    /// A tab's right-click menu.
+    EditorTab,
 }
 
 #[derive(Clone, Debug)]
@@ -108,6 +164,8 @@ pub struct CommandDef {
     pub id: String,
     pub title: String,
     pub icon: Option<SharedString>,
+    /// Its default shortcut, as `keymap.rs` writes them (`secondary-alt-k`).
+    pub key: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -124,6 +182,34 @@ pub struct PanelDef {
     pub title: String,
 }
 
+/// A status bar item: the code says what it shows (`set-status`).
+#[derive(Clone, Debug)]
+pub struct StatusDef {
+    pub id: String,
+    /// Run when it's clicked.
+    pub command: Option<String>,
+    pub when: When,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SettingKind {
+    Text,
+    Boolean,
+    Number,
+    /// One of these.
+    Choice(Vec<String>),
+}
+
+/// One of the extension's settings (`extensions.<id>.<key>` in settings.json).
+#[derive(Clone, Debug)]
+pub struct SettingDef {
+    pub key: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub kind: SettingKind,
+    pub default: Option<serde_json::Value>,
+}
+
 /// One extension's contributions.
 #[derive(Clone, Debug, Default)]
 pub struct Contributions {
@@ -133,14 +219,42 @@ pub struct Contributions {
     pub dir: PathBuf,
     /// Its `kuana.wasm`, if it has one.
     pub code: Option<PathBuf>,
+    pub api: Api,
     pub permissions: Vec<Permission>,
+    /// The events its code hears about (0.2), from `EVENTS`.
+    pub events: Vec<&'static str>,
     pub views: Vec<ViewDef>,
     pub commands: Vec<CommandDef>,
     pub menus: Vec<MenuDef>,
     pub panels: Vec<PanelDef>,
+    pub status: Vec<StatusDef>,
+    pub settings: Vec<SettingDef>,
 }
 
 impl Contributions {
+    /// Whether its code is told about `event` (see `EVENTS`).
+    pub fn hears(&self, event: &str) -> bool {
+        self.code.is_some() && self.events.contains(&event)
+    }
+
+    /// The extension's settings as its code gets them: what the user set
+    /// (`user`, the `extensions.<id>` object as JSON, or nothing), with the
+    /// manifest's defaults for the keys that aren't.
+    pub fn settings_json(&self, user: Option<&serde_json::Value>) -> String {
+        let defaults = || self.settings.iter().filter_map(|s| Some((s.key.clone(), s.default.clone()?)));
+        match user {
+            None if self.settings.iter().all(|s| s.default.is_none()) => String::new(),
+            Some(value) if !value.is_object() || defaults().next().is_none() => value.to_string(),
+            user => {
+                let mut map: serde_json::Map<String, serde_json::Value> = defaults().collect();
+                for (key, value) in user.and_then(|v| v.as_object()).into_iter().flatten() {
+                    map.insert(key.clone(), value.clone());
+                }
+                serde_json::Value::Object(map).to_string()
+            }
+        }
+    }
+
     pub fn command(&self, id: &str) -> Option<&CommandDef> {
         self.commands.iter().find(|c| c.id == id)
     }
@@ -178,15 +292,58 @@ fn icon(value: &str, dir: &Path, problems: &mut Vec<String>, what: &str) -> Opti
     Some(format!("{FILE_ICON_PREFIX}{}", path.display()).into())
 }
 
-/// `kind == 'container'` / `language == 'Go'`.
+/// `kind == 'container'` / `language == 'Go'` / `name == 'Makefile'` /
+/// `extension == 'json'` / `type == 'folder'`.
 fn condition(text: &str) -> Option<Condition> {
     let (key, value) = text.split_once("==")?;
     let value = value.trim().trim_matches(['\'', '"']).to_string();
     match key.trim() {
         "kind" => Some(Condition::Kind(value)),
         "language" => Some(Condition::Language(value)),
+        "name" => Some(Condition::Name(value)),
+        "extension" => Some(Condition::Extension(value.trim_start_matches('.').to_string())),
+        "type" => match value.as_str() {
+            "folder" => Some(Condition::Folder(true)),
+            "file" => Some(Condition::Folder(false)),
+            _ => None,
+        },
         _ => None,
     }
+}
+
+/// `when` of a view or a status item: always, `file:<name>`, `language:<name>`.
+fn when(text: Option<&str>, what: &str, problems: &mut Vec<String>) -> When {
+    match text {
+        None | Some("always") => When::Always,
+        Some(text) => match text.split_once(':') {
+            Some(("file", name)) if !name.is_empty() => When::File(name.to_string()),
+            Some(("language", name)) if !name.is_empty() => When::Language(name.to_string()),
+            _ => {
+                problems.push(format!("{what}: when = \"{text}\" isn't always, file:<name> or language:<name>"));
+                When::Always
+            }
+        },
+    }
+}
+
+/// A TOML value as the JSON settings.json would hold.
+fn json_of(value: &Value) -> Option<serde_json::Value> {
+    match value {
+        Value::String(s) => Some(s.as_str().into()),
+        Value::Boolean(b) => Some((*b).into()),
+        Value::Integer(n) => Some((*n).into()),
+        Value::Float(n) => serde_json::Number::from_f64(*n).map(serde_json::Value::Number),
+        _ => None,
+    }
+}
+
+/// A shortcut as `keymap.rs` writes them: parts joined by `-`, modifiers
+/// first, then one key. Kuana checks what it's bound over when it installs it.
+fn valid_key(key: &str) -> bool {
+    let mut parts: Vec<&str> = key.split('-').collect();
+    let Some(last) = parts.pop().filter(|k| !k.is_empty()) else { return false };
+    let modifier = |p: &&str| matches!(*p, "secondary" | "cmd" | "ctrl" | "alt" | "shift" | "fn");
+    last.chars().all(|c| c.is_ascii_graphic()) && !modifier(&last) && parts.iter().all(modifier) && parts.iter().any(|p| *p != "shift")
 }
 
 /// An id usable in commands, views and panels: letters, digits, `-`, `_`, `.`.
@@ -208,6 +365,13 @@ pub fn parse(manifest: &toml::Table, extension: &str, name: &str, dir: &Path) ->
     if !API_VERSIONS.contains(&api.as_str()) {
         problems.push(format!("[kuana] api {api}: this Kuana hosts {}", API_VERSIONS.join(", ")));
     }
+    out.api = if api == "0.2" { Api::V2 } else { Api::V1 };
+    let v2 = out.api >= Api::V2;
+    let needs_v2 = |what: &str, problems: &mut Vec<String>| {
+        if !v2 {
+            problems.push(format!("{what} needs api = \"0.2\" in [kuana]"));
+        }
+    };
     let code = dir.join("kuana.wasm");
     out.code = code.is_file().then_some(code);
 
@@ -215,8 +379,22 @@ pub fn parse(manifest: &toml::Table, extension: &str, name: &str, dir: &Path) ->
         match value.as_str().and_then(Permission::from_key) {
             Some(p) if !out.permissions.contains(&p) => out.permissions.push(p),
             Some(_) => {}
-            None => problems.push(format!("[kuana] permissions: {value} isn't one of network, process, workspace-files")),
+            None => problems.push(format!("[kuana] permissions: {value} isn't one of network, process, workspace-files, workspace-write")),
         }
+    }
+    if out.permissions.contains(&Permission::WorkspaceWrite) {
+        needs_v2("the workspace-write permission", &mut problems);
+    }
+
+    for value in table.get("events").and_then(Value::as_array).into_iter().flatten() {
+        match value.as_str().and_then(|name| EVENTS.iter().find(|e| **e == name)) {
+            Some(event) if !out.events.contains(event) => out.events.push(event),
+            Some(_) => {}
+            None => problems.push(format!("[kuana] events: {value} isn't one of {}", EVENTS.join(", "))),
+        }
+    }
+    if !out.events.is_empty() {
+        needs_v2("[kuana] events", &mut problems);
     }
 
     for (id, view) in table.get("views").and_then(Value::as_table).into_iter().flatten() {
@@ -230,17 +408,7 @@ pub fn parse(manifest: &toml::Table, extension: &str, name: &str, dir: &Path) ->
             Some(value) => icon(&value, dir, &mut problems, &what).unwrap_or_else(|| "icons/puzzle.svg".into()),
             None => "icons/puzzle.svg".into(),
         };
-        let when = match str_of(view, "when").as_deref() {
-            None | Some("always") => When::Always,
-            Some(text) => match text.split_once(':') {
-                Some(("file", name)) if !name.is_empty() => When::File(name.to_string()),
-                Some(("language", name)) if !name.is_empty() => When::Language(name.to_string()),
-                _ => {
-                    problems.push(format!("{what}: when = \"{text}\" isn't always, file:<name> or language:<name>"));
-                    When::Always
-                }
-            },
-        };
+        let when = when(str_of(view, "when").as_deref(), &what, &mut problems);
         out.views.push(ViewDef { id: id.clone(), title, icon, when });
     }
 
@@ -252,7 +420,14 @@ pub fn parse(manifest: &toml::Table, extension: &str, name: &str, dir: &Path) ->
         };
         let title = str_of(command, "title").unwrap_or_else(|| id.clone());
         let icon = str_of(command, "icon").and_then(|value| icon(&value, dir, &mut problems, &what));
-        out.commands.push(CommandDef { id: id.clone(), title, icon });
+        let key = str_of(command, "key").filter(|key| {
+            let valid = valid_key(key);
+            if !valid {
+                problems.push(format!("{what}: key = \"{key}\" isn't a shortcut like secondary-alt-k (modifiers, then a key)"));
+            }
+            valid
+        });
+        out.commands.push(CommandDef { id: id.clone(), title, icon, key });
     }
 
     for (id, panel) in table.get("panels").and_then(Value::as_table).into_iter().flatten() {
@@ -272,11 +447,13 @@ pub fn parse(manifest: &toml::Table, extension: &str, name: &str, dir: &Path) ->
         };
         let place = match str_of(menu, "place").as_deref() {
             Some("editor") => MenuPlace::Editor,
+            Some("file-tree") => MenuPlace::FileTree,
+            Some("editor-tab") => MenuPlace::EditorTab,
             Some(text) => match text.split_once(':') {
                 Some(("view-toolbar", view)) => MenuPlace::ViewToolbar(view.to_string()),
                 Some(("view-item", view)) => MenuPlace::ViewItem(view.to_string()),
                 _ => {
-                    problems.push(format!("{what}: place = \"{text}\" isn't view-toolbar:<view>, view-item:<view> or editor"));
+                    problems.push(format!("{what}: place = \"{text}\" isn't view-toolbar:<view>, view-item:<view>, editor, editor-tab or file-tree"));
                     continue;
                 }
             },
@@ -302,13 +479,76 @@ pub fn parse(manifest: &toml::Table, extension: &str, name: &str, dir: &Path) ->
             for part in text.split("||") {
                 match condition(part) {
                     Some(c) => when.push(c),
-                    None => problems.push(format!("{what}: when = \"{text}\" isn't kind == '…' or language == '…' (alternatives joined by ||)")),
+                    None => problems.push(format!(
+                        "{what}: when = \"{text}\" isn't kind, language, name or extension == '…', or type == 'file' / 'folder' (alternatives joined by ||)"
+                    )),
                 }
             }
         }
         out.menus.push(MenuDef { place, command, when });
     }
 
+    for (id, item) in table.get("status").and_then(Value::as_table).into_iter().flatten() {
+        let what = format!("status item {id}");
+        let Some(item) = item.as_table().filter(|_| valid_id(id)) else {
+            problems.push(format!("{what}: needs a table and an id of letters, digits, -, _ or ."));
+            continue;
+        };
+        let command = str_of(item, "command");
+        if let Some(command) = command.as_ref().filter(|c| out.command(c).is_none()) {
+            problems.push(format!("{what}: there's no command {command}"));
+        }
+        let when = when(str_of(item, "when").as_deref(), &what, &mut problems);
+        out.status.push(StatusDef { id: id.clone(), command, when });
+    }
+    if !out.status.is_empty() {
+        needs_v2("[kuana.status]", &mut problems);
+    }
+
+    for (key, setting) in table.get("settings").and_then(Value::as_table).into_iter().flatten() {
+        let what = format!("setting {key}");
+        let Some(setting) = setting.as_table().filter(|_| valid_id(key)) else {
+            problems.push(format!("{what}: needs a table and a key of letters, digits, -, _ or ."));
+            continue;
+        };
+        let values = || setting.get("values").and_then(Value::as_array).into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>();
+        let kind = match str_of(setting, "type").as_deref() {
+            None | Some("string") => SettingKind::Text,
+            Some("boolean") => SettingKind::Boolean,
+            Some("number") => SettingKind::Number,
+            Some("enum") if !values().is_empty() => SettingKind::Choice(values()),
+            Some("enum") => {
+                problems.push(format!("{what}: type = \"enum\" needs values = [\"…\", …]"));
+                continue;
+            }
+            Some(other) => {
+                problems.push(format!("{what}: type = \"{other}\" isn't string, boolean, number or enum"));
+                continue;
+            }
+        };
+        let default = setting.get("default").and_then(json_of);
+        let fits = match (&kind, &default) {
+            (_, None) => setting.get("default").is_none(),
+            (SettingKind::Text, Some(v)) => v.is_string(),
+            (SettingKind::Boolean, Some(v)) => v.is_boolean(),
+            (SettingKind::Number, Some(v)) => v.is_number(),
+            (SettingKind::Choice(values), Some(v)) => v.as_str().is_some_and(|v| values.iter().any(|x| x == v)),
+        };
+        if !fits {
+            problems.push(format!("{what}: its default doesn't fit its type"));
+        }
+        out.settings.push(SettingDef {
+            key: key.clone(),
+            title: str_of(setting, "title").unwrap_or_else(|| key.clone()),
+            description: str_of(setting, "description"),
+            kind,
+            default: default.filter(|_| fits),
+        });
+    }
+
+    if out.code.is_none() && !out.events.is_empty() {
+        problems.push("[kuana]: events need the extension's code (kuana.wasm)".into());
+    }
     if out.code.is_none() && (!out.views.is_empty() || !out.commands.is_empty()) {
         problems.push("[kuana]: views and commands need the extension's code (kuana.wasm)".into());
     }
@@ -387,6 +627,95 @@ mod tests {
         );
         let text = problems.join("\n");
         for expected in ["api 9.0", "root", "sometimes", "outside the extension", "no view nope", "no command missing", "color == 'red'"] {
+            assert!(text.contains(expected), "{expected} in {text}");
+        }
+    }
+
+    #[test]
+    fn reads_what_0_2_adds() {
+        let (c, problems) = parsed(
+            r#"
+            [kuana]
+            api = "0.2"
+            permissions = ["workspace-files", "workspace-write"]
+            events = ["file-saved", "editor-changed", "file-saved"]
+            [kuana.commands.sort]
+            title = "Sort Keys"
+            key = "secondary-alt-k"
+            [[kuana.menus]]
+            place = "file-tree"
+            command = "sort"
+            when = "extension == '.json' || name == 'Makefile' || type == 'folder'"
+            [[kuana.menus]]
+            place = "editor-tab"
+            command = "sort"
+            when = "language == 'JSON'"
+            [kuana.status.count]
+            command = "sort"
+            when = "language:JSON"
+            [kuana.settings.folder]
+            title = "Notes folder"
+            default = "~/Notes"
+            [kuana.settings.order]
+            type = "enum"
+            values = ["name", "date"]
+            default = "name"
+            [kuana.settings.limit]
+            type = "number"
+            "#,
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(c.api, Api::V2);
+        assert_eq!(c.events, ["file-saved", "editor-changed"]);
+        assert!(c.hears("editor-changed") && !c.hears("file-opened"));
+        assert_eq!(c.commands[0].key.as_deref(), Some("secondary-alt-k"));
+        assert_eq!(c.status[0].when, When::Language("JSON".into()));
+        assert_eq!(c.settings.iter().find(|s| s.key == "order").unwrap().kind, SettingKind::Choice(vec!["name".into(), "date".into()]));
+
+        let file = |path: &'static str, folder, language| FileSubject { path: Path::new(path), folder, language };
+        let shown = |place: MenuPlace, subject: FileSubject| c.menu(&place, |cond| cond.holds_for(&subject)).count();
+        assert_eq!(shown(MenuPlace::FileTree, file("/p/a.JSON", false, None)), 1);
+        assert_eq!(shown(MenuPlace::FileTree, file("/p/makefile", false, None)), 1);
+        assert_eq!(shown(MenuPlace::FileTree, file("/p/src", true, None)), 1);
+        assert_eq!(shown(MenuPlace::FileTree, file("/p/a.rs", false, None)), 0);
+        assert_eq!(shown(MenuPlace::EditorTab, file("/p/a.json", false, Some("JSON"))), 1);
+        assert_eq!(shown(MenuPlace::EditorTab, file("/p/a.json", false, Some("Rust"))), 0);
+
+        // What the user set wins over the defaults; unset keys get theirs.
+        let json = |text: &str| -> serde_json::Value { serde_json::from_str(text).unwrap() };
+        assert_eq!(json(&c.settings_json(None)), json(r#"{"folder": "~/Notes", "order": "name"}"#));
+        assert_eq!(json(&c.settings_json(Some(&json(r#"{"order": "date", "x": 1}"#)))), json(r#"{"folder": "~/Notes", "order": "date", "x": 1}"#));
+    }
+
+    #[test]
+    fn what_0_2_adds_needs_it_declared() {
+        let (_, problems) = parsed(
+            r#"
+            [kuana]
+            permissions = ["workspace-write"]
+            events = ["file-saved", "key-pressed"]
+            [kuana.commands.c]
+            key = "k"
+            [kuana.status.s]
+            command = "nope"
+            [kuana.settings.a]
+            type = "enum"
+            [kuana.settings.b]
+            type = "boolean"
+            default = "yes"
+            "#,
+        );
+        let text = problems.join("\n");
+        for expected in [
+            "workspace-write permission needs api",
+            "events needs api",
+            "key-pressed",
+            "key = \"k\"",
+            "[kuana.status] needs api",
+            "no command nope",
+            "needs values",
+            "default doesn't fit",
+        ] {
             assert!(text.contains(expected), "{expected} in {text}");
         }
     }

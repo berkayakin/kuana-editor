@@ -1,0 +1,248 @@
+// Kuana's own extension interface, version 0.2. Over 0.1 it adds the editor
+// (reading the open file and its selections, editing it as one undo step),
+// writing project files, events and timers, a pick list and status bar items.
+// As before, Kuana draws everything; the code only answers with data.
+//
+// Licensed under MIT OR Apache-2.0, like Kuana, so extensions can copy it.
+
+package kuana:extension@0.2.0;
+
+interface types {
+    /// How an item, icon or message is colored (the theme picks the color).
+    enum tone {
+        normal,
+        muted,
+        success,
+        warning,
+        error,
+    }
+
+    /// One row of a view's tree.
+    record tree-item {
+        /// Stable across refreshes: Kuana keeps expansion and selection by it.
+        id: string,
+        label: string,
+        /// Dim text after the label.
+        detail: option<string>,
+        /// One of Kuana's icon names (`database`, `table`, `folder`, …) or a
+        /// path to an SVG in the extension's folder.
+        icon: option<string>,
+        tone: tone,
+        /// Matched by menus' `when = "kind == '…'"`.
+        kind: option<string>,
+        /// Whether it has children (asked for when it's opened).
+        expandable: bool,
+        /// A command run when it's clicked or Enter is pressed on it.
+        command: option<string>,
+    }
+
+    /// A table: column names and rows of cells (none: NULL / empty).
+    record table {
+        columns: list<string>,
+        rows: list<list<option<string>>>,
+    }
+
+    variant panel-content {
+        /// Lines of text (monospaced).
+        text(list<string>),
+        table(table),
+    }
+
+    enum severity {
+        error,
+        warning,
+        info,
+    }
+
+    /// A problem in a file: 1-based line and column, in characters.
+    record diagnostic {
+        line: u32,
+        column: u32,
+        /// Where it ends on its line (the word at `column` when none).
+        end-column: option<u32>,
+        severity: severity,
+        message: string,
+    }
+
+    record process-output {
+        /// The exit code (-1 when the program was ended by a signal).
+        status: s32,
+        stdout: string,
+        stderr: string,
+    }
+
+    record http-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    // ---- New in 0.2 ----
+
+    /// A stretch of a document's text, as UTF-8 byte offsets into it (`end`
+    /// not included), so a Rust `&text[start..end]` is that stretch. Empty
+    /// (`start == end`): a place in the text, a caret.
+    record span {
+        start: u32,
+        end: u32,
+    }
+
+    /// An open file as its tab has it now, unsaved changes included.
+    record editor-state {
+        path: string,
+        /// The language's name, as the status bar shows it.
+        language: string,
+        /// Changes with every edit: pass it back with edits and selections,
+        /// which are refused when the text has changed since.
+        version: u64,
+        /// Whether it has unsaved changes.
+        dirty: bool,
+        /// Carets and selections, the main one first.
+        selections: list<span>,
+        /// The whole text, when it was asked for.
+        text: option<string>,
+    }
+
+    /// Replaces `span` (empty: inserts there) with `text` (empty: deletes).
+    record text-edit {
+        span: span,
+        text: string,
+    }
+
+    /// A row of a pick list.
+    record pick-item {
+        /// What `pick` answers with.
+        id: string,
+        label: string,
+        /// Dim text after the label.
+        detail: option<string>,
+        /// As a tree item's.
+        icon: option<string>,
+    }
+
+    /// What a status bar item (`[kuana.status.<id>]`) shows.
+    record status {
+        /// Short: Kuana cuts it past 40 characters.
+        text: string,
+        icon: option<string>,
+        tone: tone,
+        tooltip: option<string>,
+    }
+
+    /// Something that happened, told to `on-event`.
+    record event {
+        /// One of the manifest's `events` (`project-opened`, `project-closed`,
+        /// `file-opened`, `file-closed`, `file-saved`, `editor-changed`,
+        /// `settings-changed`), or `timer`.
+        name: string,
+        /// The file or project folder it's about.
+        path: option<string>,
+        /// The file's language, for the file and editor events.
+        language: option<string>,
+        /// `timer`: the timer's name. Events may say more here later (as
+        /// JSON), without a new version of the interface.
+        data: option<string>,
+    }
+}
+
+/// What Kuana does for the code. Calls that need a permission declared in
+/// `[kuana] permissions` fail with an error until the user allows it.
+interface host {
+    use types.{tone, panel-content, diagnostic, process-output, http-response, span, editor-state, text-edit, pick-item, status};
+
+    // ---- As in 0.1 ----
+
+    /// Reads a view's items again: `item`'s children, or the whole view.
+    refresh: func(view: string, item: option<string>);
+    /// Shows content in one of the extension's panels (`[kuana.panels.<id>]`)
+    /// in the bottom area, with an optional title for this content.
+    show-panel: func(panel: string, title: option<string>, content: panel-content);
+    /// Opens a file in a tab, at a 1-based line: a path in the extension's
+    /// work folder, or in the project (with `workspace-files`).
+    open-file: func(path: string, line: option<u32>) -> result<_, string>;
+    /// A notification (`tone` picks its color: success, error, or info).
+    notify: func(tone: tone, message: string, detail: option<string>);
+    /// Asks the user for a line of text (`secret`: a password field). None
+    /// when they cancel.
+    ask-input: func(prompt: string, initial: string, secret: bool) -> option<string>;
+    /// Asks the user to confirm an action (`action` names its button).
+    confirm: func(message: string, detail: string, action: string) -> bool;
+    /// The extension's settings: `extensions.<id>` in settings.json, as JSON,
+    /// with the defaults of `[kuana.settings]` for keys that aren't set.
+    settings: func() -> string;
+    /// The open project's folder, if any.
+    project-root: func() -> option<string>;
+    /// A value the extension keeps in the system keychain (its own keys only).
+    secret-get: func(key: string) -> option<string>;
+    /// Keeps a value in the keychain (none: removes it).
+    secret-set: func(key: string, value: option<string>) -> result<_, string>;
+    /// Replaces the extension's problems for a file (a path as for `open-file`).
+    set-diagnostics: func(path: string, diagnostics: list<diagnostic>);
+    /// Runs a shell command in a terminal tab the user sees (`process`).
+    run-in-terminal: func(title: string, command: string) -> result<_, string>;
+    /// Runs a program and waits for it (`process`; trusted projects only).
+    run-process: func(program: string, args: list<string>, cwd: option<string>) -> result<process-output, string>;
+    /// An HTTP request (`network`).
+    http-request: func(method: string, url: string, headers: list<tuple<string, string>>, body: option<list<u8>>) -> result<http-response, string>;
+    /// Reads a file in the open project (`workspace-files`).
+    read-project-file: func(path: string) -> result<string, string>;
+
+    // ---- New in 0.2: the editor ----
+
+    /// An open file's tab: `path`'s, or without one the tab the user is in
+    /// (the window the call is for). None when there's no such tab, or it's
+    /// a file the extension can't reach: one outside its work folder and the
+    /// project, a project file without `workspace-files`, an image, a file
+    /// over 20 MB. `with-text` asks for the text too.
+    editor: func(path: option<string>, with-text: bool) -> option<editor-state>;
+    /// Edits an open file as one undo step (`workspace-write` for a project
+    /// file). The spans are in the text at `version` and can't overlap;
+    /// carets and selections follow the edits. Answers with the new version,
+    /// or an error when the text has changed since `version`.
+    apply-edits: func(path: string, version: u64, edits: list<text-edit>) -> result<u64, string>;
+    /// Sets an open file's carets and selections (the main one first) and
+    /// scrolls to the main one.
+    set-selections: func(path: string, version: u64, selections: list<span>) -> result<_, string>;
+    /// Writes a file in the project, making it and its folders when missing
+    /// (`workspace-write`). A tab showing it reloads as after any change on
+    /// disk, and its earlier text stays in Local History.
+    write-project-file: func(path: string, content: string) -> result<_, string>;
+
+    // ---- New in 0.2: asking and showing ----
+
+    /// Lets the user pick one of `items` from a list they can type to narrow
+    /// down, like Find Action. The picked item's id; none when they cancel.
+    pick: func(placeholder: string, items: list<pick-item>) -> option<string>;
+    /// What one of the extension's status bar items (`[kuana.status.<id>]`)
+    /// shows in the window the call is for; none hides it.
+    set-status: func(item: string, status: option<status>);
+
+    // ---- New in 0.2: timers ----
+
+    /// Tells `on-event` (`timer`, with `name` as its data) in `seconds` (at
+    /// least 1), and again `seconds` after each answer with `repeat`. A
+    /// timer belongs to the window the call is for and ends with it; setting
+    /// one again by the same name replaces it. One that comes due while its
+    /// window isn't the active one waits until it is, and one whose
+    /// `on-event` fails stops.
+    set-timer: func(name: string, seconds: u32, repeat: bool);
+    clear-timer: func(name: string);
+}
+
+world extension {
+    use types.{tree-item, event};
+    import host;
+
+    /// Called once, before anything else.
+    export activate: func() -> result<_, string>;
+    /// A view's items: the roots (no `parent`), or an item's children.
+    export children: func(view: string, parent: option<string>) -> result<list<tree-item>, string>;
+    /// Runs a command: `target` is the tree item's id when it was run on one
+    /// (its menu, or a click), the path from a menu on a file (the editor's,
+    /// a tab's, the file tree's).
+    export run-command: func(command: string, target: option<string>) -> result<_, string>;
+    /// Something happened: an event the manifest's `events` lists, a timer,
+    /// or (always, as 0.1's `file-saved`) an explicit Save of a file in the
+    /// extension's work folder. An error shows as a notification.
+    export on-event: func(event: event) -> result<_, string>;
+}

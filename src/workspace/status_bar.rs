@@ -75,6 +75,7 @@ impl Workspace {
         let fit = StatusFit::for_width(f32::from(self.viewport.width));
         let lsp_item = self.render_lsp_status(&theme, fit.lsp_chars, cx);
         let copilot_item = self.render_copilot_status(&theme, cx);
+        let extension_items = if fit.extensions { self.render_extension_status(&theme, cx) } else { Vec::new() };
         let active_editor = self.active_editor(cx);
         let editor = active_editor.as_ref().map(|e| e.read(cx));
         // The file's problems and the last Run's (both counted already).
@@ -102,6 +103,8 @@ impl Workspace {
         };
 
         let mut right: Vec<AnyElement> = Vec::new();
+        // Extensions' items come first: what doesn't fit is cut from there.
+        right.extend(extension_items);
         if let Some(e) = editor {
             if let Some(mode) = e.vim_status() {
                 right.push(
@@ -314,6 +317,8 @@ struct StatusFit {
     short_position: bool,
     /// The language's name beside its icon.
     language: bool,
+    /// Extensions' status items.
+    extensions: bool,
 }
 
 impl StatusFit {
@@ -332,6 +337,7 @@ impl StatusFit {
             file_format: width >= 600.,
             short_position: width < 600.,
             language: width >= 520.,
+            extensions: width >= 800.,
         }
     }
 }

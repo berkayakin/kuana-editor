@@ -521,6 +521,9 @@ impl Workspace {
                 sibling.update(cx, |e, _| e.put_unloaded(unloaded));
             }
         } else if let Some(path) = editor.read(cx).doc.read(cx).path.clone() {
+            if editor.read(cx).is_loaded() {
+                self.extension_file_event("file-closed", editor, cx);
+            }
             // Closed without saving: its edits go with it, so the store doesn't keep it.
             let doc = editor.read(cx).doc.clone();
             self.documents.update(cx, |s, cx| s.release(&doc, cx));

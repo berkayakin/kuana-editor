@@ -2,17 +2,35 @@
 //! `ui_host`): their views as activity bar tabs (`SidebarMode::Extension`),
 //! their commands in Find Action, menus and toolbars, their panels in the
 //! bottom area, and the requests their code makes while it runs (refresh a
-//! view, show a panel, open a file, ask the user, report problems).
+//! view, show a panel, open a file, ask the user, report problems, read and
+//! edit the open file, set a status item or a timer). The other way, what
+//! the code is told: `extension_event` (a file opened, saved, closed, the
+//! project, the tab the user is in, settings, timers).
+//!
+//! Extensions' code costs nothing until it's needed, and nothing at startup:
+//! an event goes only to the extensions that list it (none: one read of the
+//! registry), and the first ones wait `STARTUP_QUIET` so no code is compiled
+//! or loaded while the window comes up.
 
-use std::{collections::HashMap, rc::Rc, sync::Arc};
+use std::{
+    collections::HashMap,
+    rc::Rc,
+    sync::{Arc, OnceLock},
+    time::Instant,
+};
+
+use futures::{
+    StreamExt,
+    channel::{mpsc, oneshot},
+};
 
 use super::*;
 use crate::{
     extension_panel::ExtensionPanelsEvent,
     extension_view::{ExtensionView, ExtensionViewEvent},
     extensions::{
-        contrib::{Condition, Contributions, MenuPlace, ViewDef, When},
-        ui_host::{self, Caller, Request, Tone},
+        contrib::{Api, Condition, Contributions, FileSubject, MenuPlace, Permission, ViewDef, When},
+        ui_host::{self, Caller, Event, Request, StatusItem, Tone},
     },
     lint::Diagnostic,
 };
@@ -37,6 +55,68 @@ pub struct RunExtensionCommand {
 #[serde(deny_unknown_fields)]
 pub struct ToggleExtensionView {
     pub view: String,
+}
+
+/// How long after the first event extensions' code is left alone: starting
+/// Kuana opens a project and its tabs, and none of that should wait for (or
+/// share the processor with) code being loaded.
+const STARTUP_QUIET: Duration = Duration::from_secs(2);
+/// How long the user stays in a tab before `editor-changed` says so.
+const EDITOR_CHANGED_DELAY: Duration = Duration::from_millis(200);
+
+/// When extensions' code may first hear events: `STARTUP_QUIET` after the
+/// first one (which comes as the first window opens its project).
+fn awake_at() -> Instant {
+    static AT: OnceLock<Instant> = OnceLock::new();
+    *AT.get_or_init(|| Instant::now() + STARTUP_QUIET)
+}
+
+/// An event on its way to one extension's code.
+struct Delivery {
+    extension: Arc<Contributions>,
+    event: Event,
+    needs: Option<Permission>,
+    /// A timer's: told how it went, and nobody else is.
+    done: Option<oneshot::Sender<Result<(), String>>>,
+}
+
+/// What a status bar item of an extension shows in this window.
+pub(super) struct ShownStatus {
+    pub extension: Arc<Contributions>,
+    pub item: String,
+    pub status: StatusItem,
+    /// Its icon as an asset path, found when the status was set (an
+    /// extension's own SVG is looked for on disk).
+    pub icon: Option<SharedString>,
+    /// Whether its `when` holds, worked out when the project, the open files
+    /// or the extensions change: the status bar only reads it.
+    pub visible: bool,
+}
+
+/// What extensions' code keeps in a window while it runs.
+#[derive(Default)]
+pub(super) struct ExtensionRuntime {
+    /// Status bar items the code has filled, in the order they first showed.
+    pub status: Vec<ShownStatus>,
+    /// Timers by (extension, name): dropping one ends it.
+    timers: HashMap<(String, String), Task<()>>,
+    /// Timers that came due while the window wasn't the active one.
+    waiting_for_window: Vec<oneshot::Sender<()>>,
+    /// Events in the order they happened, to the task that hands them over.
+    events: Option<mpsc::UnboundedSender<Delivery>>,
+    /// Whether any extension listens for `editor-changed` (checked each
+    /// render, so it's worked out when the extensions change).
+    hears_editor_changed: bool,
+    /// The tab the user was in at the last render, so a render in the same
+    /// one reads nothing more.
+    seen_item: Option<EntityId>,
+    /// The file `editor-changed` was last told (or is about to be).
+    told_editor: Option<PathBuf>,
+    editor_changed: Option<Task<()>>,
+    /// The project each listening extension was told is open.
+    told_project: Vec<(String, PathBuf)>,
+    /// The settings each listening extension has, as it last heard.
+    told_settings: HashMap<String, String>,
 }
 
 // ---- View slots ------------------------------------------------------------------------
@@ -101,6 +181,12 @@ pub fn handle_extension_request(request: Request, cx: &mut App) {
     let target = match &request {
         Request::Refresh { .. } | Request::Diagnostics { .. } => None,
         Request::ShowPanel { window, .. }
+        | Request::Editor { window, .. }
+        | Request::ApplyEdits { window, .. }
+        | Request::SetSelections { window, .. }
+        | Request::Pick { window, .. }
+        | Request::Status { window, .. }
+        | Request::Timer { window, .. }
         | Request::OpenFile { window, .. }
         | Request::Notify { window, .. }
         | Request::AskInput { window, .. }
@@ -199,7 +285,351 @@ impl Workspace {
                 let target = crate::run::RunTarget { name: format!("{name}: {title}"), command, cwd, row: None, rows: 0..0, debug: None, test: None };
                 self.run_target(target, window, cx);
             }
+            Request::Editor { path, with_text, answer, .. } => {
+                let editor = match &path {
+                    Some(path) => self.tab_for(path, cx),
+                    None => self.active_editor(cx),
+                };
+                // A restored tab that wasn't shown yet reads its file now.
+                if let Some(editor) = &editor {
+                    self.load_tab(editor, cx);
+                }
+                answer.send(editor.and_then(|e| e.read(cx).extension_state(with_text, cx))).ok();
+            }
+            Request::ApplyEdits { path, version, edits, answer, .. } => {
+                let result = match self.tab_for(&path, cx) {
+                    Some(editor) => editor.update(cx, |e, cx| e.apply_extension_edits(version, edits, cx)),
+                    None => Err(format!("{} isn't open in a tab", path.display())),
+                };
+                answer.send(result).ok();
+            }
+            Request::SetSelections { path, version, selections, answer, .. } => {
+                let result = match self.tab_for(&path, cx) {
+                    Some(editor) => editor.update(cx, |e, cx| e.set_extension_selections(version, selections, cx)),
+                    None => Err(format!("{} isn't open in a tab", path.display())),
+                };
+                answer.send(result).ok();
+            }
+            Request::Pick { extension, placeholder, items, answer, .. } => self.extension_pick(extension, placeholder, items, answer, window, cx),
+            Request::Status { extension, item, status, .. } => {
+                let at = self.ext_runtime.status.iter().position(|s| s.extension.extension == extension && s.item == item);
+                let Some(c) = contribution(&extension) else { return };
+                match (at, status) {
+                    (Some(at), Some(status)) if self.ext_runtime.status[at].status == status => return,
+                    (Some(at), None) => {
+                        self.ext_runtime.status.remove(at);
+                    }
+                    (at, Some(status)) => {
+                        let icon = status.icon.as_deref().and_then(|icon| crate::extension_view::icon_path(&c, icon));
+                        let visible = c.status.iter().find(|s| s.id == item).is_some_and(|s| self.extension_when_holds(&s.when, cx));
+                        let shown = ShownStatus { extension: c, item, status, icon, visible };
+                        match at {
+                            Some(at) => self.ext_runtime.status[at] = shown,
+                            None => self.ext_runtime.status.push(shown),
+                        }
+                    }
+                    (None, None) => return,
+                }
+                cx.notify();
+            }
+            Request::Timer { extension, name, every, .. } => self.set_extension_timer(extension, name, every, window, cx),
             Request::Refresh { .. } | Request::Diagnostics { .. } => self.extension_broadcast(&request, window, cx),
+        }
+    }
+
+    // ---- Events and timers ---------------------------------------------------------------
+
+    /// Tells extensions' code that `name` happened (`contrib::EVENTS`), to
+    /// `path` when it's about a file or folder. It reaches the extensions
+    /// that list the event, and for a file only those that can reach it: one
+    /// in their own folder, or in the project when they declare
+    /// `workspace-files` (which the user is asked for before the first one).
+    /// A save of an extension's own file always reaches it (0.1's `file-saved`).
+    pub(super) fn extension_event(&mut self, name: &'static str, path: Option<&Path>, language: Option<&str>, cx: &mut Context<Self>) {
+        let about_file = !matches!(name, "project-opened" | "project-closed" | "settings-changed");
+        for c in crate::extensions::contributions() {
+            if c.code.is_none() {
+                continue;
+            }
+            let own = about_file && path.is_some_and(|p| ui_host::in_work_folder(&c.extension, p));
+            let needs = match (own, about_file) {
+                (true, _) if name == "file-saved" || (c.api >= Api::V2 && c.hears(name)) => None,
+                (false, false) if c.api >= Api::V2 && c.hears(name) => None,
+                (false, true) if c.api >= Api::V2 && c.hears(name) => {
+                    let in_project = path.zip(self.root.as_ref()).is_some_and(|(p, root)| p.starts_with(root));
+                    if !in_project || !c.permissions.contains(&Permission::WorkspaceFiles) {
+                        continue;
+                    }
+                    Some(Permission::WorkspaceFiles)
+                }
+                _ => continue,
+            };
+            let event = Event { name, path: path.map(Path::to_path_buf), language: language.map(str::to_string), data: None };
+            self.deliver_extension_event(Delivery { extension: c, event, needs, done: None }, cx);
+        }
+    }
+
+    /// Queues an event for an extension's code. One task per window hands
+    /// them over in order, the first ones once Kuana has started.
+    fn deliver_extension_event(&mut self, delivery: Delivery, cx: &mut Context<Self>) {
+        let events = self.ext_runtime.events.get_or_insert_with(|| {
+            let (send, mut queued) = mpsc::unbounded::<Delivery>();
+            cx.spawn(async move |ws, cx| {
+                while let Some(Delivery { extension, event, needs, done }) = queued.next().await {
+                    let wait = awake_at().saturating_duration_since(Instant::now());
+                    if !wait.is_zero() {
+                        cx.background_executor().timer(wait).await;
+                    }
+                    let name = extension.name.clone();
+                    // The window as it is now (its project may have changed while this waited).
+                    let Ok(job) = ws.update(cx, |ws, cx| ui_host::event(extension.clone(), ws.extension_caller(&extension.extension, cx), event, needs)) else {
+                        break;
+                    };
+                    // Not waited for here: the code may take its time, and other extensions' events go on.
+                    let ws = ws.clone();
+                    cx.spawn(async move |cx| {
+                        let result = job.await;
+                        match done {
+                            Some(done) => {
+                                done.send(result).ok();
+                            }
+                            None => {
+                                if let Err(err) = result {
+                                    ws.update(cx, |ws, cx| ws.toast(ToastKind::Error, format!("The {name} extension failed"), Some(err), cx)).ok();
+                                }
+                            }
+                        }
+                    })
+                    .detach();
+                }
+            })
+            .detach();
+            send
+        });
+        events.unbounded_send(delivery).ok();
+    }
+
+    /// A file's events: `name` for the file in `editor`.
+    pub(super) fn extension_file_event(&mut self, name: &'static str, editor: &Entity<Editor>, cx: &mut Context<Self>) {
+        let (path, language) = {
+            let doc = editor.read(cx).doc.read(cx);
+            (doc.path.clone(), doc.language.name())
+        };
+        if let Some(path) = path {
+            self.extension_event(name, Some(&path), Some(language), cx);
+        }
+    }
+
+    /// Called each render: when the user has moved to another file's tab and
+    /// stayed, the extensions listening are told. One comparison when none is.
+    pub(super) fn note_extension_editor(&mut self, cx: &mut Context<Self>) {
+        if !self.ext_runtime.hears_editor_changed {
+            return;
+        }
+        // The same tab as last time: nothing of the editor is read (the
+        // root view mustn't come to depend on what changes as one types).
+        let item = self.active_item(cx).map(|item| item.entity_id());
+        if item == self.ext_runtime.seen_item {
+            return;
+        }
+        let unread = self.active_editor(cx).is_some_and(|e| !e.read(cx).is_loaded());
+        if !unread {
+            // A restored tab still being read is looked at again once it's there.
+            self.ext_runtime.seen_item = item;
+        }
+        let path = self.active_editor(cx).filter(|e| e.read(cx).is_loaded()).and_then(|e| e.read(cx).doc.read(cx).path.clone());
+        if path.is_none() || path == self.ext_runtime.told_editor {
+            return;
+        }
+        self.ext_runtime.told_editor = path.clone();
+        self.ext_runtime.editor_changed = Some(cx.spawn(async move |ws, cx| {
+            cx.background_executor().timer(EDITOR_CHANGED_DELAY).await;
+            ws.update(cx, |ws, cx| {
+                // Still there?
+                if let Some(editor) = ws.active_editor(cx).filter(|e| e.read(cx).doc.read(cx).path == path) {
+                    ws.extension_file_event("editor-changed", &editor, cx);
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Sets or clears the window's timer `name` of an extension. When it's
+    /// due the code's `on-event` is told, once the window is the active one;
+    /// the next wait starts when the code has answered, so ticks never pile
+    /// up. A timer whose code fails stops.
+    fn set_extension_timer(&mut self, extension: String, name: String, every: Option<(u32, bool)>, window: &mut Window, cx: &mut Context<Self>) {
+        let key = (extension.clone(), name.clone());
+        self.ext_runtime.timers.remove(&key);
+        let Some((seconds, repeat)) = every else { return };
+        let task = cx.spawn_in(window, async move |ws, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(seconds.max(ui_host::MIN_TIMER_SECONDS) as u64)).await;
+                let Ok(inactive) = ws.update_in(cx, |ws, window, _| {
+                    (!window.is_window_active()).then(|| {
+                        let (wake, woken) = oneshot::channel();
+                        ws.ext_runtime.waiting_for_window.push(wake);
+                        woken
+                    })
+                }) else {
+                    return;
+                };
+                if let Some(woken) = inactive
+                    && woken.await.is_err()
+                {
+                    return;
+                }
+                let (done, answered) = oneshot::channel();
+                let told = ws.update(cx, |ws, cx| {
+                    let Some(c) = contribution(&extension).filter(|c| c.api >= Api::V2 && c.code.is_some()) else { return false };
+                    let event = Event { name: "timer", path: None, language: None, data: Some(name.clone()) };
+                    ws.deliver_extension_event(Delivery { extension: c, event, needs: None, done: Some(done) }, cx);
+                    true
+                });
+                let result = match told {
+                    Ok(true) => answered.await.unwrap_or(Ok(())),
+                    _ => Err(String::new()),
+                };
+                if result.is_ok() && repeat {
+                    continue;
+                }
+                ws.update(cx, |ws, cx| {
+                    if let Err(err) = result.as_ref()
+                        && !err.is_empty()
+                    {
+                        let title = contribution(&extension).map_or_else(|| extension.clone(), |c| c.name.clone());
+                        ws.toast(ToastKind::Error, format!("The {title} extension's timer {name} failed"), Some(err.clone()), cx);
+                    }
+                    // This task itself: it ends here either way.
+                    ws.ext_runtime.timers.remove(&(extension.clone(), name.clone()));
+                })
+                .ok();
+                return;
+            }
+        });
+        self.ext_runtime.timers.insert(key, task);
+    }
+
+    /// A list the code asks the user to pick from (`pick`): the picked row's
+    /// id, or none when they close it (or something else takes its place).
+    fn extension_pick(
+        &mut self,
+        extension: String,
+        placeholder: String,
+        items: Vec<ui_host::PickItem>,
+        answer: oneshot::Sender<Option<String>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let c = contribution(&extension);
+        let title: SharedString = c.as_ref().map_or(extension, |c| c.name.clone()).into();
+        let choices = items
+            .into_iter()
+            .map(|item| crate::picker::Choice {
+                id: item.id,
+                label: item.label.into(),
+                detail: item.detail.map(SharedString::from),
+                icon: item.icon.and_then(|icon| c.as_ref().and_then(|c| crate::extension_view::icon_path(c, &icon))),
+            })
+            .collect();
+        let picker = cx.new(|cx| {
+            let mut picker = Picker::new(PickerMode::Choices, None, Arc::new(Vec::new()), Vec::new(), Arc::new(Vec::new()), window, cx);
+            picker.set_choices(title, &placeholder, choices, cx);
+            picker
+        });
+        let answer = Rc::new(std::cell::Cell::new(Some(answer)));
+        let subscription = cx.subscribe_in(&picker, window, move |ws, _, event: &PickerEvent, window, cx| {
+            let picked = match event {
+                PickerEvent::Chosen(id) => Some(id.clone()),
+                PickerEvent::Dismissed => None,
+                _ => return,
+            };
+            if let Some(answer) = answer.take() {
+                answer.send(picked).ok();
+            }
+            ws.close_modal(window, cx);
+        });
+        self.modals.open(Modal::Picker(picker), subscription);
+        cx.notify();
+    }
+
+    /// The window became the active one: timers that came due meanwhile go on.
+    pub(super) fn extension_window_active(&mut self) {
+        for wake in self.ext_runtime.waiting_for_window.drain(..) {
+            wake.send(()).ok();
+        }
+    }
+
+    /// Whether a view's or a status item's `when` holds in this window now.
+    /// It looks at the disk (`file:`), so it's asked when something changes,
+    /// never while drawing.
+    fn extension_when_holds(&self, when: &When, cx: &App) -> bool {
+        match when {
+            When::Always => true,
+            When::File(name) => self.root.as_ref().is_some_and(|r| r.join(name).exists()),
+            When::Language(name) => self.editors.iter().any(|e| e.read(cx).doc.read(cx).language.name().eq_ignore_ascii_case(name)),
+        }
+    }
+
+    /// The project, the open files or the extensions changed (installed,
+    /// removed, reloaded): what's left of the ones that went goes, status
+    /// items show by their `when`, and who listens for the current tab is
+    /// worked out again.
+    fn sync_extension_runtime(&mut self, installed: &[Arc<Contributions>], cx: &mut Context<Self>) {
+        let current = |extension: &str| installed.iter().find(|c| c.extension == extension);
+        self.ext_runtime.timers.retain(|(extension, _), _| current(extension).is_some_and(|c| c.api >= Api::V2));
+        if !self.ext_runtime.status.is_empty() {
+            let mut shown = std::mem::take(&mut self.ext_runtime.status);
+            let before: Vec<bool> = shown.iter().map(|s| s.visible).collect();
+            shown.retain_mut(|shown| {
+                let Some(c) = current(&shown.extension.extension) else { return false };
+                let Some(def) = c.status.iter().find(|s| s.id == shown.item) else { return false };
+                shown.visible = self.extension_when_holds(&def.when, cx);
+                shown.extension = c.clone();
+                true
+            });
+            if shown.iter().map(|s| s.visible).ne(before.iter().copied()) {
+                cx.notify();
+            }
+            self.ext_runtime.status = shown;
+        }
+        let runtime = &mut self.ext_runtime;
+        runtime.hears_editor_changed = installed.iter().any(|c| c.api >= Api::V2 && c.hears("editor-changed"));
+
+        // The project: each extension hears of the one that's open once, and
+        // of its going (one installed later hears of the one already open).
+        let root = self.root.clone();
+        let mut events = Vec::new();
+        runtime.told_project.retain(|(extension, _)| current(extension).is_some());
+        for c in installed.iter().filter(|c| c.api >= Api::V2 && c.code.is_some()) {
+            let told = runtime.told_project.iter().position(|(extension, _)| *extension == c.extension);
+            if told.map(|ix| &runtime.told_project[ix].1) == root.as_ref() {
+                continue;
+            }
+            if let Some(ix) = told {
+                let (_, old) = runtime.told_project.remove(ix);
+                events.push((c.clone(), "project-closed", old));
+            }
+            if let Some(root) = &root {
+                runtime.told_project.push((c.extension.clone(), root.clone()));
+                events.push((c.clone(), "project-opened", root.clone()));
+            }
+        }
+        for (c, name, path) in events {
+            if c.hears(name) {
+                let event = Event { name, path: Some(path), language: None, data: None };
+                self.deliver_extension_event(Delivery { extension: c, event, needs: None, done: None }, cx);
+            }
+        }
+
+        // The settings each listener starts from, to tell a change by.
+        let told = &mut self.ext_runtime.told_settings;
+        told.retain(|extension, _| current(extension).is_some());
+        for c in installed.iter().filter(|c| c.api >= Api::V2 && c.hears("settings-changed")) {
+            if !told.contains_key(&c.extension) {
+                let user = Settings::get(cx).extensions.as_ref().and_then(|map| map.get(&c.extension));
+                told.insert(c.extension.clone(), c.settings_json(user));
+            }
         }
     }
 
@@ -276,7 +706,9 @@ impl Workspace {
             .flat_map(|c| c.views.iter().map(|v| slot_of(&c.extension, v)).collect::<Vec<_>>())
             .collect();
         self.ext_views.retain(|slot, _| keep.contains(slot));
-        let installed: Vec<String> = crate::extensions::contributions().iter().map(|c| c.extension.clone()).collect();
+        let contributions = crate::extensions::contributions();
+        self.sync_extension_runtime(&contributions, cx);
+        let installed: Vec<String> = contributions.iter().map(|c| c.extension.clone()).collect();
         self.ext_panels.update(cx, |p, cx| p.retain_extensions(|e| installed.iter().any(|i| i == e), cx));
         if let SidebarMode::Extension(slot) = self.sidebar_mode
             && !keep.contains(&slot)
@@ -293,7 +725,12 @@ impl Workspace {
 
     /// What extensions' code is told about this window.
     fn extension_caller(&self, extension: &str, cx: &Context<Self>) -> Caller {
-        let settings = Settings::get(cx).extensions.as_ref().and_then(|map| map.get(extension)).map(|v| v.to_string()).unwrap_or_default();
+        // What the user set, with the manifest's defaults for the rest.
+        let user = Settings::get(cx).extensions.as_ref().and_then(|map| map.get(extension));
+        let settings = match contribution(extension) {
+            Some(c) => c.settings_json(user),
+            None => user.map(|v| v.to_string()).unwrap_or_default(),
+        };
         Caller { window: cx.entity_id().as_u64(), root: self.root.clone(), settings }
     }
 
@@ -332,6 +769,20 @@ impl Workspace {
         for entity in self.ext_views.values().cloned().collect::<Vec<_>>() {
             let caller = self.extension_caller(&entity.read(cx).extension().extension.clone(), cx);
             entity.update(cx, |v, cx| v.set_caller(caller, cx));
+        }
+        // `settings-changed`, for the extensions whose own settings did.
+        if self.ext_runtime.told_settings.is_empty() {
+            return;
+        }
+        let user = Settings::get(cx).extensions.clone().unwrap_or_default();
+        for c in crate::extensions::contributions() {
+            let Some(told) = self.ext_runtime.told_settings.get_mut(&c.extension) else { continue };
+            let now = c.settings_json(user.get(&c.extension));
+            if *told != now {
+                *told = now;
+                let event = Event { name: "settings-changed", path: None, language: None, data: None };
+                self.deliver_extension_event(Delivery { extension: c, event, needs: None, done: None }, cx);
+            }
         }
     }
 
@@ -476,14 +927,17 @@ impl Workspace {
     /// The editor menu's entries from extensions, for a file in `language`.
     pub(super) fn extension_editor_entries(&self, path: Option<&Path>, language: &str) -> Vec<(MenuEntry, Option<MenuAction>)> {
         let Some(path) = path else { return Vec::new() };
+        self.extension_menu_entries(&MenuPlace::Editor, &FileSubject { path, folder: false, language: Some(language) })
+    }
+
+    /// Extensions' entries for a menu on a file (the editor's, a tab's, the
+    /// file tree's): the commands whose `when` holds for it, run on its path.
+    pub(super) fn extension_menu_entries(&self, place: &MenuPlace, file: &FileSubject) -> Vec<(MenuEntry, Option<MenuAction>)> {
         let mut out = Vec::new();
         for c in crate::extensions::contributions() {
-            let commands: Vec<(String, String)> = c
-                .menu(&MenuPlace::Editor, |cond| matches!(cond, Condition::Language(l) if l.eq_ignore_ascii_case(language)))
-                .map(|cmd| (cmd.id.clone(), cmd.title.clone()))
-                .collect();
+            let commands: Vec<(String, String)> = c.menu(place, |cond| cond.holds_for(file)).map(|cmd| (cmd.id.clone(), cmd.title.clone())).collect();
             for (command, title) in commands {
-                let (c, target) = (c.clone(), path.to_string_lossy().into_owned());
+                let (c, target) = (c.clone(), file.path.to_string_lossy().into_owned());
                 out.push((
                     MenuEntry::item(title, Icon::Puzzle),
                     Some(MenuAction::Call(Rc::new(move |ws: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| {
@@ -495,24 +949,54 @@ impl Workspace {
         out
     }
 
-    /// After an explicit Save: a file in an extension's work folder goes to
-    /// its code (`file-saved`).
+    /// After an explicit Save: the extensions listening for saves are told,
+    /// and the one whose own file it is (0.1's `file-saved`).
     pub(super) fn extension_file_saved(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
-        let Some(path) = editor.read(cx).doc.read(cx).path.clone() else { return };
-        for c in crate::extensions::contributions() {
-            if c.code.is_none() || !ui_host::in_work_folder(&c.extension, &path) {
-                continue;
-            }
-            let caller = self.extension_caller(&c.extension, cx);
-            let name = c.name.clone();
-            let job = ui_host::file_saved(c, caller, path.clone());
-            cx.spawn(async move |ws, cx| {
-                if let Err(err) = job.await {
-                    ws.update(cx, |ws, cx| ws.toast(ToastKind::Error, format!("{name} couldn't handle the save"), Some(err), cx)).ok();
-                }
-            })
-            .detach();
+        self.extension_file_event("file-saved", editor, cx);
+    }
+
+    // ---- Status bar -----------------------------------------------------------------------
+
+    /// The status bar items extensions' code has filled (`set-status`), in
+    /// this window. Only what `ExtensionRuntime` holds is read: nothing is
+    /// asked of the code or the disk while drawing.
+    pub(super) fn render_extension_status(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut out = Vec::new();
+        for (ix, shown) in self.ext_runtime.status.iter().enumerate().filter(|(_, s)| s.visible) {
+            let color: Hsla = match shown.status.tone {
+                Tone::Normal => theme.text_muted.into(),
+                Tone::Muted => theme.text_dim.into(),
+                Tone::Success => theme.success.into(),
+                Tone::Warning => theme.warning.into(),
+                Tone::Error => theme.error.into(),
+            };
+            let command = shown.extension.status.iter().find(|s| s.id == shown.item).and_then(|s| s.command.clone());
+            let tip: SharedString = shown.status.tooltip.clone().unwrap_or_else(|| shown.extension.name.clone()).into();
+            let extension = shown.extension.clone();
+            let item = div()
+                .id(("extension-status", ix))
+                .flex()
+                .items_center()
+                .gap_1()
+                .flex_shrink_0()
+                // Same size and rounding as the status bar's menus.
+                .h(px(24.))
+                .px_2()
+                .rounded(px(9.))
+                .text_color(color)
+                .children(shown.icon.clone().map(|icon| gpui::svg().path(icon).size(px(13.)).flex_shrink_0().text_color(color)))
+                .when(!shown.status.text.is_empty(), |el| el.child(SharedString::from(shown.status.text.clone())))
+                .tooltip(move |_, cx| tooltip_view(tip.clone(), cx));
+            out.push(match command {
+                Some(command) => item
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |ws, _, _, cx| ws.run_extension_command(extension.clone(), command.clone(), None, cx)))
+                    .hover_bg(theme.hover)
+                    .into_any_element(),
+                None => item.into_any_element(),
+            });
         }
+        out
     }
 
     // ---- Panels ---------------------------------------------------------------------------

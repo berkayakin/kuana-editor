@@ -854,6 +854,8 @@ pub struct Workspace {
     has_ext_panel: bool,
     /// Problems extensions reported, by file.
     ext_problems: extension_ui::ProblemMap,
+    /// What extensions' code keeps in this window: status items, timers, events on their way.
+    ext_runtime: extension_ui::ExtensionRuntime,
     /// The Files view.
     tree: Entity<ProjectTree>,
     /// The shells in the bottom area.
@@ -1103,6 +1105,7 @@ impl Workspace {
         // Leaving the window saves edits, like VS Code.
         let activation = cx.observe_window_activation(window, |ws, window, cx| {
             if window.is_window_active() {
+                ws.extension_window_active();
                 ws.check_config(cx);
                 // The watcher reports changes to Git status as they come.
                 if ws.watcher.is_none() {
@@ -1296,6 +1299,7 @@ impl Workspace {
             ext_panels,
             has_ext_panel: false,
             ext_problems: HashMap::new(),
+            ext_runtime: Default::default(),
             tree,
             terminals,
             problems,
@@ -1596,6 +1600,7 @@ impl Workspace {
             }
         }
         self.lsp.update(cx, |s, cx| s.register(editor, cx));
+        self.extension_file_event("file-opened", editor, cx);
         self.suggest_extension(editor, cx);
         if !self.has_repo(cx) && self.root.is_none() {
             // A lone file: use the repository it lives in, if any.
