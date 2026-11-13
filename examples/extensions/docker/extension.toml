@@ -7,7 +7,7 @@ authors = ["Berkay Akin"]
 repository = "https://github.com/berkayakin/kuana-editor"
 
 [kuana]
-api = "0.1"
+api = "0.2"
 permissions = ["process"]
 
 [kuana.views.containers]
@@ -24,6 +24,13 @@ icon = "table"
 
 [kuana.commands.logs]
 title = "Show Logs"
+
+[kuana.commands.follow]
+title = "Follow Logs"
+
+[kuana.commands.stop-following]
+title = "Stop Following Logs"
+icon = "stop"
 
 [kuana.commands.inspect]
 title = "Inspect"
@@ -51,6 +58,15 @@ command = "table"
 place = "view-item:containers"
 command = "logs"
 when = "kind == 'running' || kind == 'stopped'"
+
+[[kuana.menus]]
+place = "view-item:containers"
+command = "follow"
+when = "kind == 'running'"
+
+[[kuana.menus]]
+place = "view-toolbar:containers"
+command = "stop-following"
 
 [[kuana.menus]]
 place = "view-item:containers"

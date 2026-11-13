@@ -51,6 +51,7 @@ use crate::{
 pub mod check;
 pub mod contrib;
 pub mod permissions;
+pub mod processes;
 pub mod registry;
 pub mod suggest;
 pub mod updates;

@@ -1,5 +1,5 @@
 //! A sample Kuana extension for interface 0.2: it changes the open file and
-//! follows what the user does, where the Docker sample (0.1) shows a view.
+//! follows what the user does, where the Docker sample shows a view.
 //!
 //! - Transform Selection… asks which way (`pick`) and rewrites each selection
 //!   as one undo step (`editor`, `apply-edits`);

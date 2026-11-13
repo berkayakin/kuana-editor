@@ -1122,6 +1122,8 @@ impl Workspace {
         // Last chance to write edits when the app quits some other way
         // (Dock menu, logout).
         let quit = cx.on_app_quit(|ws, cx| {
+            // Programs extensions left running end with Kuana.
+            extensions::ui_host::quitting();
             if ws.auto_save != AutoSave::Off {
                 ws.auto_save_all(true, cx);
             }
@@ -1299,7 +1301,7 @@ impl Workspace {
             ext_panels,
             has_ext_panel: false,
             ext_problems: HashMap::new(),
-            ext_runtime: Default::default(),
+            ext_runtime: extension_ui::ExtensionRuntime::for_window(cx.entity_id().as_u64()),
             tree,
             terminals,
             problems,
