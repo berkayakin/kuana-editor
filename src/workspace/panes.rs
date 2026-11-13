@@ -345,7 +345,11 @@ impl Workspace {
     pub(super) fn show_commit(&mut self, _: &ShowCommit, window: &mut Window, cx: &mut Context<Self>) {
         self.set_view_shown(SidebarMode::Commit, true);
         self.refresh_commit_view(cx);
-        self.git_panel.read(cx).focus_message(window, cx);
+        // Without a repository the view has no message box: focusing it would
+        // leave the keyboard with nothing on screen, and shortcuts dead.
+        if self.has_repo(cx) {
+            self.git_panel.read(cx).focus_message(window, cx);
+        }
         self.save_state(cx);
         cx.notify();
     }
