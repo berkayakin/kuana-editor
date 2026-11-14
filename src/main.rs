@@ -1,6 +1,8 @@
 // A GUI app on Windows: no console window opens with it.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+// The GPUI-free core (`crates/kuana-core`), at the root as before.
+use kuana_core::{encoding, paths, process, project, search, watcher};
 mod about;
 mod askpass;
 mod autopilot;
@@ -28,7 +30,6 @@ mod extension_panel;
 mod extension_view;
 mod extensions;
 mod editorconfig;
-mod encoding;
 mod file_history;
 mod file_icons;
 mod find_bar;
@@ -55,16 +56,13 @@ mod merge_view;
 mod nav_history;
 mod onboarding;
 mod pane_item;
-mod paths;
 mod panic_log;
 mod picker;
 mod postfix;
 mod preview;
 mod problems_panel;
-mod project;
 mod project_settings;
 mod project_tree;
-mod process;
 mod todo;
 mod trust;
 mod trust_dialog;
@@ -76,7 +74,6 @@ mod project_search;
 mod push_dialog;
 mod remotes_dialog;
 mod results_panel;
-mod search;
 mod settings;
 mod snippets;
 mod state;
@@ -90,7 +87,6 @@ mod transition;
 mod ui;
 mod updater;
 mod wasi_sdk;
-mod watcher;
 mod workspace;
 mod wrap;
 

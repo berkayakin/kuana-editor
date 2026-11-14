@@ -92,7 +92,7 @@ jobs:
           toolchain: "1.94"
       # Without KUANA_RELEASE, which is for the builds: the tests run as CI's do,
       # in a Kuana that neither updates itself nor insists on being the only one.
-      - run: env -u KUANA_RELEASE cargo test --locked
+      - run: env -u KUANA_RELEASE cargo test --locked --workspace
 
   macos:
     needs: create

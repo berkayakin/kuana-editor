@@ -14,8 +14,9 @@ change it safely.
 cargo build --release            # binary: target/release/kuana (needs cmake, for wasmtime)
 cargo run --release -- <folder> [<file>…]
 cargo build                      # debug build: optimized dependencies, quick to rebuild Kuana itself
-cargo test                       # unit tests (lint rules, search, git, themes, document)
-cargo clippy --all-targets       # must be clean: CI (.github/workflows/ci.yml) fails on any warning
+cargo test --workspace           # unit tests (lint rules, search, git, themes, document; the core's too)
+cargo clippy --workspace --all-targets  # must be clean: CI (.github/workflows/ci.yml) fails on any warning
+cargo build -p kuana-server      # the headless server for remote development (crates/kuana-server)
 cargo bundle --release           # macOS .app (needs `cargo install cargo-bundle`)
 scripts/screenshot.sh [<folder> [<file>…]]  # README screenshots → docs/screenshots (macOS; -h for options)
 scripts/record.sh [<script>]     # plays scripts/readme.autopilot and saves docs/screenshots/demo.webp (macOS, img2webp)
@@ -31,8 +32,12 @@ scripts/smoke.sh <kuana> <folder> <out>  # CI's smoke test: plays scripts/smoke.
 
 ## Architecture
 
-Everything is one binary crate. The window's root view is `Workspace`; every open file is an
-`Entity<Editor>` owning a `Document`.
+A Cargo workspace: the app is the root package (`src/`, the `kuana` binary); `crates/kuana-core` is the
+GPUI-free part it shares with `crates/kuana-server`, the headless side of remote development (see
+`plans/remote-dev.md`). The app re-exports the core's modules at its root (`use kuana_core::{encoding,
+paths, process, project, search, watcher}` in `main.rs`), so `crate::search` and the like work as
+before; the table lists them under their old names. Keep the core free of GPUI. The window's root
+view is `Workspace`; every open file is an `Entity<Editor>` owning a `Document`.
 
 | File | Role |
 | --- | --- |
