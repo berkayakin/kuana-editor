@@ -6,6 +6,8 @@ license.workspace = true
 description = "Kuana's GPUI-free core, shared by the editor and its remote server"
 
 [dependencies]
+base64 = "0.22"
+serde_json = "1"
 encoding_rs = "0.8"
 futures = "0.3.34"
 ignore = "0.4.33"

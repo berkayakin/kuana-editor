@@ -164,9 +164,23 @@ fn skipped(root: &Path, path: &Path) -> bool {
     path.strip_prefix(root).is_ok_and(|rel| rel.components().any(|c| matches!(c.as_os_str().to_str(), Some(".git" | "node_modules" | ".DS_Store"))))
 }
 
+/// The files under `dir`, sorted, each with whether it's ignored (see `add_tree`).
+pub fn scan_files(dir: &Path) -> Vec<(PathBuf, bool)> {
+    let mut files = BTreeMap::new();
+    add_tree(dir, &mut files);
+    files.into_iter().collect()
+}
+
 /// The files under `dir`: in folders the ignore rules let in, every file,
-/// marked when it's ignored itself.
+/// marked when it's ignored itself. A remote host's are found there
+/// (`kuana-server` runs `scan_files`), with its ignore rules.
 fn add_tree(dir: &Path, files: &mut BTreeMap<PathBuf, bool>) {
+    if let (Some((host, path)), Some(mount)) = (crate::fs::remote(dir), crate::fs::mount_of(dir)) {
+        if let Some(Ok(found)) = host.scan(&path) {
+            files.extend(found.into_iter().map(|(path, ignored)| (crate::fs::local_path(&mount, &path), ignored)));
+        }
+        return;
+    }
     let mut walked = std::collections::HashSet::new();
     let mut dirs = Vec::new();
     for entry in walker(dir).filter_map(Result::ok) {

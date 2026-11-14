@@ -7,6 +7,7 @@ pub mod exec;
 pub mod fs;
 pub mod paths;
 pub mod process;
+pub mod remote;
 pub mod project;
 pub mod search;
 pub mod watcher;

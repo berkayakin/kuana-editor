@@ -6,6 +6,8 @@ use kuana_core::{encoding, exec, fs, paths, process, project, search, watcher};
 mod about;
 #[cfg(test)]
 mod host_lint;
+#[cfg(test)]
+mod remote_tests;
 mod askpass;
 mod autopilot;
 mod python;
