@@ -149,6 +149,9 @@ pub struct SessionState {
     /// each is offered once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suggested_extensions: Vec<String>,
+    /// Local projects whose dev container was offered (once each).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devcontainer_offered: Vec<PathBuf>,
     /// Welcome Setup was finished (Get Started or Escape). Only finishing it
     /// sets this; the older `onboarded` key was also set by guessing from
     /// existing files, so installs that never saw the setup missed it.

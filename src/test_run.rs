@@ -441,6 +441,10 @@ pub fn status_of(test: &(Framework, String), statuses: &Statuses) -> Option<Test
 /// The command that runs only `run`'s failed tests, the way `target` ran
 /// them. None when none failed or the runner's filter can't say it.
 pub fn rerun_failed(target: &RunTarget, run: &TestRun) -> Option<RunTarget> {
+    crate::run::for_host(&target.cwd, || rerun_failed_here(target, run))
+}
+
+fn rerun_failed_here(target: &RunTarget, run: &TestRun) -> Option<RunTarget> {
     let mut failed: Vec<&str> = run.results.iter().filter(|r| r.status == TestStatus::Failed).map(|r| r.id.as_str()).collect();
     if failed.is_empty() {
         return None;

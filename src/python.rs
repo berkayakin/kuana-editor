@@ -96,12 +96,17 @@ fn is_venv(dir: &Path) -> bool {
 
 /// Where the venv keeps its executables.
 pub fn bin_dir(venv: &Path) -> PathBuf {
-    venv.join(if cfg!(windows) { "Scripts" } else { "bin" })
+    venv.join(if windows_venv(venv) { "Scripts" } else { "bin" })
+}
+
+/// A venv made by Windows' Python (a remote project's is its host's, Linux or macOS).
+fn windows_venv(venv: &Path) -> bool {
+    cfg!(windows) && !crate::fs::is_remote(venv)
 }
 
 /// The venv's interpreter.
 pub fn interpreter(venv: &Path) -> PathBuf {
-    bin_dir(venv).join(if cfg!(windows) { "python.exe" } else { "python" })
+    bin_dir(venv).join(if windows_venv(venv) { "python.exe" } else { "python" })
 }
 
 /// `path` with the venv's executables first.

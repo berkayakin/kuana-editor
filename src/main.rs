@@ -104,7 +104,7 @@ use crate::{
         CheckForUpdates, CloseTab, CloseWindow, DecreaseFontSize, FileStructure, Find, IncreaseFontSize, OpenSettings, OpenExtensions, ProjectTrust,
         ResetFontSize, Rerun, RunConfiguration, SplitDown, SplitRight, StopRun, ShowFileHistory, ToggleGitLog, ToggleTerminal, FindAction, FindInFiles, GitBranches, GitStash, ManageRemotes, GitClone, GitFetch,
         GitInit, GitPull, GitPush, GitSync, GitUndoCommit, GoToFile, GoToLine, MinimizeWindow, ZoomWindow, NewFile, NewWindow, NextTab, OpenFile,
-        OpenFolder, OpenFolderInThisWindow, ConnectToHost, OpenRemote, PrevTab, Quit, RecentFiles, RecentProjects,
+        OpenFolder, OpenFolderInThisWindow, ConnectToHost, ConnectToWsl, AttachToContainer, OpenInDevContainer, OpenRemote, PrevTab, Quit, RecentFiles, RecentProjects,
         Replace, ReplaceInFiles, Save, SaveAs, SearchEverywhere, SelectTheme, ShowCommit,
         ToggleProblems, ToggleResults, ToggleSidebar, ToggleSecondSidebar, WelcomeSetup, GoToSymbol, InstallShellCommand,
         DebugConfiguration, Resume, PauseProgram, StepOver, StepInto, StepOut, AttachToProcess, AddConditionalBreakpoint, AddLogpoint,
@@ -131,12 +131,19 @@ fn menus_for(mac: bool) -> Vec<Menu> {
         MenuItem::action("Open Folder in This Window…", OpenFolderInThisWindow),
         MenuItem::action("Recent Projects…", RecentProjects),
         MenuItem::action("Connect to SSH Host…", ConnectToHost),
+    ];
+    if cfg!(windows) {
+        file.push(MenuItem::action("Connect to WSL…", ConnectToWsl));
+    }
+    file.extend([
+        MenuItem::action("Attach to Running Container…", AttachToContainer),
+        MenuItem::action("Open in Dev Container", OpenInDevContainer),
         MenuItem::action("Clone Repository…", GitClone),
         MenuItem::separator(),
         MenuItem::action("Save", Save),
         MenuItem::action("Save As…", SaveAs),
         MenuItem::separator(),
-    ];
+    ]);
     if !mac {
         file.extend([
             MenuItem::action("Settings…", OpenSettings),

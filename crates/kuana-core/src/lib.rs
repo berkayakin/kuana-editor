@@ -5,6 +5,7 @@
 pub mod encoding;
 pub mod exec;
 pub mod fs;
+pub mod jsonc;
 pub mod paths;
 pub mod process;
 pub mod remote;

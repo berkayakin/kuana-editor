@@ -423,7 +423,7 @@ pub fn home_dir() -> Option<PathBuf> {
 /// Shows paths under the home folder as `~/…`.
 pub fn display_path(path: &Path) -> String {
     // A remote project's: `box: ~/project`.
-    if let Some(shown) = kuana_core::remote::ssh::display(path) {
+    if let Some(shown) = kuana_core::remote::connection::display(path) {
         return shown;
     }
     match home_dir().and_then(|h| path.strip_prefix(&h).ok().map(Path::to_path_buf)) {

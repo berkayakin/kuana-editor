@@ -1,9 +1,9 @@
 # Remote development
 
-Kuana opens projects on other machines over SSH. The window, the open files and everything you
-type stay on your computer, so typing never waits on the network; a small headless
-`kuana-server` on the remote machine reads and writes its files, watches them, searches them and
-runs Git there.
+Kuana opens projects on other machines over SSH, in WSL distributions and in containers. The
+window, the open files and everything you type stay on your computer, so typing never waits on the
+network; a small headless `kuana-server` on the remote machine reads and writes its files, watches
+them, searches them and runs Git there.
 
 ## Connecting
 
@@ -20,6 +20,32 @@ runs Git there.
 The window's project chip and Recent Projects show it as `host: ~/project`. A remote project comes
 back like a local one: Recent Projects, and the last project at startup, connect first. One
 connection serves every window on that host.
+
+## WSL (Windows)
+
+**File → Connect to WSL…** lists your distributions (the default one first). Kuana runs its
+server in the one you pick, as your default user there, and asks for a folder in it. Everything
+below works as it does over SSH: files, Git, language servers, terminals, Run and debugging all
+happen inside the distribution, with its own tools.
+
+## Containers
+
+- **File → Attach to Running Container…** lists `docker ps`; pick one and a folder in it.
+- **File → Open in Dev Container** reopens the current project in its dev container
+  (`.devcontainer/devcontainer.json`, `.devcontainer.json`, or `.devcontainer/<name>/devcontainer.json`).
+  The first time, the container is made: from its `image` or its Dockerfile (`build`), with the
+  project mounted at `workspaceFolder` (`/workspaces/<folder>` unless it says otherwise), its
+  `containerEnv`, `mounts`, `runArgs` and `containerUser`, then its `onCreateCommand`,
+  `updateContentCommand`, `postCreateCommand` and `postStartCommand`. Later it's found again (and
+  started if it stopped). You work in it as its `remoteUser`.
+  Opening a project that has a dev container offers it once.
+- With the [devcontainer CLI](https://github.com/devcontainers/cli) installed
+  (`npm install -g @devcontainers/cli`), Kuana lets it bring the container up instead, so
+  features and Docker Compose work too; without it, those are left out (and said so).
+- Kuana copies its server into the container (into the user's home, `~/.kuana-server/`). A stopped
+  container that was opened before is started when its project is opened again.
+- Docker's CLI is found on your shell's `PATH`; `KUANA_DOCKER` names another (`podman`).
+- A dev container runs commands from the project, so it opens only for a trusted project.
 
 ## What works there
 
@@ -56,8 +82,8 @@ you trust it, its project settings, formatters and Git hooks don't run.
 ## Notes
 
 - The remote machine needs Linux (x86_64 or aarch64) or macOS. Windows machines aren't supported as
-  remotes yet (WSL and containers are planned).
+  SSH remotes; use WSL there.
 - Kuana keeps one SSH control connection per host (in its config folder, `ssh/`), as `ssh -o
   ControlMaster` does, for the commands that follow.
-- `KUANA_SSH` names another `ssh` program; `KUANA_SERVER_BINARY` a `kuana-server` to copy instead of
-  downloading one (development builds).
+- `KUANA_SSH`, `KUANA_WSL` and `KUANA_DOCKER` name other programs for each; `KUANA_SERVER_BINARY` a
+  `kuana-server` to copy instead of downloading one (development builds).

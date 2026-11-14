@@ -43,7 +43,6 @@ use gpui::{
 };
 
 mod commands;
-#[cfg(unix)]
 mod remote_pty;
 mod run_log;
 pub mod shell_marks;
@@ -1468,11 +1467,10 @@ fn start_pty(
     listener: Listener,
     log: Option<RunLog>,
 ) -> std::io::Result<Started> {
-    // A remote project's terminal runs on its host (`terminal/remote_pty.rs`).
-    #[cfg(unix)]
+    // A remote project's terminal runs on its host (`terminal/remote_pty.rs`),
+    // a POSIX system whatever this one is.
     let remote = kuana_core::remote::client::host_for(cwd);
-    #[cfg(not(unix))]
-    let remote: Option<(PathBuf, Arc<kuana_core::remote::RemoteHost>)> = None;
+    let here_windows = cfg!(windows) && remote.is_none();
     let default_shell: Option<String> = match &remote {
         Some((_, host)) => host.shell(),
         None => std::env::var("SHELL").ok(),
@@ -1483,7 +1481,7 @@ fn start_pty(
         // PowerShell (the user's when that's PowerShell 7) with their
         // profile, as a login shell would read it. The script goes
         // encoded: Windows hands a program one command line, unquoted.
-        Some(target) if cfg!(windows) => {
+        Some(target) if here_windows => {
             let program = configured.as_ref().and_then(|c| c.first()).filter(|p| is_powershell(p)).cloned();
             let script = powershell_run_script(&target.command, cwd, venv.as_deref());
             Some(vec![program.unwrap_or_else(|| "powershell".into()), "-NoLogo".into(), "-EncodedCommand".into(), encoded_command(&script)])
@@ -1503,7 +1501,7 @@ fn start_pty(
     let activate = match (run, &venv) {
         (None, Some(venv)) if crate::trust::is_trusted(cwd) => {
             let program = configured.as_ref().and_then(|c| c.first().cloned()).or_else(login_shell);
-            let program = program.unwrap_or_else(|| if cfg!(windows) { "powershell".into() } else { "sh".into() });
+            let program = program.unwrap_or_else(|| if here_windows { "powershell".into() } else { "sh".into() });
             crate::python::activate_command(venv, &program)
         }
         _ => None,
@@ -1515,7 +1513,7 @@ fn start_pty(
     // Shell integration: Kuana's script for zsh, bash and fish; marks from
     // any shell that makes them itself are read too.
     let mut shell = shell;
-    let marks = (integrate && cfg!(unix)).then(shell_marks::Marks::default);
+    let marks = (integrate && !here_windows).then(shell_marks::Marks::default);
     if marks.is_some() {
         let program = configured.as_ref().and_then(|c| c.first().cloned()).or_else(login_shell);
         let args: Vec<String> = configured.as_ref().map(|c| c[1..].to_vec()).unwrap_or_default();
@@ -1535,11 +1533,9 @@ fn start_pty(
             env.insert("KUANA_SHELL_INTEGRATION".to_string(), "1".to_string());
         }
     }
-    #[cfg(unix)]
     if let Some((mount, host)) = remote {
         // What runs there names the host's paths, not the mount's.
-        let mount = mount.to_string_lossy().trim_end_matches('/').to_string();
-        let host_text = |s: &str| s.replace(&mount, "");
+        let host_text = |s: &str| crate::fs::host_text(&mount, s);
         let shell: Vec<String> = shell.unwrap_or_else(|| vec![login_shell().unwrap_or_else(|| "/bin/sh".into()), "-l".into()]).iter().map(|s| host_text(s)).collect();
         let env: Vec<(String, String)> = env.into_iter().map(|(k, v)| (k, host_text(&v))).collect();
         let cwd = crate::fs::remote(cwd).map(|(_, path)| path);

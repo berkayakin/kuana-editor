@@ -1,5 +1,5 @@
 //! Connecting over SSH, with a stand-in for `ssh` that runs the command here
-//! with its own `HOME` (the "remote" user's): `kuana_core::remote::ssh`
+//! with its own `HOME` (the "remote" user's): `kuana_core::remote::connection`
 //! probes, installs this build's `kuana-server` there (uploading it through
 //! ssh's stdin), starts it and mounts it; then files and programs go through.
 
@@ -14,7 +14,7 @@ use std::{
 use kuana_core::{
     exec::Command,
     fs::{self, PathExt},
-    remote::ssh,
+    remote::connection::{self, Options, Transport},
 };
 
 fn temp(name: &str) -> PathBuf {
@@ -56,9 +56,9 @@ fn connects_installs_starts_and_mounts() {
         std::fs::read(env!("CARGO_BIN_EXE_kuana-server")).map_err(|e| e.to_string())
     };
     let progress = |s: &str| steps.lock().unwrap().push(s.to_string());
-    let options = ssh::Options { program: program.display().to_string(), control_dir: dir.join("control"), askpass: Vec::new(), server_binary: &server, progress: &progress };
+    let options = Options { program: Some(program.display().to_string()), control_dir: dir.join("control"), askpass: Vec::new(), server_binary: &server, progress: &progress };
 
-    let connected = ssh::connect("box", &options).unwrap();
+    let connected = connection::connect(&Transport::Ssh("box".into()), &options).unwrap();
     assert_eq!(connected.home, home.display().to_string());
     // Installed for the host's system, into its home.
     let (os, arch) = asked.lock().unwrap()[0].clone();
@@ -74,21 +74,21 @@ fn connects_installs_starts_and_mounts() {
     assert_eq!(std::fs::read_to_string(home.join("project/b.txt")).unwrap(), "from kuana");
     let out = Command::new("sh").args(["-c", "ls"]).current_dir(&project).output().unwrap();
     assert_eq!(String::from_utf8(out.stdout).unwrap(), "a.txt\nb.txt\n");
-    assert_eq!(ssh::display(&project).as_deref(), Some("box: ~/project"));
+    assert_eq!(connection::display(&project).as_deref(), Some("box: ~/project"));
     // Connecting again uses the connection there is.
-    assert!(ssh::connect("box", &options).is_ok());
+    assert!(connection::connect(&Transport::Ssh("box".into()), &options).is_ok());
 
     // Gone: unmounted, calls fail.
-    ssh::disconnect("box");
-    assert!(ssh::connected("box").is_none());
+    connection::disconnect("box");
+    assert!(connection::connected("box").is_none());
     assert!(!project.join("a.txt").exists_on_host());
 
     // The next time, the server is there already: no install.
     asked.lock().unwrap().clear();
-    let again = ssh::connect("box", &options).unwrap();
+    let again = connection::connect(&Transport::Ssh("box".into()), &options).unwrap();
     assert!(asked.lock().unwrap().is_empty());
     assert!(again.home_path().join("project/a.txt").is_file_on_host());
-    ssh::disconnect("box");
+    connection::disconnect("box");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -99,8 +99,8 @@ fn a_host_that_fails_says_why() {
     std::fs::write(&script, "#!/bin/sh\necho 'ssh: Could not resolve hostname nowhere: nodename nor servname provided' >&2\nexit 255\n").unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let server = |_: &str, _: &str| Err("not needed".to_string());
-    let options = ssh::Options { program: script.display().to_string(), control_dir: dir.join("control"), askpass: Vec::new(), server_binary: &server, progress: &|_| {} };
-    let err = ssh::connect("nowhere", &options).err().unwrap();
+    let options = Options { program: Some(script.display().to_string()), control_dir: dir.join("control"), askpass: Vec::new(), server_binary: &server, progress: &|_| {} };
+    let err = connection::connect(&Transport::Ssh("nowhere".into()), &options).err().unwrap();
     assert!(err.contains("Couldn't connect to nowhere") && err.contains("Could not resolve hostname"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -114,8 +114,8 @@ fn questions_asked_there_are_answered_here() {
     std::fs::create_dir_all(&home).unwrap();
     let program = fake_ssh(&dir, &home);
     let server = |_: &str, _: &str| std::fs::read(env!("CARGO_BIN_EXE_kuana-server")).map_err(|e| e.to_string());
-    let options = ssh::Options { program: program.display().to_string(), control_dir: dir.join("control"), askpass: Vec::new(), server_binary: &server, progress: &|_| {} };
-    let connected = ssh::connect("askbox", &options).unwrap();
+    let options = Options { program: Some(program.display().to_string()), control_dir: dir.join("control"), askpass: Vec::new(), server_binary: &server, progress: &|_| {} };
+    let connected = connection::connect(&Transport::Ssh("askbox".into()), &options).unwrap();
     let asked = std::sync::Arc::new(Mutex::new(Vec::new()));
     let noted = asked.clone();
     kuana_core::remote::client::set_asker(std::sync::Arc::new(move |prompt: &str, confirm: bool| {
@@ -134,6 +134,6 @@ fn questions_asked_there_are_answered_here() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(String::from_utf8(out.stdout).unwrap(), "s3cret\n");
     assert_eq!(*asked.lock().unwrap(), [("Password for https://me@example.com: ".to_string(), false)]);
-    ssh::disconnect("askbox");
+    connection::disconnect("askbox");
     let _ = std::fs::remove_dir_all(&dir);
 }

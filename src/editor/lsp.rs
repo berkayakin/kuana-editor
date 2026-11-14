@@ -1626,7 +1626,8 @@ impl Editor {
             "rust-analyzer.runSingle" | "rust-analyzer.debugSingle" => {
                 let debug = name.ends_with("debugSingle");
                 // What the lens describes, else Kuana's own target on that line.
-                let target = crate::run::from_rust_analyzer(&args[0]).filter(|t| !debug || t.debug.is_some()).or_else(|| {
+                let file = self.doc.read(cx).path.clone().unwrap_or_default();
+                let target = crate::run::from_rust_analyzer(&args[0], &file).filter(|t| !debug || t.debug.is_some()).or_else(|| {
                     let targets = self.run_targets(cx);
                     targets
                         .iter()

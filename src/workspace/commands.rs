@@ -77,10 +77,10 @@ impl Workspace {
     /// window brings that window to the front instead.
     pub(super) fn open_project(&mut self, path: PathBuf, target: OpenIn, window: &mut Window, cx: &mut Context<Self>) {
         // A remote project whose host isn't connected: connect, then open it.
-        if let Some(host) = kuana_core::remote::ssh::host_of(&path)
-            && kuana_core::remote::ssh::connected(&host).is_none()
+        if let Some(host) = kuana_core::remote::connection::host_of(&path)
+            && kuana_core::remote::connection::connected(&host).is_none()
         {
-            self.connect_host(host, Some(path), window, cx);
+            self.connect_host(host, Some((path, target)), window, cx);
             return;
         }
         let path = crate::paths::canonicalize(&path).unwrap_or(path);
