@@ -32,12 +32,13 @@ Making what's there dependable on every platform before adding more.
   port, debug adapters from extensions.
 - **More of Vim** in the existing [Vim mode](editing.md#vim-mode): registers other than the
   clipboard, macros, marks, `:s`, `gu`/`gU`.
+- **[Remote development](remote.md)**: installing a missing language server on the remote machine
+  with one click, terminals that keep running through a short drop, Windows machines over SSH.
 
 ## Later, being considered
 
 Bigger pieces that need a design first; feedback on which matter most is welcome.
 
-- Remote development: projects over SSH, and WSL folders on Windows.
 - Several folders in one window (multi-root workspaces).
 - Screen reader support, which depends on the GPUI framework.
 - Localization.

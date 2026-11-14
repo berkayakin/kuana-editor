@@ -1,6 +1,9 @@
 # Architecture
 
-Kuana is one Rust binary crate built on [GPUI](https://www.gpui.rs). The window's root view is
+Kuana is a Cargo workspace: the app (`src/`, one binary built on [GPUI](https://www.gpui.rs)),
+`crates/kuana-core` (the part without GPUI: files and programs on either machine, search, file
+watching, the remote protocol) and `crates/kuana-server` (the small headless server that remote
+development runs on the other machine). The app's root view is
 `Workspace`; every open file is an `Editor` showing a `Document` (a `ropey` rope with undo
 history, a tree-sitter syntax tree and diagnostics). The editor is a custom GPUI element that
 shapes and paints only the lines on screen; parsing, linting, Git, search and language servers
@@ -34,7 +37,13 @@ bindings, colors, icons) are in the [contributing guide](../CONTRIBUTING.md).
 - `src/search.rs`, `src/find_bar.rs`, `src/project_search.rs` — in-file and project search
 - `src/picker.rs` — Search Everywhere, Go to File, Recent Files, Recent Projects, Find Action,
   File Structure, Go to Line
-- `src/terminal.rs` — the integrated terminal
+- `src/terminal.rs` — the integrated terminal; `src/terminal/remote_pty.rs` is a remote project's shell
+- `crates/kuana-core/src/fs.rs`, `exec.rs` — files and programs, sent to a remote machine when
+  their path is under its mount (`/kuana-remote/<host>/…`); project-side code uses these instead
+  of `std::fs` and `std::process`
+- `crates/kuana-core/src/remote/`, `crates/kuana-server` — remote development: the protocol, the
+  server, connecting over SSH, WSL and Docker (`connection.rs`), dev containers (`container.rs`);
+  `src/workspace/remote.rs` is the app's side (connecting, reconnecting, ports, the status item)
 - `src/run.rs`, `src/editor/run.rs` — run and test targets and the gutter ▶
 - `src/test_run.rs` — test results read from a run's output (cargo, go, pytest, Jest, Vitest,
   node, `oxie test`, `lyth test`), their tree, the gutter's ✓ / ✕ and Rerun Failed
