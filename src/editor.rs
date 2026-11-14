@@ -5,6 +5,7 @@ mod bookmarks;
 mod excerpt;
 mod fold;
 mod format;
+mod linked;
 mod conflict;
 mod debug_values;
 mod extension;
@@ -393,6 +394,10 @@ pub struct Editor {
     test_statuses: Arc<crate::test_run::Statuses>,
     /// See `row_problems`, for a document state.
     row_problems: (Option<(u64, u64, u64)>, Arc<Vec<(usize, Option<usize>, usize)>>),
+    /// The tag names being edited together (`editor/linked.rs`), valid while
+    /// the document is at `linked_version`.
+    linked: Option<(Range<usize>, Range<usize>)>,
+    linked_version: u64,
     /// See `debug_value_rows`: (document, version, tree, values, paused row).
     debug_values: (Option<(u64, u64, u64, usize, usize)>, Arc<Vec<(usize, String)>>),
     marked_range: Option<Range<usize>>,
@@ -577,6 +582,8 @@ impl Editor {
             test_statuses: Arc::default(),
             row_problems: (None, Arc::default()),
             debug_values: (None, Arc::default()),
+            linked: None,
+            linked_version: 0,
             marked_range: None,
             indent_unit: String::new(),
             tab_size: file_settings.tab_size,
@@ -1429,7 +1436,13 @@ impl Editor {
             placements.push(cursor);
             edits.push((range, text));
         }
-        let new_ranges = self.change_doc(cx, |doc| doc.edit(edits, &before, kind));
+        // Typing in a tag's name renames its pair too.
+        let mirror = self.linked_edit(&edits, cx);
+        let count = edits.len();
+        edits.extend(mirror);
+        let mut new_ranges = self.change_doc(cx, |doc| doc.edit(edits, &before, kind));
+        new_ranges.truncate(count);
+        self.linked_version = self.doc.read(cx).version();
         let selections = new_ranges
             .iter()
             .zip(placements)
@@ -7106,6 +7119,46 @@ mod editing_tests {
         let editor = open(cx, "a.html", "<style>\nbody { color: red; |}\n</style>\n");
         editor.update(cx, |e, cx| e.toggle_block_comments(cx));
         assert_eq!(shown(&editor, cx), "<style>\nbody { color: red; /* | */}\n</style>\n");
+    }
+
+    /// Backspace `n` times, parses landing between keys.
+    fn backspaced(editor: &Entity<Editor>, n: usize, cx: &mut TestAppContext) -> String {
+        for _ in 0..n {
+            editor.update(cx, |e, cx| e.edit_selections(EditKind::Deleting, cx, |doc, s| (doc.prev_char_boundary(s.head)..s.head, String::new(), Some(0))));
+            cx.run_until_parked();
+        }
+        shown(editor, cx)
+    }
+
+    #[gpui::test]
+    fn tag_names_are_edited_together(cx: &mut TestAppContext) {
+        // Typing in the opening tag's name renames the closing tag, and back.
+        let html = open(cx, "a.html", "<div|>text</div>\n");
+        assert_eq!(typed(&html, "x", cx), "<divx|>text</divx>\n");
+        let closing = open(cx, "a.html", "<ul>\n  <li>a</li|>\n</ul>\n");
+        assert_eq!(typed(&closing, "nk", cx), "<ul>\n  <link>a</link|>\n</ul>\n");
+
+        // Emptied and typed again: still together, though `<>` has no name.
+        let html = open(cx, "a.html", "<p>x</p|>\n");
+        assert_eq!(backspaced(&html, 1, cx), "<>x</|>\n");
+        assert_eq!(typed(&html, "span", cx), "<span>x</span|>\n");
+
+        // One undo step puts both back.
+        html.update(cx, |e, cx| e.undo_step(cx));
+        assert_eq!(html.read_with(cx, |e, cx| e.text(cx)), "<>x</>\n");
+
+        // A space or `>` ends the name: the pair isn't touched.
+        let html = open(cx, "a.html", "<div|>x</div>\n");
+        assert_eq!(typed(&html, " ", cx), "<div |>x</div>\n");
+
+        // JSX, member names included.
+        let tsx = open(cx, "a.tsx", "const a = <UI.Bu|tton>x</UI.Button>;\n");
+        assert_eq!(typed(&tsx, "t", cx), "const a = <UI.But|tton>x</UI.Buttton>;\n");
+
+        // Off by the setting.
+        let html = open(cx, "a.html", "<div|>x</div>\n");
+        html.update(cx, |e, _| e.file_settings.linked_editing = false);
+        assert_eq!(typed(&html, "x", cx), "<divx|>x</div>\n");
     }
 
     #[gpui::test]

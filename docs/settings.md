@@ -42,6 +42,7 @@ and theme colors.
 | `rulers` | `[]` (`.editorconfig`'s `max_line_length`) | columns for vertical guides, e.g. `[80, 120]` |
 | `show_whitespace` | `"selection"` | mark spaces and tabs: `"selection"`, `"boundary"` (indentation and line ends), `"trailing"`, `"all"`, `"none"` |
 | `inlay_hints` | `true` | types and parameter names from the language server |
+| `linked_editing` | `true` | typing in a tag's name (HTML, JSX, and grammars like them) renames its closing or opening tag too |
 | `inline_values` | `true` | paused in the debugger, variables' values after the lines of the function that name them |
 | `code_lens` | `true` | the language server's code lenses above lines ("3 references", "▶ Run \| Debug") |
 | `minimap` | `false` | the document in miniature at the editor's right edge, in place of the scrollbar: code as colored blocks, the visible part as a slider, problems, search matches and Git changes along its edge |
