@@ -104,7 +104,9 @@ Everything Kuana does, in one list. Each area has its own page with the details.
 - Integrated terminal (⌥F12 / Alt+F12): your login shell in tabs, full colors, mouse support for
   full-screen programs, selection and copy/paste, Find in the output and scrollback; shell keys
   like Ctrl+R reach the shell; input methods (Chinese, Japanese, Korean) compose at the cursor;
-  split groups, renamable tabs, and each project's terminals come back in their folders
+  split groups, renamable tabs, and each project's terminals come back in their folders; shell
+  integration for zsh, bash and fish marks each command with how it ended, jumps between commands
+  and copies one's output; see [Terminal shell integration](editing.md#terminal-shell-integration)
 - Code folding by indentation (Markdown by section), with gutter arrows and a `⋯` placeholder;
   folds are kept with the project
 - Split panes (side by side or stacked, a file in both if you like) with draggable dividers; drag tabs to reorder them or

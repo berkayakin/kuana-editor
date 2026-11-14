@@ -661,6 +661,10 @@ impl Workspace {
         }
         add(MenuEntry::item("Paste", Icon::Clipboard).shortcut(keys(&TerminalPaste)), tab(TerminalTabAction::Paste));
         add(MenuEntry::text("Select All"), tab(TerminalTabAction::SelectAll));
+        // Shell integration knows where each command's output is.
+        if terminal.read(cx).has_commands() {
+            add(MenuEntry::text("Copy Command Output"), tab(TerminalTabAction::CopyCommandOutput(position)));
+        }
         add(MenuEntry::Separator, None);
         add(MenuEntry::item("Find…", Icon::Search).shortcut(keys(&TerminalFind)), tab(TerminalTabAction::Find));
         add(MenuEntry::text("Clear").shortcut(keys(&TerminalClear)), tab(TerminalTabAction::Clear));
@@ -685,6 +689,10 @@ impl Workspace {
                     _ => t.open_search(&TerminalFind, window, cx),
                 });
                 return;
+            }
+            TerminalTabAction::CopyCommandOutput(position) => {
+                terminal.update(cx, |t, cx| t.copy_command_output_at(position, cx));
+                return self.activate_terminal(g, ix, window, cx);
             }
             TerminalTabAction::Rename => return self.open_rename_terminal(terminal, window, cx),
             TerminalTabAction::ResetName => {

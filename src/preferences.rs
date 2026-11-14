@@ -163,6 +163,7 @@ enum Setting {
     FinalNewline,
     Shell,
     OptionAsMeta,
+    ShellIntegration,
     RunConfigurations,
     TrustAll,
     NativeGrammars,
@@ -173,7 +174,7 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Setting; 41] = [
+    const ALL: [Setting; 42] = [
         Setting::Theme,
         Setting::IconTheme,
         Setting::VisualEffects,
@@ -208,6 +209,7 @@ impl Setting {
         Setting::FinalNewline,
         Setting::Shell,
         Setting::OptionAsMeta,
+        Setting::ShellIntegration,
         Setting::RunConfigurations,
         Setting::TrustAll,
         Setting::NativeGrammars,
@@ -235,7 +237,7 @@ impl Setting {
             | Setting::FormatOnSave
             | Setting::TrimWhitespace
             | Setting::FinalNewline => Page::Saving,
-            Setting::Shell | Setting::OptionAsMeta | Setting::RunConfigurations => Page::Terminal,
+            Setting::Shell | Setting::OptionAsMeta | Setting::ShellIntegration | Setting::RunConfigurations => Page::Terminal,
             Setting::TrustAll | Setting::NativeGrammars => Page::Trust,
             Setting::AutoUpdate => Page::Updates,
             Setting::PullStrategy | Setting::AutoFetch | Setting::AutoResolveConflicts => Page::Git,
@@ -261,7 +263,7 @@ impl Setting {
             Setting::TodoPatterns => "TODO",
             Setting::AutoSave | Setting::AutoSaveDelay => "Auto-save",
             Setting::FormatOnSave | Setting::TrimWhitespace | Setting::FinalNewline => "On save",
-            Setting::Shell | Setting::OptionAsMeta => "Terminal",
+            Setting::Shell | Setting::OptionAsMeta | Setting::ShellIntegration => "Terminal",
             Setting::RunConfigurations => "Run configurations",
             Setting::TrustAll | Setting::NativeGrammars => "Restricted Mode",
             Setting::AutoUpdate => "Updates",
@@ -306,6 +308,7 @@ impl Setting {
             Setting::FinalNewline => "Insert final newline",
             Setting::Shell => "Shell",
             Setting::OptionAsMeta => "Use Option as Meta key",
+            Setting::ShellIntegration => "Shell integration",
             Setting::RunConfigurations => "Run configurations",
             Setting::TrustAll => "Trust all folders",
             Setting::NativeGrammars => "Native extension grammars",
@@ -354,6 +357,7 @@ impl Setting {
             Setting::FinalNewline => "End every file with a line break.",
             Setting::Shell => "Program and arguments for new terminals. Empty uses your login shell.",
             Setting::OptionAsMeta => "Option+key sends Escape and the key, for the shell's word moves and Emacs keys, instead of typing a character like ∫.",
+            Setting::ShellIntegration => "zsh, bash and fish mark each command: how it ended at the terminal's edge, jumping between commands, copying one's output. New terminals.",
             Setting::RunConfigurations => "Commands for Run… next to the detected ones (cargo, npm scripts, go, make, pytest).",
             Setting::TrustAll => "Run language servers, formatters and project tools in every folder without asking. Not recommended.",
             Setting::NativeGrammars => "Compile extensions' grammars with your C compiler instead of WebAssembly, which runs them sandboxed. Only for extensions in trusted folders.",
@@ -401,6 +405,7 @@ impl Setting {
             Setting::FinalNewline => "newline end of file eof",
             Setting::Shell => "terminal bash zsh fish powershell",
             Setting::OptionAsMeta => "terminal option alt meta escape key emacs readline word",
+            Setting::ShellIntegration => "terminal shell integration osc 133 command marks exit code prompt zsh bash fish",
             Setting::RunConfigurations => "run tasks commands scripts",
             Setting::TrustAll => "trust security restricted mode workspace untrusted safe",
             Setting::NativeGrammars => "extensions grammars tree-sitter native compiler wasm webassembly sandbox",
@@ -1760,6 +1765,9 @@ impl Preferences {
                 })
             }
             Setting::AutoFetch => self.switch_with_default("pref-auto-fetch", "auto_fetch", settings.auto_fetch, true, cx),
+            Setting::ShellIntegration => {
+                self.switch_with_default("pref-shell-integration", "terminal_shell_integration", settings.terminal_shell_integration, true, cx)
+            }
             Setting::OptionAsMeta => {
                 self.switch_with_default("pref-option-as-meta", "terminal_option_as_meta", settings.terminal_option_as_meta, false, cx)
             }
@@ -2988,6 +2996,7 @@ fn setting_key(setting: Setting) -> &'static str {
         Setting::FinalNewline => "insert_final_newline",
         Setting::Shell => "terminal_shell",
         Setting::OptionAsMeta => "terminal_option_as_meta",
+        Setting::ShellIntegration => "terminal_shell_integration",
         Setting::TrustAll => "trust_all_projects",
         Setting::NativeGrammars => "native_grammars",
         Setting::AutoUpdate => "auto_update",
@@ -3388,7 +3397,7 @@ mod tests {
         };
         assert_eq!(find("tab size"), vec![Setting::TabSize]);
         assert!(find("font").contains(&Setting::FontFamily) && find("font").contains(&Setting::LineHeight));
-        assert_eq!(find("zsh"), vec![Setting::Shell]);
+        assert_eq!(find("zsh"), vec![Setting::Shell, Setting::ShellIntegration]);
         assert!(find("nothing like this").is_empty());
     }
 }

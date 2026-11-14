@@ -131,21 +131,53 @@ pub struct Teed<P> {
 pub struct TeeReader<P> {
     pty: P,
     log: Option<RunLog>,
+    /// A shell's terminal: its prompt marks rewritten (`shell_marks`), and
+    /// rewritten bytes not handed on yet (a mark can come out longer).
+    marks: Option<(super::shell_marks::MarkFilter, VecDeque<u8>)>,
 }
 
 impl<P> Teed<P> {
     pub fn new(pty: P, log: Option<RunLog>) -> Self {
-        Self { reader: TeeReader { pty, log } }
+        Self { reader: TeeReader { pty, log, marks: None } }
+    }
+
+    /// Rewrites the shell's marks on the way (see `shell_marks`).
+    pub fn with_marks(mut self, filter: super::shell_marks::MarkFilter) -> Self {
+        self.reader.marks = Some((filter, VecDeque::new()));
+        self
     }
 }
 
 impl<P: EventedReadWrite> Read for TeeReader<P> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let read = self.pty.reader().read(buf)?;
-        if let Some(log) = &self.log {
-            log.advance(&buf[..read]);
+        let Some((filter, pending)) = self.marks.as_mut() else {
+            let read = self.pty.reader().read(buf)?;
+            if let Some(log) = &self.log {
+                log.advance(&buf[..read]);
+            }
+            return Ok(read);
+        };
+        if pending.is_empty() {
+            // A quarter of the room: a rewritten mark is longer than the
+            // original, and what's read should fit in one go.
+            let room = (buf.len() / 4).max(64).min(buf.len());
+            let read = self.pty.reader().read(&mut buf[..room])?;
+            if read == 0 {
+                return Ok(0);
+            }
+            let mut out = Vec::with_capacity(read + 64);
+            filter.feed(&buf[..read], &mut out);
+            if out.is_empty() {
+                // All of it held back (a mark cut short): the next read brings the rest.
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            pending.extend(out);
         }
-        Ok(read)
+        let n = pending.len().min(buf.len());
+        for (slot, byte) in buf.iter_mut().zip(pending.drain(..n)) {
+            *slot = byte;
+        }
+        Ok(n)
     }
 }
 

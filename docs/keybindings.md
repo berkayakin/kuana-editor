@@ -55,6 +55,7 @@ The table below is the JetBrains keymap.
 | New / close terminal tab (in the terminal) | ⌘T / ⌘W | Ctrl+Shift+T / Ctrl+Shift+W |
 | Copy / paste / clear (in the terminal) | ⌘C / ⌘V / ⌘K | Ctrl+Shift+C / Ctrl+Shift+V / — |
 | Find (in the terminal) | ⌘F | Ctrl+Shift+F |
+| Previous / next command (in the terminal, with shell integration) | ⌘↑ / ⌘↓ | Ctrl+↑ / Ctrl+↓ |
 | Close tab / next / previous | ⌘W / ⌃→ / ⌃← | Ctrl+F4 / Alt+→ / Alt+← |
 | Last used tab (keep ⌃ down and press ⇥ again for older ones) | ⌃⇥ / ⌃⇧⇥ | Ctrl+Tab / Ctrl+Shift+Tab |
 | Open file / folder | ⌘O / ⌥⌘O | Ctrl+O / Ctrl+Alt+O |

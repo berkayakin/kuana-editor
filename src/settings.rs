@@ -64,6 +64,9 @@ pub struct Settings {
     /// macOS: Option sends Escape + the key to the terminal (Meta), as Alt
     /// does elsewhere, instead of typing its character. Off by default.
     pub terminal_option_as_meta: Option<bool>,
+    /// Kuana's shell integration (zsh, bash, fish): command marks, exit
+    /// codes and the shell's folder (`terminal/shell_marks.rs`). On by default.
+    pub terminal_shell_integration: Option<bool>,
     /// Extra entries for Run…: a name, a shell command and an optional
     /// folder relative to the project.
     pub run_configurations: Vec<RunConfiguration>,
@@ -495,6 +498,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "formatters",
     "terminal_shell",
     "terminal_option_as_meta",
+    "terminal_shell_integration",
     "run_configurations",
     "auto_update",
     "auto_update_extensions",
@@ -820,6 +824,7 @@ impl Settings {
             "tools_location" => self.tools_location.is_some(),
             "terminal_shell" => self.terminal_shell.is_some(),
             "terminal_option_as_meta" => self.terminal_option_as_meta.is_some(),
+            "terminal_shell_integration" => self.terminal_shell_integration.is_some(),
             "run_configurations" => !self.run_configurations.is_empty(),
             "auto_update" => self.auto_update.is_some(),
             "auto_update_extensions" => !self.auto_update_extensions.is_empty(),
@@ -1263,6 +1268,11 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // the shell's word moves, Emacs keys) instead of typing ∫. Alt always
   // does on Windows and Linux.
   // "terminal_option_as_meta": true,
+
+  // Shell integration for zsh, bash and fish: each command marked at the
+  // terminal's edge with how it ended, jumping between commands, copying one's
+  // output, links relative to the shell's folder. New terminals only.
+  // "terminal_shell_integration": true,
 
   // How Update Project (pull) combines incoming commits with yours when
   // both branches have new ones: "merge", "rebase" or "ff_only" (stop
