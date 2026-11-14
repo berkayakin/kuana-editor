@@ -286,3 +286,35 @@ fn ports_there_are_reached_from_here() {
     assert_eq!(&answer, b"HELLO THERE");
     client::unmount(&root);
 }
+
+/// A port forwarded on purpose (a web app there): reached on the local port
+/// asked for, refused at once while nothing listens there, gone once dropped.
+#[test]
+fn forwarded_ports_stop_when_dropped() {
+    let (root, host, _serving) = connect("tcp-forward-test", &temp("tcp-forward-trash"));
+    let free = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let (remote, local) = (free(), free());
+    let forwarded = host.forward_on(local, remote).unwrap();
+    assert_eq!(forwarded.address.port(), local);
+    // Nothing there yet: closed without waiting.
+    let started = std::time::Instant::now();
+    let mut stream = std::net::TcpStream::connect(forwarded.address).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    assert_eq!(stream.read(&mut [0; 8]).unwrap_or(0), 0);
+    assert!(started.elapsed() < Duration::from_secs(3));
+    // Now a program listens there.
+    let listener = std::net::TcpListener::bind(("127.0.0.1", remote)).unwrap();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.write_all(b"pong").unwrap();
+    });
+    let mut stream = std::net::TcpStream::connect(forwarded.address).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut answer = [0; 4];
+    stream.read_exact(&mut answer).unwrap();
+    assert_eq!(&answer, b"pong");
+    drop(forwarded);
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(std::net::TcpStream::connect(("127.0.0.1", local)).is_err(), "still listening");
+    client::unmount(&root);
+}

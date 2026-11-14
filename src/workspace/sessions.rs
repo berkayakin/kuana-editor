@@ -82,6 +82,7 @@ impl Workspace {
             python_venv,
             terminals,
             last_run,
+            forwarded_ports: self.forwarded.iter().map(|f| f.remote).collect(),
             other: Default::default(),
         };
         Some(SessionSnapshot { session, unsaved })

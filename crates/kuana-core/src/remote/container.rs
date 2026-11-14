@@ -70,6 +70,20 @@ pub struct Up {
     pub workspace: String,
     /// What was left out (features without the CLI).
     pub warnings: Vec<String>,
+    /// Ports there to reach from here (`forwardPorts`; another service's, `db:5432`, aren't).
+    pub forward_ports: Vec<u16>,
+}
+
+/// A configuration's `forwardPorts` that are ports of the container itself.
+fn forward_ports(value: &Value) -> Vec<u16> {
+    value
+        .get("forwardPorts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.as_u64().and_then(|n| u16::try_from(n).ok()).or_else(|| p.as_str()?.parse().ok()))
+        .filter(|&p| p > 0)
+        .collect()
 }
 
 pub struct UpOptions<'a> {
@@ -83,11 +97,12 @@ pub struct UpOptions<'a> {
 /// if stopped), else a new one. Blocking: run it in the background.
 pub fn up(dir: &Path, options: &UpOptions) -> Result<Up, String> {
     let config = config_file(dir).ok_or_else(|| format!("{} has no dev container configuration", dir.display()))?;
-    if let Some(cli) = &options.cli {
-        return up_with_cli(cli, dir, &config, options);
-    }
     let text = std::fs::read_to_string(&config).map_err(|e| format!("Couldn't read {}: {e}", config.display()))?;
     let mut value: Value = serde_json::from_str(&crate::jsonc::strip(&text)).map_err(|e| format!("{}: {e}", config.display()))?;
+    if let Some(cli) = &options.cli {
+        // The CLI makes the container; forwarding is the client's job.
+        return up_with_cli(cli, dir, &config, options).map(|up| Up { forward_ports: forward_ports(&value), ..up });
+    }
     let basename = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let workspace = value.get("workspaceFolder").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| format!("/workspaces/{basename}"));
     let vars = Variables { local: dir.to_string_lossy().into_owned(), container: substitute_text(&workspace, &Variables { local: dir.to_string_lossy().into_owned(), container: String::new() }) };
@@ -115,7 +130,7 @@ pub fn up(dir: &Path, options: &UpOptions) -> Result<Up, String> {
             docker(&["start", &id], "Couldn't start the dev container")?;
             lifecycle(options, &id, user.as_deref(), &workspace, &value, &["postStartCommand"])?;
         }
-        return Ok(Up { container: id, user, workspace, warnings });
+        return Ok(Up { container: id, user, workspace, warnings, forward_ports: forward_ports(&value) });
     }
     if value.get("dockerComposeFile").is_some() {
         return Err("This dev container uses Docker Compose, which needs the devcontainer CLI (npm install -g @devcontainers/cli).".into());
@@ -178,7 +193,7 @@ pub fn up(dir: &Path, options: &UpOptions) -> Result<Up, String> {
     let id: String = id.trim().chars().take(12).collect();
     (options.progress)("Setting up the dev container…");
     lifecycle(options, &id, user.as_deref(), &workspace, &value, &["onCreateCommand", "updateContentCommand", "postCreateCommand", "postStartCommand"])?;
-    Ok(Up { container: id, user, workspace, warnings })
+    Ok(Up { container: id, user, workspace, warnings, forward_ports: forward_ports(&value) })
 }
 
 fn up_with_cli(cli: &Path, dir: &Path, config: &Path, options: &UpOptions) -> Result<Up, String> {
@@ -201,6 +216,7 @@ fn up_with_cli(cli: &Path, dir: &Path, config: &Path, options: &UpOptions) -> Re
             user: field("remoteUser"),
             workspace: field("remoteWorkspaceFolder").ok_or("devcontainer up named no workspace folder")?,
             warnings: Vec::new(),
+            forward_ports: Vec::new(),
         }),
         _ => {
             let message = field("message").or_else(|| field("description"));
@@ -309,6 +325,12 @@ fn fnv(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_containers_own_ports_are_forwarded() {
+        let value = serde_json::json!({ "forwardPorts": [3000, "8080", "db:5432", 0, 70000] });
+        assert_eq!(forward_ports(&value), [3000, 8080]);
+    }
 
     #[test]
     fn variables_are_filled_in() {

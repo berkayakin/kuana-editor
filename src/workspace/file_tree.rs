@@ -24,6 +24,8 @@ impl Workspace {
             p.set_root(Some(root.clone()), cx);
         });
         let mut session = ProjectSession::load(&root);
+        let pending = self.pending_ports.take().filter(|(path, _)| *path == root).map(|(_, ports)| ports);
+        let ports: Vec<u16> = session.iter().flat_map(|s| s.forwarded_ports.iter().copied()).chain(pending.into_iter().flatten()).collect();
         // The folders that were open last time, if they still exist.
         let expanded: Vec<PathBuf> = session.iter().flat_map(|s| s.expanded.iter().map(|p| root.join(p))).filter(|p| p.is_dir_on_host()).collect();
         if let Some(session) = &mut session {
@@ -50,6 +52,7 @@ impl Workspace {
         self.root = Some(root.clone());
         // A remote project: its connection is watched.
         self.watch_connection(cx);
+        self.forward_ports(ports, cx);
         self.offer_dev_container(cx);
         self.refresh_extension_views(cx);
         self.extension_callers_changed(cx);

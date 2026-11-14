@@ -147,3 +147,54 @@ fn run_targets_point_at_the_host() {
     client::unmount(&root);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A dropped connection takes its language servers along; once the
+/// machine is back, they start again over the new one.
+#[gpui::test]
+fn language_servers_start_again_after_a_reconnect(cx: &mut TestAppContext) {
+    if crate::lsp::servers::which("python3").is_none() {
+        return;
+    }
+    cx.executor().allow_parking();
+    crate::trust::set_trust_all(true);
+    let dir = temp("lsp-again");
+    std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+    let (root, host) = connect("app-remote-lsp-again");
+    let project = mounted(&root, &dir);
+    let store = cx.new(|_| {
+        let mut store = LspStore::new();
+        store.test_specs = Some(vec![fake_server("uri", "")]);
+        store.set_root(Some(project.clone()));
+        store
+    });
+    let editor: Entity<Editor> = cx.new(|cx| Editor::new(Document::open(&project.join("a.rs")).unwrap(), cx));
+    store.update(cx, |s, cx| s.register(&editor, cx));
+    let diagnosed = |cx: &mut TestAppContext| {
+        let started = std::time::Instant::now();
+        loop {
+            cx.run_until_parked();
+            if editor.read_with(cx, |e, cx| !e.doc.read(cx).diagnostics.is_empty()) {
+                return;
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(20), "no diagnostics came");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    };
+    diagnosed(cx);
+    let first = store.read_with(cx, |s, _| s.running_servers());
+    assert_eq!(first.len(), 1);
+
+    // The connection goes; another server is mounted in its place.
+    host.disconnect();
+    let (again, host) = connect("app-remote-lsp-again");
+    assert_eq!(again, root);
+    store.update(cx, |s, cx| s.restart_under(&root, cx));
+    cx.run_until_parked();
+    diagnosed(cx);
+    let second = store.read_with(cx, |s, _| s.running_servers());
+    assert_eq!(second.len(), 1);
+    assert!(!std::sync::Arc::ptr_eq(&first[0], &second[0]), "the server started again");
+    host.disconnect();
+    client::unmount(&root);
+    let _ = std::fs::remove_dir_all(&dir);
+}

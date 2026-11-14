@@ -1502,6 +1502,17 @@ impl LspStore {
         self.reregister(|d| keys.iter().any(|key| d.has(key)), cx);
     }
 
+    /// A remote machine (`mount`) is back after a lost connection: its
+    /// servers went with the old one, so they start again for their documents.
+    pub fn restart_under(&mut self, mount: &Path, cx: &mut Context<Self>) {
+        let keys: Vec<ServerKey> = self.servers.keys().filter(|k| k.root.starts_with(mount)).cloned().collect();
+        for key in &keys {
+            self.stop(key, cx);
+        }
+        self.reregister(|d| keys.iter().any(|key| d.has(key)), cx);
+        cx.notify();
+    }
+
     /// Stops one server and forgets what it said.
     fn stop(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
         if let Some(client) = self.client(key) {
