@@ -203,7 +203,8 @@ impl Workspace {
     /// Whether the sidebar's side of the window has a block: always with the
     /// activity bar, only while the sidebar shows without it.
     pub(super) fn has_sidebar_block(&self, cx: &App) -> bool {
-        self.show_sidebar || !tools_in_title_bar(cx)
+        // Zen mode hides the activity bar, but the sidebar may be opened in it.
+        self.show_sidebar || (!tools_in_title_bar(cx) && self.zen.is_none())
     }
 
     /// The sidebar block's width, with the sidebar shown or not. Without it,

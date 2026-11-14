@@ -127,6 +127,7 @@ mod title_tools;
 mod watching;
 mod welcome;
 mod windows;
+mod zen;
 use self::{
     file_tree::*,
     pane::{Pane, PaneChrome, PaneEvent, file_drop_overlay},
@@ -186,6 +187,8 @@ actions!(
         ToggleSecondSidebar,
         /// Switches the window between the Modern and Classic layouts (`ui_style`).
         ToggleClassicLayout,
+        /// Everything but the editor hidden, its text centered (`workspace/zen.rs`).
+        ToggleZenMode,
         ToggleProblems,
         ToggleTerminal,
         ToggleGitLog,
@@ -874,6 +877,8 @@ pub struct Workspace {
     connecting: Option<String>,
     reconnecting: Option<PathBuf>,
     connection_task: Option<Task<()>>,
+    /// Zen mode, and what it hid (`workspace/zen.rs`).
+    zen: Option<zen::Zen>,
     /// The project's connection went (until it's back).
     connection_lost: bool,
     /// Ports there reached from here (`workspace/remote.rs`).
@@ -1241,6 +1246,8 @@ impl Workspace {
             ws.extension_callers_changed(cx);
             ws.lsp.update(cx, |s, cx| s.settings_changed(cx));
             ws.todo_settings_changed(cx);
+            // Zen mode's line numbers are a setting too.
+            ws.sync_zen_editors(cx);
             cx.notify();
         });
         // An update finished downloading: show Restart to Update.
@@ -1349,6 +1356,7 @@ impl Workspace {
             connecting: None,
             reconnecting: None,
             connection_task: None,
+            zen: None,
             connection_lost: false,
             forwarded: Vec::new(),
             pending_ports: None,
@@ -1632,6 +1640,10 @@ impl Workspace {
             self.file_opened(editor, cx);
         }
         self.editors.push(editor.clone());
+        // Opened in Zen mode: it looks the part.
+        if let Some(look) = self.zen_look(cx) {
+            editor.update(cx, |e, cx| e.set_zen(Some(look), cx));
+        }
         self.sync_sql_gutter(editor, cx);
         // A preview of its document may be open (a split of the file).
         self.sync_previewed(cx);
@@ -1896,6 +1908,8 @@ impl Workspace {
                 active,
                 outlined: active && panes.len() > 1,
                 at_top,
+                zen: self.zen.is_some(),
+                hide_tabs: self.zen.is_some() && !Settings::get(cx).zen_tabs(),
                 find_bar: (active && self.show_find).then(|| self.find_bar.clone()),
                 root: self.root.clone(),
                 title_ends: if at_top { self.title_ends_now() } else { (0., f32::INFINITY) },

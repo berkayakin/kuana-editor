@@ -151,10 +151,12 @@ impl Editor {
             let shaped = text_system.shape_line(SharedString::from(dl.text.clone()), font_size, &runs, None);
             frame.sticky_lines.push((point(text_left - self.scroll.x, y), shaped));
 
-            let number = SharedString::from((row + 1).to_string());
-            let run = TextRun { len: number.len(), font: font.clone(), color: theme.line_number.into(), background_color: None, underline: None, strikethrough: None };
-            let number_line = text_system.shape_line(number, font_size, &[run], None);
-            frame.sticky_numbers.push((point(number_right - number_line.width, y), number_line));
+            if self.shows_line_numbers() {
+                let number = SharedString::from((row + 1).to_string());
+                let run = TextRun { len: number.len(), font: font.clone(), color: theme.line_number.into(), background_color: None, underline: None, strikethrough: None };
+                let number_line = text_system.shape_line(number, font_size, &[run], None);
+                frame.sticky_numbers.push((point(number_right - number_line.width, y), number_line));
+            }
         }
         // A thin line under the pinned rows separates them from the scrolling text.
         let bottom = bounds.top() + line_height * headers.len() as f32;

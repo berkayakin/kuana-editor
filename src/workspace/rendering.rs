@@ -333,6 +333,9 @@ impl Render for Workspace {
         // The second sidebar, on the editor's other side.
         let mut second = self.second_shown().map(|(mode, width)| self.render_second_sidebar(mode, width, cx));
         let title_row = self.has_title_row(cx);
+        // Zen mode centers a lone pane's text, with nothing open beside it.
+        let zen = self.zen.is_some();
+        let zen_column = (zen && !sidebar_block && second.is_none() && self.center.len() == 1).then(|| self.zen_column_width(window, cx));
 
         div()
             .id("workspace")
@@ -359,6 +362,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_sidebar_position))
             .on_action(cx.listener(Self::toggle_second_sidebar))
             .on_action(cx.listener(Self::toggle_classic_layout))
+            .on_action(cx.listener(Self::toggle_zen_mode))
             .on_action(cx.listener(Self::toggle_problems))
             .on_action(cx.listener(Self::toggle_results))
             .on_action(cx.listener(Self::rerun_failed_tests))
@@ -539,6 +543,10 @@ impl Render for Workspace {
                             el.pr(px(GAP))
                         }
                     })
+                    // Zen mode: no status bar under the islands, as much room
+                    // below them as the tab row's above, and a lone pane centered.
+                    .when(zen && !theme.classic, |el| el.pb(px(TAB_STRIP_HEIGHT - 1.)))
+                    .when(zen_column.is_some(), |el| el.justify_center())
                     .gap(px(layout_gap(&theme)))
                     // The activity bar and the sidebar keep their full height on
                     // either side; the bottom panels stay under the editor area.
@@ -550,6 +558,7 @@ impl Render for Workspace {
                             .flex_col()
                             .flex_1()
                             .min_w_0()
+                            .when_some(zen_column, |el, width| el.max_w(px(width)))
                             .gap(px(layout_gap(&theme)))
                             .child(div().flex_1().min_h_0().child(panes))
                             .when(self.shows(BottomPanel::Problems), |el| el.child(self.render_problems(cx)))
@@ -563,9 +572,10 @@ impl Render for Workspace {
                     .when(!sidebar_right, |el| el.children(second.take()))
                     .when(sidebar_block && sidebar_right, |el| el.child(self.render_sidebar_block(window, cx))),
             ))
-            .child(self.render_statusbar(cx))
+            .when(!zen, |el| el.child(self.render_statusbar(cx)))
             // The title bar's ends, over the tab row's (after it, so they're on top).
             .when(!title_row, |el| el.child(self.render_title_lead(window, cx)).child(self.render_title_trail(window, cx)))
+            .when(zen, |el| el.child(self.render_zen_exit(window, cx)))
             .children(toasts)
             .children(self.render_context_menu(cx))
             .children(modal)

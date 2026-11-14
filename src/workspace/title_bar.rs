@@ -101,7 +101,8 @@ impl Workspace {
                 el.child(self.render_app_menu(cx)).child(div().flex_shrink_0().w(px(GAP)))
             })
             .child(self.track_lead_base(window, cx))
-            .when(!self.show_sidebar, |el| el.children(self.render_title_chips(self.lead_chips_room(cx), true, window, cx)))
+            // Not in Zen mode, which hides all but the editor.
+            .when(!self.show_sidebar && self.zen.is_none(), |el| el.children(self.render_title_chips(self.lead_chips_room(cx), true, window, cx)))
     }
 
     /// The chips' room in the lead while the sidebar is hidden: what they'd

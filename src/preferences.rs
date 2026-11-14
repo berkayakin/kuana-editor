@@ -137,6 +137,10 @@ enum Setting {
     ToolsLocation,
     ProjectAvatar,
     CompactActivityBar,
+    ZenFullScreen,
+    ZenWidth,
+    ZenLineNumbers,
+    ZenTabs,
     BaseKeymap,
     FontFamily,
     FontSize,
@@ -175,7 +179,7 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Setting; 43] = [
+    const ALL: [Setting; 47] = [
         Setting::Theme,
         Setting::IconTheme,
         Setting::VisualEffects,
@@ -184,6 +188,10 @@ impl Setting {
         Setting::ToolsLocation,
         Setting::ProjectAvatar,
         Setting::CompactActivityBar,
+        Setting::ZenFullScreen,
+        Setting::ZenWidth,
+        Setting::ZenLineNumbers,
+        Setting::ZenTabs,
         Setting::BaseKeymap,
         Setting::FontFamily,
         Setting::FontSize,
@@ -229,6 +237,7 @@ impl Setting {
     fn page(self) -> Page {
         match self {
             Setting::Theme | Setting::IconTheme | Setting::VisualEffects | Setting::UiStyle | Setting::SidebarDock | Setting::ToolsLocation | Setting::ProjectAvatar | Setting::CompactActivityBar => Page::Appearance,
+            Setting::ZenFullScreen | Setting::ZenWidth | Setting::ZenLineNumbers | Setting::ZenTabs => Page::Appearance,
             Setting::BaseKeymap => Page::Keymap,
             Setting::FontFamily | Setting::FontSize | Setting::LineHeight => Page::Editor,
             Setting::TabSize | Setting::HardTabs | Setting::LinkedEditing | Setting::SoftWrap => Page::Editor,
@@ -252,6 +261,7 @@ impl Setting {
             Setting::IconTheme => "File icons",
             Setting::VisualEffects => "Effects",
             Setting::UiStyle | Setting::SidebarDock | Setting::ToolsLocation | Setting::ProjectAvatar | Setting::CompactActivityBar => "Layout",
+            Setting::ZenFullScreen | Setting::ZenWidth | Setting::ZenLineNumbers | Setting::ZenTabs => "Zen mode",
             Setting::BaseKeymap => "Keymap",
             Setting::FontFamily | Setting::FontSize | Setting::LineHeight => "Font",
             Setting::TabSize | Setting::HardTabs => "Indentation",
@@ -285,6 +295,10 @@ impl Setting {
             Setting::ToolsLocation => "Tool buttons",
             Setting::ProjectAvatar => "Project avatar",
             Setting::CompactActivityBar => "Compact activity bar",
+            Setting::ZenFullScreen => "Full screen",
+            Setting::ZenWidth => "Text width",
+            Setting::ZenLineNumbers => "Line numbers",
+            Setting::ZenTabs => "Tabs",
             Setting::BaseKeymap => "Base keymap",
             Setting::FontFamily => "Family",
             Setting::FontSize => "Size",
@@ -333,6 +347,10 @@ impl Setting {
             Setting::ToolsLocation => "Run, the panels' toggles, Search and Settings: on a bar beside the sidebar, or in a title bar of their own above the tabs, the sidebar's views then tabs like the editor's.",
             Setting::ProjectAvatar => "The round initial before the project's name in the title bar.",
             Setting::CompactActivityBar => "A narrower bar beside the sidebar, with smaller buttons and icons, for more room.",
+            Setting::ZenFullScreen => "Toggle Zen Mode also makes the window full screen.",
+            Setting::ZenWidth => "The centered text column, in characters.",
+            Setting::ZenLineNumbers => "Keep line numbers in the gutter in Zen mode.",
+            Setting::ZenTabs => "Keep the editor's tabs in Zen mode.",
             Setting::BaseKeymap => "The shortcuts Kuana starts from. Your own changes below stay on top of any of them.",
             Setting::FontFamily => "Monospaced fonts installed on this computer.",
             Setting::FontSize => "Zoom (Increase / Decrease Font Size) adds to this until you reset it.",
@@ -384,6 +402,10 @@ impl Setting {
             Setting::ToolsLocation => "tool buttons activity bar title bar header toolbar icons run debug search settings extensions panel toggles location top",
             Setting::ProjectAvatar => "project avatar monogram initial letter circle badge icon title bar header name chip hide show",
             Setting::CompactActivityBar => "compact activity bar icons size large small big narrow buttons left panel sidebar tools space room",
+            Setting::ZenFullScreen => "zen mode distraction free focus full screen fullscreen window",
+            Setting::ZenWidth => "zen mode distraction free focus centered center width text column characters wide narrow",
+            Setting::ZenLineNumbers => "zen mode distraction free focus line numbers gutter",
+            Setting::ZenTabs => "zen mode distraction free focus tabs tab strip",
             Setting::BaseKeymap => "keymap shortcuts key bindings vscode vs code jetbrains intellij webstorm sublime zed",
             Setting::FontFamily => "typeface family monospace",
             Setting::FontSize => "font zoom text",
@@ -1743,6 +1765,19 @@ impl Preferences {
             Setting::CompactActivityBar => {
                 self.switch_with_default("pref-compact-activity-bar", "compact_activity_bar", settings.compact_activity_bar, false, cx)
             }
+            Setting::ZenFullScreen => self.switch_with_default("pref-zen-full-screen", "zen_full_screen", settings.zen_full_screen, true, cx),
+            Setting::ZenWidth => {
+                let width = settings.zen_width();
+                let (min, max) = settings::ZEN_WIDTHS;
+                self.stepper("pref-zen-width", format!("{width} characters"), width > min, width < max, cx, move |this, step, cx| {
+                    let width = Settings::get(cx).zen_width();
+                    // Snap to tens.
+                    let next = ((width / 10.).round() * 10. + step as f32 * 10.).clamp(min, max);
+                    this.set_or_default("zen_width", json!(next as i64), json!(settings::DEFAULT_ZEN_WIDTH as i64), cx);
+                })
+            }
+            Setting::ZenLineNumbers => self.bool_switch("pref-zen-line-numbers", "zen_line_numbers", settings.zen_line_numbers, cx),
+            Setting::ZenTabs => self.bool_switch("pref-zen-tabs", "zen_tabs", settings.zen_tabs, cx),
             Setting::FormatOnSave => self.bool_switch("pref-format", "format_on_save", settings.editor.format_on_save, cx),
             Setting::TrustAll => self.switch_with_default("pref-trust-all", "trust_all_projects", settings.trust_all_projects, false, cx),
             Setting::NativeGrammars => self.switch_with_default("pref-native-grammars", "native_grammars", settings.native_grammars, false, cx),
@@ -2983,6 +3018,10 @@ fn setting_key(setting: Setting) -> &'static str {
         Setting::ToolsLocation => "tools_location",
         Setting::ProjectAvatar => "project_avatar",
         Setting::CompactActivityBar => "compact_activity_bar",
+        Setting::ZenFullScreen => "zen_full_screen",
+        Setting::ZenWidth => "zen_width",
+        Setting::ZenLineNumbers => "zen_line_numbers",
+        Setting::ZenTabs => "zen_tabs",
         Setting::SoftWrap => "soft_wrap",
         Setting::Rulers => "rulers",
         Setting::TodoPatterns => "todo_patterns",

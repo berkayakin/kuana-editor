@@ -90,7 +90,9 @@ impl Workspace {
 
     /// The terminal panel as the session keeps it.
     pub(super) fn terminal_layout(&self, cx: &App) -> TerminalLayout {
-        self.terminals.read(cx).layout(self.shows(BottomPanel::Terminal), cx)
+        // Whether the panel is open, as it was before Zen mode hid it.
+        let (_, _, bottom) = self.layout_to_save();
+        self.terminals.read(cx).layout(bottom == Some(BottomPanel::Terminal), cx)
     }
 
     pub(super) fn schedule_session_save(&mut self, cx: &mut Context<Self>) {
@@ -280,12 +282,13 @@ impl Workspace {
     pub(super) fn save_state(&mut self, cx: &mut Context<Self>) {
         let root = self.root.clone();
         let (sidebar_width, problems_height) = (f32::from(self.sidebar_width), f32::from(self.problems_height));
-        let show_sidebar = self.show_sidebar;
-        let (show_problems, show_terminal, show_git_log) =
-            (self.shows(BottomPanel::Problems), self.shows(BottomPanel::Terminal), self.shows(BottomPanel::GitLog));
+        // Zen mode's hiding isn't kept: the layout from before it is.
+        let (show_sidebar, second_view, bottom) = self.layout_to_save();
+        let shows = |panel| bottom == Some(panel);
+        let (show_problems, show_terminal, show_git_log) = (shows(BottomPanel::Problems), shows(BottomPanel::Terminal), shows(BottomPanel::GitLog));
         let sidebar_mode = self.sidebar_mode.saved_name().unwrap_or_else(|| "files".to_string());
         let moved: Vec<String> = self.moved_views.iter().filter_map(|m| m.saved_name()).collect();
-        let second_view = self.second_view.and_then(|m| m.saved_name());
+        let second_view = second_view.and_then(|m| m.saved_name());
         let second_width = f32::from(self.second_width);
         // What this window shows; what's shared with other windows (zoom,
         // recent projects, placement) stays as the others left it.
@@ -313,6 +316,10 @@ impl Workspace {
     /// Saves where the window is (after moves and resizes settle), so the
     /// next launch opens it there.
     pub(super) fn remember_placement(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Full screen for Zen mode only: the next launch opens as before it.
+        if self.zen_full_screen_now(window) {
+            return;
+        }
         let placement = placement_of(window, cx);
         SessionState::change_soon("window", 0, move |state| state.window = Some(placement.clone()));
         self.state_task = Some(crate::state::write_soon(cx));

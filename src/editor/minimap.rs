@@ -52,7 +52,7 @@ impl Editor {
     /// Whether this editor draws a minimap: the setting, in a code editor
     /// whose file isn't too large to highlight.
     pub(super) fn shows_minimap(&self, cx: &App) -> bool {
-        self.file_settings.minimap && !self.is_chromeless() && !self.doc.read(cx).large && !self.is_excerpt()
+        self.file_settings.minimap && !self.is_chromeless() && !self.doc.read(cx).large && !self.is_excerpt() && self.zen.is_none()
     }
 
     /// What the right edge takes from the text: the minimap or the scrollbar.

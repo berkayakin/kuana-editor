@@ -114,6 +114,8 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   and copies one's output; see [Terminal shell integration](editing.md#terminal-shell-integration)
 - Code folding by indentation (Markdown by section), with gutter arrows and a `⋯` placeholder;
   folds are kept with the project
+- [Zen mode](editing.md#zen-mode): everything but the editor hidden, full screen, the text centered at a
+  width you choose; the layout comes back as it was when you leave it
 - Split panes (side by side or stacked, a file in both if you like) with draggable dividers; drag tabs to reorder them or
   move them between panes; pinned tabs; a tab menu with Close Others / All / to the Right
 - Debugger for Rust, Go, Python and JavaScript/TypeScript (lldb-dap, Delve, debugpy, js-debug):

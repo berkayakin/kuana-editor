@@ -61,6 +61,10 @@ pub(super) struct PaneChrome {
     /// A context menu is open: tabs show no tooltip, which would cover the
     /// menu a right-click opens under the pointer.
     pub(super) menu_open: bool,
+    /// Zen mode (`workspace/zen.rs`): no breadcrumbs.
+    pub(super) zen: bool,
+    /// Zen mode without `zen_tabs`: no tab strip either, just its room.
+    pub(super) hide_tabs: bool,
 }
 
 /// Where a tab dragged over a pane's content would land: in this pane, or
@@ -610,7 +614,7 @@ impl Render for Pane {
             .min_w_0()
             .min_h_0()
             .border_color(edge)
-            .when_some(item.clone(), |el, item| el.children(self.render_breadcrumbs(&item, cx)))
+            .when_some(item.clone().filter(|_| !self.chrome.zen), |el, item| el.children(self.render_breadcrumbs(&item, cx)))
             .children(find_bar)
             .child(
                 div()
@@ -655,7 +659,7 @@ impl Render for Pane {
             // island lines up with the sidebar's). Empty along the window's top,
             // it moves the window; with tabs, their strip's free space does.
             .map(|el| {
-                if self.tabs.is_empty() && self.chrome.at_top {
+                if (self.tabs.is_empty() || self.chrome.hide_tabs) && self.chrome.at_top {
                     el.child(tab_room(window_drag_area("tabs-room"), &theme))
                 } else {
                     el.child(tab_room(div(), &theme))
@@ -663,7 +667,7 @@ impl Render for Pane {
             })
             .child(island)
             // After the island, so the current tab paints over its top border.
-            .when(!self.tabs.is_empty(), |el| el.child(self.render_strip(edge, window, cx)))
+            .when(!self.tabs.is_empty() && !self.chrome.hide_tabs, |el| el.child(self.render_strip(edge, window, cx)))
             // Finder files, and files dragged from the file tree, dropped anywhere
             // over the pane (tabs included) open in it.
             .group(drop_group.clone())

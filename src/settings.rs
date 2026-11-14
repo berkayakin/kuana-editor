@@ -117,6 +117,16 @@ pub struct Settings {
     pub auto_fetch: Option<bool>,
     /// The minimap's width in pixels (`minimap_width()`).
     pub minimap_width: Option<f32>,
+    /// Zen mode (`workspace/zen.rs`) makes the window full screen (`true`
+    /// unless set).
+    pub zen_full_screen: Option<bool>,
+    /// Zen mode's text column, in characters of the editor's font
+    /// (`zen_width()`).
+    pub zen_width: Option<f32>,
+    /// Zen mode keeps line numbers (`false` unless set).
+    pub zen_line_numbers: Option<bool>,
+    /// Zen mode keeps the editor's tabs (`false` unless set).
+    pub zen_tabs: Option<bool>,
     /// Where ghost-text suggestions come from (none unless chosen): only the
     /// user's settings pick a service that's sent code, never a project's.
     pub edit_prediction_provider: Option<EditPredictionProvider>,
@@ -485,6 +495,10 @@ impl EditorSettings {
 pub const DEFAULT_MINIMAP_WIDTH: f32 = 100.;
 /// The narrowest and widest minimap.
 pub const MINIMAP_WIDTHS: (f32, f32) = (40., 240.);
+/// Zen mode's text column, in characters, unless set.
+pub const DEFAULT_ZEN_WIDTH: f32 = 100.;
+/// The narrowest and widest it may be set to.
+pub const ZEN_WIDTHS: (f32, f32) = (40., 240.);
 
 const TOP_LEVEL_KEYS: &[&str] = &[
     "theme",
@@ -520,6 +534,10 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "auto_resolve_conflicts",
     "auto_fetch",
     "minimap_width",
+    "zen_full_screen",
+    "zen_width",
+    "zen_line_numbers",
+    "zen_tabs",
     "edit_prediction_provider",
     "todo_patterns",
 ];
@@ -666,6 +684,26 @@ impl Settings {
     /// The minimap's width in pixels (100 unless set).
     pub fn minimap_width(&self) -> f32 {
         self.minimap_width.unwrap_or(DEFAULT_MINIMAP_WIDTH).clamp(MINIMAP_WIDTHS.0, MINIMAP_WIDTHS.1)
+    }
+
+    /// Whether Zen mode makes the window full screen.
+    pub fn zen_full_screen(&self) -> bool {
+        self.zen_full_screen.unwrap_or(true)
+    }
+
+    /// Zen mode's text column in characters (100 unless set).
+    pub fn zen_width(&self) -> f32 {
+        self.zen_width.unwrap_or(DEFAULT_ZEN_WIDTH).clamp(ZEN_WIDTHS.0, ZEN_WIDTHS.1)
+    }
+
+    /// Whether Zen mode keeps line numbers.
+    pub fn zen_line_numbers(&self) -> bool {
+        self.zen_line_numbers.unwrap_or(false)
+    }
+
+    /// Whether Zen mode keeps the editor's tabs.
+    pub fn zen_tabs(&self) -> bool {
+        self.zen_tabs.unwrap_or(false)
     }
 
     /// The side the sidebar sits on (left unless set).
@@ -819,6 +857,10 @@ impl Settings {
             "edit_predictions" => self.editor.edit_predictions.is_some(),
             "edit_prediction_provider" => self.edit_prediction_provider.is_some(),
             "minimap_width" => self.minimap_width.is_some(),
+            "zen_full_screen" => self.zen_full_screen.is_some(),
+            "zen_width" => self.zen_width.is_some(),
+            "zen_line_numbers" => self.zen_line_numbers.is_some(),
+            "zen_tabs" => self.zen_tabs.is_some(),
             "todo_patterns" => self.todo_patterns.is_some(),
             "vim_mode" => self.vim_mode.is_some(),
             "icon_theme" => self.icon_theme.is_some(),
@@ -1236,6 +1278,13 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // "title_bar" (a title bar row of their own, the tabs under it, the
   // sidebar's views as tabs like the editor's).
   // "tools_location": "activity_bar",
+  // Zen mode (Toggle Zen Mode) hides everything but the editor and centers its
+  // text: whether it goes full screen, the text column's width in characters,
+  // and whether line numbers and the editor's tabs stay.
+  // "zen_full_screen": true,
+  // "zen_width": 100,
+  // "zen_line_numbers": false,
+  // "zen_tabs": false,
 
   // Per-language overrides, by the name shown in the status bar.
   // "languages": {
@@ -1710,6 +1759,24 @@ mod tests {
         assert_eq!(style(r#"{"ui_style": "classic"}"#), UiStyle::Classic);
         assert_eq!(style(r#"{"ui_style": "modern"}"#), UiStyle::Modern);
         assert!(Settings::unknown_keys(r#"{"ui_style": "classic"}"#).is_empty());
+    }
+
+    #[test]
+    fn zen_mode_options_have_defaults_and_limits() {
+        let parsed = |json: &str| Settings::parse(json).unwrap();
+        let plain = parsed("{}");
+        assert!(plain.zen_full_screen() && !plain.zen_line_numbers() && !plain.zen_tabs());
+        assert_eq!(plain.zen_width(), DEFAULT_ZEN_WIDTH);
+        let set = r#"{"zen_full_screen": false, "zen_width": 1000, "zen_line_numbers": true, "zen_tabs": true}"#;
+        let custom = parsed(set);
+        assert!(!custom.zen_full_screen() && custom.zen_line_numbers() && custom.zen_tabs());
+        assert_eq!(custom.zen_width(), ZEN_WIDTHS.1);
+        assert_eq!(parsed(r#"{"zen_width": 10}"#).zen_width(), ZEN_WIDTHS.0);
+        assert!(Settings::unknown_keys(set).is_empty());
+        for key in ["zen_full_screen", "zen_width", "zen_line_numbers", "zen_tabs"] {
+            assert!(custom.is_set(key), "{key}");
+            assert!(!plain.is_set(key), "{key}");
+        }
     }
 
     #[test]

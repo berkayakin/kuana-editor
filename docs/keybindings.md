@@ -51,6 +51,7 @@ The table below is the JetBrains keymap.
 | Attach to Process… | ⌥⇧F5 | Ctrl+Alt+F5 |
 | Resume / Step Over / Into / Out | ⌥⌘R / F8 / F7 / ⇧F8 | F9 / F8 / F7 / Shift+F8 |
 | Split Right / Down | ⌘\\ / ⌘⇧\\ | Ctrl+\\ / Ctrl+Shift+\\ |
+| [Zen mode](editing.md#zen-mode) (VS Code: ⌘K Z / Ctrl+K Z; Sublime Text: ⌃⇧⌘F / Shift+F11) | Find Action | Find Action |
 | Next pane | ⌥⇥ | — |
 | New / close terminal tab (in the terminal) | ⌘T / ⌘W | Ctrl+Shift+T / Ctrl+Shift+W |
 | Copy / paste / clear (in the terminal) | ⌘C / ⌘V / ⌘K | Ctrl+Shift+C / Ctrl+Shift+V / — |

@@ -15,6 +15,8 @@
 //! - `action <name> [json]`: dispatch an action by name (`kuana::ToggleTerminal`)
 //! - `click <x> <y> [right] [double]`: a mouse click at a point of the window's
 //!   content (points from its top left), the pointer moved there first
+//! - `hover <x> <y>`: the pointer moved to a point, without a click (what shows
+//!   under it, a tooltip or a hover button, can be screenshot)
 //! - `drag <x> <y> <to x> <to y>`: press, move in steps, release (mouse steps
 //!   are macOS only: GPUI takes mouse events from the system alone, so they're
 //!   handed to its view as AppKit events, still without leaving Kuana)
@@ -37,6 +39,7 @@ enum Step {
     Size(f32, f32),
     /// A click at a point: the button and how many presses.
     Click(f32, f32, MouseButton, usize),
+    Hover(f32, f32),
     Drag((f32, f32), (f32, f32)),
     Mark(String),
     Quit,
@@ -111,6 +114,11 @@ fn parse(text: &str) -> Result<Vec<(usize, Step)>, String> {
                     }
                 }
                 Step::Click(x, y, button, count)
+            }
+            "hover" => {
+                let n: Vec<f32> = rest.split_whitespace().filter_map(|n| n.parse().ok()).collect();
+                let [x, y] = n[..] else { return Err(format!("line {line_no}: hover takes an x and a y")) };
+                Step::Hover(x, y)
             }
             "drag" => {
                 let n: Vec<f32> = rest.split_whitespace().filter_map(|n| n.parse().ok()).collect();
@@ -195,6 +203,10 @@ async fn perform(step: &Step, pace: &mut u64, cx: &mut AsyncApp) -> Result<(), S
                 mouse(cx, down, (*x, *y), clicks)?;
                 mouse(cx, up, (*x, *y), clicks)?;
             }
+            sleep(*pace).await;
+        }
+        Step::Hover(x, y) => {
+            mouse(cx, Mouse::Moved, (*x, *y), 0)?;
             sleep(*pace).await;
         }
         Step::Drag(from, to) => {
@@ -373,12 +385,13 @@ mod tests {
         assert_eq!(steps[6], Step::Size(1280., 800.));
         assert_eq!(steps[7], Step::Mark("start".into()));
         assert_eq!(steps[8], Step::Quit);
-        let steps = parse("click 10 20\nclick 5.5 6 right\nclick 1 2 double\ndrag 1 2 30 40\n").unwrap();
+        let steps = parse("click 10 20\nclick 5.5 6 right\nclick 1 2 double\ndrag 1 2 30 40\nhover 7 8\n").unwrap();
         let steps: Vec<Step> = steps.into_iter().map(|(_, s)| s).collect();
         assert_eq!(steps[0], Step::Click(10., 20., MouseButton::Left, 1));
         assert_eq!(steps[1], Step::Click(5.5, 6., MouseButton::Right, 1));
         assert_eq!(steps[2], Step::Click(1., 2., MouseButton::Left, 2));
         assert_eq!(steps[3], Step::Drag((1., 2.), (30., 40.)));
+        assert_eq!(steps[4], Step::Hover(7., 8.));
     }
 
     #[test]
@@ -390,6 +403,7 @@ mod tests {
         assert!(err("click 10").contains("line 1: click takes"));
         assert!(err("click 1 2 middle").contains("line 1: click doesn't know"));
         assert!(err("drag 1 2 3").contains("line 1: drag takes"));
+        assert!(err("hover 1").contains("line 1: hover takes"));
         assert!(err("action a::B {nope").contains("line 1: the action's data isn't JSON"));
     }
 
