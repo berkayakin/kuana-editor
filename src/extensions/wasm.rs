@@ -1183,6 +1183,13 @@ fn remove_link(path: &Path) {
     }
 }
 
+/// Why a program isn't run for `root`, a project that isn't trusted: the
+/// reason first, since a notification cuts a long path short.
+pub fn restricted_message(root: &Path) -> String {
+    let name = root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into_owned());
+    format!("Extensions don't run programs for a project in Restricted Mode. Trust {name} to let them (Project Trust… in Find Action).")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1439,11 +1446,4 @@ mod tests {
         assert!(work.join("file").is_file());
         std::fs::remove_dir_all(&root).ok();
     }
-}
-
-/// Why a program isn't run for `root`, a project that isn't trusted: the
-/// reason first, since a notification cuts a long path short.
-pub fn restricted_message(root: &Path) -> String {
-    let name = root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into_owned());
-    format!("Extensions don't run programs for a project in Restricted Mode. Trust {name} to let them (Project Trust… in Find Action).")
 }
