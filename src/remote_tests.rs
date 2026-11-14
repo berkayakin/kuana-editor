@@ -5,9 +5,15 @@
 
 use std::path::{Path, PathBuf};
 
+use gpui::{AppContext, Entity, TestAppContext};
 use kuana_core::remote::{RemoteHost, client, server};
 
-use crate::{document::Document, fs::PathExt};
+use crate::{
+    document::Document,
+    editor::Editor,
+    fs::PathExt,
+    lsp::{LspStore, fake_server},
+};
 
 /// A server on a thread, mounted as `name`.
 fn connect(name: &str) -> (PathBuf, std::sync::Arc<RemoteHost>) {
@@ -75,6 +81,46 @@ fn git_documents_and_the_tree_work_on_a_remote_project() {
     let names: Vec<(String, bool)> = crate::project_tree::children(&project).into_iter().map(|(_, is_dir, _, name)| (name, is_dir)).collect();
     assert_eq!(names, [("src".to_string(), true), ("README.md".to_string(), false)]);
 
+    host.disconnect();
+    client::unmount(&root);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A remote project's language server runs there, is told the host's own
+/// paths, and its answers reach Kuana's documents under the mount.
+#[gpui::test]
+fn language_servers_run_on_the_host(cx: &mut TestAppContext) {
+    if crate::lsp::servers::which("python3").is_none() {
+        return;
+    }
+    cx.executor().allow_parking();
+    crate::trust::set_trust_all(true);
+    let dir = temp("lsp");
+    std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+    let (root, host) = connect("app-remote-lsp");
+    let project = mounted(&root, &dir);
+    let store = cx.new(|_| {
+        let mut store = LspStore::new();
+        store.test_specs = Some(vec![fake_server("uri", "")]);
+        store.set_root(Some(project.clone()));
+        store
+    });
+    let editor: Entity<Editor> = cx.new(|cx| Editor::new(Document::open(&project.join("a.rs")).unwrap(), cx));
+    store.update(cx, |s, cx| s.register(&editor, cx));
+    let started = std::time::Instant::now();
+    let message = loop {
+        cx.run_until_parked();
+        let found = editor.read_with(cx, |e, cx| e.doc.read(cx).diagnostics.first().map(|d| d.message.to_string()));
+        if let Some(message) = found {
+            break message;
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "no diagnostics came");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    // The server read `file://<the host's path>`, not the mount's.
+    let host_uri = url::Url::from_file_path(dir.join("a.rs")).unwrap().to_string();
+    assert!(message.ends_with(&format!("saw {host_uri}")), "{message}");
+    assert!(!message.contains("kuana-remote"), "{message}");
     host.disconnect();
     client::unmount(&root);
     let _ = std::fs::remove_dir_all(&dir);

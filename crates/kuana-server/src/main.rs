@@ -4,6 +4,11 @@
 //! `kuana_core::remote::server`. Nothing else may be printed on stdout.
 
 fn main() {
+    // Started by Git or SSH to ask a question (see `server::askpass`).
+    #[cfg(unix)]
+    if let Some(code) = kuana_core::remote::server::askpass::ask() {
+        std::process::exit(code);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version") {
         println!("kuana-server {}", env!("CARGO_PKG_VERSION"));

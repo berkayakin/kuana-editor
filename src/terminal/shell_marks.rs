@@ -252,11 +252,12 @@ pub fn integration(program: &str, args: &[String], dir: &Path) -> Option<(Option
 /// returning that folder.
 fn write_scripts(dir: &Path, shell: &str, files: &[(&str, &str)]) -> Option<PathBuf> {
     let folder = dir.join(shell);
-    std::fs::create_dir_all(&folder).ok()?;
+    // On a remote host for its terminals (`crate::fs`).
+    crate::fs::create_dir_all(&folder).ok()?;
     for (name, text) in files {
         let path = folder.join(name);
-        if std::fs::read_to_string(&path).ok().as_deref() != Some(*text) {
-            std::fs::write(&path, text).ok()?;
+        if crate::fs::read_to_string(&path).ok().as_deref() != Some(*text) {
+            crate::fs::write(&path, text).ok()?;
         }
     }
     Some(folder)

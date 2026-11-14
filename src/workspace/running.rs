@@ -420,6 +420,11 @@ impl Workspace {
             self.toast(ToastKind::Info, "Attaching to a process isn't supported on Windows yet", None, cx);
             return;
         }
+        // The list would be this computer's processes.
+        if self.root.as_deref().is_some_and(crate::fs::is_remote) {
+            self.toast(ToastKind::Info, "Attaching to a process isn't available for remote projects yet", None, cx);
+            return;
+        }
         self.close_modal(window, cx);
         self.open_picker(PickerMode::Attach, window, cx);
         let cwd = self.root.clone().or_else(|| std::env::var_os("HOME").map(PathBuf::from)).unwrap_or_default();

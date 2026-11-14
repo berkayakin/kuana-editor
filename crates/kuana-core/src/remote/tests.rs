@@ -208,3 +208,81 @@ fn a_dropped_connection_fails_calls_instead_of_hanging() {
     client::unmount(&root);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[cfg(unix)]
+#[test]
+fn terminals_run_there() {
+    use std::sync::mpsc;
+
+    let dir = temp("pty");
+    let (root, host, _serving) = connect("pty-test", &temp("pty-trash"));
+    let (out_tx, out) = mpsc::channel::<Vec<u8>>();
+    let (exit_tx, exit) = mpsc::channel::<Option<i32>>();
+    let out_tx = std::sync::Mutex::new(out_tx);
+    let exit_tx = std::sync::Mutex::new(exit_tx);
+    let sinks = super::client::PtySinks {
+        output: Box::new(move |data| {
+            let _ = out_tx.lock().unwrap().send(data);
+        }),
+        exit: Box::new(move |code| {
+            let _ = exit_tx.lock().unwrap().send(code);
+        }),
+    };
+    let shell = vec!["/bin/sh".to_string(), "-c".to_string(), "stty -echo; echo ready; read x; echo \"got $x in $(pwd)\"; exit 4".to_string()];
+    let id = host.pty_open(&shell, Some(&dir.to_string_lossy()), &[("KUANA_TEST".into(), "1".into())], (80, 24), sinks).unwrap();
+    let mut seen = String::new();
+    let wait_for = |what: &str, seen: &mut String| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !seen.contains(what) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let chunk = out.recv_timeout(left).unwrap_or_else(|_| panic!("no {what:?} in {seen:?}"));
+            seen.push_str(&String::from_utf8_lossy(&chunk));
+        }
+    };
+    wait_for("ready", &mut seen);
+    host.pty_resize(id, 120, 40);
+    host.pty_input(id, b"abc\r");
+    wait_for(&format!("got abc in {}", dir.display()), &mut seen);
+    assert_eq!(exit.recv_timeout(Duration::from_secs(10)).unwrap(), Some(4));
+
+    // A shell waiting for input ends when its terminal closes.
+    let (exit_tx, exit) = mpsc::channel::<Option<i32>>();
+    let exit_tx = std::sync::Mutex::new(exit_tx);
+    let sinks = super::client::PtySinks {
+        output: Box::new(|_| {}),
+        exit: Box::new(move |code| {
+            let _ = exit_tx.lock().unwrap().send(code);
+        }),
+    };
+    let waiting = host.pty_open(&["/bin/sh".to_string(), "-c".to_string(), "read x".to_string()], None, &[], (80, 24), sinks).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(host.pty_foreground(waiting), None);
+    host.pty_close(waiting);
+    assert!(exit.recv_timeout(Duration::from_secs(10)).is_ok());
+    client::unmount(&root);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ports_there_are_reached_from_here() {
+    let (root, host, _serving) = connect("tcp-test", &temp("tcp-trash"));
+    // A program there listens (an echo server, upper-casing), after a while.
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0; 64];
+        let n = stream.read(&mut buf).unwrap();
+        stream.write_all(&buf[..n].to_ascii_uppercase()).unwrap();
+    });
+    let address = host.forward(port).unwrap();
+    // Connected before it listens: the relay waits for it.
+    let mut stream = std::net::TcpStream::connect(address).unwrap();
+    stream.write_all(b"hello there").unwrap();
+    let mut answer = [0; 11];
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    stream.read_exact(&mut answer).unwrap();
+    assert_eq!(&answer, b"HELLO THERE");
+    client::unmount(&root);
+}

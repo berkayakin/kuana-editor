@@ -10,7 +10,6 @@ use std::{
     io::{BufReader, Read, Write},
     net::{SocketAddr, TcpStream},
     path::Path,
-    process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicI64, Ordering},
@@ -22,7 +21,10 @@ use std::{
 use futures::channel::{mpsc as async_mpsc, oneshot};
 use serde_json::{Value, json};
 
-use crate::lsp::rpc::read_message;
+use crate::{
+    exec::{Child, Command, Stdio},
+    lsp::rpc::read_message,
+};
 
 /// What the adapter sends besides responses.
 #[derive(Debug)]
@@ -45,6 +47,9 @@ pub struct DapClient {
     pending: Pending,
     /// The adapter's process (none for a child session's connection).
     child: Mutex<Option<Child>>,
+    /// An adapter on a remote host: the mount its paths are under here
+    /// (`remap_out`, `remap_in`).
+    mount: Option<String>,
 }
 
 impl DapClient {
@@ -56,7 +61,8 @@ impl DapClient {
         let stderr = child.stderr.take().ok_or_else(|| std::io::Error::other("no stderr"))?;
         let (incoming_tx, incoming) = async_mpsc::unbounded();
         let tail = keep_tail(stderr, None);
-        let client = Self::start(Some(child), stdin, stdout, tail, incoming_tx)?;
+        let mount = mount_of(command);
+        let client = Self::start(Some(child), stdin, stdout, tail, incoming_tx, mount)?;
         Ok((client, incoming))
     }
 
@@ -77,14 +83,15 @@ impl DapClient {
                     std::thread::sleep(Duration::from_millis(100));
                 }
                 Err(err) => {
-                    crate::process::kill_tree(&mut child);
+                    child.kill_tree();
                     let detail = tail.lock().map(|t| t.trim().to_string()).unwrap_or_default();
                     return Err(std::io::Error::other(if detail.is_empty() { err.to_string() } else { detail }));
                 }
             }
         };
         let reader = stream.try_clone()?;
-        let client = Self::start(Some(child), stream, reader, tail, incoming_tx)?;
+        let mount = mount_of(command);
+        let client = Self::start(Some(child), stream, reader, tail, incoming_tx, mount)?;
         Ok((client, incoming))
     }
 
@@ -94,7 +101,7 @@ impl DapClient {
         let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
         let reader = stream.try_clone()?;
         let (incoming_tx, incoming) = async_mpsc::unbounded();
-        let client = Self::start(None, stream, reader, Arc::default(), incoming_tx)?;
+        let client = Self::start(None, stream, reader, Arc::default(), incoming_tx, None)?;
         Ok((client, incoming))
     }
 
@@ -104,6 +111,7 @@ impl DapClient {
         reader: impl Read + Send + 'static,
         tail: Arc<Mutex<String>>,
         incoming: async_mpsc::UnboundedSender<Incoming>,
+        mount: Option<String>,
     ) -> std::io::Result<Arc<DapClient>> {
         let (write_tx, to_write) = mpsc::channel::<Vec<u8>>();
         std::thread::Builder::new().name("dap-writer".into()).spawn(move || {
@@ -117,9 +125,13 @@ impl DapClient {
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let reader_pending = pending.clone();
         let reader_tx = incoming;
+        let reading_mount = mount.clone();
         std::thread::Builder::new().name("dap-reader".into()).spawn(move || {
             let mut reader = BufReader::new(reader);
-            while let Some(message) = read_message(&mut reader) {
+            while let Some(mut message) = read_message(&mut reader) {
+                if let Some(mount) = &reading_mount {
+                    remap_in(&mut message, mount);
+                }
                 dispatch(message, &reader_pending, &reader_tx);
             }
             for (_, tx) in reader_pending.lock().unwrap().drain() {
@@ -129,7 +141,7 @@ impl DapClient {
             let tail = tail.lock().map(|t| t.clone()).unwrap_or_default();
             let _ = reader_tx.unbounded_send(Incoming::Closed { tail });
         })?;
-        Ok(Arc::new(DapClient { writer: write_tx, seq: AtomicI64::new(1), pending, child: Mutex::new(child) }))
+        Ok(Arc::new(DapClient { writer: write_tx, seq: AtomicI64::new(1), pending, child: Mutex::new(child), mount }))
     }
 
     /// Sends a request; resolves with the response's body, or its error message.
@@ -150,7 +162,10 @@ impl DapClient {
         }));
     }
 
-    fn send(&self, message: Value) {
+    fn send(&self, mut message: Value) {
+        if let Some(mount) = &self.mount {
+            remap_out(&mut message, mount);
+        }
         let body = message.to_string();
         let mut frame = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
         frame.extend_from_slice(body.as_bytes());
@@ -161,8 +176,45 @@ impl DapClient {
 impl Drop for DapClient {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.lock().ok().and_then(|mut c| c.take()) {
-            crate::process::kill_tree(&mut child);
+            child.kill_tree();
         }
+    }
+}
+
+/// The mount an adapter's folder is under (it runs on that host).
+fn mount_of(command: &Command) -> Option<String> {
+    let mount = crate::fs::mount_of(command.get_current_dir()?)?;
+    Some(mount.to_string_lossy().trim_end_matches(['/', '\\']).to_string())
+}
+
+/// Kuana's paths in a message to a remote adapter: the host's.
+fn remap_out(value: &mut Value, mount: &str) {
+    match value {
+        Value::String(s) => {
+            if let Some(rest) = s.strip_prefix(mount).filter(|r| r.starts_with('/')) {
+                *s = rest.to_string();
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(|v| remap_out(v, mount)),
+        Value::Object(map) => map.values_mut().for_each(|v| remap_out(v, mount)),
+        _ => {}
+    }
+}
+
+/// A remote adapter's paths (sources' `path`s: frames, breakpoints) as
+/// Kuana's. Only `path`: values and output may well start with `/` too.
+fn remap_in(value: &mut Value, mount: &str) {
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(|v| remap_in(v, mount)),
+        Value::Object(map) => {
+            for (key, v) in map.iter_mut() {
+                match v {
+                    Value::String(s) if key == "path" && s.starts_with('/') && !s.starts_with(mount) => *s = format!("{mount}{s}"),
+                    _ => remap_in(v, mount),
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -230,7 +282,8 @@ pub fn free_port() -> std::io::Result<u16> {
 
 /// Where an adapter's working directory and PATH come from.
 pub fn command(program: &Path, args: &[String], cwd: &Path) -> Command {
-    let mut command = crate::process::command(program);
+    // A remote project's adapter runs there (`crate::exec`).
+    let mut command = Command::new(program);
     command.args(args).current_dir(cwd).env("PATH", crate::lsp::servers::search_path());
     command
 }

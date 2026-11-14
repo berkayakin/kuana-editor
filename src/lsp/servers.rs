@@ -448,15 +448,25 @@ pub struct Command {
 /// venv first (a pinned version), then the search path.
 pub fn find(spec: &ServerSpec, file: &Path, venv: Option<&Path>) -> Option<Command> {
     let command = |program: PathBuf, args: &[&str]| Command { program, args: args.iter().map(|a| a.to_string()).collect(), env: Vec::new() };
-    for (name, args) in spec.candidates.iter().filter(|(name, _)| usable(name)) {
+    // A remote project's servers are found there: its PATH, its node_modules and venv.
+    let remote = crate::fs::is_remote(file);
+    for (name, args) in spec.candidates.iter().filter(|(name, _)| remote || usable(name)) {
         let local = file
             .ancestors()
             .skip(1)
             .find_map(|d| executable(&d.join("node_modules").join(".bin").join(name)))
             .or_else(|| executable(&crate::python::bin_dir(venv?).join(name)));
-        if let Some(program) = local.or_else(|| which(name).filter(|p| !broken_rustup_proxy(p))) {
+        let on_path = || match file.parent().and_then(|dir| crate::exec::which_on(dir, name)) {
+            Some(there) => there,
+            None => which(name).filter(|p| !broken_rustup_proxy(p)),
+        };
+        if let Some(program) = local.or_else(on_path) {
             return Some(command(program, args));
         }
+    }
+    // Kuana's own copies are this computer's.
+    if remote {
+        return None;
     }
     // Only then Kuana's own copies: the user's servers, any of them, come first.
     spec.candidates.iter().filter(|(name, _)| usable(name)).find_map(|(name, args)| Some(command(super::install::installed(name)?, args)))
@@ -489,6 +499,11 @@ pub fn which(name: &str) -> Option<PathBuf> {
 }
 
 pub(crate) fn executable(path: &Path) -> Option<PathBuf> {
+    // On a remote host: its file, with its execute bits.
+    if crate::fs::is_remote(path) {
+        let meta = crate::fs::metadata(path).ok()?;
+        return (meta.is_file() && meta.executable()).then(|| path.to_path_buf());
+    }
     #[cfg(windows)]
     {
         for ext in ["exe", "cmd", "bat"] {

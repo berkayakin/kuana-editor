@@ -120,8 +120,12 @@ impl TerminalView {
     /// Marks the shell sent since the last look.
     pub(super) fn take_marks(&mut self) {
         if let Some(marks) = &self.shell_marks {
-            let marks = marks.take();
-            self.commands.take(marks);
+            // A remote shell names the host's folder: under the mount here.
+            let marks = marks.take().into_iter().map(|mark| match mark {
+                Mark::Cwd(path) => Mark::Cwd(crate::fs::from_host(&self.cwd, &path.to_string_lossy())),
+                other => other,
+            });
+            self.commands.take(marks.collect());
         }
     }
 

@@ -259,13 +259,18 @@ impl DebugSession {
             let pid = *pid;
             launch_args["port"] = json!(cx.background_executor().spawn(async move { launch::open_node_inspector(pid) }).await);
         }
-        let server = adapter.port.map(|port| SocketAddr::from(([127, 0, 0, 1], port)));
+        // An adapter listening on a remote host is reached through a relayed port.
+        let server = match (adapter.port, kuana_core::remote::client::host_for(&cwd)) {
+            (Some(port), Some((_, host))) => Some(host.forward(port).map_err(|e| format!("Couldn't reach the debugger there: {e}"))?),
+            (Some(port), None) => Some(SocketAddr::from(([127, 0, 0, 1], port))),
+            (None, _) => None,
+        };
         let started = cx
             .background_executor()
             .spawn(async move {
                 let mut command = crate::dap::command(&adapter.program, &adapter.args, &cwd);
-                match adapter.port {
-                    Some(port) => DapClient::spawn_tcp(&mut command, ([127, 0, 0, 1], port).into()),
+                match server {
+                    Some(address) => DapClient::spawn_tcp(&mut command, address),
                     None => DapClient::spawn_stdio(&mut command),
                 }
             })
@@ -753,7 +758,7 @@ impl DebugSession {
         }
         // A build in progress is just killed (with the compilers it started).
         if let Some(mut child) = self.build.lock().unwrap().take() {
-            crate::process::kill_tree(&mut child);
+            child.kill_tree();
         }
         self.end(if self.is_attach() { "Detached" } else { "Stopped" }.into(), cx);
     }

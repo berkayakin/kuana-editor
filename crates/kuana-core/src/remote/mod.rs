@@ -4,6 +4,8 @@
 //! `crate::exec` reach it).
 
 pub mod client;
+#[cfg(unix)]
+mod pty;
 pub mod rpc;
 pub mod server;
 pub mod ssh;

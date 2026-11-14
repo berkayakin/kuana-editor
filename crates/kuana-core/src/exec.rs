@@ -45,6 +45,19 @@ pub trait RemoteProcess: Send {
 /// Hosts that run programs (`crate::fs::Host` plus this).
 pub trait Runner: Send + Sync {
     fn spawn(&self, spec: &Spec) -> io::Result<Spawned>;
+
+    /// Where `name` is on the host's (login) PATH, a host path.
+    fn which(&self, _name: &str) -> io::Result<Option<String>> {
+        Ok(None)
+    }
+}
+
+/// For a folder on a remote host: where `name` is on that host's PATH, as a
+/// mount path. None for a folder here (look on this computer's PATH).
+pub fn which_on(dir: &Path, name: &str) -> Option<Option<PathBuf>> {
+    let mount = fs::mount_of(dir)?;
+    let runner = runner_for(&mount)?;
+    Some(runner.which(name).ok().flatten().map(|p| fs::local_path(&mount, &p)))
 }
 
 /// How a host's `Runner` is found for a mount: `crate::fs::mount` keeps

@@ -31,9 +31,17 @@ connection serves every window on that host.
 - Go to File, Find in Files and the TODO list, with the project's `.gitignore` applied there.
 - Git: the gutter, blame, the Commit view, staging, commits, branches, pull and push, the log.
 - Project settings (`.kuana/settings.json`), `.editorconfig`, formatters and ESLint run there.
-
-Language servers, debuggers, terminals and Run tabs on the remote machine come next (see the
-roadmap); until then they don't start for a remote project.
+- Language servers run there, found on that machine's `PATH` as your login shell sets it (and in
+  the project's `node_modules` or virtual environment), and told that machine's own paths.
+- Terminals open a shell there (your login shell on that machine), with shell integration: command
+  marks, Copy Command Output, the folder a link is relative to. Closing one asks first while a
+  program runs in it, as locally.
+- Run tabs and test runs run there, and their errors become Problems with links into the project.
+- Debugging: the build and the debug adapter (lldb-dap, Delve, debugpy, js-debug) run there;
+  adapters that listen on a port are reached through the connection, so nothing needs to be open
+  on that machine's firewall. Attaching to a running process is local only for now.
+- Git and SSH questions asked there (a password, a passphrase, a new host for `git pull`) are
+  asked in Kuana.
 
 ## When the connection drops
 

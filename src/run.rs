@@ -1029,9 +1029,10 @@ pub fn output_problems(output: &str, cwd: &Path) -> Vec<OutputProblem> {
     static PLAIN: LazyLock<Regex> = LazyLock::new(|| re(r"^\s*([^\s:]+):(\d+)(?::(\d+))?: ?(.+)$"));
 
     let file = |text: &str| -> Option<PathBuf> {
-        let path = Path::new(text.trim());
+        // A remote host's program prints its own paths: under the mount here.
+        let path = crate::fs::from_host(cwd, text.trim());
         // Without `./` in it, so it matches the path of an open tab.
-        let path: PathBuf = if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) }.components().collect();
+        let path: PathBuf = if path.is_absolute() { path } else { cwd.join(path) }.components().collect();
         path.is_file_on_host().then_some(path)
     };
     let number = |text: Option<regex::Match>| text.and_then(|m| m.as_str().parse::<u32>().ok());
