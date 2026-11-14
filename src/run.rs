@@ -76,15 +76,20 @@ impl DebugSpec {
 
 /// What rust-analyzer's Run / Debug lens describes (its `runnable`: cargo's
 /// arguments, the test binary's, and where to run), as a target to run or
-/// debug the same way Kuana's own Rust targets are.
-pub fn from_rust_analyzer(runnable: &serde_json::Value) -> Option<RunTarget> {
+/// debug the same way Kuana's own Rust targets are. Its paths are the
+/// server's: on a remote project, the host's (`reference` is the file asked about).
+pub fn from_rust_analyzer(runnable: &serde_json::Value, reference: &Path) -> Option<RunTarget> {
+    for_host(reference, || from_rust_analyzer_here(runnable, reference))
+}
+
+fn from_rust_analyzer_here(runnable: &serde_json::Value, reference: &Path) -> Option<RunTarget> {
     let args = runnable.get("args")?;
     let strings = |key: &str| -> Vec<String> {
         args.get(key).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default()
     };
     let (cargo, exe) = (strings("cargoArgs"), strings("executableArgs"));
     let subcommand = cargo.first()?.clone();
-    let cwd = ["cwd", "workspaceRoot"].iter().find_map(|k| args.get(*k).and_then(|v| v.as_str())).map(PathBuf::from)?;
+    let cwd = ["cwd", "workspaceRoot"].iter().find_map(|k| args.get(*k).and_then(|v| v.as_str())).map(|printed| crate::fs::from_host(reference, printed))?;
     let quote = |list: &[String]| list.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
     let mut command = format!("cargo {}", quote(&cargo));
     if !exe.is_empty() {
@@ -107,10 +112,29 @@ pub fn from_rust_analyzer(runnable: &serde_json::Value) -> Option<RunTarget> {
     })
 }
 
+thread_local! {
+    /// Commands being made for a remote host's POSIX shell (`for_host`).
+    static REMOTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes `f`'s commands for the shell where `path` is: a remote project's
+/// run on its host, a POSIX system, whatever this one is.
+pub fn for_host<T>(path: &Path, f: impl FnOnce() -> T) -> T {
+    let before = REMOTE.replace(crate::fs::is_remote(path));
+    let out = f();
+    REMOTE.set(before);
+    out
+}
+
+/// Whether commands are for PowerShell: on Windows, for a project here.
+fn powershell() -> bool {
+    cfg!(windows) && !REMOTE.get()
+}
+
 /// Quotes for the shell Run tabs use, when needed: PowerShell on Windows,
 /// else a POSIX shell.
 pub fn shell_quote(s: &str) -> String {
-    if cfg!(windows) { powershell_quote(s) } else { posix_quote(s) }
+    if powershell() { powershell_quote(s) } else { posix_quote(s) }
 }
 
 fn posix_quote(s: &str) -> String {
@@ -145,7 +169,9 @@ pub fn powershell_string(s: &str) -> String {
 
 /// Python's command. On Windows `python3` is the Microsoft Store's stub
 /// unless Python came from there, and a venv has no `python3.exe`.
-const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
+fn python() -> &'static str {
+    if powershell() { "python" } else { "python3" }
+}
 
 fn nearest_with(file: &Path, marker: &str) -> Option<PathBuf> {
     file.ancestors().skip(1).find(|d| d.join(marker).is_file_on_host()).map(Path::to_path_buf)
@@ -195,6 +221,10 @@ pub fn file_targets(language: Language, path: &Path, text: &str, tree: &Tree) ->
     if crate::scratch::is_scratch(path) {
         return crate::scratch::run_target(language, path, text.lines().count()).into_iter().collect();
     }
+    for_host(path, || file_targets_here(language, path, text, tree))
+}
+
+fn file_targets_here(language: Language, path: &Path, text: &str, tree: &Tree) -> Vec<RunTarget> {
     let root = tree.root_node();
     let mut out = Vec::new();
     match language {
@@ -305,16 +335,16 @@ fn c_targets(cpp: bool, path: &Path, text: &str, root: Node, out: &mut Vec<RunTa
 
 /// How to build and start a C/C++ program.
 #[derive(Debug, PartialEq)]
-struct NativePlan {
+pub(crate) struct NativePlan {
     /// Commands (a program and its arguments), in order.
-    build: Vec<Vec<String>>,
-    program: PathBuf,
+    pub build: Vec<Vec<String>>,
+    pub program: PathBuf,
     cwd: PathBuf,
     /// The CMake target, or the file.
     label: String,
 }
 
-fn native_plan(path: &Path, cpp: bool) -> Option<NativePlan> {
+pub(crate) fn native_plan(path: &Path, cpp: bool) -> Option<NativePlan> {
     match cmake_root(path) {
         Some(root) => cmake_plan(&root, path),
         None => single_file_plan(path, cpp),
@@ -416,14 +446,19 @@ fn cmakelists_target(root: &Path, path: &Path, build: &Path) -> Option<(String, 
 /// A file on its own: compiled with debug info (and compile_flags.txt's
 /// flags, which clangd reads too) into the temp folder.
 fn single_file_plan(path: &Path, cpp: bool) -> Option<NativePlan> {
-    let compiler = if cfg!(windows) {
+    let compiler = if powershell() {
         let clang = if cpp { "clang++" } else { "clang" };
         crate::lsp::servers::which(clang)?.to_string_lossy().into_owned()
     } else {
         (if cpp { "c++" } else { "cc" }).to_string()
     };
     let stem = path.file_stem()?.to_string_lossy().into_owned();
-    let program = std::env::temp_dir().join(format!("kuana-run-{stem}{}", std::env::consts::EXE_SUFFIX));
+    let name = format!("kuana-run-{stem}{}", if powershell() { std::env::consts::EXE_SUFFIX } else { "" });
+    // Where the compiler runs: a remote project's host has its own /tmp.
+    let program = match crate::fs::mount_of(path) {
+        Some(mount) => crate::fs::local_path(&mount, &format!("/tmp/{name}")),
+        None => std::env::temp_dir().join(name),
+    };
     let mut step = vec![compiler, "-g".into(), "-O0".into()];
     if cpp {
         step.push("-std=c++20".into());
@@ -447,7 +482,7 @@ fn single_file_plan(path: &Path, cpp: bool) -> Option<NativePlan> {
 pub fn chain(steps: &[Vec<String>], then: &[String]) -> String {
     let line = |argv: &[String]| argv.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
     let all: Vec<&[String]> = steps.iter().map(Vec::as_slice).chain(std::iter::once(then)).filter(|s| !s.is_empty()).collect();
-    if cfg!(windows) {
+    if powershell() {
         let mut out = String::new();
         for (i, argv) in all.iter().enumerate() {
             if i > 0 {
@@ -659,6 +694,7 @@ fn go_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>) {
 // ---- Python ----------------------------------------------------------------------
 
 fn python_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>) {
+    let python = python();
     let dir = path.parent().unwrap_or(path);
     let file = shell_quote(&path.to_string_lossy());
     // Test results name pytest's tests by file name and node path.
@@ -673,7 +709,7 @@ fn python_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>)
                 let ident = node_text(name, text);
                 if ident.starts_with("test") {
                     let debug = pytest(path, &[ident]);
-                    let test = target(format!("Test '{ident}'"), format!("{PYTHON} -m pytest -v {file}::{ident}"), dir, node, name, debug);
+                    let test = target(format!("Test '{ident}'"), format!("{python} -m pytest -v {file}::{ident}"), dir, node, name, debug);
                     out.push(testing(test, Framework::Pytest, key(&[ident])));
                 }
             }
@@ -684,7 +720,7 @@ fn python_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>)
                     continue;
                 }
                 let debug = pytest(path, &[class]);
-                let tests = target(format!("Tests in '{class}'"), format!("{PYTHON} -m pytest -v {file}::{class}"), dir, node, name, debug);
+                let tests = target(format!("Tests in '{class}'"), format!("{python} -m pytest -v {file}::{class}"), dir, node, name, debug);
                 out.push(testing(tests, Framework::Pytest, key(&[class])));
                 let Some(body) = node.child_by_field_name("body") else { continue };
                 let mut c = body.walk();
@@ -701,14 +737,14 @@ fn python_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>)
                     let m = node_text(mname, text);
                     if m.starts_with("test") {
                         let debug = pytest(path, &[class, m]);
-                        let test = target(format!("Test '{m}'"), format!("{PYTHON} -m pytest -v {file}::{class}::{m}"), dir, method, mname, debug);
+                        let test = target(format!("Test '{m}'"), format!("{python} -m pytest -v {file}::{class}::{m}"), dir, method, mname, debug);
                         out.push(testing(test, Framework::Pytest, key(&[class, m])));
                     }
                 }
             }
             "if_statement" if node_text(node, text).starts_with("if __name__") => {
                 let debug = Some(DebugSpec::Python { program: Some(path.to_path_buf()), module: None, args: Vec::new() });
-                out.push(target("Run file".into(), format!("{PYTHON} {file}"), dir, node, node, debug));
+                out.push(target("Run file".into(), format!("{python} {file}"), dir, node, node, debug));
             }
             _ => {}
         }
@@ -792,6 +828,10 @@ fn js_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>) {
 /// What the project can run: build tools found at its root, then the
 /// current file.
 pub fn project_targets(root: &Path, current: Option<(&Path, Language)>) -> Vec<RunTarget> {
+    for_host(root, || project_targets_here(root, current))
+}
+
+fn project_targets_here(root: &Path, current: Option<(&Path, Language)>) -> Vec<RunTarget> {
     let mut out = Vec::new();
     let mut add = |name: String, command: String, cwd: &Path, debug: Option<DebugSpec>| {
         out.push(RunTarget { name, command, cwd: cwd.to_path_buf(), row: None, rows: 0..0, debug, test: None });
@@ -879,7 +919,7 @@ pub fn project_targets(root: &Path, current: Option<(&Path, Language)>) -> Vec<R
     }
     if root.join("pyproject.toml").is_file_on_host() || root.join("pytest.ini").is_file_on_host() {
         let debug = Some(DebugSpec::Python { program: None, module: Some("pytest".into()), args: Vec::new() });
-        add("pytest".into(), format!("{PYTHON} -m pytest -v"), root, debug);
+        add("pytest".into(), format!("{} -m pytest -v", python()), root, debug);
     }
     if let Some((path, language)) = current {
         let file = shell_quote(&path.to_string_lossy());
@@ -888,7 +928,7 @@ pub fn project_targets(root: &Path, current: Option<(&Path, Language)>) -> Vec<R
         let (command, debug) = match language {
             Language::Python => {
                 let debug = DebugSpec::Python { program: Some(path.to_path_buf()), module: None, args: Vec::new() };
-                (Some(format!("{PYTHON} {file}")), Some(debug))
+                (Some(format!("{} {file}", python())), Some(debug))
             }
             Language::JavaScript => (Some(format!("node {file}")), node_debug("node", &[&path.to_string_lossy()])),
             Language::TypeScript | Language::Tsx => (Some(format!("npx tsx {file}")), node_debug("npx", &["tsx", &path.to_string_lossy()])),
@@ -1250,7 +1290,7 @@ mod tests {
         let py = "def test_one():\n    pass\n\nclass TestThing:\n    def test_two(self):\n        pass\n\nif __name__ == \"__main__\":\n    main()\n";
         let got = targets(Language::Python, Path::new("/p/t.py"), py);
         assert_eq!(got.iter().map(|t| t.0.as_str()).collect::<Vec<_>>(), ["Test 'test_one'", "Tests in 'TestThing'", "Test 'test_two'", "Run file"]);
-        assert_eq!(got[2].1, format!("{PYTHON} -m pytest -v /p/t.py::TestThing::test_two"));
+        assert_eq!(got[2].1, format!("{} -m pytest -v /p/t.py::TestThing::test_two", python()));
 
         let dir = temp_project(&[("package.json", "{\"devDependencies\": {\"vitest\": \"1\"}}"), ("a.test.ts", "")]);
         let ts = "describe('math', () => {\n  it('adds 1+1', () => {});\n});\n";
@@ -1267,7 +1307,7 @@ mod tests {
             "kind": "cargo",
             "args": { "workspaceRoot": "/w", "cargoArgs": ["test", "--package", "demo", "--bin", "demo"], "executableArgs": ["tests::doubles", "--exact"] },
         });
-        let target = from_rust_analyzer(&runnable).unwrap();
+        let target = from_rust_analyzer(&runnable, Path::new("/w/src/main.rs")).unwrap();
         assert_eq!(target.name, "test tests::doubles");
         assert_eq!(target.command, "cargo test --package demo --bin demo -- tests::doubles --exact");
         assert_eq!(target.cwd, PathBuf::from("/w"));

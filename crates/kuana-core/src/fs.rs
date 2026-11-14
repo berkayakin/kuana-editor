@@ -99,7 +99,7 @@ static ANY: AtomicBool = AtomicBool::new(false);
 
 /// The folder a host named `name` is mounted at.
 pub fn mount_root(name: &str) -> PathBuf {
-    let name: String = name.chars().map(|c| if c.is_alphanumeric() || "-_.@".contains(c) { c } else { '_' }).collect();
+    let name: String = name.chars().map(|c| if c.is_alphanumeric() || "-_.@+".contains(c) { c } else { '_' }).collect();
     if cfg!(windows) { PathBuf::from(format!(r"\\kuana-remote\{name}\")) } else { PathBuf::from("/kuana-remote").join(name) }
 }
 
@@ -163,6 +163,33 @@ pub fn local_path(mount: &Path, host_path: &str) -> PathBuf {
     for part in host_path.split('/').filter(|p| !p.is_empty()) {
         out.push(part);
     }
+    out
+}
+
+/// `text` (a command line, a variable's value) with the paths under `mount`
+/// in it as the host's own: `/kuana-remote/box/home/me/p` → `/home/me/p`
+/// (on Windows `\\kuana-remote\box\home\me\p` too). A path ends at a quote,
+/// whitespace or shell punctuation.
+pub fn host_text(mount: &Path, text: &str) -> String {
+    let prefix = mount.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(&prefix) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + prefix.len()..];
+        let end = after.find(|c: char| c.is_whitespace() || "'\"`;|&()<>,=:".contains(c)).unwrap_or(after.len());
+        let path = &after[..end];
+        if path.is_empty() {
+            out.push('/');
+        } else if path.starts_with(['/', '\\']) {
+            out.push_str(&if cfg!(windows) { path.replace('\\', "/") } else { path.to_string() });
+        } else {
+            // Another mount's name that starts the same (`box` in `box2`).
+            out.push_str(&rest[at..at + prefix.len() + end]);
+        }
+        rest = &after[end..];
+    }
+    out.push_str(rest);
     out
 }
 
@@ -523,6 +550,15 @@ mod tests {
     use std::{collections::HashMap, sync::Mutex};
 
     use super::*;
+
+    #[test]
+    fn mount_paths_in_text_become_the_hosts() {
+        let mount = mount_root("box");
+        let path = |p: &str| local_path(&mount, p).to_string_lossy().into_owned();
+        let text = format!("cd '{}' && PATH={}:$PATH {} --init-file={} {}2/x", path("/home/me/my dir"), path("/opt/bin"), path("/usr/bin/zsh"), path("/tmp/rc"), mount.to_string_lossy());
+        assert_eq!(host_text(&mount, &text), format!("cd '/home/me/my dir' && PATH=/opt/bin:$PATH /usr/bin/zsh --init-file=/tmp/rc {}2/x", mount.to_string_lossy()));
+        assert_eq!(host_text(&mount, &mount.to_string_lossy()), "/");
+    }
 
     /// A host keeping files in memory.
     #[derive(Default)]

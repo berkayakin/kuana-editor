@@ -55,13 +55,9 @@ impl TrustDialog {
     }
 }
 
-/// `~/…` for folders in the home folder.
+/// `~/…` for folders in the home folder; `box: ~/…` for a remote one.
 fn display(path: &Path) -> String {
-    match std::env::var_os("HOME").map(PathBuf::from).and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf)) {
-        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Some(rest) => format!("~/{}", rest.display()),
-        None => path.display().to_string(),
-    }
+    crate::clone_dialog::display_path(path)
 }
 
 impl Focusable for TrustDialog {

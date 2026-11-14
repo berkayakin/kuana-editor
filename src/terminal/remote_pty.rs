@@ -1,17 +1,14 @@
 //! A terminal whose shell runs on a remote host (`kuana-server`'s `pty/*`).
 //! alacritty's event loop polls a pty's file descriptor; here that's one end
-//! of a local socket pair. A thread writes the host's output into the other
-//! end (`ours`), another reads what the event loop writes there (keys) and
-//! sends it to the host. The shell's end comes on a second pair, alacritty's
+//! of a local socket pair (a Unix one, on Windows a loopback TCP one, which
+//! IOCP polls). A thread writes the host's output into the other end
+//! (`ours`), another reads what the event loop writes there (keys) and sends
+//! it to the host. The shell's end comes on a second pair, alacritty's
 //! child-event token, as a byte once all its output is in.
 
 use std::{
     io::{Read, Write},
     net::Shutdown,
-    os::{
-        fd::AsFd,
-        unix::{net::UnixStream, process::ExitStatusExt},
-    },
     sync::{Arc, Mutex, mpsc},
 };
 
@@ -22,17 +19,71 @@ use alacritty_terminal::{
 use kuana_core::remote::{RemoteHost, client::PtySinks};
 use polling::{Event, PollMode, Poller};
 
-/// alacritty's tokens on Unix (`tty::unix`, crate-private there).
+/// alacritty's tokens (`tty::unix`'s are crate-private).
+#[cfg(unix)]
 const READ_WRITE_TOKEN: usize = 0;
+#[cfg(windows)]
+const READ_WRITE_TOKEN: usize = alacritty_terminal::tty::windows::PTY_READ_WRITE_TOKEN;
+#[cfg(unix)]
 const CHILD_EVENT_TOKEN: usize = 1;
+#[cfg(windows)]
+const CHILD_EVENT_TOKEN: usize = alacritty_terminal::tty::windows::PTY_CHILD_EVENT_TOKEN;
+
+#[cfg(unix)]
+type Stream = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+type Stream = std::net::TcpStream;
+
+/// Two connected streams.
+#[cfg(unix)]
+fn pair() -> std::io::Result<(Stream, Stream)> {
+    Stream::pair()
+}
+
+/// Two connected loopback streams: the accepted end must be the one just
+/// connected, not another local program that was quicker.
+#[cfg(windows)]
+fn pair() -> std::io::Result<(Stream, Stream)> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let ours = Stream::connect(listener.local_addr()?)?;
+    loop {
+        let (theirs, from) = listener.accept()?;
+        if from == ours.local_addr()? {
+            ours.set_nodelay(true)?;
+            theirs.set_nodelay(true)?;
+            return Ok((theirs, ours));
+        }
+    }
+}
+
+/// What the poller takes to forget a stream.
+#[cfg(unix)]
+fn source(stream: &Stream) -> std::os::fd::BorrowedFd<'_> {
+    std::os::fd::AsFd::as_fd(stream)
+}
+#[cfg(windows)]
+fn source(stream: &Stream) -> std::os::windows::io::BorrowedSocket<'_> {
+    std::os::windows::io::AsSocket::as_socket(stream)
+}
+
+/// A wait status for an exit code.
+#[cfg(unix)]
+fn exit_status(code: i32) -> std::process::ExitStatus {
+    // The code in the high byte (a signal: none).
+    std::os::unix::process::ExitStatusExt::from_raw((code & 0xff) << 8)
+}
+#[cfg(windows)]
+fn exit_status(code: i32) -> std::process::ExitStatus {
+    std::os::windows::process::ExitStatusExt::from_raw(code as u32)
+}
 
 pub struct RemotePty {
     host: Arc<RemoteHost>,
     id: u64,
     /// The event loop's end.
-    stream: UnixStream,
+    stream: Stream,
     /// Readable once the shell ended.
-    ended: UnixStream,
+    ended: Stream,
     code: Arc<Mutex<Option<Option<i32>>>>,
 }
 
@@ -44,8 +95,8 @@ enum Out {
 impl RemotePty {
     /// Starts `shell` (host paths) in `cwd` there.
     pub fn start(host: Arc<RemoteHost>, shell: &[String], cwd: Option<&str>, env: &[(String, String)]) -> std::io::Result<RemotePty> {
-        let (stream, ours) = UnixStream::pair()?;
-        let (ended, ended_ours) = UnixStream::pair()?;
+        let (stream, ours) = pair()?;
+        let (ended, ended_ours) = pair()?;
         stream.set_nonblocking(true)?;
         ended.set_nonblocking(true)?;
         let code = Arc::new(Mutex::new(None));
@@ -106,8 +157,8 @@ impl Drop for RemotePty {
 }
 
 impl EventedReadWrite for RemotePty {
-    type Reader = UnixStream;
-    type Writer = UnixStream;
+    type Reader = Stream;
+    type Writer = Stream;
 
     unsafe fn register(&mut self, poller: &Arc<Poller>, mut interest: Event, mode: PollMode) -> std::io::Result<()> {
         interest.key = READ_WRITE_TOKEN;
@@ -125,15 +176,15 @@ impl EventedReadWrite for RemotePty {
     }
 
     fn deregister(&mut self, poller: &Arc<Poller>) -> std::io::Result<()> {
-        poller.delete(self.stream.as_fd())?;
-        poller.delete(self.ended.as_fd())
+        poller.delete(source(&self.stream))?;
+        poller.delete(source(&self.ended))
     }
 
-    fn reader(&mut self) -> &mut UnixStream {
+    fn reader(&mut self) -> &mut Stream {
         &mut self.stream
     }
 
-    fn writer(&mut self) -> &mut UnixStream {
+    fn writer(&mut self) -> &mut Stream {
         &mut self.stream
     }
 }
@@ -144,8 +195,7 @@ impl EventedPty for RemotePty {
         match self.ended.read(&mut byte) {
             Ok(1) => {
                 let code = self.code.lock().unwrap_or_else(|e| e.into_inner()).take().flatten();
-                // A wait status: the code in the high byte (a signal: none).
-                Some(ChildEvent::Exited(code.map(|c| std::process::ExitStatus::from_raw((c & 0xff) << 8))))
+                Some(ChildEvent::Exited(code.map(exit_status)))
             }
             _ => None,
         }

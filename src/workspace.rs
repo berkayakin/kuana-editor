@@ -158,6 +158,12 @@ actions!(
         OpenFolderInThisWindow,
         /// A project on another machine over SSH (`workspace/remote.rs`).
         ConnectToHost,
+        /// A project in a WSL distribution (Windows).
+        ConnectToWsl,
+        /// A project in a running container.
+        AttachToContainer,
+        /// The project in its dev container (`.devcontainer/devcontainer.json`).
+        OpenInDevContainer,
         RecentProjects,
         Save,
         SaveAs,
@@ -378,6 +384,8 @@ enum ToastButton {
     InstallExtension(&'static str),
     /// Connect a remote project's host again (`workspace/remote.rs`).
     Reconnect,
+    /// Open the project in its dev container (`offer_dev_container`).
+    OpenInDevContainer,
 }
 
 impl ToastButton {
@@ -388,6 +396,7 @@ impl ToastButton {
             ToastButton::ShowTestResults => "Show Results",
             ToastButton::InstallExtension(_) => "Install",
             ToastButton::Reconnect => "Reconnect",
+            ToastButton::OpenInDevContainer => "Open in Container",
         }
     }
 }

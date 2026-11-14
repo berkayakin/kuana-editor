@@ -22,7 +22,7 @@ use crate::{
     theme::{self, config_dir},
     workspace::{
         CloseAllTabs, CloseOtherTabs, CloseTab, CloseTerminal, NextPane, PreviousPane, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPaneDown, Rerun, RunConfiguration, StopRun, SplitDown, SplitRight, TogglePinTab, DecreaseFontSize, NewTerminal, ToggleTerminal, FileStructure, Find, IncreaseFontSize, OpenKeymap, OpenSettings, ResetFontSize, RestartLanguageServer, CopilotSignIn, CopilotSignOut, FindAction, FindInFiles, FindNext, FindPrevious, GoToFile, GoToLine, OpenSettingsFile, SwitchHeaderSource,
-        CloseWindow, MinimizeWindow, ZoomWindow, NewFile, NewWindow, NextTab, OpenFile, OpenFolder, OpenFolderInThisWindow, ConnectToHost,
+        CloseWindow, MinimizeWindow, ZoomWindow, NewFile, NewWindow, NextTab, OpenFile, OpenFolder, OpenFolderInThisWindow, ConnectToHost, ConnectToWsl, AttachToContainer, OpenInDevContainer,
         PrevTab, Quit, RecentFiles, RecentProjects, RecentTab, RecentTabBack, NavigateBack, NavigateForward, Replace,
         GitBranches, GitStash, ManageRemotes, GitClone, GitFetch, GitInit, GitPull, GitPush, GitSync, GitUndoCommit, OpenRemote, OpenThemesFolder, OpenSnippetsFolder, ReloadThemes, ReplaceInFiles,
         Save, SaveAs, SearchEverywhere, SelectTheme, ShowCommit, ShowFileHistory, ToggleCommit, ToggleGitLog, ToggleProblems,
@@ -790,7 +790,8 @@ pub fn action_entries() -> Vec<ActionEntry> {
     fn a(name: &'static str, action: impl Action) -> ActionEntry {
         ActionEntry { name, action: Box::new(action) }
     }
-    vec![
+    let windows_only = cfg!(windows).then(|| a("Connect to WSL…", ConnectToWsl));
+    let mut entries = vec![
         a("Search Everywhere", SearchEverywhere),
         a("Find", Find),
         a("Replace", Replace),
@@ -883,6 +884,8 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Open Folder…", OpenFolder),
         a("Open Folder in This Window…", OpenFolderInThisWindow),
         a("Connect to SSH Host…", ConnectToHost),
+        a("Attach to Running Container…", AttachToContainer),
+        a("Open in Dev Container", OpenInDevContainer),
         a("Recent Projects…", RecentProjects),
         a("New Window", NewWindow),
         a("Close Window", CloseWindow),
@@ -994,7 +997,9 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Open Snippets Folder", OpenSnippetsFolder),
         a("Reload Themes", ReloadThemes),
         a("Quit", Quit),
-    ]
+    ];
+    entries.extend(windows_only);
+    entries
 }
 
 // ---- User keymap -----------------------------------------------------------------

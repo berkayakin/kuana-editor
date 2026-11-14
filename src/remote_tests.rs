@@ -125,3 +125,25 @@ fn language_servers_run_on_the_host(cx: &mut TestAppContext) {
     client::unmount(&root);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Run targets for a remote project: rust-analyzer's places (the host's)
+/// come back under the mount, and a lone C file builds into the host's /tmp.
+#[test]
+fn run_targets_point_at_the_host() {
+    let dir = temp("run");
+    std::fs::write(dir.join("hello.c"), "int main(void) { return 0; }\n").unwrap();
+    let (root, host) = connect("app-remote-run");
+    let project = mounted(&root, &dir);
+    let runnable = serde_json::json!({
+        "label": "run demo",
+        "args": { "workspaceRoot": dir.to_string_lossy(), "cargoArgs": ["run", "--bin", "demo"], "executableArgs": [] },
+    });
+    let target = crate::run::from_rust_analyzer(&runnable, &project.join("src/main.rs")).unwrap();
+    assert_eq!(target.cwd, project);
+    let plan = crate::run::native_plan(&project.join("hello.c"), false).unwrap();
+    assert_eq!(plan.program, crate::fs::local_path(&root, "/tmp/kuana-run-hello"));
+    assert_eq!(crate::fs::host_text(&root, &plan.build[0].join(" ")), format!("cc -g -O0 {}/hello.c -o /tmp/kuana-run-hello", dir.display()));
+    host.disconnect();
+    client::unmount(&root);
+    let _ = std::fs::remove_dir_all(&dir);
+}
