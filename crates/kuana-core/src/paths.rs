@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 /// `std::fs::canonicalize`, minus the `\\?\` prefix on Windows wherever the
 /// path means the same without it (see `plain`).
 pub fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+    // A remote host's (its paths have no such prefix).
+    if crate::fs::is_remote(path) {
+        return crate::fs::canonicalize(path);
+    }
     let real = std::fs::canonicalize(path)?;
     if !cfg!(windows) {
         return Ok(real);

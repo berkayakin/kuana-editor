@@ -18,7 +18,22 @@ pub struct FsChange {
 }
 
 pub struct Watcher {
-    inner: notify::RecommendedWatcher,
+    inner: Inner,
+}
+
+enum Inner {
+    Local(notify::RecommendedWatcher),
+    /// A remote host's (`crate::fs` mounts): the server watches, changes
+    /// come back as notifications, with mount paths.
+    Remote { host: std::sync::Arc<dyn crate::fs::Host>, id: u64 },
+}
+
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        if let Inner::Remote { host, id } = &self.inner {
+            host.unwatch(*id);
+        }
+    }
 }
 
 impl Watcher {
@@ -27,6 +42,18 @@ impl Watcher {
     /// rescan), the batch holds `root` itself: anything may have changed.
     pub fn new(root: &Path) -> notify::Result<(Watcher, UnboundedReceiver<Vec<FsChange>>)> {
         let (tx, rx) = unbounded();
+        if let (Some((host, path)), Some(mount)) = (crate::fs::remote(root), crate::fs::mount_of(root)) {
+            let sink = Box::new(move |changes: Vec<(String, bool)>| {
+                let changes = changes.into_iter().map(|(path, structural)| FsChange { path: crate::fs::local_path(&mount, &path), structural }).collect();
+                let _ = tx.unbounded_send(changes);
+            });
+            let id = match host.watch(&path, sink) {
+                Some(Ok(id)) => id,
+                Some(Err(err)) => return Err(notify::Error::io(err)),
+                None => return Err(notify::Error::generic("this host can't watch")),
+            };
+            return Ok((Watcher { inner: Inner::Remote { host, id } }, rx));
+        }
         let everything = root.to_path_buf();
         let mut inner = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             let event = match event {
@@ -52,12 +79,18 @@ impl Watcher {
             }
         })?;
         inner.watch(root, RecursiveMode::Recursive)?;
-        Ok((Watcher { inner }, rx))
+        Ok((Watcher { inner: Inner::Local(inner) }, rx))
     }
 
     /// Also watches `path` (a repository's `.git` outside the project folder).
     pub fn add(&mut self, path: &Path) -> notify::Result<()> {
-        self.inner.watch(path, RecursiveMode::Recursive)
+        match &mut self.inner {
+            Inner::Local(inner) => inner.watch(path, RecursiveMode::Recursive),
+            Inner::Remote { host, id } => {
+                let (_, host_path) = crate::fs::remote(path).ok_or_else(|| notify::Error::generic("not on the watched host"))?;
+                host.watch_add(*id, &host_path).map_err(notify::Error::io)
+            }
+        }
     }
 }
 

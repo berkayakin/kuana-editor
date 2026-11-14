@@ -317,7 +317,7 @@ pub fn is_available() -> bool {
 pub fn discover(path: &Path) -> Option<PathBuf> {
     let dir = if path.is_dir_on_host() { path } else { path.parent()? };
     let out = run(dir, &["rev-parse", "--show-toplevel"]).ok()?;
-    let root = PathBuf::from(out.trim());
+    let root = crate::fs::from_host(dir, out.trim());
     Some(crate::paths::canonicalize(&root).unwrap_or(root))
 }
 
@@ -1014,7 +1014,7 @@ fn fetched_since(root: &Path, time: SystemTime) -> bool {
     let Ok(path) = run(root, &["rev-parse", "--git-path", "FETCH_HEAD"]) else { return false };
     // Some file systems keep modification times to the second or two.
     let time = time - Duration::from_secs(2);
-    crate::fs::metadata(root.join(path.trim())).and_then(|m| m.modified()).is_ok_and(|m| m >= time)
+    crate::fs::metadata(root.join(crate::fs::from_host(root, path.trim()))).and_then(|m| m.modified()).is_ok_and(|m| m >= time)
 }
 
 pub fn fetch(root: &Path) -> Result<String, String> {
@@ -1883,7 +1883,7 @@ impl RepoState {
 /// The `.git` directory (worktrees and submodules point elsewhere).
 pub fn git_dir(root: &Path) -> Option<PathBuf> {
     let out = run(root, &["rev-parse", "--absolute-git-dir"]).ok()?;
-    Some(PathBuf::from(out.trim()))
+    Some(crate::fs::from_host(root, out.trim()))
 }
 
 pub fn repo_state(root: &Path) -> Option<RepoState> {

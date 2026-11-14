@@ -45,6 +45,25 @@ pub trait Host: Send + Sync {
     fn connected(&self) -> bool {
         true
     }
+
+    /// A project's files under `path` with whether each is ignored, as
+    /// `project::scan_files` finds them there (None: this host can't).
+    fn scan(&self, _path: &str) -> Option<io::Result<Vec<(String, bool)>>> {
+        None
+    }
+
+    /// Watches `path` recursively; `sink` gets changed paths (the host's)
+    /// and whether entries came or went. Returns an id for `unwatch`.
+    #[allow(clippy::type_complexity)]
+    fn watch(&self, _path: &str, _sink: Box<dyn Fn(Vec<(String, bool)>) + Send + Sync>) -> Option<io::Result<u64>> {
+        None
+    }
+
+    fn watch_add(&self, _id: u64, _path: &str) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    fn unwatch(&self, _id: u64) {}
 }
 
 /// What a host says about a file.
@@ -145,6 +164,16 @@ pub fn local_path(mount: &Path, host_path: &str) -> PathBuf {
         out.push(part);
     }
     out
+}
+
+/// A path a program printed (Git's `--show-toplevel`, a compiler's error),
+/// as Kuana knows it: on the host `reference` is on, an absolute path is
+/// under that mount; a relative one, or anything here, as it is.
+pub fn from_host(reference: &Path, printed: &str) -> PathBuf {
+    match mount_of(reference) {
+        Some(mount) if printed.starts_with('/') => local_path(&mount, printed),
+        _ => PathBuf::from(printed),
+    }
 }
 
 fn not_connected() -> io::Error {

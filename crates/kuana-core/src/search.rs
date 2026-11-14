@@ -184,6 +184,10 @@ const BATCH_EVERY: Duration = Duration::from_millis(50);
 
 /// Every file under `root`, honoring .gitignore. Paths are absolute.
 pub fn project_files(root: &Path) -> Vec<PathBuf> {
+    // A remote host lists them there, with its ignore rules.
+    if crate::fs::is_remote(root) {
+        return crate::project::scan_files(root).into_iter().filter(|(_, ignored)| !ignored).map(|(path, _)| path).collect();
+    }
     let mut files: Vec<PathBuf> = walker(root)
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
@@ -293,10 +297,10 @@ fn search_file(root: &Path, path: &Path, query: &SearchQuery, overrides: &HashMa
     let contents: Arc<str> = match overrides.get(path) {
         Some(text) => text.clone(),
         None => {
-            if std::fs::metadata(path).map(|m| m.len() > MAX_FILE_SIZE).unwrap_or(true) {
+            if crate::fs::metadata(path).map(|m| m.len() > MAX_FILE_SIZE).unwrap_or(true) {
                 return Vec::new();
             }
-            let Ok(bytes) = std::fs::read(path) else { return Vec::new() };
+            let Ok(bytes) = crate::fs::read(path) else { return Vec::new() };
             if bytes.iter().take(8000).any(|b| *b == 0) {
                 return Vec::new(); // binary
             }
