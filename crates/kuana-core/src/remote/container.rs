@@ -130,7 +130,7 @@ pub fn up(dir: &Path, options: &UpOptions) -> Result<Up, String> {
             docker(&["start", &id], "Couldn't start the dev container")?;
             lifecycle(options, &id, user.as_deref(), &workspace, &value, &["postStartCommand"])?;
         }
-        return Ok(Up { container: id, user, workspace, warnings, forward_ports: forward_ports(&value) });
+        return Ok(Up { container: name_of(&options.docker, &id), user, workspace, warnings, forward_ports: forward_ports(&value) });
     }
     if value.get("dockerComposeFile").is_some() {
         return Err("This dev container uses Docker Compose, which needs the devcontainer CLI (npm install -g @devcontainers/cli).".into());
@@ -162,7 +162,10 @@ pub fn up(dir: &Path, options: &UpOptions) -> Result<Up, String> {
     };
 
     // The container: the project mounted, kept running.
-    let mut args = vec!["run".to_string(), "-d".into()];
+    // A name people can read (Kuana shows it), the same for this folder and configuration.
+    let base = value.get("name").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| basename.clone());
+    let name = format!("{}-{:06x}", slug(&base), fnv(format!("{}\0{}", dir.display(), config.display()).as_bytes()) & 0xff_ffff);
+    let mut args = vec!["run".to_string(), "-d".into(), "--name".into(), name.clone()];
     for label in &labels {
         args.extend(["--label".to_string(), label.clone()]);
     }
@@ -193,7 +196,7 @@ pub fn up(dir: &Path, options: &UpOptions) -> Result<Up, String> {
     let id: String = id.trim().chars().take(12).collect();
     (options.progress)("Setting up the dev container…");
     lifecycle(options, &id, user.as_deref(), &workspace, &value, &["onCreateCommand", "updateContentCommand", "postCreateCommand", "postStartCommand"])?;
-    Ok(Up { container: id, user, workspace, warnings, forward_ports: forward_ports(&value) })
+    Ok(Up { container: name, user, workspace, warnings, forward_ports: forward_ports(&value) })
 }
 
 fn up_with_cli(cli: &Path, dir: &Path, config: &Path, options: &UpOptions) -> Result<Up, String> {
@@ -212,7 +215,7 @@ fn up_with_cli(cli: &Path, dir: &Path, config: &Path, options: &UpOptions) -> Re
     let field = |key: &str| result.as_ref().and_then(|r| r.get(key)).and_then(Value::as_str).map(str::to_string);
     match field("outcome").as_deref() {
         Some("success") => Ok(Up {
-            container: field("containerId").map(|id| id.chars().take(12).collect()).ok_or("devcontainer up named no container")?,
+            container: field("containerId").map(|id| name_of(&options.docker, &id)).ok_or("devcontainer up named no container")?,
             user: field("remoteUser"),
             workspace: field("remoteWorkspaceFolder").ok_or("devcontainer up named no workspace folder")?,
             warnings: Vec::new(),
@@ -257,6 +260,29 @@ fn lifecycle(options: &UpOptions, id: &str, user: Option<&str>, workspace: &str,
         }
     }
     Ok(())
+}
+
+/// A container's name (what Kuana connects to and shows), else its short id.
+fn name_of(docker: &str, id: &str) -> String {
+    run(docker, &["inspect", "--format", "{{.Name}}", id], "")
+        .ok()
+        .map(|name| name.trim().trim_start_matches('/').to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| id.chars().take(12).collect())
+}
+
+/// `My App` → `my-app`: what Docker takes in a name.
+fn slug(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+            out.push(c);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let out: String = out.trim_matches(['-', '_', '.']).chars().take(30).collect();
+    if out.is_empty() { "devcontainer".into() } else { out }
 }
 
 /// Runs docker; its output, or its error.
@@ -330,6 +356,13 @@ mod tests {
     fn only_the_containers_own_ports_are_forwarded() {
         let value = serde_json::json!({ "forwardPorts": [3000, "8080", "db:5432", 0, 70000] });
         assert_eq!(forward_ports(&value), [3000, 8080]);
+    }
+
+    #[test]
+    fn container_names_are_readable() {
+        assert_eq!(slug("My App (Python 3)"), "my-app-python-3");
+        assert_eq!(slug("---"), "devcontainer");
+        assert_eq!(slug("web.api_v2"), "web.api_v2");
     }
 
     #[test]
