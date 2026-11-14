@@ -423,6 +423,8 @@ pub struct EditorSettings {
     pub linked_editing: Option<bool>,
     /// A swatch before each color in CSS (and from language servers), opening a picker.
     pub document_colors: Option<bool>,
+    /// The language server's semantic tokens over tree-sitter's colors.
+    pub semantic_tokens: Option<bool>,
     /// The document in miniature at the editor's right edge, in place of the
     /// scrollbar (off by default).
     pub minimap: Option<bool>,
@@ -452,6 +454,7 @@ impl EditorSettings {
             inline_values: self.inline_values.or(base.inline_values),
             linked_editing: self.linked_editing.or(base.linked_editing),
             document_colors: self.document_colors.or(base.document_colors),
+            semantic_tokens: self.semantic_tokens.or(base.semantic_tokens),
             minimap: self.minimap.or(base.minimap),
             syntax_errors: self.syntax_errors.or(base.syntax_errors),
             edit_predictions: self.edit_predictions.or(base.edit_predictions),
@@ -535,6 +538,7 @@ pub const EDITOR_KEYS: &[&str] = &[
     "inline_values",
     "linked_editing",
     "document_colors",
+    "semantic_tokens",
     "minimap",
     "syntax_errors",
     "edit_predictions",
@@ -558,6 +562,7 @@ pub struct FileSettings {
     pub inline_values: bool,
     pub linked_editing: bool,
     pub document_colors: bool,
+    pub semantic_tokens: bool,
     pub minimap: bool,
     pub syntax_errors: bool,
     pub edit_predictions: bool,
@@ -808,6 +813,7 @@ impl Settings {
             "inline_values" => self.editor.inline_values.is_some(),
             "linked_editing" => self.editor.linked_editing.is_some(),
             "document_colors" => self.editor.document_colors.is_some(),
+            "semantic_tokens" => self.editor.semantic_tokens.is_some(),
             "minimap" => self.editor.minimap.is_some(),
             "syntax_errors" => self.editor.syntax_errors.is_some(),
             "edit_predictions" => self.editor.edit_predictions.is_some(),
@@ -948,6 +954,7 @@ impl Settings {
             inline_values: None,
             linked_editing: None,
             document_colors: None,
+            semantic_tokens: None,
             minimap: None,
             syntax_errors: None,
             edit_predictions: None,
@@ -969,6 +976,7 @@ impl Settings {
             inline_values: s.inline_values.unwrap_or(true),
             linked_editing: s.linked_editing.unwrap_or(true),
             document_colors: s.document_colors.unwrap_or(true),
+            semantic_tokens: s.semantic_tokens.unwrap_or(true),
             minimap: s.minimap.unwrap_or(false),
             syntax_errors: s.syntax_errors.unwrap_or(true),
             edit_predictions: s.edit_predictions.unwrap_or(true),
@@ -1180,6 +1188,9 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // "linked_editing": true,
   // A swatch before each color in CSS (and colors from language servers); click it to pick another.
   // "document_colors": true,
+  // The language server's colors over the syntax colors (types, parameters, macros,
+  // mutable variables underlined), for servers that have them.
+  // "semantic_tokens": true,
   // The document in miniature at the editor's right edge, in place of the
   // scrollbar, and its width in pixels.
   // "minimap": false,

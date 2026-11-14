@@ -133,8 +133,7 @@ says what's planned):
   no chat or agent panel; agents like Claude Code or Codex run in the terminal.
 - **Languages**: 13 have highlighting built in; others come from [extensions](docs/extensions.md),
   but there's none yet for C/C++, Kotlin or Swift.
-- **Editing**: no semantic highlighting from language servers, no Emmet, no spell checking;
-  ESLint runs on open and save, not as you type.
+- **Editing**: no Emmet, no spell checking; ESLint runs on open and save, not as you type.
 - **Git**: commits can be reworded, squashed and dropped, not reordered or split; the log shows
   the latest 3,000 commits.
 - **Debugger**: no hit counts or exception breakpoint options. **Vim mode**: no registers other
@@ -151,8 +150,8 @@ support, features. Good places to start:
 - **Make a theme or an extension.** Neither needs any Rust: see [Themes](docs/themes.md) and
   [Extensions](docs/extensions.md).
 - **Pick an open [issue](https://github.com/berkayakin/kuana-editor/issues)**, or take something
-  from the [roadmap](docs/roadmap.md): reordering commits, Vim registers and macros, semantic
-  tokens, a C/C++ extension.
+  from the [roadmap](docs/roadmap.md): reordering commits, Vim registers and macros, Emmet, a C/C++
+  extension.
 
 The [contributing guide](CONTRIBUTING.md) covers building, the checks a change has to pass and
 the conventions the code follows; [Architecture](docs/architecture.md) maps the code.

@@ -419,6 +419,8 @@ impl Editor {
         self.schedule_inlay_hints(cx);
         self.schedule_code_lenses(cx);
         self.schedule_colors(cx);
+        self.semantic_due();
+        cx.notify();
     }
 
     /// The document's servers that are up, the main one first. Not
@@ -1295,6 +1297,7 @@ impl Editor {
         self.lsp.view = Some(lines);
         self.want_inlay_hints(cx);
         self.want_code_lenses(cx);
+        self.want_semantic_tokens(cx);
     }
 
     /// The lines whose hints and lens titles are wanted: the ones shown and
@@ -2247,6 +2250,45 @@ mod tests {
         });
         editor.update(cx, |e, cx| e.run_code_lens(lens, cx));
         assert_eq!(*events.borrow(), [("lens lens".to_string(), 1)]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn semantic_tokens_color_over_the_syntax(cx: &mut TestAppContext) {
+        if crate::lsp::servers::which("python3").is_none() {
+            return;
+        }
+        cx.executor().allow_parking();
+        crate::trust::set_trust_all(true);
+        let dir = std::env::temp_dir().join(format!("kuana-lsp-semantic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.rs");
+        let text = "let mut count = make!();\n";
+        std::fs::write(&path, text).unwrap();
+        let store = cx.new(|_| {
+            let mut store = LspStore::new();
+            store.test_specs = Some(vec![fake_server("semantic", "")]);
+            store
+        });
+        let editor: Entity<Editor> = cx.new(|cx| Editor::new(Document::open(&path).unwrap(), cx));
+        store.update(cx, |s, cx| s.register(&editor, cx));
+        wait_for(cx, "the tokens", |cx| {
+            editor.update(cx, |e, cx| e.want_semantic_tokens(cx));
+            cx.executor().advance_clock(std::time::Duration::from_millis(300));
+            editor.read_with(cx, |e, cx| e.doc.read(cx).semantic_generation() > 0)
+        });
+        let names: Vec<(String, &str)> = editor.update(cx, |e, cx| {
+            e.visible_highlights(0, 1, 0, 1, cx).iter().map(|(r, h)| (text[r.clone()].to_string(), h.name())).collect()
+        });
+        assert!(names.contains(&("count".to_string(), "variable.mutable")), "{names:?}");
+        // (Its `!` is a macro to tree-sitter too: one span.)
+        assert!(names.iter().any(|(t, h)| t.starts_with("make") && *h == "function.macro"), "{names:?}");
+        // Tree-sitter's colors stay where the server says nothing it knows (`let`, the brace).
+        assert!(names.iter().any(|(t, h)| t == "let" && *h == "keyword"), "{names:?}");
+        // Off: tree-sitter alone.
+        editor.update(cx, |e, _| e.file_settings.semantic_tokens = false);
+        let names: Vec<&str> = editor.update(cx, |e, cx| e.visible_highlights(0, 1, 0, 1, cx).iter().map(|(_, h)| h.name()).collect());
+        assert!(!names.contains(&"variable.mutable"), "{names:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

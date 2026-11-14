@@ -17,6 +17,7 @@ mod minimap;
 mod prediction;
 mod run;
 mod snippet;
+mod semantic;
 mod sticky;
 mod transform;
 mod unloaded;
@@ -24,6 +25,15 @@ mod vim;
 
 pub use bookmarks::EditorBookmarksChanged;
 pub use debug_values::{EditorDebugChildren, EditorEvaluate};
+
+/// The semantic token types and modifiers Kuana tells servers it knows.
+pub fn semantic_token_types() -> &'static [&'static str] {
+    semantic::TOKEN_TYPES
+}
+
+pub fn semantic_token_modifiers() -> &'static [&'static str] {
+    semantic::TOKEN_MODIFIERS
+}
 pub use excerpt::ExcerptEvent;
 pub use format::FormatError;
 pub use lsp::EditorLspEvent;
@@ -402,6 +412,10 @@ pub struct Editor {
     colors_asked: bool,
     color_picker: Option<colors::ColorPicker>,
     color_hits: Vec<(Bounds<Pixels>, usize)>,
+    /// Semantic tokens: the document stamp last asked for, and the request
+    /// (`editor/semantic.rs`).
+    semantic_asked: Option<(u64, u64)>,
+    semantic_task: Option<Task<()>>,
     /// The tag names being edited together (`editor/linked.rs`), valid while
     /// the document is at `linked_version`.
     linked: Option<(Range<usize>, Range<usize>)>,
@@ -465,7 +479,7 @@ pub struct Editor {
     /// The carets' bracket pairs, for a tree version and caret offsets.
     bracket_cache: Option<((u64, Vec<usize>), Arc<Vec<Range<usize>>>)>,
     /// Highlights of what was on screen: for a tree version, language and ranges.
-    highlight_cache: Option<((u64, crate::syntax::Language, Vec<Range<usize>>), Arc<Vec<(Range<usize>, crate::syntax::Highlight)>>)>,
+    highlight_cache: Option<((u64, crate::syntax::Language, Vec<Range<usize>>, u64), Arc<Vec<(Range<usize>, crate::syntax::Highlight)>>)>,
     /// Fold regions for a (version, tab size, language).
     fold_regions: derived::Derived<(u64, usize, crate::syntax::Language), Vec<crate::fold::FoldRegion>>,
     /// `⋯` placeholders on screen last frame, for clicks: (bounds, fold start).
@@ -596,6 +610,8 @@ impl Editor {
             colors_asked: false,
             color_picker: None,
             color_hits: Vec::new(),
+            semantic_asked: None,
+            semantic_task: None,
             marked_range: None,
             indent_unit: String::new(),
             tab_size: file_settings.tab_size,
@@ -1213,6 +1229,7 @@ impl Editor {
         self.schedule_inlay_hints(cx);
         self.schedule_code_lenses(cx);
         self.schedule_colors(cx);
+        self.semantic_due();
         cx.notify();
     }
 
@@ -2390,14 +2407,25 @@ impl Editor {
         if let Some(r) = ranges.last_mut().filter(|_| first_row < last_row) {
             r.end = (self.doc.read(cx).line_start(last_row - 1) + self.shown_columns(last_row - 1, first_drow, last_drow, cx).end).max(r.start);
         }
-        let key = (self.doc.read(cx).tree_version(), self.doc.read(cx).language, ranges);
+        let semantic = if self.semantic_on(cx) { self.doc.read(cx).semantic_generation() } else { 0 };
+        let key = (self.doc.read(cx).tree_version(), self.doc.read(cx).language, ranges, semantic);
         if let Some((k, highlights)) = &self.highlight_cache
             && *k == key
         {
             return highlights.clone();
         }
-        let syntax = self.doc.read(cx).syntax();
-        let highlights: Arc<Vec<_>> = Arc::new(key.2.iter().flat_map(|r| syntax.highlights(self.doc.read(cx).rope(), r.clone())).collect());
+        let doc = self.doc.read(cx);
+        let syntax = doc.syntax();
+        // The server's tokens over tree-sitter's spans (`editor/semantic.rs`).
+        let highlights: Arc<Vec<_>> = Arc::new(
+            key.2
+                .iter()
+                .flat_map(|r| {
+                    let spans = syntax.highlights(doc.rope(), r.clone());
+                    if semantic == 0 { spans } else { semantic::overlay(&spans, doc.semantic_in(r.clone())) }
+                })
+                .collect(),
+        );
         self.highlight_cache = Some((key, highlights.clone()));
         highlights
     }
@@ -4138,8 +4166,11 @@ impl Editor {
                 let linked = self.lsp.link.as_ref().is_some_and(|l| l.start <= abs && abs < l.end);
                 let underline = if linked {
                     Some(UnderlineStyle { thickness: px(1.), color: Some(theme.accent.into()), wavy: false })
+                } else if let Some(sev) = severity {
+                    Some(UnderlineStyle { thickness: px(1.), color: Some(severity_color(&theme, sev)), wavy: true })
                 } else {
-                    severity.map(|sev| UnderlineStyle { thickness: px(1.), color: Some(severity_color(&theme, sev)), wavy: true })
+                    // A mutable variable (semantic tokens), as VS Code and JetBrains underline it.
+                    semantic::is_mutable(kind).then(|| UnderlineStyle { thickness: px(1.), color: Some(theme.highlight_color(kind).alpha(0.6)), wavy: false })
                 };
                 let mut color = theme.highlight_color(kind);
                 if todos.iter().any(|r| r.start <= abs && abs < r.end) {

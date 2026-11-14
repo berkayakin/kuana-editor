@@ -274,6 +274,13 @@ pub struct Document {
     /// (`Editor::inlays`).
     swatches: Vec<InlayHint>,
     hints_and_swatches: Vec<InlayHint>,
+    /// A language server's semantic tokens (`editor/semantic.rs`), sorted,
+    /// shifted by edits (a token an edit touches goes) until the next answer;
+    /// `semantic_generation` counts the answers, `semantic_refreshes` the
+    /// server's word that they changed.
+    semantic: Arc<Vec<(Range<usize>, crate::syntax::Highlight)>>,
+    semantic_generation: u64,
+    semantic_refreshes: u64,
     /// The chunks of lines (the editor's `HINT_CHUNK`s) whose hints were
     /// asked for as of a `hint_stamp`: the others, and all of them after an
     /// edit or a server's word, are due (`hints_fresh`).
@@ -438,6 +445,9 @@ impl Document {
             colors: Vec::new(),
             swatches: Vec::new(),
             hints_and_swatches: Vec::new(),
+            semantic: Arc::default(),
+            semantic_generation: 0,
+            semantic_refreshes: 0,
             hint_chunks: ((0, 0), Vec::new()),
             hint_refreshes: 0,
             code_lenses: Vec::new(),
@@ -1200,6 +1210,7 @@ impl Document {
         self.debug_line = self.debug_line.and_then(|offset| self.line_moved(offset, patch, old, exact));
         self.shift_inlay_hints(patch);
         self.shift_colors(patch);
+        self.shift_semantic(patch);
         self.code_lenses = std::mem::take(&mut self.code_lenses)
             .into_iter()
             .filter_map(|lens| Some(CodeLens { line_start: self.line_moved(lens.line_start, patch, old, exact)?, ..lens }))
@@ -1282,6 +1293,49 @@ impl Document {
         self.inlay_hints = hints;
         self.inlay_generation += 1;
         self.merge_swatches();
+    }
+
+    /// When semantic tokens are due: a new version, or the server's word.
+    pub fn semantic_stamp(&self) -> (u64, u64) {
+        (self.version, self.semantic_refreshes)
+    }
+
+    /// A server says its semantic tokens changed.
+    pub fn semantic_changed(&mut self) {
+        self.semantic_refreshes += 1;
+    }
+
+    /// Semantic tokens for the text at `version` (dropped if it changed since).
+    pub fn set_semantic_tokens(&mut self, version: u64, tokens: Arc<Vec<(Range<usize>, crate::syntax::Highlight)>>) {
+        if version == self.version {
+            self.semantic = tokens;
+            self.semantic_generation += 1;
+        }
+    }
+
+    /// The semantic tokens that overlap `range`.
+    pub fn semantic_in(&self, range: Range<usize>) -> &[(Range<usize>, crate::syntax::Highlight)] {
+        let first = self.semantic.partition_point(|(r, _)| r.end <= range.start);
+        let count = self.semantic[first..].partition_point(|(r, _)| r.start < range.end);
+        &self.semantic[first..first + count]
+    }
+
+    /// Changes when new semantic tokens come (not when edits move them).
+    pub fn semantic_generation(&self) -> u64 {
+        self.semantic_generation
+    }
+
+    fn shift_semantic(&mut self, patch: &Patch) {
+        if self.semantic.is_empty() {
+            return;
+        }
+        let tokens = Arc::make_mut(&mut self.semantic);
+        tokens.retain_mut(|(r, _)| {
+            let (start, end) = (patch.map(r.start), patch.map(r.end));
+            let kept = end - start == r.end - r.start && end >= start;
+            *r = start..end;
+            kept
+        });
     }
 
     /// The swatches before colors (see `swatches`).

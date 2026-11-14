@@ -29,7 +29,8 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   ⌘/Ctrl-click list its usages, as in JetBrains; holding ⌘/Ctrl over a symbol the server can
   take you to underlines it and shows a pointing hand), Find Usages (grouped by file in a Find
   panel you step through with the arrows, pinnable per search), Call and Type Hierarchy there as
-  trees that load as you open them, highlighted
+  trees that load as you open them, semantic highlighting (the server's colors over the syntax
+  colors, mutable variables underlined; see [Semantic highlighting](editing.md#semantic-highlighting)), highlighted
   uses of the symbol at the caret, Go to Symbol across the project, Rename and context actions
   (quick fixes and refactorings); see [Language servers](languages.md#language-servers)
 - Edit predictions from GitHub Copilot, off until you choose it: code suggested after the caret as
