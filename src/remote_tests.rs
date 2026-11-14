@@ -198,3 +198,22 @@ fn language_servers_start_again_after_a_reconnect(cx: &mut TestAppContext) {
     client::unmount(&root);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Attach to Process on a remote project lists the host's processes, with
+/// their programs under the mount (the adapter is told the host's paths).
+#[test]
+fn processes_to_attach_to_are_the_hosts() {
+    let dir = temp("attach");
+    let (root, host) = connect("app-remote-attach");
+    let project = mounted(&root, &dir);
+    let mut sleeper = std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap();
+    let listed = crate::debugger::launch::processes(&project);
+    let found = listed.iter().find(|p| p.pid == sleeper.id());
+    let _ = sleeper.kill();
+    let found = found.unwrap_or_else(|| panic!("sleep isn't listed among {}", listed.len()));
+    assert!(found.program.starts_with(&root), "{}", found.program.display());
+    assert!(found.name.contains("sleep"), "{}", found.name);
+    host.disconnect();
+    client::unmount(&root);
+    let _ = std::fs::remove_dir_all(&dir);
+}

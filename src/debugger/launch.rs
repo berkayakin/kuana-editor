@@ -499,10 +499,11 @@ fn substitute(text: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
 /// Node listens for a debugger after a SIGUSR1 (js-debug's own server
 /// doesn't send it, unlike VS Code): sends it and returns the inspector's
 /// port, from `--inspect…` flags or Node's default.
-pub fn open_node_inspector(pid: u32) -> u16 {
+pub fn open_node_inspector(pid: u32, cwd: &Path) -> u16 {
     let pid = pid.to_string();
-    let command = crate::process::command("ps").args(["-o", "args=", "-p", &pid]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
-    let _ = crate::process::command("kill").args(["-USR1", &pid]).status();
+    // Where the process is: a remote project's host.
+    let command = crate::exec::Command::new("ps").args(["-o", "args=", "-p", &pid]).current_dir(cwd).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+    let _ = crate::exec::Command::new("kill").args(["-USR1", &pid]).current_dir(cwd).status();
     inspector_port(&command.unwrap_or_default()).unwrap_or(9229)
 }
 
@@ -532,10 +533,11 @@ pub struct Process {
     pub program: PathBuf,
 }
 
-/// The user's processes, newest first (from `ps`), without Kuana itself.
-pub fn processes() -> Vec<Process> {
+/// The user's processes where `dir` is (a remote project's host), newest
+/// first (from `ps`), without Kuana itself.
+pub fn processes(dir: &Path) -> Vec<Process> {
     let column = |name: &str| -> Vec<(u32, String)> {
-        let Ok(output) = crate::process::command("ps").args(["x", "-o", "pid=", "-o"]).arg(format!("{name}=")).output() else { return Vec::new() };
+        let Ok(output) = crate::exec::Command::new("ps").args(["x", "-o", "pid=", "-o"]).arg(format!("{name}=")).current_dir(dir).output() else { return Vec::new() };
         String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter_map(|line| {
@@ -545,12 +547,31 @@ pub fn processes() -> Vec<Process> {
             .collect()
     };
     let commands: std::collections::HashMap<u32, String> = column("args").into_iter().collect();
+    // Linux's `comm` is a short name; the real paths are in /proc, all read
+    // at once (one round trip to a remote host). Nothing on macOS.
+    let script = r#"for p in /proc/[0-9]*; do e=$(readlink "$p/exe" 2>/dev/null) && printf '%s %s\n' "${p#/proc/}" "$e"; done"#;
+    let exes: std::collections::HashMap<u32, PathBuf> = crate::exec::Command::new("sh")
+        .args(["-c", script])
+        .current_dir(dir)
+        .stderr(crate::exec::Stdio::null())
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let (pid, exe) = line.split_once(' ')?;
+                    Some((pid.parse().ok()?, crate::fs::from_host(dir, exe)))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let ours = (!crate::fs::is_remote(dir)).then(std::process::id);
     let mut processes: Vec<Process> = column("comm")
         .into_iter()
-        .filter(|(pid, _)| *pid != std::process::id())
+        .filter(|(pid, _)| Some(*pid) != ours)
         .map(|(pid, comm)| {
-            // Linux's `comm` is a short name; the real path is in /proc.
-            let program = crate::fs::read_link(format!("/proc/{pid}/exe")).unwrap_or_else(|_| PathBuf::from(&comm));
+            // macOS's `comm` is the program's path (a remote Mac's, under its mount).
+            let program = exes.get(&pid).cloned().unwrap_or_else(|| crate::fs::from_host(dir, &comm));
             let name = program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(comm);
             let command = commands.get(&pid).cloned().unwrap_or_default();
             Process { pid, name, command, program }
@@ -802,7 +823,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn lists_processes() {
-        let all = processes();
+        let all = processes(&std::env::temp_dir());
         assert!(all.iter().all(|p| p.pid != std::process::id()));
         assert!(all.windows(2).all(|w| w[0].pid > w[1].pid));
         assert!(all.iter().any(|p| !p.name.is_empty() && !p.command.is_empty()), "no processes from ps");

@@ -256,8 +256,8 @@ impl DebugSession {
             cx.background_executor().spawn(async move { launch::launch_arguments(&spec2, &cwd2, program2.as_deref(), id) }).await
         };
         if let (DebugSpec::Attach { pid, .. }, "pwa-node") = (&spec, id) {
-            let pid = *pid;
-            launch_args["port"] = json!(cx.background_executor().spawn(async move { launch::open_node_inspector(pid) }).await);
+            let (pid, cwd2) = (*pid, cwd.clone());
+            launch_args["port"] = json!(cx.background_executor().spawn(async move { launch::open_node_inspector(pid, &cwd2) }).await);
         }
         // An adapter listening on a remote host is reached through a relayed port.
         let server = match (adapter.port, kuana_core::remote::client::host_for(&cwd)) {
