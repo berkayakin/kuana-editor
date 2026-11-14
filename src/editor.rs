@@ -423,6 +423,8 @@ pub struct Editor {
     /// (`editor/semantic.rs`).
     semantic_asked: Option<(u64, u64)>,
     semantic_task: Option<Task<()>>,
+    /// Token requests in a row the server answered busy (`lsp::BUSY_RETRY`).
+    semantic_retries: u32,
     /// The tag names being edited together (`editor/linked.rs`), valid while
     /// the document is at `linked_version`.
     linked: Option<(Range<usize>, Range<usize>)>,
@@ -622,6 +624,7 @@ impl Editor {
             color_hits: Vec::new(),
             semantic_asked: None,
             semantic_task: None,
+            semantic_retries: 0,
             marked_range: None,
             indent_unit: String::new(),
             tab_size: file_settings.tab_size,

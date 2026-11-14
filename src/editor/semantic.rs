@@ -189,7 +189,30 @@ impl Editor {
                 Some((server, params, e.doc.read(cx).rope().clone(), e.doc.read(cx).version()))
             });
             let Ok(Some((server, params, rope, version))) = asked else { return };
-            let Ok(answer) = server.request("textDocument/semanticTokens/full", params).await else { return };
+            let answer = match server.request("textDocument/semanticTokens/full", params).await {
+                Ok(answer) => answer,
+                // Busy with something that changes them (rust-analyzer
+                // loading): asked again a moment later, a few times.
+                Err(err) if err.is_cancelled() => {
+                    let retry = this
+                        .update(cx, |e, _| {
+                            let retry = e.semantic_retries < super::lsp::BUSY_RETRIES;
+                            e.semantic_retries = if retry { e.semantic_retries + 1 } else { 0 };
+                            retry
+                        })
+                        .unwrap_or(false);
+                    if retry {
+                        cx.background_executor().timer(super::lsp::BUSY_RETRY).await;
+                        this.update(cx, |e, cx| {
+                            e.semantic_asked = None;
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                    return;
+                }
+                Err(_) => return,
+            };
             let legend = server.capability_value("semanticTokensProvider")["legend"].clone();
             let encoding = server.encoding;
             let tokens = cx
@@ -200,6 +223,7 @@ impl Editor {
                 })
                 .await;
             this.update(cx, |e, cx| {
+                e.semantic_retries = 0;
                 e.doc.as_mut(cx).set_semantic_tokens(version, Arc::new(tokens));
                 cx.notify();
             })

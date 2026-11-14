@@ -100,6 +100,11 @@ const EDIT_PAUSE: Duration = Duration::from_millis(350);
 const LENS_EDIT_PAUSE: Duration = Duration::from_millis(400);
 /// After scrolling to lines without hints, they're asked for this soon.
 const SCROLL_PAUSE: Duration = Duration::from_millis(50);
+/// A server busy with something that changes its answers (rust-analyzer
+/// loading the project says "content modified") is asked again this much
+/// later, at most `BUSY_RETRIES` times in a row.
+pub(super) const BUSY_RETRY: Duration = Duration::from_secs(1);
+pub(super) const BUSY_RETRIES: u32 = 30;
 /// Lenses that came into view get their titles this soon: scrolling
 /// through doesn't resolve every lens it passes.
 const LENS_PAUSE: Duration = Duration::from_millis(100);
@@ -209,6 +214,10 @@ pub(super) struct EditorLsp {
     /// Asks for the inlay hints the view needs: the `hint_stamp` it was
     /// scheduled at, and the task.
     inlay_task: Option<((u64, u64), Task<()>)>,
+    /// Hint requests in a row the server answered busy (`BUSY_RETRY`).
+    hint_retries: u32,
+    /// Lens requests in a row a server answered busy.
+    lens_retries: u32,
     /// Asks for the code lenses: the `lens_stamp` it was scheduled at, and the task.
     lens_task: Option<((u64, u64), Task<()>)>,
     /// Gives the lenses in view that have no title yet theirs.
@@ -1385,12 +1394,27 @@ impl Editor {
                 // they're taken, and stay due.
                 if e.doc.read(cx).version() == stamp.0 {
                     let fresh = e.doc.read(cx).hint_stamp() == stamp;
+                    // Busy (ContentModified and the like: the answer would be
+                    // stale, not refused): those chunks stay due and are asked
+                    // for again a moment later, a few times.
+                    let may_retry = e.lsp.hint_retries < BUSY_RETRIES;
+                    let mut busy = false;
                     for (run, answer) in runs.into_iter().zip(answers) {
+                        if may_retry && answer.as_ref().err().is_some_and(|err| err.is_cancelled()) {
+                            busy = true;
+                            continue;
+                        }
                         // No answer counts as asked too: asking again every
                         // frame would flood a server that refuses (it says
                         // when to ask again, `workspace/inlayHint/refresh`).
                         let hints = answer.ok().map(|value| read_inlay_hints(&value, e.doc.read(cx).rope(), server.encoding, &run.bytes));
                         e.doc.as_mut(cx).set_chunk_hints(run.bytes, if fresh { run.chunks } else { 0..0 }, hints);
+                    }
+                    if busy {
+                        e.lsp.hint_retries += 1;
+                        e.fetch_inlay_hints_after(BUSY_RETRY, cx);
+                    } else {
+                        e.lsp.hint_retries = 0;
                     }
                 }
                 cx.notify();
@@ -1458,10 +1482,32 @@ impl Editor {
                 return;
             };
             let mut found: Vec<(Arc<Server>, Vec<Value>)> = Vec::new();
+            let mut busy = false;
             for server in servers {
-                if let Ok(Value::Array(lenses)) = server.request("textDocument/codeLens", params.clone()).await {
-                    found.push((server, lenses));
+                match server.request("textDocument/codeLens", params.clone()).await {
+                    Ok(Value::Array(lenses)) => found.push((server, lenses)),
+                    Err(err) if err.is_cancelled() => busy = true,
+                    _ => {}
                 }
+            }
+            // A server busy with something that changes them (rust-analyzer
+            // loading): the lenses shown stay, and they're asked for again a
+            // moment later, a few times.
+            let retry = this
+                .update(cx, |e, _| {
+                    let retry = busy && e.lsp.lens_retries < BUSY_RETRIES;
+                    e.lsp.lens_retries = if retry { e.lsp.lens_retries + 1 } else { 0 };
+                    retry
+                })
+                .unwrap_or(false);
+            if retry {
+                cx.background_executor().timer(BUSY_RETRY).await;
+                this.update(cx, |e, cx| {
+                    e.lsp.lens_task = None;
+                    e.schedule_code_lenses(cx);
+                })
+                .ok();
+                return;
             }
             // Read in the text they're for: edited meanwhile, the next frame
             // asks again.
@@ -2432,6 +2478,43 @@ mod tests {
         });
         assert_eq!(rows(cx), [1, 400, 500]);
         assert_eq!(hints(cx)[0], before[0], "out of view, not asked for");
+        store.update(cx, |s, _| s.shutdown_all());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A server that answers "content modified" (rust-analyzer while it
+    /// loads the project) is asked again a moment later, not taken at its
+    /// word: hints, lenses and semantic tokens all come.
+    #[gpui::test]
+    fn a_busy_servers_hints_lenses_and_tokens_are_asked_again(cx: &mut TestAppContext) {
+        if crate::lsp::servers::which("python3").is_none() {
+            return;
+        }
+        cx.executor().allow_parking();
+        crate::trust::set_trust_all(true);
+        let dir = std::env::temp_dir().join(format!("kuana-lsp-hint-busy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.rs");
+        std::fs::write(&path, "fn main() {}\n").unwrap();
+        let store = cx.new(|_| {
+            let mut store = LspStore::new();
+            store.test_specs = Some(vec![fake_server("busy-hints", "")]);
+            store
+        });
+        let editor: Entity<Editor> = cx.new(|cx| Editor::new(Document::open(&path).unwrap(), cx));
+        store.update(cx, |s, cx| s.register(&editor, cx));
+        let labels = |cx: &mut TestAppContext| editor.read_with(cx, |e, cx| e.doc.read(cx).inlay_hints().iter().map(|h| h.label.to_string()).collect::<Vec<_>>());
+        // The first answer is the error; the hints come from the second.
+        wait_for(cx, "the hints after the busy answer", |cx| {
+            cx.executor().advance_clock(Duration::from_millis(500));
+            !labels(cx).is_empty()
+        });
+        assert_eq!(labels(cx), [": hint 2"]);
+        wait_for(cx, "the lenses and tokens after the busy answers", |cx| {
+            editor.update(cx, |e, cx| e.want_semantic_tokens(cx));
+            cx.executor().advance_clock(Duration::from_millis(500));
+            editor.read_with(cx, |e, cx| !e.doc.read(cx).code_lenses().is_empty() && e.doc.read(cx).semantic_generation() > 0)
+        });
         store.update(cx, |s, _| s.shutdown_all());
         std::fs::remove_dir_all(&dir).ok();
     }
