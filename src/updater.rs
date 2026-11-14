@@ -240,6 +240,60 @@ fn download_latest() -> Result<Option<Downloaded>, String> {
     Ok(Some(Downloaded { version: manifest.version, archive, sha256: asset.sha256.clone() }))
 }
 
+/// A host's system as `uname -s` / `uname -m` say it, as Rust names it
+/// (`macos`, `aarch64`): what server builds are named by.
+pub(crate) fn rust_platform(os: &str, arch: &str) -> (String, String) {
+    let os = match os.to_ascii_lowercase().as_str() {
+        "darwin" => "macos".to_string(),
+        other => other.to_string(),
+    };
+    let arch = match arch {
+        "arm64" => "aarch64".to_string(),
+        "amd64" => "x86_64".to_string(),
+        other => other.to_string(),
+    };
+    (os, arch)
+}
+
+/// `kuana-server` for a host's system (remote development), as bytes to copy
+/// there: `KUANA_SERVER_BINARY` if set; this build's own when the host has
+/// this computer's system; else this version's release asset (listed in its
+/// signed `latest.json` as `server-<os>-<arch>`, checked against its SHA-256,
+/// kept for next time). Blocking.
+pub(crate) fn server_binary(os: &str, arch: &str) -> Result<Vec<u8>, String> {
+    if let Some(path) = std::env::var_os("KUANA_SERVER_BINARY") {
+        return std::fs::read(&path).map_err(|e| format!("KUANA_SERVER_BINARY: {e}"));
+    }
+    let (os, arch) = rust_platform(os, arch);
+    if (os.as_str(), arch.as_str()) == (std::env::consts::OS, std::env::consts::ARCH)
+        && let Some(own) = std::env::current_exe().ok().map(|exe| exe.with_file_name(if cfg!(windows) { "kuana-server.exe" } else { "kuana-server" }))
+        && own.is_file()
+    {
+        return std::fs::read(&own).map_err(|e| e.to_string());
+    }
+    let version = env!("CARGO_PKG_VERSION");
+    let base = format!("https://github.com/{REPO}/releases/download/v{version}");
+    let manifest = fetch(&format!("{base}/latest.json"))?;
+    let signature = fetch(&format!("{base}/latest.json.minisig"))?;
+    let manifest = verified_manifest(&manifest, &signature, PUBLIC_KEY)?;
+    let asset = manifest.assets.get(&format!("server-{os}-{arch}")).ok_or_else(|| format!("Kuana {version} has no kuana-server for {os} {arch}."))?;
+    let dir = downloads_dir()?.join("servers");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let archive = dir.join(format!("{version}-{}", asset.name));
+    if sha256_hex(&archive).as_deref() != Some(asset.sha256.as_str()) {
+        let partial = archive.with_extension("part");
+        download(&format!("{base}/{}", asset.name), &partial, &format!("kuana-server for {os} {arch}"), None)?;
+        if sha256_hex(&partial).as_deref() != Some(asset.sha256.as_str()) {
+            std::fs::remove_file(&partial).ok();
+            return Err(format!("{} doesn't match the release's checksum.", asset.name));
+        }
+        std::fs::rename(&partial, &archive).map_err(|e| e.to_string())?;
+    }
+    let mut binary = Vec::new();
+    std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(std::fs::File::open(&archive).map_err(|e| e.to_string())?), &mut binary).map_err(|e| e.to_string())?;
+    Ok(binary)
+}
+
 fn verified_manifest(data: &[u8], signature: &[u8], public_key: &str) -> Result<Manifest, String> {
     let key = minisign_verify::PublicKey::from_base64(public_key).map_err(|e| e.to_string())?;
     let signature = std::str::from_utf8(signature)
@@ -511,6 +565,11 @@ mod tests {
             assert!(release.contains(&format!("\"{key}\": f\"")), "{key} isn't in release.yml's latest.json");
         }
         assert_eq!(platform_for("freebsd", "x86_64"), None);
+        // And kuana-server's, as `server_binary` asks for them (from `uname`).
+        for (os, arch) in [("Linux", "x86_64"), ("Linux", "aarch64"), ("Darwin", "arm64"), ("Darwin", "x86_64")] {
+            let (os, arch) = rust_platform(os, arch);
+            assert!(release.contains(&format!("\"server-{os}-{arch}\": f\"")), "server-{os}-{arch} isn't in release.yml's latest.json");
+        }
     }
 
     #[test]

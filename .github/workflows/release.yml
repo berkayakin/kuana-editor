@@ -115,6 +115,14 @@ jobs:
         run: |
           lipo -create -output "$APP/Contents/MacOS/kuana" \
             target/aarch64-apple-darwin/dist/kuana target/x86_64-apple-darwin/dist/kuana
+      # Remote development's server (plans/remote-dev.md): inside the app, which
+      # copies it to Macs it connects to, and on its own for the release.
+      - name: Build kuana-server
+        run: |
+          cargo build --profile dist --locked -p kuana-server --target aarch64-apple-darwin
+          cargo build --profile dist --locked -p kuana-server --target x86_64-apple-darwin
+          lipo -create -output "$APP/Contents/MacOS/kuana-server" \
+            target/aarch64-apple-darwin/dist/kuana-server target/x86_64-apple-darwin/dist/kuana-server
 
       # Developer ID signing and notarization turn on once their repository
       # secrets exist (README: "Signing the macOS app"). Secrets are only given
@@ -179,6 +187,7 @@ jobs:
         run: |
           mkdir -p dist dmg
           ditto -c -k --keepParent "$APP" "dist/Kuana-$VERSION-macos.zip"
+          gzip -9 -c "$APP/Contents/MacOS/kuana-server" > dist/kuana-server-macos.gz
           cp -R "$APP" dmg/
           ln -s /Applications dmg/Applications
           # hdiutil sometimes fails with "Resource busy" on GitHub's runners; retry.
@@ -289,10 +298,12 @@ jobs:
         with:
           toolchain: "1.94"
       - run: cargo build --profile dist --locked
+      # Beside kuana: copied to Linux machines of this architecture it connects to.
+      - run: cargo build --profile dist --locked -p kuana-server
       - name: Package
         run: |
           mkdir -p dist pkg
-          cp target/dist/kuana LICENSE-MIT LICENSE-APACHE pkg/
+          cp target/dist/kuana target/dist/kuana-server LICENSE-MIT LICENSE-APACHE pkg/
           tar -czf "dist/kuana-$VERSION-linux-${{ matrix.arch }}.tar.gz" -C pkg .
       - run: gh release upload "$TAG" dist/* --clobber
       - uses: actions/upload-artifact@v4
@@ -300,6 +311,33 @@ jobs:
           name: build-linux-${{ matrix.arch }}
           path: dist/kuana-*-linux-${{ matrix.arch }}.tar.gz
           retention-days: 1
+
+  # Remote development's server for Linux machines Kuana connects to: static
+  # (musl), so it runs on any distribution without GPUI's libraries.
+  server:
+    needs: create
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94"
+          targets: ${{ matrix.arch }}-unknown-linux-musl
+      - run: cargo build --profile dist --locked -p kuana-server --target ${{ matrix.arch }}-unknown-linux-musl
+      - name: Package
+        run: |
+          mkdir -p dist
+          gzip -9 -c target/${{ matrix.arch }}-unknown-linux-musl/dist/kuana-server > dist/kuana-server-linux-${{ matrix.arch }}.gz
+      - run: gh release upload "$TAG" dist/* --clobber
 
   # Starts each build and drives it through its main areas before anything is
   # published; see smoke.yml. A platform whose build failed is skipped there.
@@ -312,7 +350,7 @@ jobs:
       artifacts: true
 
   publish:
-    needs: [create, test, macos, windows, linux, smoke]
+    needs: [create, test, macos, windows, linux, server, smoke]
     if: ${{ !cancelled() && needs.create.result == 'success' && needs.test.result == 'success' && needs.smoke.result == 'success' }}
     runs-on: ubuntu-24.04
     env:
@@ -334,6 +372,11 @@ jobs:
               "windows-aarch64": f"kuana-{version}-windows-aarch64.zip",
               "linux-x86_64": f"kuana-{version}-linux-x86_64.tar.gz",
               "linux-aarch64": f"kuana-{version}-linux-aarch64.tar.gz",
+              # kuana-server, for remote development (`server_binary` in src/updater.rs).
+              "server-linux-x86_64": f"kuana-server-linux-x86_64.gz",
+              "server-linux-aarch64": f"kuana-server-linux-aarch64.gz",
+              "server-macos-aarch64": f"kuana-server-macos.gz",
+              "server-macos-x86_64": f"kuana-server-macos.gz",
           }
           def sha256(name):
               with open(name, "rb") as f:
