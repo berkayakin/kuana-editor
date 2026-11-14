@@ -475,6 +475,8 @@ fn main() {
     });
     app.run(move |cx: &mut App| {
         // Git's questions (passwords, passphrases) asked in a window.
+        // Remote hosts' questions too (`kuana-server` relays them).
+        kuana_core::remote::client::set_asker(std::sync::Arc::new(askpass::ask_remote));
         if let Some(mut questions) = askpass::serve() {
             cx.spawn(async move |cx| {
                 use futures::StreamExt as _;

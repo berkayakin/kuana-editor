@@ -73,6 +73,8 @@ struct Server {
 }
 
 static SERVER: OnceLock<Server> = OnceLock::new();
+/// Where questions go (the app), for those asked on a remote host (`ask`).
+static QUESTIONS: OnceLock<mpsc::UnboundedSender<Question>> = OnceLock::new();
 
 /// How many questions went unanswered (cancelled), ever.
 static CANCELLED: AtomicU64 = AtomicU64::new(0);
@@ -94,6 +96,7 @@ pub fn serve() -> Option<mpsc::UnboundedReceiver<Question>> {
     let port = listener.local_addr().ok()?.port();
     let token = crate::instance::random_token();
     let (tx, rx) = mpsc::unbounded();
+    let _ = QUESTIONS.set(tx.clone());
     let accepted = token.clone();
     std::thread::Builder::new()
         .name("askpass".into())
@@ -128,6 +131,18 @@ fn take_question(stream: TcpStream, token: &str, questions: &mpsc::UnboundedSend
     let mut reply = serde_json::to_string(&Answered { answer }).ok()?;
     reply.push('\n');
     (&stream).write_all(reply.as_bytes()).ok()
+}
+
+/// A question Git or SSH asks on a remote host (`kuana-server` relays it),
+/// shown as the local ones are; blocks until it's answered. None cancels.
+pub fn ask_remote(prompt: &str, confirm: bool) -> Option<String> {
+    let (answer, answered) = oneshot::channel();
+    QUESTIONS.get()?.unbounded_send(Question { prompt: prompt.to_string(), confirm, answer }).ok()?;
+    let answer = futures::executor::block_on(answered).ok().flatten();
+    if answer.is_none() {
+        CANCELLED.fetch_add(1, Ordering::Relaxed);
+    }
+    answer
 }
 
 /// The environment that lets a Git command ask through Kuana, while it serves.

@@ -3935,10 +3935,12 @@ dependencies = [
 name = "kuana-core"
 version = "0.2.0"
 dependencies = [
+ "alacritty_terminal",
  "base64 0.22.1",
  "encoding_rs",
  "futures",
  "ignore",
+ "libc",
  "notify",
  "regex",
  "ropey",

@@ -8,7 +8,6 @@
 use crate::fs::PathExt as _;
 use std::{
     path::{Path, PathBuf},
-    process::Stdio,
     sync::{Arc, Mutex},
 };
 
@@ -56,8 +55,8 @@ impl DebugAdapter for LldbDap {
     fn aliases(&self) -> &[&'static str] {
         &["lldb", "lldb-vscode", "codelldb", "CodeLLDB"]
     }
-    fn start(&self, _: &Path) -> Result<Adapter, String> {
-        lldb_dap()
+    fn start(&self, cwd: &Path) -> Result<Adapter, String> {
+        lldb_dap(cwd)
     }
 }
 
@@ -68,8 +67,8 @@ impl DebugAdapter for Delve {
     fn aliases(&self) -> &[&'static str] {
         &["delve", "Delve", "dlv"]
     }
-    fn start(&self, _: &Path) -> Result<Adapter, String> {
-        delve()
+    fn start(&self, cwd: &Path) -> Result<Adapter, String> {
+        delve(cwd)
     }
 }
 
@@ -92,8 +91,8 @@ impl DebugAdapter for JsDebug {
     fn aliases(&self) -> &[&'static str] {
         &["node", "JavaScript", "js-debug"]
     }
-    fn start(&self, _: &Path) -> Result<Adapter, String> {
-        js_debug()
+    fn start(&self, cwd: &Path) -> Result<Adapter, String> {
+        js_debug(cwd)
     }
 }
 
@@ -198,16 +197,24 @@ pub fn adapter(spec: &DebugSpec, cwd: &Path) -> Result<Adapter, String> {
     }
 }
 
-fn lldb_dap() -> Result<Adapter, String> {
-    let program = servers::which("lldb-dap")
-        .or_else(xcrun_lldb_dap)
-        .or_else(|| servers::which("lldb-vscode"))
+/// A program on PATH: the remote host's for a remote project (`exec::which_on`).
+fn find_program(cwd: &Path, name: &str) -> Option<PathBuf> {
+    match crate::exec::which_on(cwd, name) {
+        Some(there) => there,
+        None => servers::which(name),
+    }
+}
+
+fn lldb_dap(cwd: &Path) -> Result<Adapter, String> {
+    let program = find_program(cwd, "lldb-dap")
+        .or_else(|| xcrun_lldb_dap(cwd))
+        .or_else(|| find_program(cwd, "lldb-vscode"))
         .ok_or("Debugging Rust, C and C++ needs lldb-dap: install Xcode's command line tools (xcode-select --install) or LLVM.")?;
     Ok(Adapter { id: "lldb-dap", program, args: Vec::new(), port: None })
 }
 
-fn delve() -> Result<Adapter, String> {
-    let program = servers::which("dlv").ok_or("Debugging Go needs Delve: go install github.com/go-delve/delve/cmd/dlv@latest")?;
+fn delve(cwd: &Path) -> Result<Adapter, String> {
+    let program = find_program(cwd, "dlv").ok_or("Debugging Go needs Delve: go install github.com/go-delve/delve/cmd/dlv@latest")?;
     let port = crate::dap::free_port().map_err(|e| e.to_string())?;
     let args = vec!["dap".into(), format!("--listen=127.0.0.1:{port}")];
     Ok(Adapter { id: "go", program, args, port: Some(port) })
@@ -215,11 +222,12 @@ fn delve() -> Result<Adapter, String> {
 
 fn debugpy(cwd: &Path) -> Result<Adapter, String> {
     let python = python_for(cwd).ok_or("Debugging Python needs python3 on PATH.")?;
-    let has_debugpy = crate::process::command(&python)
+    let has_debugpy = crate::exec::Command::new(&python)
+        .current_dir(cwd)
         .args(["-c", "import debugpy"])
         .env("PATH", servers::search_path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(crate::exec::Stdio::null())
+        .stderr(crate::exec::Stdio::null())
         .status()
         .is_ok_and(|s| s.success());
     if !has_debugpy {
@@ -230,11 +238,15 @@ fn debugpy(cwd: &Path) -> Result<Adapter, String> {
 
 /// Microsoft's js-debug, as its standalone DAP server: `js-debug-adapter` on
 /// PATH (as Mason installs it), else a release unpacked in the config folder.
-fn js_debug() -> Result<Adapter, String> {
+fn js_debug(cwd: &Path) -> Result<Adapter, String> {
     let port = crate::dap::free_port().map_err(|e| e.to_string())?;
     let listen = vec![port.to_string(), "127.0.0.1".to_string()];
-    if let Some(program) = servers::which("js-debug-adapter") {
+    if let Some(program) = find_program(cwd, "js-debug-adapter") {
         return Ok(Adapter { id: "pwa-node", program, args: listen, port: Some(port) });
+    }
+    // Kuana's own copy is this computer's.
+    if crate::fs::is_remote(cwd) {
+        return Err("Debugging JavaScript on a remote host needs js-debug-adapter on its PATH.".into());
     }
     let server = crate::theme::config_dir().map(|d| d.join("debug-adapters/js-debug/src/dapDebugServer.js")).filter(|p| p.is_file_on_host());
     let Some(server) = server else {
@@ -251,25 +263,27 @@ fn js_debug() -> Result<Adapter, String> {
 /// Go executables carry build info that `go version` reads: "<path>: go1.22.1".
 /// (For others it says why not, and still exits with 0.)
 fn is_go_program(program: &Path) -> bool {
-    let Some(go) = servers::which("go") else { return false };
-    let Ok(output) = crate::process::command(go).arg("version").arg(program).stderr(Stdio::null()).output() else { return false };
+    let dir = program.parent().unwrap_or(program);
+    let Some(go) = find_program(dir, "go") else { return false };
+    let Ok(output) = crate::exec::Command::new(go).arg("version").arg(program).current_dir(dir).stderr(crate::exec::Stdio::null()).output() else { return false };
     let text = String::from_utf8_lossy(&output.stdout);
     text.trim().rsplit(": ").next().is_some_and(|version| version.starts_with("go") || version.starts_with("devel"))
 }
 
 /// Xcode ships lldb-dap without putting it on PATH.
-fn xcrun_lldb_dap() -> Option<PathBuf> {
-    if !cfg!(target_os = "macos") {
+fn xcrun_lldb_dap(cwd: &Path) -> Option<PathBuf> {
+    // A remote host may be a Mac whatever this computer is.
+    if !cfg!(target_os = "macos") && !crate::fs::is_remote(cwd) {
         return None;
     }
-    let output = crate::process::command("xcrun").args(["-f", "lldb-dap"]).stderr(Stdio::null()).output().ok()?;
-    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let output = crate::exec::Command::new("xcrun").args(["-f", "lldb-dap"]).current_dir(cwd).stderr(crate::exec::Stdio::null()).output().ok()?;
+    let path = crate::fs::from_host(cwd, String::from_utf8_lossy(&output.stdout).trim());
     (output.status.success() && path.is_file_on_host()).then_some(path)
 }
 
 /// The project's venv Python, else python3 on PATH.
 fn python_for(cwd: &Path) -> Option<PathBuf> {
-    crate::python::venv(cwd).map(|v| crate::python::interpreter(&v)).filter(|p| p.is_file_on_host()).or_else(|| servers::which("python3"))
+    crate::python::venv(cwd).map(|v| crate::python::interpreter(&v)).filter(|p| p.is_file_on_host()).or_else(|| find_program(cwd, "python3"))
 }
 
 /// `initialize` arguments (what Kuana supports as a client).
@@ -548,16 +562,19 @@ pub fn processes() -> Vec<Process> {
 
 /// LLDB commands that load the toolchain's Rust formatters.
 fn rust_formatters(cwd: &Path) -> Option<Vec<String>> {
-    let output = crate::process::command("rustc")
+    let output = crate::exec::Command::new("rustc")
         .args(["--print", "sysroot"])
         .current_dir(cwd)
         .env("PATH", servers::search_path())
-        .stderr(Stdio::null())
+        .stderr(crate::exec::Stdio::null())
         .output()
         .ok()?;
+    // The commands name the sysroot as the adapter sees it (a remote host's
+    // own path); it's looked at here through the mount.
     let etc = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()).join("lib/rustlib/etc");
     let (lookup, commands) = (etc.join("lldb_lookup.py"), etc.join("lldb_commands"));
-    (lookup.is_file_on_host() && commands.is_file_on_host()).then(|| {
+    let here = |p: &Path| crate::fs::from_host(cwd, &p.to_string_lossy());
+    (here(&lookup).is_file_on_host() && here(&commands).is_file_on_host()).then(|| {
         vec![
             format!("command script import \"{}\"", lookup.display()),
             format!("command source -s 0 \"{}\"", commands.display()),
@@ -566,22 +583,22 @@ fn rust_formatters(cwd: &Path) -> Option<Vec<String>> {
 }
 
 /// A running cargo build, which Stop kills.
-pub type Build = Arc<Mutex<Option<std::process::Child>>>;
+pub type Build = Arc<Mutex<Option<crate::exec::Child>>>;
 
 /// Builds with cargo (`build …` or `test --no-run …`) and returns the
 /// executable it made. Cargo's progress and compiler messages go to
 /// `on_line` as they come. Blocks: run it off the main thread.
 pub fn cargo_build(cwd: &Path, args: &[String], build: &Build, on_line: impl FnMut(String) + Send + 'static) -> Result<PathBuf, String> {
-    let mut command = crate::process::command("cargo");
+    let mut command = crate::exec::Command::new("cargo");
     command
         .args(args)
         .arg("--message-format=json-render-diagnostics")
         .current_dir(cwd)
         .env("PATH", servers::search_path())
         .env("CARGO_TERM_COLOR", "never")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdin(crate::exec::Stdio::null())
+        .stdout(crate::exec::Stdio::piped())
+        .stderr(crate::exec::Stdio::piped());
     let mut child = command.spawn().map_err(|e| format!("couldn't run cargo: {e}"))?;
     let stdout = child.stdout.take().ok_or("no output from cargo")?;
     let stderr = child.stderr.take().ok_or("no output from cargo")?;
@@ -607,7 +624,8 @@ pub fn cargo_build(cwd: &Path, args: &[String], build: &Build, on_line: impl FnM
         Some(Err(err)) => return Err(err.to_string()),
         None => return Err("The build was stopped".into()),
     }
-    pick_executable(&artifacts, args).ok_or_else(|| "cargo didn't build an executable for this".into())
+    // A remote cargo names the host's path.
+    pick_executable(&artifacts, args).map(|p| crate::fs::from_host(cwd, &p.to_string_lossy())).ok_or_else(|| "cargo didn't build an executable for this".into())
 }
 
 /// Runs a native program's build commands in order (each a program and
@@ -617,15 +635,15 @@ pub fn native_build(cwd: &Path, steps: &[Vec<String>], build: &Build, mut on_lin
     for step in steps {
         let Some((program, args)) = step.split_first() else { continue };
         on_line(format!("$ {}", step.join(" ")));
-        let mut command = crate::process::command(program);
+        let mut command = crate::exec::Command::new(program);
         command
             .args(args)
             .current_dir(cwd)
             .env("PATH", servers::search_path())
             .env("CLICOLOR_FORCE", "0")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdin(crate::exec::Stdio::null())
+            .stdout(crate::exec::Stdio::piped())
+            .stderr(crate::exec::Stdio::piped());
         let mut child = command.spawn().map_err(|e| format!("couldn't run {program}: {e}"))?;
         let stdout = child.stdout.take().ok_or("no output")?;
         let stderr = child.stderr.take().ok_or("no output")?;

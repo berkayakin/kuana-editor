@@ -16,5 +16,10 @@ regex = "1.13.1"
 # Search works on documents' text as the editor keeps it (LF lines only, as in the app).
 ropey = { version = "1.6", default-features = false, features = ["simd"] }
 
+# The server's terminals (`remote::pty`): alacritty's pty, without its terminal.
+[target.'cfg(unix)'.dependencies]
+alacritty_terminal = { version = "0.26.0", default-features = false }
+libc = "0.2"
+
 [lints]
 workspace = true

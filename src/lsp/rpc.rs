@@ -10,7 +10,6 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::Path,
     pin::Pin,
-    process::{Child, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicI64, Ordering},
@@ -22,6 +21,8 @@ use std::{
 
 use futures::channel::{mpsc as async_mpsc, oneshot};
 use serde_json::{Value, json};
+
+use crate::exec::{Child, Stdio};
 
 /// A message the server sent on its own.
 #[derive(Debug)]
@@ -110,6 +111,9 @@ enum Outgoing {
 
 pub struct Client {
     child: Mutex<Child>,
+    /// A server on a remote host: the URIs it reads and writes are its own
+    /// (`file:///home/…`), Kuana's are under the host's mount.
+    remap: Option<Arc<Remap>>,
     writer: mpsc::Sender<Outgoing>,
     next_id: AtomicI64,
     pending: Pending,
@@ -127,7 +131,9 @@ impl Client {
         path_env: &std::ffi::OsStr,
         env: &[(String, String)],
     ) -> std::io::Result<(Arc<Client>, async_mpsc::UnboundedReceiver<Incoming>)> {
-        let mut command = crate::process::command(program);
+        // A remote project's server runs there (`crate::exec`), seeing its own paths.
+        let remap = crate::fs::mount_of(cwd).map(|mount| Arc::new(Remap::new(&mount)));
+        let mut command = crate::exec::Command::new(program);
         command
             .args(args)
             .current_dir(cwd)
@@ -173,9 +179,12 @@ impl Client {
         let reader = Answers { pending: pending.clone(), held: held.clone(), writer: writer.clone() };
         std::thread::Builder::new()
             .name("lsp-reader".into())
-            .spawn(move || read_loop(stdout, reader, incoming_tx, stderr_tail))?;
+            .spawn({
+                let remap = remap.clone();
+                move || read_loop(stdout, reader, incoming_tx, stderr_tail, remap)
+            })?;
 
-        let client = Arc::new(Client { child: Mutex::new(child), writer, next_id: AtomicI64::new(1), pending, held });
+        let client = Arc::new(Client { child: Mutex::new(child), remap, writer, next_id: AtomicI64::new(1), pending, held });
         Ok((client, incoming))
     }
 
@@ -225,7 +234,11 @@ impl Client {
 
     /// Answers a request from the server.
     pub fn respond(&self, id: Value, result: Value) {
-        self.writer.send(Outgoing::Answer(frame(&json!({ "jsonrpc": "2.0", "id": id, "result": result })))).ok();
+        let mut answer = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+        if let Some(remap) = &self.remap {
+            remap.outgoing(&mut answer);
+        }
+        self.writer.send(Outgoing::Answer(frame(&answer))).ok();
     }
 
     /// Answers a request Kuana doesn't handle with JSON-RPC's MethodNotFound,
@@ -235,7 +248,10 @@ impl Client {
         self.writer.send(Outgoing::Answer(frame(&json!({ "jsonrpc": "2.0", "id": id, "error": error })))).ok();
     }
 
-    fn send(&self, message: Value) {
+    fn send(&self, mut message: Value) {
+        if let Some(remap) = &self.remap {
+            remap.outgoing(&mut message);
+        }
         send(&self.writer, message);
     }
 
@@ -263,8 +279,56 @@ impl Client {
             std::thread::sleep(Duration::from_millis(5));
         }
         if let Ok(mut child) = self.child.lock() {
-            crate::process::kill_tree(&mut child);
+            child.kill_tree();
         }
+    }
+}
+
+/// Between Kuana's paths for a remote host's files (under its mount) and the
+/// host's own, in a message's strings: `file:///kuana-remote/box/home/a.rs`
+/// is `file:///home/a.rs` to a server there, and a plain mount path its path.
+pub struct Remap {
+    /// The mount as a URI and as a path, without a trailing `/`.
+    uri: String,
+    path: String,
+}
+
+impl Remap {
+    pub fn new(mount: &Path) -> Self {
+        let uri = super::protocol::path_to_uri(mount);
+        Remap { uri: uri.trim_end_matches('/').to_string(), path: mount.to_string_lossy().trim_end_matches(['/', '\\']).to_string() }
+    }
+
+    /// Kuana's message as the server reads it.
+    pub fn outgoing(&self, value: &mut Value) {
+        walk(value, &mut |s| {
+            if let Some(rest) = s.strip_prefix(&self.uri).filter(|r| r.starts_with('/')) {
+                *s = format!("file://{rest}");
+            } else if let Some(rest) = s.strip_prefix(&self.path).filter(|r| r.starts_with('/')) {
+                *s = rest.to_string();
+            }
+        });
+    }
+
+    /// The server's message as Kuana reads it.
+    pub fn incoming(&self, value: &mut Value) {
+        walk(value, &mut |s| {
+            if let Some(rest) = s.strip_prefix("file://").filter(|r| r.starts_with('/'))
+                && !s.starts_with(&self.uri)
+            {
+                *s = format!("{}{rest}", self.uri);
+            }
+        });
+    }
+}
+
+/// Every string in a value (keys aside).
+fn walk(value: &mut Value, f: &mut impl FnMut(&mut String)) {
+    match value {
+        Value::String(s) => f(s),
+        Value::Array(items) => items.iter_mut().for_each(|v| walk(v, f)),
+        Value::Object(map) => map.values_mut().for_each(|v| walk(v, f)),
+        _ => {}
     }
 }
 
@@ -331,7 +395,7 @@ pub(crate) fn for_each_line(stream: impl Read, mut f: impl FnMut(String)) {
 impl Drop for Client {
     fn drop(&mut self) {
         if let Ok(mut child) = self.child.lock() {
-            crate::process::kill_tree(&mut child);
+            child.kill_tree();
         }
     }
 }
@@ -421,10 +485,13 @@ struct Answers {
     writer: mpsc::Sender<Outgoing>,
 }
 
-fn read_loop(stdout: impl Read, answers: Answers, incoming: async_mpsc::UnboundedSender<Incoming>, stderr_tail: Arc<Mutex<String>>) {
+fn read_loop(stdout: impl Read, answers: Answers, incoming: async_mpsc::UnboundedSender<Incoming>, stderr_tail: Arc<Mutex<String>>, remap: Option<Arc<Remap>>) {
     let Answers { pending, held, writer } = answers;
     let mut reader = BufReader::new(stdout);
-    while let Some(message) = read_message(&mut reader) {
+    while let Some(mut message) = read_message(&mut reader) {
+        if let Some(remap) = &remap {
+            remap.incoming(&mut message);
+        }
         let answer = message.get("method").is_none().then(|| message.get("id").and_then(Value::as_i64)).flatten();
         dispatch(message, &pending, &incoming);
         if let Some(id) = answer.filter(|&id| held.load(Ordering::Acquire) == id) {

@@ -43,6 +43,8 @@ use gpui::{
 };
 
 mod commands;
+#[cfg(unix)]
+mod remote_pty;
 mod run_log;
 pub mod shell_marks;
 
@@ -129,6 +131,8 @@ pub struct TerminalView {
     custom_title: Option<SharedString>,
     /// The shell's process, to find the folder it's in now and what it runs.
     process: Option<ShellProcess>,
+    /// A remote host's terminal (`terminal/remote_pty.rs`): asked what it runs.
+    remote: Option<(Arc<kuana_core::remote::RemoteHost>, u64)>,
     focus_handle: FocusHandle,
     /// Columns, rows and cell size last sent to the shell.
     size: Option<(u16, u16, Pixels, Pixels)>,
@@ -190,6 +194,8 @@ enum Pty {
 struct Started {
     notifier: Notifier,
     process: Option<ShellProcess>,
+    /// A remote host's terminal: the connection and its id there.
+    remote: Option<(Arc<kuana_core::remote::RemoteHost>, u64)>,
     /// A shell's marks (`shell_marks`), when integration is on.
     marks: Option<shell_marks::Marks>,
 }
@@ -297,9 +303,10 @@ impl TerminalView {
     /// size the view has by now.
     fn pty_started(&mut self, started: std::io::Result<Started>, cx: &mut Context<Self>) {
         match started {
-            Ok(Started { notifier, process, marks }) => {
+            Ok(Started { notifier, process, remote, marks }) => {
                 let Pty::Starting(typed) = std::mem::replace(&mut self.pty, Pty::Running(notifier)) else { return };
                 self.process = process;
+                self.remote = remote;
                 self.shell_marks = marks;
                 if let (Pty::Running(notifier), Some(size)) = (&mut self.pty, self.size) {
                     notifier.on_resize(window_size(size));
@@ -362,6 +369,7 @@ impl TerminalView {
             title: shell_name.into(),
             custom_title: None,
             process: None,
+            remote: None,
             focus_handle: cx.focus_handle(),
             size: None,
             origin: Point::default(),
@@ -407,6 +415,9 @@ impl TerminalView {
     pub fn running_process(&self) -> Option<String> {
         if let Some((target, state)) = &self.run {
             return (*state == RunState::Running).then(|| target.name.clone());
+        }
+        if let Some((host, id)) = &self.remote {
+            return host.pty_foreground(*id);
         }
         self.process.as_ref()?.foreground_command()
     }
@@ -1367,7 +1378,8 @@ fn parse_link(text: &str, cwd: &Path) -> Option<Link> {
     let column = parts.next().and_then(|n| n.parse().ok());
     let path = match path.strip_prefix("~/") {
         Some(rest) => std::env::var_os("HOME").map(PathBuf::from)?.join(rest),
-        None => cwd.join(path),
+        // A remote shell's absolute paths are the host's: under the mount here.
+        None => cwd.join(crate::fs::from_host(cwd, path)),
     };
     path.is_file_on_host().then_some(Link::File { path, line, column })
 }
@@ -1456,6 +1468,16 @@ fn start_pty(
     listener: Listener,
     log: Option<RunLog>,
 ) -> std::io::Result<Started> {
+    // A remote project's terminal runs on its host (`terminal/remote_pty.rs`).
+    #[cfg(unix)]
+    let remote = kuana_core::remote::client::host_for(cwd);
+    #[cfg(not(unix))]
+    let remote: Option<(PathBuf, Arc<kuana_core::remote::RemoteHost>)> = None;
+    let default_shell: Option<String> = match &remote {
+        Some((_, host)) => host.shell(),
+        None => std::env::var("SHELL").ok(),
+    };
+    let login_shell = || default_shell.clone();
     let venv = crate::python::venv(cwd);
     let shell = match run {
         // PowerShell (the user's when that's PowerShell 7) with their
@@ -1468,11 +1490,7 @@ fn start_pty(
         }
         Some(target) => {
             // A login, interactive shell so PATH matches the user's terminal.
-            let program = configured
-                .as_ref()
-                .and_then(|c| c.first().cloned())
-                .or_else(|| std::env::var("SHELL").ok())
-                .unwrap_or_else(|| "/bin/sh".into());
+            let program = configured.as_ref().and_then(|c| c.first().cloned()).or_else(login_shell).unwrap_or_else(|| "/bin/sh".into());
             // After the profile, which may reorder PATH.
             let setup = venv.as_deref().map(crate::python::exports).unwrap_or_default();
             Some(vec![program, "-l".into(), "-i".into(), "-c".into(), setup + &run_script(&target.command)])
@@ -1484,7 +1502,7 @@ fn start_pty(
     // The activate script is the project's own shell script.
     let activate = match (run, &venv) {
         (None, Some(venv)) if crate::trust::is_trusted(cwd) => {
-            let program = configured.as_ref().and_then(|c| c.first().cloned()).or_else(|| std::env::var("SHELL").ok());
+            let program = configured.as_ref().and_then(|c| c.first().cloned()).or_else(login_shell);
             let program = program.unwrap_or_else(|| if cfg!(windows) { "powershell".into() } else { "sh".into() });
             crate::python::activate_command(venv, &program)
         }
@@ -1499,10 +1517,14 @@ fn start_pty(
     let mut shell = shell;
     let marks = (integrate && cfg!(unix)).then(shell_marks::Marks::default);
     if marks.is_some() {
-        let program = configured.as_ref().and_then(|c| c.first().cloned()).or_else(|| std::env::var("SHELL").ok());
+        let program = configured.as_ref().and_then(|c| c.first().cloned()).or_else(login_shell);
         let args: Vec<String> = configured.as_ref().map(|c| c[1..].to_vec()).unwrap_or_default();
-        // Tests keep out of the user's config folder.
-        let dir = if cfg!(test) { Some(std::env::temp_dir().join("kuana-test-shell-integration")) } else { crate::theme::config_dir().map(|d| d.join("shell-integration")) };
+        // Tests keep out of the user's config folder; a remote host keeps its own.
+        let dir = match &remote {
+            Some((mount, host)) => host.info().ok().map(|info| crate::fs::local_path(mount, &format!("{}/.kuana-server/shell-integration", info.home))),
+            None if cfg!(test) => Some(std::env::temp_dir().join("kuana-test-shell-integration")),
+            None => crate::theme::config_dir().map(|d| d.join("shell-integration")),
+        };
         if let (Some(program), Some(dir)) = (program, dir)
             && let Some((command, extra)) = shell_marks::integration(&program, &args, &dir)
         {
@@ -1512,6 +1534,28 @@ fn start_pty(
             env.extend(extra);
             env.insert("KUANA_SHELL_INTEGRATION".to_string(), "1".to_string());
         }
+    }
+    #[cfg(unix)]
+    if let Some((mount, host)) = remote {
+        // What runs there names the host's paths, not the mount's.
+        let mount = mount.to_string_lossy().trim_end_matches('/').to_string();
+        let host_text = |s: &str| s.replace(&mount, "");
+        let shell: Vec<String> = shell.unwrap_or_else(|| vec![login_shell().unwrap_or_else(|| "/bin/sh".into()), "-l".into()]).iter().map(|s| host_text(s)).collect();
+        let env: Vec<(String, String)> = env.into_iter().map(|(k, v)| (k, host_text(&v))).collect();
+        let cwd = crate::fs::remote(cwd).map(|(_, path)| path);
+        let pty = remote_pty::RemotePty::start(host, &shell, cwd.as_deref(), &env)?;
+        let remote = Some(pty.host());
+        let teed = match &marks {
+            Some(marks) => Teed::new(pty, log).with_marks(shell_marks::MarkFilter::new(marks.clone())),
+            None => Teed::new(pty, log),
+        };
+        let event_loop = EventLoop::new(term, listener, teed, false, false)?;
+        let notifier = Notifier(event_loop.channel());
+        event_loop.spawn();
+        if let Some(line) = activate {
+            notifier.notify((host_text(&line) + "\r").into_bytes());
+        }
+        return Ok(Started { notifier, process: None, remote, marks });
     }
     let shell = shell.and_then(|command| {
         let (program, args) = command.split_first()?;
@@ -1551,7 +1595,7 @@ fn start_pty(
         // The shell reads it once it's ready.
         notifier.notify((line + "\r").into_bytes());
     }
-    Ok(Started { notifier, process, marks })
+    Ok(Started { notifier, process, remote: None, marks })
 }
 
 /// No signals blocked on this thread while it lives. A process inherits its

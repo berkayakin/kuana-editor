@@ -1961,6 +1961,9 @@ while True:
                 answer = answer_to(["odd", "wdp"])
                 answers[answer["id"]] = answer
             extra += [str(answers["odd"].get("error", {}).get("code")), "progress " + ("refused" if "error" in answers["wdp"] else "ok")]
+        if name == "uri":
+            # What it was told the file is (a remote host's server sees the host's path).
+            extra.append("saw " + uri)
         message = " ".join([name + " problem"] + extra)
         problem = {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "severity": 1, "message": message}
         if name != "pull":

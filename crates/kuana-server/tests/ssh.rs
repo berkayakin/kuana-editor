@@ -104,3 +104,36 @@ fn a_host_that_fails_says_why() {
     assert!(err.contains("Couldn't connect to nowhere") && err.contains("Could not resolve hostname"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Git asking for a password on the host: its askpass program is the server,
+/// which relays the question to Kuana's asker and the answer back.
+#[test]
+fn questions_asked_there_are_answered_here() {
+    let dir = temp("askpass");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let program = fake_ssh(&dir, &home);
+    let server = |_: &str, _: &str| std::fs::read(env!("CARGO_BIN_EXE_kuana-server")).map_err(|e| e.to_string());
+    let options = ssh::Options { program: program.display().to_string(), control_dir: dir.join("control"), askpass: Vec::new(), server_binary: &server, progress: &|_| {} };
+    let connected = ssh::connect("askbox", &options).unwrap();
+    let asked = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let noted = asked.clone();
+    kuana_core::remote::client::set_asker(std::sync::Arc::new(move |prompt: &str, confirm: bool| {
+        noted.lock().unwrap().push((prompt.to_string(), confirm));
+        Some("s3cret".to_string())
+    }));
+    // As `git::asking` marks a command: Kuana's own askpass variables, which
+    // the server swaps for its own.
+    let out = Command::new("sh")
+        .args(["-c", "\"$GIT_ASKPASS\" 'Password for https://me@example.com: '"])
+        .current_dir(connected.home_path())
+        .env("KUANA_ASKPASS", "1234:token")
+        .env("GIT_ASKPASS", "/Applications/Kuana.app/Contents/MacOS/kuana")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "s3cret\n");
+    assert_eq!(*asked.lock().unwrap(), [("Password for https://me@example.com: ".to_string(), false)]);
+    ssh::disconnect("askbox");
+    let _ = std::fs::remove_dir_all(&dir);
+}
