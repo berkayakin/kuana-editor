@@ -363,7 +363,7 @@ is a small extension that uses them: it transforms the selection and counts word
 
 | Call | What it does | Needs |
 | --- | --- | --- |
-| `editor(path, with-text)` | An open file's tab: `path`'s, or without one the tab the user is in. Its path, language, version, whether it's unsaved, its carets and selections (the main one first) and, when asked, its text. None when there's no such tab or the code can't reach the file. | `workspace-files` for project files |
+| `editor(path, with-text)` | An open file's tab: `path`'s, or without one the tab the user is in. Its path, language, version, whether it's unsaved, its carets and selections (the main one first) and, when asked, its text. None when there's no such tab; an error when there is one but the code can't reach its file (the user didn't allow `workspace-files`, or it's outside the project), so the two can be told apart. | `workspace-files` for project files |
 | `apply-edits(path, version, edits)` | Edits the open file as one undo step and answers with the new version. | `workspace-write` for project files |
 | `set-selections(path, version, selections)` | Sets the carets and selections, and scrolls to the main one. | `workspace-files` for project files |
 | `write-project-file(path, content)` | Writes a file in the project (up to 16 MB), making its folders. An open tab of it reloads as after any change on disk; Local History keeps the version before. | `workspace-write` |
