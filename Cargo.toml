@@ -1,3 +1,13 @@
+[workspace]
+members = ["crates/kuana-core", "crates/kuana-server"]
+# `cargo build` / `test` / `run`: the app and the library it uses. The remote
+# server builds with `-p kuana-server` (or `--workspace`).
+default-members = [".", "crates/kuana-core"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
 [package]
 name = "kuana"
 version = "0.2.0"
@@ -16,6 +26,8 @@ short_description = "A small, fast GPU-rendered code editor"
 info_plist_exts = ["assets/macos/document-types.plist"]
 
 [dependencies]
+# The GPUI-free part shared with the remote server (`crates/kuana-core`).
+kuana-core = { path = "crates/kuana-core" }
 alacritty_terminal = { version = "0.26.0", default-features = false }
 # alacritty_terminal's own, for wrapping its pty (`terminal::run_log::Teed`).
 polling = "3.11"
@@ -140,7 +152,10 @@ codegen-units = 1
 debug = "limited"
 split-debuginfo = "packed"
 
-[lints.clippy]
+[lints]
+workspace = true
+
+[workspace.lints.clippy]
 # Requests and prompts started for their effect, their answers not needed.
 let_underscore_future = "allow"
 type_complexity = "allow"

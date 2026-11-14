@@ -3872,6 +3872,7 @@ dependencies = [
  "ignore",
  "image",
  "keyring",
+ "kuana-core",
  "libc",
  "libloading",
  "minisign-verify",
@@ -3928,6 +3929,25 @@ dependencies = [
  "wasmtime",
  "wasmtime-wasi",
  "winresource",
+]
+
+[[package]]
+name = "kuana-core"
+version = "0.2.0"
+dependencies = [
+ "encoding_rs",
+ "futures",
+ "ignore",
+ "notify",
+ "regex",
+ "ropey",
+]
+
+[[package]]
+name = "kuana-server"
+version = "0.2.0"
+dependencies = [
+ "kuana-core",
 ]
 
 [[package]]

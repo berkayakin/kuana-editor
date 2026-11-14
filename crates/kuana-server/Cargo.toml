@@ -1,0 +1,12 @@
+[package]
+name = "kuana-server"
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+description = "Kuana's headless server for remote development"
+
+[dependencies]
+kuana-core = { path = "../kuana-core" }
+
+[lints]
+workspace = true

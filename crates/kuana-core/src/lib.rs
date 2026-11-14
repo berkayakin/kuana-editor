@@ -1,0 +1,10 @@
+//! Kuana's GPUI-free core: what both the editor and its remote server
+//! (`kuana-server`, see `plans/remote-dev.md`) need. The editor re-exports
+//! these modules at its root, so `crate::search` and the like work as before.
+
+pub mod encoding;
+pub mod paths;
+pub mod process;
+pub mod project;
+pub mod search;
+pub mod watcher;
