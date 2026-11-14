@@ -7,6 +7,8 @@ first time, does the work on that machine: it reads, writes, watches and searche
 files and runs its Git, language servers, terminals, tests and debugger with the tools installed
 there. There's no extension to add and nothing to install there by hand.
 
+![A Rust project in a dev container: rust-analyzer, Git blame and a bash terminal all running in the container, and a forwarded port in the status bar](screenshots/remote.png)
+
 ## Connecting
 
 1. **File → Connect to SSH Host…** (or Find Action). The list has the projects you opened on other

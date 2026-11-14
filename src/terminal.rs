@@ -1476,6 +1476,13 @@ fn start_pty(
     // a POSIX system whatever this one is.
     let remote = kuana_core::remote::client::host_for(cwd);
     let here_windows = cfg!(windows) && remote.is_none();
+    // A container's shells aren't login shells, as VS Code's on Linux: a
+    // login shell's /etc/profile can set PATH afresh and drop the image's
+    // own (`/usr/local/cargo/bin`, `/usr/local/go/bin`).
+    let login = !remote.as_ref().is_some_and(|(mount, _)| {
+        kuana_core::remote::connection::host_of(mount)
+            .is_some_and(|name| matches!(kuana_core::remote::Transport::from_name(&name), kuana_core::remote::Transport::Container { .. }))
+    });
     let default_shell: Option<String> = match &remote {
         Some((_, host)) => host.shell(),
         None => std::env::var("SHELL").ok(),
@@ -1496,7 +1503,12 @@ fn start_pty(
             let program = configured.as_ref().and_then(|c| c.first().cloned()).or_else(login_shell).unwrap_or_else(|| "/bin/sh".into());
             // After the profile, which may reorder PATH.
             let setup = venv.as_deref().map(crate::python::exports).unwrap_or_default();
-            Some(vec![program, "-l".into(), "-i".into(), "-c".into(), setup + &run_script(&target.command)])
+            let mut command = vec![program];
+            if login {
+                command.push("-l".into());
+            }
+            command.extend(["-i".into(), "-c".into(), setup + &run_script(&target.command)]);
+            Some(command)
         }
         None => configured.clone(),
     };
@@ -1521,7 +1533,11 @@ fn start_pty(
     let marks = (integrate && !here_windows).then(shell_marks::Marks::default);
     if marks.is_some() {
         let program = configured.as_ref().and_then(|c| c.first().cloned()).or_else(login_shell);
-        let args: Vec<String> = configured.as_ref().map(|c| c[1..].to_vec()).unwrap_or_default();
+        let mut args: Vec<String> = configured.as_ref().map(|c| c[1..].to_vec()).unwrap_or_default();
+        // Without arguments the integration starts a login shell.
+        if args.is_empty() && !login {
+            args.push("-i".into());
+        }
         // Tests keep out of the user's config folder; a remote host keeps its own.
         let dir = match &remote {
             Some((mount, host)) => host.info().ok().map(|info| crate::fs::local_path(mount, &format!("{}/.kuana-server/shell-integration", info.home))),
@@ -1541,7 +1557,14 @@ fn start_pty(
     if let Some((mount, host)) = remote {
         // What runs there names the host's paths, not the mount's.
         let host_text = |s: &str| crate::fs::host_text(&mount, s);
-        let shell: Vec<String> = shell.unwrap_or_else(|| vec![login_shell().unwrap_or_else(|| "/bin/sh".into()), "-l".into()]).iter().map(|s| host_text(s)).collect();
+        let shell: Vec<String> = shell
+            .unwrap_or_else(|| {
+                let program = login_shell().unwrap_or_else(|| "/bin/sh".into());
+                if login { vec![program, "-l".into()] } else { vec![program] }
+            })
+            .iter()
+            .map(|s| host_text(s))
+            .collect();
         let env: Vec<(String, String)> = env.into_iter().map(|(k, v)| (k, host_text(&v))).collect();
         let cwd = crate::fs::remote(cwd).map(|(_, path)| path);
         let pty = remote_pty::RemotePty::start(host, &shell, cwd.as_deref(), &env)?;
