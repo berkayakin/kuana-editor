@@ -33,6 +33,9 @@ use crate::{
 pub enum DebugEvent {
     /// Paused here, or another frame was picked: show this line (1-based).
     Stopped { path: PathBuf, line: u32 },
+    /// The selected frame's first scope (Locals) arrived: (name, value) of
+    /// each variable, for the editor to show beside the lines naming them.
+    Values { path: PathBuf, values: Arc<Vec<(String, String)>> },
     /// Running again: no current line.
     Resumed,
     Ended,
@@ -108,6 +111,9 @@ pub struct DebugSession {
     frames: Vec<Frame>,
     frame: usize,
     scopes: Vec<Var>,
+    /// The scope opened for the selected frame (Locals): its variables go to
+    /// the editor as `DebugEvent::Values`.
+    locals: Option<i64>,
     children: HashMap<i64, Vec<Var>>,
     expanded: HashSet<i64>,
     watches: Vec<(String, Option<Result<String, String>>)>,
@@ -152,6 +158,7 @@ impl DebugSession {
             frames: Vec::new(),
             frame: 0,
             scopes: Vec::new(),
+            locals: None,
             children: HashMap::new(),
             expanded: HashSet::new(),
             watches: Vec::new(),
@@ -486,6 +493,7 @@ impl DebugSession {
     fn select_frame(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.frame = ix;
         self.scopes.clear();
+        self.locals = None;
         self.children.clear();
         self.expanded.clear();
         let Some(frame) = self.frames.get(ix) else {
@@ -515,6 +523,7 @@ impl DebugSession {
             let open = first.map(|(_, s)| s.reference).filter(|r| *r > 0);
             this.update(cx, |s, cx| {
                 s.scopes = scopes;
+                s.locals = open;
                 if let Some(reference) = open {
                     s.toggle(reference, cx);
                 }
@@ -552,12 +561,22 @@ impl DebugSession {
                 })
                 .collect();
             this.update(cx, |s, cx| {
+                if s.locals == Some(reference) {
+                    s.send_values(&vars, cx);
+                }
                 s.children.insert(reference, vars);
                 cx.notify();
             })
             .ok();
         });
         task.detach();
+    }
+
+    /// The selected frame's locals, for inline values (`shows_inline`).
+    fn send_values(&self, vars: &[Var], cx: &mut Context<Self>) {
+        let Some(path) = self.frames.get(self.frame).and_then(|f| f.path.clone()) else { return };
+        let values = vars.iter().filter(|v| shows_inline(&v.name, &v.value)).map(|v| (v.name.clone(), v.value.clone())).collect();
+        cx.emit(DebugEvent::Values { path, values: Arc::new(values) });
     }
 
     fn frame_id(&self) -> Option<i64> {
@@ -1180,10 +1199,33 @@ impl Render for DebugSession {
     }
 }
 
+/// Whether a variable's value goes after the lines naming it: a plain name
+/// (not `[0]` or `<return>`) and a value that says more than a type and an
+/// address (lldb's `&[i32] @ 0x16fdfdcd0` for references).
+fn shows_inline(name: &str, value: &str) -> bool {
+    let plain = name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+        && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$');
+    let address_only = value.rsplit_once(" @ 0x").is_some_and(|(_, hex)| !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()));
+    plain && !value.is_empty() && !address_only
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dap;
+
+    #[test]
+    fn inline_values_skip_odd_names_and_bare_addresses() {
+        assert!(shows_inline("sum", "10"));
+        assert!(shows_inline("name", "\"kuana\""));
+        assert!(shows_inline("_x", "Some(1)"));
+        assert!(!shows_inline("items", "&[i32] @ 0x16fdfdcd0"));
+        assert!(!shows_inline("[0]", "1"));
+        assert!(!shows_inline("<return>", "1"));
+        assert!(!shows_inline("empty", ""));
+        // An address within a longer value says more.
+        assert!(shows_inline("p", "{x: 1} @ 0x10 extra"));
+    }
 
     #[test]
     fn readable_frames_and_quiet_console() {
