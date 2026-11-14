@@ -17,6 +17,7 @@ impl Workspace {
         );
         self.breakpoints.clear();
         self.bookmarks.clear();
+        self.nav.clear();
         self.reset_todos();
         self.problems.update(cx, |p, cx| {
             p.set_run(None, cx);

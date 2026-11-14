@@ -71,6 +71,8 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   in one tab, each editable in place with everything a file's tab has (highlighting, problems,
   completion, Rename, Undo); ↑/↓ go from excerpt to excerpt, "⋯" strips show more, F4 opens the
   file; see [Multibuffers](editing.md#multibuffers)
+- Back / Forward through the places navigations left (Go to Declaration, results, pickers, other
+  tabs…), from the keyboard or a mouse's side buttons; see [Back and Forward](editing.md#back-and-forward)
 - Bookmarks, as in JetBrains: on any line, optionally with a mnemonic (0–9, A–Z) and a description,
   shown in the gutter and the scrollbar, following the lines as you edit; Show Bookmarks lists them
   all, Next / Previous Bookmark and Go to Bookmark 0–9 jump between them; see

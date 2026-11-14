@@ -450,11 +450,13 @@ impl Workspace {
         let command = command.trim().trim_start_matches(':');
         if let Ok(line) = command.parse::<usize>() {
             let editor = self.active_editor(cx).ok_or("No file is open")?;
-            editor.update(cx, |e, cx| {
-                let row = line.saturating_sub(1).min(e.doc.read(cx).line_count().saturating_sub(1));
-                let text = e.doc.read(cx).line_text(row);
-                let offset = e.doc.read(cx).line_start(row) + (text.len() - text.trim_start().len());
-                e.go_to(offset, window, cx);
+            self.navigate(window, cx, |_, window, cx| {
+                editor.update(cx, |e, cx| {
+                    let row = line.saturating_sub(1).min(e.doc.read(cx).line_count().saturating_sub(1));
+                    let text = e.doc.read(cx).line_text(row);
+                    let offset = e.doc.read(cx).line_start(row) + (text.len() - text.trim_start().len());
+                    e.go_to(offset, window, cx);
+                })
             });
             return Ok(());
         }
@@ -666,6 +668,7 @@ impl Workspace {
 
     /// Keeps open tabs, expanded folders and recents pointing at moved files.
     pub(super) fn moved(&mut self, old: &Path, new: &Path, cx: &mut Context<Self>) {
+        self.nav.moved(old, new);
         self.lsp.read(cx).did_rename(&[(old.to_path_buf(), new.to_path_buf(), new.is_dir())]);
         let remap = |p: &Path| p.strip_prefix(old).ok().map(|rest| if rest.as_os_str().is_empty() { new.to_path_buf() } else { new.join(rest) });
         for editor in self.editors.clone() {
