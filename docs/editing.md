@@ -132,6 +132,15 @@ multibuffer with every match marked, so a search across the project can be edite
   lists them, as for files changed without a tab).
 - Multiple carets stay within one excerpt.
 
+## Linked editing
+
+Typing in a tag's name changes its closing tag with it, and the other way round: `<li>` → `<link>`
+renames `</li>` → `</link>` as you type, in one undo step. It works in HTML, JSX and TSX (`<UI.Button>`
+too), and in extension languages whose grammars name tags the same way (Vue, Svelte, XML); it needs
+no language server. A space or `>` ends the name, leaving the other tag alone. Emptying a name and
+typing a new one still renames both. Turn it off with `"linked_editing": false` (Settings → Editor →
+Typing), per language too.
+
 ## Back and Forward
 
 **Back** goes to where the caret was before the last navigation, and **Forward** undoes a Back, as
