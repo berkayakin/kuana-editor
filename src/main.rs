@@ -6,7 +6,9 @@ use kuana_core::{encoding, exec, fs, paths, process, project, search, watcher};
 mod about;
 #[cfg(test)]
 mod host_lint;
-#[cfg(test)]
+// The server runs in-process, so this computer is the host, and remote
+// hosts are POSIX.
+#[cfg(all(test, unix))]
 mod remote_tests;
 mod askpass;
 mod autopilot;
