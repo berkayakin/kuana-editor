@@ -184,8 +184,26 @@ fn language_servers_start_again_after_a_reconnect(cx: &mut TestAppContext) {
     let first = store.read_with(cx, |s, _| s.running_servers());
     assert_eq!(first.len(), 1);
 
-    // The connection goes; another server is mounted in its place.
+    // The connection goes: the server's end isn't announced (it's said
+    // once, for the connection); another server is mounted in its place.
+    let toasts = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let noted = toasts.clone();
+    cx.update(|cx| {
+        cx.subscribe(&store, move |_, event: &crate::lsp::LspEvent, _| {
+            if let crate::lsp::LspEvent::Message(message) = event {
+                noted.borrow_mut().push(message.clone());
+            }
+        })
+        .detach()
+    });
     host.disconnect();
+    let started = std::time::Instant::now();
+    while store.read_with(cx, |s, _| !s.running_servers().is_empty()) && started.elapsed() < std::time::Duration::from_secs(10) {
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(store.read_with(cx, |s, _| s.running_servers().is_empty()), "the server outlived its connection");
+    assert!(toasts.borrow().is_empty(), "{:?}", toasts.borrow());
     let (again, host) = connect("app-remote-lsp-again");
     assert_eq!(again, root);
     store.update(cx, |s, cx| s.restart_under(&root, cx));
@@ -210,6 +228,7 @@ fn processes_to_attach_to_are_the_hosts() {
     let listed = crate::debugger::launch::processes(&project);
     let found = listed.iter().find(|p| p.pid == sleeper.id());
     let _ = sleeper.kill();
+    let _ = sleeper.wait();
     let found = found.unwrap_or_else(|| panic!("sleep isn't listed among {}", listed.len()));
     assert!(found.program.starts_with(&root), "{}", found.program.display());
     assert!(found.name.contains("sleep"), "{}", found.name);

@@ -83,8 +83,8 @@ opens (ports of other Compose services, `db:5432`, aren't).
 
 ## When the connection drops
 
-Kuana notices within a few seconds: the status bar's remote item turns red and Kuana offers
-**Reconnect** (also in that item's menu). The window and its unsaved text stay as they were; once
+Kuana notices within a few seconds and connects again by itself. If that fails, the status bar's
+remote item turns red and Kuana offers **Reconnect** (also in that item's menu). The window and its unsaved text stay as they were; once
 back, the tree, Git, the watcher and open files are read again, language servers start again and
 forwarded ports come back.
 
