@@ -357,6 +357,8 @@ impl Workspace {
                         let name = Transport::Container { name: up.container, user: up.user }.name();
                         let project = crate::fs::local_path(&crate::fs::mount_root(&name), &up.workspace);
                         ws.pending_ports = Some((project.clone(), up.forward_ports));
+                        // The same project as the trusted one here (only that opens in its container).
+                        crate::trust::trust(&project, cx);
                         // The window's project reopens there.
                         ws.connect_host(name, Some((project, OpenIn::ThisWindow)), window, cx);
                     }

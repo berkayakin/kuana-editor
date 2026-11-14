@@ -36,8 +36,10 @@ happen inside the distribution, with its own tools.
   The first time, the container is made: from its `image` or its Dockerfile (`build`), with the
   project mounted at `workspaceFolder` (`/workspaces/<folder>` unless it says otherwise), its
   `containerEnv`, `mounts`, `runArgs` and `containerUser`, then its `onCreateCommand`,
-  `updateContentCommand`, `postCreateCommand` and `postStartCommand`. Later it's found again (and
-  started if it stopped). You work in it as its `remoteUser`.
+  `updateContentCommand`, `postCreateCommand` and `postStartCommand`. It's named after the
+  configuration's `name` (or the folder), as Kuana shows it: `demo-90b07d (container)`. Later it's
+  found again (and started if it stopped). You work in it as its `remoteUser`, and the project
+  there is trusted as the one here is.
   Opening a project that has a dev container offers it once.
 - With the [devcontainer CLI](https://github.com/devcontainers/cli) installed
   (`npm install -g @devcontainers/cli`), Kuana lets it bring the container up instead, so
