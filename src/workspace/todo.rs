@@ -216,7 +216,7 @@ impl Workspace {
     }
 
     /// The unsaved text of the open files among `paths` (the rest is read from disk).
-    fn unsaved_texts(&self, paths: &[PathBuf], cx: &App) -> HashMap<PathBuf, Arc<str>> {
+    pub(super) fn unsaved_texts(&self, paths: &[PathBuf], cx: &App) -> HashMap<PathBuf, Arc<str>> {
         let wanted: HashSet<&PathBuf> = paths.iter().collect();
         let mut texts = HashMap::new();
         for editor in &self.editors {
@@ -305,6 +305,7 @@ fn todo_file_node(path: &Path, todos: &[Todo], shown: &str) -> ResultNode {
     let children = todos
         .iter()
         .map(|t| ResultNode {
+            actions: Vec::new(),
             leading: Leading::Line(t.line as u32 + 1),
             label: t.text.clone().into(),
             highlight: Some(0..t.keyword.min(t.text.len())),
@@ -326,6 +327,7 @@ fn todo_file_node(path: &Path, todos: &[Todo], shown: &str) -> ResultNode {
     };
     let count = format!("{} item{}", todos.len(), if todos.len() == 1 { "" } else { "s" });
     ResultNode {
+        actions: Vec::new(),
         leading: Leading::File(path.to_path_buf()),
         label: name.into(),
         highlight: None,

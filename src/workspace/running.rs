@@ -772,8 +772,11 @@ impl Workspace {
         let failed = run.count(test_run::TestStatus::Failed);
         let summary = run.summary();
         let title = format!("{}: {summary}", target.name);
-        self.results.update(cx, |p, cx| p.show(title.into(), test_run::tree(&run), buttons, false, cx));
+        // Run from the Test Explorer, the explorer stays in front: it shows the marks itself.
+        let behind = self.results.read(cx).shows_kind(super::test_explorer::TESTS_TAB);
+        self.results.update(cx, |p, cx| p.fill_kind("test-results", title.into(), test_run::tree(&run), buttons, behind, cx));
         self.has_results = true;
+        self.refresh_tests_tab(cx);
         let (kind, message) = match failed {
             0 => (ToastKind::Success, format!("Tests passed: {summary}")),
             _ => (ToastKind::Error, format!("Tests failed: {summary}")),

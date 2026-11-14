@@ -587,6 +587,7 @@ fn is_group(node: &ResultNode) -> bool {
 
 fn group_node(label: &str) -> ResultNode {
     ResultNode {
+        actions: Vec::new(),
         leading: Leading::Icon(Icon::Folder),
         label: label.to_string().into(),
         highlight: None,
@@ -610,6 +611,7 @@ fn test_node(label: &str, result: &TestResult) -> ResultNode {
         format!("{}:{line}", path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()).into()
     });
     ResultNode {
+        actions: Vec::new(),
         leading: Leading::Tinted(icon, tone),
         label: label.to_string().into(),
         highlight: None,

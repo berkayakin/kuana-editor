@@ -99,6 +99,7 @@ pub fn result_nodes(items: Vec<ResultItem>, extension: &Contributions) -> Vec<Re
         });
         let expanded = !item.children.is_empty();
         ResultNode {
+            actions: Vec::new(),
             leading,
             label: item.label.into(),
             highlight: None,

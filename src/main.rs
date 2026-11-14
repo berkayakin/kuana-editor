@@ -70,6 +70,7 @@ mod preview;
 mod problems_panel;
 mod project_settings;
 mod project_tree;
+mod test_explorer;
 mod todo;
 mod trust;
 mod trust_dialog;
@@ -111,7 +112,7 @@ use crate::{
         Replace, ReplaceInFiles, Save, SaveAs, SearchEverywhere, SelectTheme, ShowCommit,
         ToggleProblems, ToggleResults, ToggleSidebar, ToggleSecondSidebar, ToggleZenMode, ImportSettings, WelcomeSetup, GoToSymbol, InstallShellCommand,
         DebugConfiguration, Resume, PauseProgram, StepOver, StepInto, StepOut, AttachToProcess, AddConditionalBreakpoint, AddLogpoint,
-        ToggleBookmark, ToggleBookmarkWithMnemonic, ShowBookmarks, NextBookmark, PreviousBookmark, ShowTodo, ProblemsInEditor, NavigateBack, NavigateForward,
+        ToggleBookmark, ToggleBookmarkWithMnemonic, ShowBookmarks, NextBookmark, PreviousBookmark, ShowTodo, ShowTestExplorer, ProblemsInEditor, NavigateBack, NavigateForward,
         NewScratchFile,
     },
 };
@@ -265,6 +266,7 @@ fn menus_for(mac: bool) -> Vec<Menu> {
                 MenuItem::action("Run…", RunConfiguration),
                 MenuItem::action("Run at Caret", RunAtCaret),
                 MenuItem::action("Stop", StopRun),
+                MenuItem::action("Test Explorer", ShowTestExplorer),
                 MenuItem::separator(),
                 MenuItem::action("Debug at Caret", DebugAtCaret),
                 MenuItem::action("Debug…", DebugConfiguration),

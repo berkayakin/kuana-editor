@@ -823,6 +823,90 @@ fn js_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>) {
     }
 }
 
+// ---- A test file's tests -------------------------------------------------------------
+
+/// Every test in a file at once (the Test Explorer's file rows), from the
+/// file's outermost tests and groups (`roots`, from `file_targets`): the one
+/// there is, else what each runner takes to run a file's tests. None when
+/// the runner can't say just this file's.
+pub fn file_tests(path: &Path, roots: &[&RunTarget]) -> Option<RunTarget> {
+    for_host(path, || file_tests_here(path, roots))
+}
+
+fn file_tests_here(path: &Path, roots: &[&RunTarget]) -> Option<RunTarget> {
+    let [first, rest @ ..] = roots else { return None };
+    if rest.is_empty() {
+        return Some((*first).clone());
+    }
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let dir = path.parent().unwrap_or(path);
+    let file = shell_quote(&path.to_string_lossy());
+    let display = path.to_string_lossy().into_owned();
+    let tests = |command: String, cwd: &Path, debug: Option<DebugSpec>| RunTarget {
+        name: format!("Tests in '{name}'"),
+        command,
+        cwd: cwd.to_path_buf(),
+        row: None,
+        rows: 0..0,
+        debug,
+        test: None,
+    };
+    match first.test.as_ref().map(|(framework, _)| *framework) {
+        // The module the file is: its tests' names without their last part.
+        Some(Framework::Cargo) => {
+            let module = |t: &&RunTarget| t.test.as_ref().map(|(_, key)| key.rsplit_once("::").map_or("", |(m, _)| m).to_string());
+            let first_module = module(first)?;
+            if rest.iter().any(|t| module(t).as_ref() != Some(&first_module)) {
+                return None;
+            }
+            let (base, _) = first.command.split_once(" -- ")?;
+            // A crate root's tests are its whole target's, unless it's an integration test.
+            if first_module.is_empty() && !base.contains("--test ") {
+                return None;
+            }
+            let filter = format!("{first_module}::");
+            let command = if first_module.is_empty() { base.to_string() } else { format!("{base} -- {}", shell_quote(&filter)) };
+            let debug = match &first.debug {
+                Some(DebugSpec::Cargo { build, .. }) => {
+                    let mut args = Vec::new();
+                    if !first_module.is_empty() {
+                        args.push(filter);
+                    }
+                    args.push("--nocapture".into());
+                    Some(DebugSpec::Cargo { build: build.clone(), args })
+                }
+                _ => None,
+            };
+            Some(tests(command, &first.cwd, debug))
+        }
+        Some(Framework::Pytest) => Some(tests(format!("{} -m pytest -v {file}", python()), dir, pytest(path, &[]))),
+        Some(Framework::Go) => {
+            let names: Vec<&str> = roots
+                .iter()
+                .filter_map(|t| t.test.as_ref().map(|(_, key)| key.as_str()))
+                .filter(|n| !n.starts_with("Benchmark"))
+                .collect();
+            if names.is_empty() {
+                return None;
+            }
+            let pattern = format!("^({})$", names.join("|"));
+            let debug = Some(DebugSpec::Go { mode: "test".into(), program: dir.to_path_buf(), args: vec!["-test.run".into(), pattern.clone()] });
+            Some(tests(format!("go test -v -run {} .", shell_quote(&pattern)), dir, debug))
+        }
+        // `describe` blocks carry no test key: a JavaScript file is told by its name.
+        _ if matches!(Language::from_path(path), Language::JavaScript | Language::TypeScript | Language::Tsx) => {
+            let package_dir = nearest_with(path, "package.json").unwrap_or_else(|| dir.to_path_buf());
+            let (command, debug) = match js_test_runner(&package_dir) {
+                "vitest" => (format!("npx vitest run --reporter=verbose {file}"), node_debug("npx", &["vitest", "run", &display])),
+                "jest" => (format!("npx jest {file}"), node_debug("npx", &["jest", &display, "--runInBand"])),
+                _ => (format!("node --test {file}"), node_debug("node", &["--test", &display])),
+            };
+            Some(tests(command, &package_dir, debug))
+        }
+        _ => None,
+    }
+}
+
 // ---- Project configurations --------------------------------------------------------
 
 /// What the project can run: build tools found at its root, then the
