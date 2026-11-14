@@ -416,20 +416,17 @@ impl Workspace {
     /// Attach to Process… (⌥⇧F5 / Ctrl+Alt+F5 in JetBrains): debug a program
     /// that's already running; the adapter depends on what it runs.
     pub(super) fn attach_to_process(&mut self, _: &AttachToProcess, window: &mut Window, cx: &mut Context<Self>) {
-        if cfg!(windows) {
+        // A remote project's processes are its host's, Linux or macOS.
+        if cfg!(windows) && !self.root.as_deref().is_some_and(crate::fs::is_remote) {
             self.toast(ToastKind::Info, "Attaching to a process isn't supported on Windows yet", None, cx);
-            return;
-        }
-        // The list would be this computer's processes.
-        if self.root.as_deref().is_some_and(crate::fs::is_remote) {
-            self.toast(ToastKind::Info, "Attaching to a process isn't available for remote projects yet", None, cx);
             return;
         }
         self.close_modal(window, cx);
         self.open_picker(PickerMode::Attach, window, cx);
         let cwd = self.root.clone().or_else(|| std::env::var_os("HOME").map(PathBuf::from)).unwrap_or_default();
         let task = cx.spawn(async move |ws, cx| {
-            let processes = cx.background_executor().spawn(async move { launch::processes() }).await;
+            let dir = cwd.clone();
+            let processes = cx.background_executor().spawn(async move { launch::processes(&dir) }).await;
             let targets: Vec<RunTarget> = processes
                 .into_iter()
                 .map(|p| RunTarget {

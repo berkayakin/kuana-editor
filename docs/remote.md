@@ -65,7 +65,8 @@ happen inside the distribution, with its own tools.
 - Run tabs and test runs run there, and their errors become Problems with links into the project.
 - Debugging: the build and the debug adapter (lldb-dap, Delve, debugpy, js-debug) run there;
   adapters that listen on a port are reached through the connection, so nothing needs to be open
-  on that machine's firewall. Attaching to a running process is local only for now.
+  on that machine's firewall. Attach to Process lists that machine's processes (and works there from
+  Windows too).
 - Git and SSH questions asked there (a password, a passphrase, a new host for `git pull`) are
   asked in Kuana.
 
