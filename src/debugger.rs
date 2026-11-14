@@ -60,13 +60,15 @@ struct Frame {
     line: u32,
 }
 
-#[derive(Clone)]
-struct Var {
-    name: String,
-    value: String,
-    ty: Option<String>,
+/// A variable, scope or evaluated expression: what the Variables tree and
+/// the editor's hover show.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Var {
+    pub name: String,
+    pub value: String,
+    pub ty: Option<String>,
     /// Children to ask for (0: none).
-    reference: i64,
+    pub reference: i64,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -549,17 +551,7 @@ impl DebugSession {
         let Some(client) = self.client() else { return };
         let task = cx.spawn(async move |this, cx| {
             let Ok(Ok(body)) = client.request("variables", json!({ "variablesReference": reference })).await else { return };
-            let vars: Vec<Var> = body["variables"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|v| Var {
-                    name: v["name"].as_str().unwrap_or("").to_string(),
-                    value: v["value"].as_str().unwrap_or("").to_string(),
-                    ty: v["type"].as_str().filter(|t| !t.is_empty()).map(str::to_string),
-                    reference: v["variablesReference"].as_i64().unwrap_or(0),
-                })
-                .collect();
+            let vars = read_vars(&body);
             this.update(cx, |s, cx| {
                 if s.locals == Some(reference) {
                     s.send_values(&vars, cx);
@@ -575,8 +567,72 @@ impl DebugSession {
     /// The selected frame's locals, for inline values (`shows_inline`).
     fn send_values(&self, vars: &[Var], cx: &mut Context<Self>) {
         let Some(path) = self.frames.get(self.frame).and_then(|f| f.path.clone()) else { return };
-        let values = vars.iter().filter(|v| shows_inline(&v.name, &v.value)).map(|v| (v.name.clone(), v.value.clone())).collect();
+        let values = vars.iter().filter(|v| shows_inline(&v.name, &v.value, v.reference)).map(|v| (v.name.clone(), v.value.clone())).collect();
         cx.emit(DebugEvent::Values { path, values: Arc::new(values) });
+    }
+
+    /// Evaluates `expression` in the selected frame for the editor's hover:
+    /// None unless paused.
+    pub fn evaluate_for_hover(&self, expression: String) -> Option<impl Future<Output = Result<Var, String>> + use<>> {
+        if !self.is_paused() {
+            return None;
+        }
+        let (client, frame) = (self.client()?, self.frame_id()?);
+        // Adapters that evaluate for hovers look names up without running code.
+        let context = if self.capabilities["supportsEvaluateForHovers"].as_bool() == Some(true) { "hover" } else { "watch" };
+        Some(async move {
+            let evaluate = |expression: String| {
+                let answer = client.request("evaluate", json!({ "expression": expression, "frameId": frame, "context": context }));
+                async move {
+                    match answer.await {
+                        Ok(Ok(body)) => Ok(Var {
+                            value: body["result"].as_str().unwrap_or("").to_string(),
+                            ty: body["type"].as_str().filter(|t| !t.is_empty()).map(str::to_string),
+                            reference: body["variablesReference"].as_i64().unwrap_or(0),
+                            name: expression,
+                        }),
+                        Ok(Err(message)) => Err(message),
+                        Err(_) => Err("The debugger stopped".to_string()),
+                    }
+                }
+            };
+            let error = match evaluate(expression.clone()).await {
+                Ok(var) => return Ok(var),
+                Err(error) => error,
+            };
+            // `p.x` where `p` is a pointer or reference: lldb wants `p->x`, and
+            // some adapters only look names up. The fields are the children.
+            let path = field_path(&expression).ok_or(error.clone())?;
+            let mut var = evaluate(path[0].to_string()).await?;
+            for field in &path[1..] {
+                let mut children = Vec::new();
+                // A pointer's one child is what it points to (`*p`).
+                for _ in 0..2 {
+                    children = match client.request("variables", json!({ "variablesReference": var.reference })).await {
+                        Ok(Ok(body)) if var.reference > 0 => read_vars(&body),
+                        _ => return Err(error),
+                    };
+                    match children.as_slice() {
+                        [only] if only.name.starts_with('*') && !children.iter().any(|c| c.name == *field) => var = only.clone(),
+                        _ => break,
+                    }
+                }
+                var = children.into_iter().find(|c| c.name == *field).ok_or(error.clone())?;
+            }
+            var.name = expression;
+            Ok(var)
+        })
+    }
+
+    /// A variable's children (`Var::reference`), for the editor's hover.
+    pub fn children_of(&self, reference: i64) -> Option<impl Future<Output = Vec<Var>> + use<>> {
+        let client = self.client()?;
+        Some(async move {
+            match client.request("variables", json!({ "variablesReference": reference })).await {
+                Ok(Ok(body)) => read_vars(&body),
+                _ => Vec::new(),
+            }
+        })
     }
 
     fn frame_id(&self) -> Option<i64> {
@@ -1199,14 +1255,38 @@ impl Render for DebugSession {
     }
 }
 
+/// A `variables` response's variables.
+fn read_vars(body: &Value) -> Vec<Var> {
+    body["variables"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|v| Var {
+            name: v["name"].as_str().unwrap_or("").to_string(),
+            value: v["value"].as_str().unwrap_or("").to_string(),
+            ty: v["type"].as_str().filter(|t| !t.is_empty()).map(str::to_string),
+            reference: v["variablesReference"].as_i64().unwrap_or(0),
+        })
+        .collect()
+}
+
+/// `a.b.c` as its names, when it's only names joined by `.`.
+fn field_path(expression: &str) -> Option<Vec<&str>> {
+    let parts: Vec<&str> = expression.split('.').map(str::trim).collect();
+    let name = |p: &&str| p.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$') && p.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$');
+    (parts.len() > 1 && parts.iter().all(name)).then_some(parts)
+}
+
 /// Whether a variable's value goes after the lines naming it: a plain name
 /// (not `[0]` or `<return>`) and a value that says more than a type and an
-/// address (lldb's `&[i32] @ 0x16fdfdcd0` for references).
-fn shows_inline(name: &str, value: &str) -> bool {
+/// address (lldb's `&[i32] @ 0x16fdfdcd0` for references, `0x16fdfde04` for
+/// a pointer to a struct: something to expand, in the Debug panel).
+fn shows_inline(name: &str, value: &str, reference: i64) -> bool {
     let plain = name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
         && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$');
     let address_only = value.rsplit_once(" @ 0x").is_some_and(|(_, hex)| !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()));
-    plain && !value.is_empty() && !address_only
+    let bare_pointer = reference > 0 && value.strip_prefix("0x").is_some_and(|hex| !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()));
+    plain && !value.is_empty() && !address_only && !bare_pointer
 }
 
 #[cfg(test)]
@@ -1216,15 +1296,23 @@ mod tests {
 
     #[test]
     fn inline_values_skip_odd_names_and_bare_addresses() {
-        assert!(shows_inline("sum", "10"));
-        assert!(shows_inline("name", "\"kuana\""));
-        assert!(shows_inline("_x", "Some(1)"));
-        assert!(!shows_inline("items", "&[i32] @ 0x16fdfdcd0"));
-        assert!(!shows_inline("[0]", "1"));
-        assert!(!shows_inline("<return>", "1"));
-        assert!(!shows_inline("empty", ""));
+        assert!(shows_inline("sum", "10", 0));
+        assert!(shows_inline("name", "\"kuana\"", 0));
+        assert!(shows_inline("_x", "Some(1)", 4));
+        assert!(!shows_inline("items", "&[i32] @ 0x16fdfdcd0", 3));
+        assert!(!shows_inline("p", "0x000000016fdfde04", 5));
+        // A plain number that happens to be hex, with nothing to expand, is the value.
+        assert!(shows_inline("mask", "0xff", 0));
+        assert!(!shows_inline("[0]", "1", 0));
+        assert!(!shows_inline("<return>", "1", 0));
+        assert!(!shows_inline("empty", "", 0));
         // An address within a longer value says more.
-        assert!(shows_inline("p", "{x: 1} @ 0x10 extra"));
+        assert!(shows_inline("p", "{x: 1} @ 0x10 extra", 0));
+        assert_eq!(field_path("p.x"), Some(vec!["p", "x"]));
+        assert_eq!(field_path("self.items.len"), Some(vec!["self", "items", "len"]));
+        assert_eq!(field_path("x"), None);
+        assert_eq!(field_path("a[0].b"), None);
+        assert_eq!(field_path("f().x"), None);
     }
 
     #[test]

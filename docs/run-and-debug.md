@@ -124,6 +124,11 @@ and Zed use):
   stepping toolbar, the paused thread's frames (click one to see its line and variables), variables
   you can expand, watch expressions, and a console with the program's output that also evaluates
   expressions in the selected frame. The line the program is paused on is highlighted.
+- **Hover values**: while paused, hovering a name in the paused file (or pressing F1 / Ctrl+Q on it)
+  shows its value in the selected frame above the language server's documentation, with an arrow
+  to open structs, lists and the like. A field shows with what it's a field of (`self.items`,
+  `p.x`), and a selection is evaluated as written. Types, keywords and literals show only the
+  documentation.
 - **Inline values**: while paused, the lines of the paused function up to the paused line end with
   the values of the local variables they name (`total = 3, items = [1, 2]`), as in JetBrains IDEs.
   Names inside strings and comments and fields after a `.` don't count, long values are cut (the

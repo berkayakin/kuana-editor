@@ -21,6 +21,7 @@ mod unloaded;
 mod vim;
 
 pub use bookmarks::EditorBookmarksChanged;
+pub use debug_values::{EditorDebugChildren, EditorEvaluate};
 pub use excerpt::ExcerptEvent;
 pub use format::FormatError;
 pub use lsp::EditorLspEvent;
