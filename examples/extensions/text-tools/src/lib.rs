@@ -54,7 +54,8 @@ fn transform(text: &str, how: &str) -> String {
 
 fn transform_selection() -> Result<(), String> {
     // The tab the user is in, with its text. Offsets are bytes into it.
-    let editor = host::editor(None, true).ok_or("No file is open")?;
+    // An error: there is a file, but this extension may not read it. None: no file.
+    let editor = host::editor(None, true)?.ok_or("No file is open")?;
     let text = editor.text.as_deref().unwrap_or_default();
     let selected: Vec<Span> = editor.selections.iter().copied().filter(|s| s.start < s.end).collect();
     if selected.is_empty() {
@@ -91,7 +92,8 @@ fn counted() -> String {
 
 /// Puts the count of the file the user is in on the status bar.
 fn show_count() {
-    let Some(editor) = host::editor(None, true) else {
+    // No file, or one this extension can't read: nothing to count.
+    let Ok(Some(editor)) = host::editor(None, true) else {
         host::set_status("count", None);
         return;
     };
@@ -106,7 +108,7 @@ fn show_count() {
 }
 
 fn show_stats(path: Option<String>) -> Result<(), String> {
-    let editor = host::editor(path.as_deref(), true).ok_or("No file is open")?;
+    let editor = host::editor(path.as_deref(), true)?.ok_or("No file is open")?;
     let text = editor.text.as_deref().unwrap_or_default();
     let (words, characters, lines) = counts(text);
     let longest = text.lines().map(|l| l.chars().count()).max().unwrap_or(0);

@@ -219,11 +219,13 @@ interface host {
     // ---- New in 0.2: the editor ----
 
     /// An open file's tab: `path`'s, or without one the tab the user is in
-    /// (the window the call is for). None when there's no such tab, or it's
-    /// a file the extension can't reach: one outside its work folder and the
-    /// project, a project file without `workspace-files`, an image, a file
-    /// over 20 MB. `with-text` asks for the text too.
-    editor: func(path: option<string>, with-text: bool) -> option<editor-state>;
+    /// (the window the call is for). `with-text` asks for the text too. None
+    /// when there's no such tab (nothing open, an image, a file over 20 MB).
+    /// An error when there is one but the extension can't reach its file:
+    /// the user didn't allow `workspace-files` for a project file, or the
+    /// file is outside the project and the extension's folder. So code can
+    /// say "open a file first" for the one and "allow it" for the other.
+    editor: func(path: option<string>, with-text: bool) -> result<option<editor-state>, string>;
     /// Edits an open file as one undo step (`workspace-write` for a project
     /// file). The spans are in the text at `version` and can't overlap;
     /// carets and selections follow the edits. Answers with the new version,

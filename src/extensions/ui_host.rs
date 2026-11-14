@@ -857,24 +857,30 @@ impl wit2::Host for HostState {}
 impl v2::kuana::extension::host::Host for HostState {
     shared_host!(wit2);
 
-    fn editor(&mut self, path: Option<String>, with_text: bool) -> Option<wit2::EditorState> {
+    fn editor(&mut self, path: Option<String>, with_text: bool) -> Result<Option<wit2::EditorState>, String> {
         let path = match path {
-            Some(path) => Some(self.resolve(&path).ok()?),
+            Some(path) => Some(self.resolve(&path)?),
             None => None,
         };
-        let state = self.ask(|window, answer| Request::Editor { window, path, with_text, answer }).flatten()?;
-        // The tab the user is in may hold any file: only one the code can reach.
+        // No such tab is an answer (none), not an error.
+        let Some(state) = self.ask(|window, answer| Request::Editor { window, path, with_text, answer }).flatten() else { return Ok(None) };
+        // The tab the user is in may hold any file: only one the code can
+        // reach, and of one it can't, not even where it is.
         let shown = state.path.to_string_lossy().into_owned();
-        self.resolve(&shown).ok()?;
+        let reachable = state.path.starts_with(&self.work) || self.caller.root.as_ref().is_some_and(|root| state.path.starts_with(root));
+        if !reachable {
+            return Err("the file in this tab is outside the project and the extension's folder".into());
+        }
+        self.resolve(&shown)?;
         let span = |range: Range<usize>| wit2::Span { start: range.start as u32, end: range.end as u32 };
-        Some(wit2::EditorState {
+        Ok(Some(wit2::EditorState {
             path: shown,
             language: state.language,
             version: state.version,
             dirty: state.dirty,
             selections: state.selections.into_iter().map(span).collect(),
             text: state.text.map(|rope| rope.to_string()),
-        })
+        }))
     }
 
     fn apply_edits(&mut self, path: String, version: u64, edits: Vec<wit2::TextEdit>) -> Result<u64, String> {
