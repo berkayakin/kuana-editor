@@ -271,6 +271,7 @@ impl MultiBufferView {
         if let Some(held) = &held {
             runs = merge_runs(runs, held.clone());
         }
+        let old_len = self.items.len();
         let mut old: Vec<Option<Item>> = self.items.drain(from..to).map(Some).collect();
         let old_rows: Vec<RangeInclusive<usize>> =
             old.iter().map(|i| i.as_ref().and_then(|i| i.editor.read(cx).excerpt_rows(cx)).unwrap_or(0..=0)).collect();
@@ -309,10 +310,12 @@ impl MultiBufferView {
         self.items.splice(from..from, items);
         self.list.splice(from..to, count);
         // The keyboard's excerpt: where its editor went, else the file's
-        // first (or the next file's) excerpt.
+        // first (or the next file's) excerpt. An index past the end (an
+        // empty view's 0) names no excerpt to follow: it stays, so the first
+        // excerpts in take it.
         if was_active.is_some() {
             self.active = if count > 0 { from + active_at.unwrap_or(0) } else { from.min(self.items.len().saturating_sub(1)) };
-        } else if self.active >= to {
+        } else if self.active >= to && self.active < old_len {
             self.active = self.active - (to - from) + count;
         }
         if !added.is_empty() {
@@ -657,5 +660,23 @@ mod tests {
         });
         assert_eq!(rows(cx), [(PathBuf::from("/p/0.rs"), 0..=1), (b.clone(), 0..=1)]);
         view.read_with(cx, |v, _| assert_eq!(v.paths().len(), 2));
+    }
+
+    #[gpui::test]
+    fn places_filling_an_empty_view_get_the_keyboard(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        let doc = cx.new(|_| Document::from_text("x\n".into(), None));
+        let view = cx.new(|cx| MultiBufferView::new("Problems", None, 2, cx));
+        let places = |rows: &[usize]| FilePlaces { rows: rows.to_vec(), marks: Vec::new() };
+        // As Problems in Editor fills it: no add_file, files in any order.
+        view.update(cx, |v, cx| {
+            v.set_file_places(PathBuf::from("/p/b.rs"), doc.clone(), places(&[0]), false, cx);
+            v.set_file_places(PathBuf::from("/p/a.rs"), doc.clone(), places(&[0]), false, cx);
+            v.set_file_places(PathBuf::from("/p/c.rs"), doc.clone(), places(&[0]), false, cx);
+        });
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.items.len(), 3);
+            assert_eq!(v.active_editor(), Some(&v.items[1].editor), "b.rs's excerpt, moved down by a.rs");
+        });
     }
 }
