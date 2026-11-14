@@ -197,6 +197,8 @@ struct Started {
     remote: Option<(Arc<kuana_core::remote::RemoteHost>, u64)>,
     /// A shell's marks (`shell_marks`), when integration is on.
     marks: Option<shell_marks::Marks>,
+    /// The shell's name when it isn't this computer's `$SHELL` (a remote host's).
+    shell_name: Option<String>,
 }
 
 /// A terminal's processes, to tell its shell at the prompt from a command
@@ -302,8 +304,11 @@ impl TerminalView {
     /// size the view has by now.
     fn pty_started(&mut self, started: std::io::Result<Started>, cx: &mut Context<Self>) {
         match started {
-            Ok(Started { notifier, process, remote, marks }) => {
+            Ok(Started { notifier, process, remote, marks, shell_name }) => {
                 let Pty::Starting(typed) = std::mem::replace(&mut self.pty, Pty::Running(notifier)) else { return };
+                if let Some(name) = shell_name.filter(|_| self.run.is_none()) {
+                    self.title = name.into();
+                }
                 self.process = process;
                 self.remote = remote;
                 self.shell_marks = marks;
@@ -1551,7 +1556,8 @@ fn start_pty(
         if let Some(line) = activate {
             notifier.notify((host_text(&line) + "\r").into_bytes());
         }
-        return Ok(Started { notifier, process: None, remote, marks });
+        let shell_name = shell.first().and_then(|p| p.rsplit('/').next()).map(|n| n.trim_start_matches('-').to_string());
+        return Ok(Started { notifier, process: None, remote, marks, shell_name });
     }
     let shell = shell.and_then(|command| {
         let (program, args) = command.split_first()?;
@@ -1591,7 +1597,7 @@ fn start_pty(
         // The shell reads it once it's ready.
         notifier.notify((line + "\r").into_bytes());
     }
-    Ok(Started { notifier, process, remote: None, marks })
+    Ok(Started { notifier, process, remote: None, marks, shell_name: None })
 }
 
 /// No signals blocked on this thread while it lives. A process inherits its
