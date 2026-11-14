@@ -340,6 +340,10 @@ impl Workspace {
                 ws.open_settings(&OpenSettings, window, cx);
             }
             OnboardingEvent::BrowseThemes => ws.select_theme(&SelectTheme, window, cx),
+            OnboardingEvent::Import => {
+                ws.finish_onboarding(window, cx);
+                ws.import_settings(&ImportSettings, window, cx);
+            }
             OnboardingEvent::Problems(problems) => ws.report_config_problems(problems.clone(), cx),
         });
         window.focus(&onboarding.focus_handle(cx));

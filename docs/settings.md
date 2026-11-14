@@ -97,6 +97,31 @@ A file's existing indentation wins over `tab_size`/`hard_tabs`. A project's `.ed
 wins over both: `indent_style`, `indent_size`, `tab_width`, `trim_trailing_whitespace` and
 `insert_final_newline` are supported, read up to the nearest `root = true`.
 
+## Importing from VS Code or JetBrains
+
+**Import Settings…** (File menu, Find Action, or **Import from …** in Welcome Setup) brings your
+setup from another editor on this computer: Visual Studio Code (and Insiders, VSCodium, Cursor,
+Windsurf) or a JetBrains IDE (its newest version). Kuana lists what it found, then shows exactly
+what it would change before writing anything.
+
+- **From VS Code:** the VS Code base keymap; font, font size and line height; tab size, tabs or
+  spaces, soft wrap, rulers, whitespace marks; format on save, trimming and the final newline;
+  auto-save; the minimap, inlay hints, code lenses, linked editing, color swatches and semantic
+  highlighting; the theme when Kuana has one of that name; the sidebar's side; per-language
+  settings (`"[python]": {…}`) for Kuana's built-in languages; your own `keybindings.json`
+  shortcuts for commands Kuana has, in the editor or terminal when theirs were; your snippets
+  (the same format, copied as they are; a file Kuana's snippets already have isn't replaced);
+  Vim mode if you use VSCodeVim. Extensions that bring a language Kuana doesn't have built in
+  (Java, C#, Dart, Ruby, Zig, Vue and more) are installed from Kuana's registry.
+- **From a JetBrains IDE:** the editor font and size, a light theme if yours is light, soft wrap,
+  its keymap if you switched it to VS Code's or Sublime Text's (JetBrains' is Kuana's own), and
+  Vim mode if you use IdeaVim.
+
+Settings that have nothing like them in Kuana are left out, and the preview says how many
+shortcuts couldn't be taken. Settings go into `settings.json` and shortcuts into `keymap.json`, so
+you can change or remove anything afterwards. A project's `.vscode/launch.json` already works in
+Kuana as it is, under Debug….
+
 ## Project settings
 
 A project can carry its own settings in `.kuana/settings.json`, committed with the code, so

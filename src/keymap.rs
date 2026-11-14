@@ -29,7 +29,7 @@ use crate::{
         DebugConfiguration, Resume, PauseProgram, StepOver, StepInto, StepOut, ToggleDebugPanel, AttachToProcess, AddConditionalBreakpoint,
         AddLogpoint, OpenExtensions, ReloadExtensions, ProjectTrust, UndoFileChange, RedoFileChange, OpenProjectSettings,
         ToggleResults, NextResult, PreviousResult, RerunFailedTests, ShowLocalHistory,
-        ToggleAutoSave, ToggleSidebar, ToggleSidebarPosition, ToggleSecondSidebar, ToggleClassicLayout, ToggleZenMode, CheckForUpdates, WelcomeSetup, GoToSymbol, SplitTerminal, RenameTerminal, SelectOpenedFile, InstallShellCommand,
+        ToggleAutoSave, ToggleSidebar, ToggleSidebarPosition, ToggleSecondSidebar, ToggleClassicLayout, ToggleZenMode, ImportSettings, CheckForUpdates, WelcomeSetup, GoToSymbol, SplitTerminal, RenameTerminal, SelectOpenedFile, InstallShellCommand,
         ToggleDatabase, NewDatabaseConnection, ToggleDatabaseResults, RunSqlStatement, RunSqlScript, NewSqlScript,
         ToggleBookmark, ToggleBookmarkWithMnemonic, EditBookmarkDescription, ShowBookmarks, NextBookmark, PreviousBookmark, GoToBookmark, ShowTodo,
         OpenResultsInEditor, ProblemsInEditor, CompareWithClipboard, CompareWithFile, CompareWithBranch, NewScratchFile, ShowScratches,
@@ -911,6 +911,7 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Toggle Second Sidebar", ToggleSecondSidebar),
         a("Toggle Classic Layout", ToggleClassicLayout),
         a("Toggle Zen Mode", ToggleZenMode),
+        a("Import Settings from VS Code or JetBrains…", ImportSettings),
         a("Toggle Problems", ToggleProblems),
         a("Toggle Find Panel", ToggleResults),
         a("Next Result", NextResult),
@@ -1284,6 +1285,25 @@ pub fn change_shortcut(name: &str, action: &dyn Action, change: ShortcutChange, 
     apply_shortcut_change(&mut sections, refers, name, &defaults, &change);
     let json = serde_json::to_string_pretty(&sections).map_err(|e| e.to_string())?;
     crate::state::write_atomic(&path, format!("{KEYMAP_HEADER}{json}\n").as_bytes()).map_err(|e| e.to_string())
+}
+
+/// Adds imported shortcuts to `keymap.json` (keys as it writes them, Find
+/// Action labels, contexts), keeping what's there; returns how many.
+pub fn import_bindings(bindings: &[crate::import::Binding]) -> Result<usize, String> {
+    let path = keymap_path().ok_or("no config directory")?;
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut sections: Vec<Value> = if text.trim().is_empty() {
+        Vec::new()
+    } else {
+        serde_json::from_str(&strip_jsonc(&text)).map_err(|e| format!("keymap.json has an error: {e}"))?
+    };
+    sections.retain(Value::is_object);
+    for binding in bindings {
+        section_bindings(&mut sections, binding.context).insert(binding.keys.clone(), Value::String(binding.action.to_string()));
+    }
+    let json = serde_json::to_string_pretty(&sections).map_err(|e| e.to_string())?;
+    crate::state::write_atomic(&path, format!("{KEYMAP_HEADER}{json}\n").as_bytes()).map_err(|e| e.to_string())?;
+    Ok(bindings.len())
 }
 
 /// The bindings object of the section for `context`, added when missing.

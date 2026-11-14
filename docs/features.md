@@ -97,6 +97,9 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   (stage, discard, commit, amend, push), staging single changes, side-by-side diffs with changed words
   highlighted, a log with a branch graph and file history, merge/rebase with conflict resolution in
   the editor, branches, pull and fetch
+- [Import Settings](settings.md#importing-from-vs-code-or-jetbrains) from VS Code (and its forks) or a JetBrains IDE:
+  settings, per-language settings, shortcuts, snippets, the theme and Vim mode, with a preview first;
+  extensions for languages Kuana doesn't have built in come from its registry
 - Welcome screen with quick-start tiles, Recent Projects, a Git card for the open repository and quick actions
 - 50 built-in themes (36 dark, 14 light) and JSON user themes with live preview
 - [Remote development](remote.md): projects on other machines over SSH (your own `ssh`, config and

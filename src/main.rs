@@ -46,6 +46,7 @@ mod hierarchy;
 mod git_panel;
 mod git_store;
 mod image_view;
+mod import;
 mod instance;
 mod input_dialog;
 mod keymap;
@@ -106,7 +107,7 @@ use crate::{
         GitInit, GitPull, GitPush, GitSync, GitUndoCommit, GoToFile, GoToLine, MinimizeWindow, ZoomWindow, NewFile, NewWindow, NextTab, OpenFile,
         OpenFolder, OpenFolderInThisWindow, ConnectToHost, ConnectToWsl, AttachToContainer, OpenInDevContainer, OpenRemote, PrevTab, Quit, RecentFiles, RecentProjects,
         Replace, ReplaceInFiles, Save, SaveAs, SearchEverywhere, SelectTheme, ShowCommit,
-        ToggleProblems, ToggleResults, ToggleSidebar, ToggleSecondSidebar, ToggleZenMode, WelcomeSetup, GoToSymbol, InstallShellCommand,
+        ToggleProblems, ToggleResults, ToggleSidebar, ToggleSecondSidebar, ToggleZenMode, ImportSettings, WelcomeSetup, GoToSymbol, InstallShellCommand,
         DebugConfiguration, Resume, PauseProgram, StepOver, StepInto, StepOut, AttachToProcess, AddConditionalBreakpoint, AddLogpoint,
         ToggleBookmark, ToggleBookmarkWithMnemonic, ShowBookmarks, NextBookmark, PreviousBookmark, ShowTodo, ProblemsInEditor, NavigateBack, NavigateForward,
         NewScratchFile,
@@ -139,6 +140,7 @@ fn menus_for(mac: bool) -> Vec<Menu> {
         MenuItem::action("Attach to Running Container…", AttachToContainer),
         MenuItem::action("Open in Dev Container", OpenInDevContainer),
         MenuItem::action("Clone Repository…", GitClone),
+        MenuItem::action("Import Settings…", ImportSettings),
         MenuItem::separator(),
         MenuItem::action("Save", Save),
         MenuItem::action("Save As…", SaveAs),

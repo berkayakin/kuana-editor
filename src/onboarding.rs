@@ -30,6 +30,8 @@ pub enum OnboardingEvent {
     OpenSettings,
     /// Browse All Themes…: the theme picker.
     BrowseThemes,
+    /// Import from …: finish and import another editor's settings.
+    Import,
     Problems(Vec<String>),
 }
 
@@ -86,13 +88,18 @@ pub struct Onboarding {
     /// Which way the last step change went (1 forward, -1 back): the new
     /// step slides in from that side.
     direction: f32,
+    /// An editor whose settings can be imported (`import::find_sources`),
+    /// offered in the action bar.
+    import_from: Option<SharedString>,
 }
 
 impl EventEmitter<OnboardingEvent> for Onboarding {}
 
 impl Onboarding {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        Self { focus_handle: cx.focus_handle(), scroll: gpui::ScrollHandle::new(), step: 0, direction: 1. }
+        let home = crate::clone_dialog::home_dir().unwrap_or_default();
+        let import_from = crate::import::find_sources(&crate::import::config_root(&home), &home).into_iter().next().map(|s| format!("Import from {}…", s.name).into());
+        Self { focus_handle: cx.focus_handle(), scroll: gpui::ScrollHandle::new(), step: 0, direction: 1., import_from }
     }
 
     /// Shows step `ix`, from its top.
@@ -547,6 +554,13 @@ impl Onboarding {
                     .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(OnboardingEvent::OpenSettings))),
             )
             .when_some(settings_keys.filter(|_| window.viewport_size().width > px(640.)), |el, keys| el.child(kbd(keys, cx)))
+            // Coming from another editor: its setup in one go.
+            .when_some(self.import_from.clone().filter(|_| window.viewport_size().width > px(720.)), |el, label| {
+                el.child(
+                    link_button("welcome-import", label, theme)
+                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(OnboardingEvent::Import))),
+                )
+            })
             .child(div().flex_1())
             // Every choice is saved already: finishing early keeps them.
             .when(!last, |el| {
@@ -953,7 +967,7 @@ fn grid(mut cells: Vec<AnyElement>, columns: usize, gap: gpui::Pixels) -> gpui::
     div().flex().flex_col().gap(gap).children(rows)
 }
 
-fn link_button(id: &'static str, label: &'static str, theme: &Theme) -> Button {
+fn link_button(id: &'static str, label: impl Into<SharedString>, theme: &Theme) -> Button {
     div()
         .id(id)
         .flex()
@@ -969,7 +983,7 @@ fn link_button(id: &'static str, label: &'static str, theme: &Theme) -> Button {
         .cursor_pointer()
         .hover_bg(theme.hover)
         .hover(|s| s.text_color(theme.text))
-        .child(label)
+        .child(label.into())
 }
 
 fn keymap_blurb(base: BaseKeymap) -> &'static str {
