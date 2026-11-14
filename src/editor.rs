@@ -6,6 +6,7 @@ mod excerpt;
 mod fold;
 mod format;
 mod conflict;
+mod debug_values;
 mod extension;
 pub(crate) mod derived;
 mod lsp;
@@ -391,6 +392,8 @@ pub struct Editor {
     test_statuses: Arc<crate::test_run::Statuses>,
     /// See `row_problems`, for a document state.
     row_problems: (Option<(u64, u64, u64)>, Arc<Vec<(usize, Option<usize>, usize)>>),
+    /// See `debug_value_rows`: (document, version, tree, values, paused row).
+    debug_values: (Option<(u64, u64, u64, usize, usize)>, Arc<Vec<(usize, String)>>),
     marked_range: Option<Range<usize>>,
     indent_unit: String,
     /// Display width of a tab character (and of an indent level with tabs).
@@ -572,6 +575,7 @@ impl Editor {
             run_rows: (None, Arc::default()),
             test_statuses: Arc::default(),
             row_problems: (None, Arc::default()),
+            debug_values: (None, Arc::default()),
             marked_range: None,
             indent_unit: String::new(),
             tab_size: file_settings.tab_size,
@@ -3874,6 +3878,8 @@ impl Editor {
         let diagnostics: Vec<&lint::Diagnostic> = self.reach.find(&self.doc.read(cx).diagnostics, range_start..=range_end);
         // Per line with problems: its worst one and how many start on it.
         let row_problems = if single { Arc::default() } else { self.row_problems(cx) };
+        // Paused in the debugger: values after the lines of the paused function.
+        let debug_values = if single { Arc::default() } else { self.debug_value_rows(cx) };
 
         let mut frame = FrameLayout {
             text_bounds,
@@ -4639,6 +4645,28 @@ impl Editor {
                     frame.inline_bgs.push(fill(pill, theme.active).corner_radii(px(4.)));
                     frame.inline_texts.push((point(x, y), pill_line));
                     self.fold_pills.push((pill, fold.start));
+                    text_end = pill.right();
+                }
+                if let Ok(i) = debug_values.binary_search_by_key(&row, |(r, _)| *r) {
+                    let text = debug_values[i].1.clone();
+                    let color = Hsla::from(theme.info);
+                    let values_line = text_system.shape_line(
+                        SharedString::from(text.clone()),
+                        font_size,
+                        &[TextRun {
+                            len: text.len(),
+                            font: editor_font.clone(),
+                            color: color.alpha(0.9),
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        }],
+                        None,
+                    );
+                    let x = text_end + char_width * 3.;
+                    let pill = Bounds::new(point(x - px(6.), y + px(2.)), size(values_line.width + px(12.), line_height - px(4.)));
+                    frame.inline_bgs.push(fill(pill, color.alpha(0.1)).corner_radii(px(4.)));
+                    frame.inline_texts.push((point(x, y), values_line));
                     text_end = pill.right();
                 }
                 if let Some((worst, count)) = worst.filter(|_| problems_row != Some(row)) {

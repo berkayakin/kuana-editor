@@ -414,6 +414,8 @@ pub struct EditorSettings {
     pub inlay_hints: Option<bool>,
     /// The language server's code lenses ("3 references", "▶ Run") above lines.
     pub code_lens: Option<bool>,
+    /// Paused in the debugger, variables' values after the lines naming them.
+    pub inline_values: Option<bool>,
     /// The document in miniature at the editor's right edge, in place of the
     /// scrollbar (off by default).
     pub minimap: Option<bool>,
@@ -440,6 +442,7 @@ impl EditorSettings {
             show_whitespace: self.show_whitespace.or(base.show_whitespace),
             inlay_hints: self.inlay_hints.or(base.inlay_hints),
             code_lens: self.code_lens.or(base.code_lens),
+            inline_values: self.inline_values.or(base.inline_values),
             minimap: self.minimap.or(base.minimap),
             syntax_errors: self.syntax_errors.or(base.syntax_errors),
             edit_predictions: self.edit_predictions.or(base.edit_predictions),
@@ -519,6 +522,7 @@ pub const EDITOR_KEYS: &[&str] = &[
     "show_whitespace",
     "inlay_hints",
     "code_lens",
+    "inline_values",
     "minimap",
     "syntax_errors",
     "edit_predictions",
@@ -539,6 +543,7 @@ pub struct FileSettings {
     pub show_whitespace: ShowWhitespace,
     pub inlay_hints: bool,
     pub code_lens: bool,
+    pub inline_values: bool,
     pub minimap: bool,
     pub syntax_errors: bool,
     pub edit_predictions: bool,
@@ -786,6 +791,7 @@ impl Settings {
             "show_whitespace" => self.editor.show_whitespace.is_some(),
             "inlay_hints" => self.editor.inlay_hints.is_some(),
             "code_lens" => self.editor.code_lens.is_some(),
+            "inline_values" => self.editor.inline_values.is_some(),
             "minimap" => self.editor.minimap.is_some(),
             "syntax_errors" => self.editor.syntax_errors.is_some(),
             "edit_predictions" => self.editor.edit_predictions.is_some(),
@@ -922,6 +928,7 @@ impl Settings {
             show_whitespace: None,
             inlay_hints: None,
             code_lens: None,
+            inline_values: None,
             minimap: None,
             syntax_errors: None,
             edit_predictions: None,
@@ -940,6 +947,7 @@ impl Settings {
             show_whitespace: s.show_whitespace.unwrap_or_default(),
             inlay_hints: s.inlay_hints.unwrap_or(true),
             code_lens: s.code_lens.unwrap_or(true),
+            inline_values: s.inline_values.unwrap_or(true),
             minimap: s.minimap.unwrap_or(false),
             syntax_errors: s.syntax_errors.unwrap_or(true),
             edit_predictions: s.edit_predictions.unwrap_or(true),
@@ -1145,6 +1153,8 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // "inlay_hints": true,
   // The language server's code lenses above lines ("3 references", "▶ Run").
   // "code_lens": true,
+  // Paused in the debugger, variables' values after the lines that name them.
+  // "inline_values": true,
   // The document in miniature at the editor's right edge, in place of the
   // scrollbar, and its width in pixels.
   // "minimap": false,

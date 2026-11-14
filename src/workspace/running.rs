@@ -139,10 +139,21 @@ impl Workspace {
                 self.debug_location = Some((path.clone(), *line));
                 self.open_at(path.clone(), Some(*line), None, window, cx);
                 if let Some(editor) = self.tab_for(path, cx) {
-                    editor.update(cx, |e, cx| e.set_debug_line(Some(line.saturating_sub(1) as usize), cx));
+                    editor.update(cx, |e, cx| {
+                        e.set_debug_line(Some(line.saturating_sub(1) as usize), cx);
+                        // Another frame or step: its values come next.
+                        e.set_debug_values(None, cx);
+                    });
                 }
                 // A breakpoint hit brings Kuana forward, like JetBrains.
                 window.activate_window();
+            }
+            DebugEvent::Values { path, values } => {
+                if self.debug_location.as_ref().is_some_and(|(at, _)| at == path)
+                    && let Some(editor) = self.tab_for(path, cx)
+                {
+                    editor.update(cx, |e, cx| e.set_debug_values(Some(values.clone()), cx));
+                }
             }
             DebugEvent::Resumed | DebugEvent::Ended => self.clear_debug_location(cx),
             DebugEvent::Hide => {

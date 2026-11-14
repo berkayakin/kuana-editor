@@ -107,7 +107,7 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   move them between panes; pinned tabs; a tab menu with Close Others / All / to the Right
 - Debugger for Rust, Go, Python and JavaScript/TypeScript (lldb-dap, Delve, debugpy, js-debug):
   breakpoints with conditions and logpoints, attaching to running processes, stepping, frames,
-  variables, watches and an evaluating console; see [Debugging](run-and-debug.md#debugging)
+  variables, values inline after the lines that use them, watches and an evaluating console; see [Debugging](run-and-debug.md#debugging)
 - Restricted Mode for folders you haven't trusted (like VS Code's): no language servers,
   formatters or project tools until you do; see [Project trust](settings.md#project-trust)
 - Python virtual environments detected per project and used by terminals, Run, the debugger,

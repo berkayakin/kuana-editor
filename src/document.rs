@@ -232,6 +232,9 @@ pub struct Document {
     bookmarks_generation: u64,
     /// Where the line a debug session is paused on starts.
     debug_line: Option<usize>,
+    /// The paused frame's variables (name, value), shown after the lines of
+    /// its function that name them (`editor/debug_values.rs`).
+    debug_values: Option<Arc<Vec<(String, String)>>>,
     /// What each edit did to lines, tagged with the version it led to, so
     /// views can update just those lines (see `line_edits_since`).
     line_edits: Vec<(u64, LineEdit)>,
@@ -411,6 +414,7 @@ impl Document {
             bookmarks: LineMarks::default(),
             bookmarks_generation: 0,
             debug_line: None,
+            debug_values: None,
             line_edits: Vec::new(),
             line_edits_base: 0,
             patches: std::collections::VecDeque::new(),
@@ -1503,6 +1507,17 @@ impl Document {
     /// Highlights `row` as where a debug session is paused (None: running).
     pub fn set_debug_row(&mut self, row: Option<usize>) {
         self.debug_line = row.filter(|&r| r < self.line_count()).map(|r| self.line_start(r));
+        if self.debug_line.is_none() {
+            self.debug_values = None;
+        }
+    }
+
+    pub fn debug_values(&self) -> Option<&Arc<Vec<(String, String)>>> {
+        self.debug_values.as_ref()
+    }
+
+    pub fn set_debug_values(&mut self, values: Option<Arc<Vec<(String, String)>>>) {
+        self.debug_values = values;
     }
 
     /// Edits not yet sent to the language server, oldest first; each is

@@ -124,6 +124,11 @@ and Zed use):
   stepping toolbar, the paused thread's frames (click one to see its line and variables), variables
   you can expand, watch expressions, and a console with the program's output that also evaluates
   expressions in the selected frame. The line the program is paused on is highlighted.
+- **Inline values**: while paused, the lines of the paused function up to the paused line end with
+  the values of the local variables they name (`total = 3, items = [1, 2]`), as in JetBrains IDEs.
+  Names inside strings and comments and fields after a `.` don't count, long values are cut (the
+  Debug panel has them in full), and picking another frame shows that frame's. Turn them off with
+  `"inline_values": false` (Settings → Editor → Hints), per language too.
 - **Stepping**: Resume ⌥⌘R / F9, Step Over F8, Step Into F7, Step Out ⇧F8, Stop ⌘F2 (in the VS Code
   and Zed keymaps: F5, F10, F11, ⇧F11, ⇧F5, and Pause F6). F5 also starts debugging again.
 
