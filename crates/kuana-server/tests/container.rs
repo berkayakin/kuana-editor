@@ -174,6 +174,32 @@ fn a_running_container_is_worked_in() {
     assert_eq!(run(&["exec", &name, "sh", "-c", "pgrep -c kuana-server || true"]), "0");
 }
 
+/// An image's own PATH (`ENV PATH=/usr/local/cargo/bin:…`) survives a login
+/// shell whose `/etc/profile` sets PATH afresh, as Debian's does for root:
+/// programs there are still found and run.
+#[test]
+#[ignore]
+fn an_images_path_survives_a_login_shell_that_resets_it() {
+    let name = format!("kuana-e2e-path-{}", std::process::id());
+    let path = "/opt/kuana-tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    run(&["run", "-d", "--name", &name, "-e", &format!("PATH={path}"), &image(), "sleep", "infinity"]);
+    let _removed = Removed(name.clone());
+    run(&[
+        "exec",
+        &name,
+        "sh",
+        "-c",
+        "mkdir -p /opt/kuana-tools/bin && printf '#!/bin/sh\\necho tool ran\\n' > /opt/kuana-tools/bin/kuana-tool && chmod 755 /opt/kuana-tools/bin/kuana-tool && printf 'PATH=/usr/bin:/bin\\nexport PATH\\n' > /etc/profile",
+    ]);
+    let transport = Transport::Container { name: name.clone(), user: None };
+    let connected = connection::connect(&transport, &options(&|_| {})).unwrap();
+    let home = connected.home_path();
+    assert!(matches!(kuana_core::exec::which_on(&home, "kuana-tool"), Some(Some(_))));
+    let out = Command::new("kuana-tool").current_dir(&home).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "tool ran\n");
+    connection::disconnect(&connected.name);
+}
+
 #[test]
 #[ignore]
 fn a_dev_container_is_brought_up_and_found_again() {

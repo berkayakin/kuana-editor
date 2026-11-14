@@ -38,7 +38,7 @@ impl Ptys {
     pub fn open(&self, connection: Arc<Connection>, params: &Value, env: &[(String, String)]) -> io::Result<Value> {
         let id = params["id"].as_u64().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no id"))?;
         let mut words = params["shell"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string);
-        let program = words.next().or_else(|| std::env::var("SHELL").ok()).unwrap_or_else(|| "/bin/sh".into());
+        let program = words.next().or_else(super::server::user_shell).unwrap_or_else(|| "/bin/sh".into());
         let args: Vec<String> = words.collect();
         let mut vars: HashMap<String, String> = env.iter().cloned().collect();
         for pair in params["env"].as_array().into_iter().flatten() {

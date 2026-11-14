@@ -26,13 +26,54 @@ pub struct Options {
     pub trash: Option<PathBuf>,
 }
 
+/// The user's shell: `$SHELL`, else their account's (`docker exec` sets no
+/// `$SHELL`).
+pub(crate) fn user_shell() -> Option<String> {
+    std::env::var("SHELL").ok().filter(|s| !s.is_empty()).or_else(account_shell)
+}
+
+#[cfg(unix)]
+fn account_shell() -> Option<String> {
+    // SAFETY: getpwuid_r fills `entry` from `buf`, both ours; the shell is
+    // copied out while they live.
+    unsafe {
+        let mut entry: libc::passwd = std::mem::zeroed();
+        let mut buf = vec![0 as libc::c_char; 4096];
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        if libc::getpwuid_r(libc::getuid(), &mut entry, buf.as_mut_ptr(), buf.len(), &mut found) != 0 || found.is_null() || entry.pw_shell.is_null() {
+            return None;
+        }
+        let shell = std::ffi::CStr::from_ptr(entry.pw_shell).to_string_lossy().into_owned();
+        (!shell.is_empty()).then_some(shell)
+    }
+}
+
+#[cfg(not(unix))]
+fn account_shell() -> Option<String> {
+    None
+}
+
+/// A login shell may set PATH afresh (Debian's `/etc/profile` does for
+/// root), dropping what the server's own environment had, like a container
+/// image's `/usr/local/cargo/bin`: those entries go after the login shell's.
+fn keep_own_path(vars: &mut [(String, String)], own: Option<&str>) {
+    let (Some(own), Some((_, path))) = (own, vars.iter_mut().find(|(k, _)| k == "PATH")) else { return };
+    let mut entries: Vec<String> = path.split(':').filter(|p| !p.is_empty()).map(str::to_string).collect();
+    for entry in own.split(':').filter(|p| !p.is_empty()) {
+        if !entries.iter().any(|e| e == entry) {
+            entries.push(entry.to_string());
+        }
+    }
+    *path = entries.join(":");
+}
+
 /// The environment a login shell sets up (PATH with rustup's, nvm's,
 /// Homebrew's additions): programs the server starts get it, as they would
 /// in the user's terminal; `ssh host command` alone doesn't read those files.
 fn login_env() -> &'static Vec<(String, String)> {
     static ENV: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
     ENV.get_or_init(|| {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let shell = user_shell().unwrap_or_else(|| "/bin/sh".into());
         let marker = "__KUANA_LOGIN_ENV__";
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -47,7 +88,14 @@ fn login_env() -> &'static Vec<(String, String)> {
         let Ok(Ok(out)) = rx.recv_timeout(std::time::Duration::from_secs(10)) else { return Vec::new() };
         let text = String::from_utf8_lossy(&out.stdout);
         let Some((_, vars)) = text.split_once(&format!("\n{marker}\n")) else { return Vec::new() };
-        vars.split('\0').filter_map(|pair| pair.split_once('=')).filter(|(k, _)| !k.is_empty() && !matches!(*k, "PWD" | "OLDPWD" | "SHLVL" | "_")).map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        let mut vars: Vec<(String, String)> = vars
+            .split('\0')
+            .filter_map(|pair| pair.split_once('='))
+            .filter(|(k, _)| !k.is_empty() && !matches!(*k, "PWD" | "OLDPWD" | "SHLVL" | "_"))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        keep_own_path(&mut vars, std::env::var("PATH").ok().as_deref());
+        vars
     })
 }
 
@@ -144,7 +192,7 @@ impl State {
                 "os": std::env::consts::OS,
                 "arch": std::env::consts::ARCH,
                 "home": std::env::var("HOME").unwrap_or_default(),
-                "shell": std::env::var("SHELL").unwrap_or_default(),
+                "shell": user_shell().unwrap_or_default(),
             })),
             "which" => Ok(params["name"].as_str().and_then(which).map(|p| json!(text(&p))).unwrap_or(Value::Null)),
             "fs/read" => Ok(json!(BASE64.encode(std::fs::read(p()?)?))),
@@ -520,5 +568,27 @@ pub mod askpass {
             }
             None => 1,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_login_path_keeps_what_the_server_had() {
+        let mut vars = vec![("HOME".to_string(), "/root".to_string()), ("PATH".to_string(), "/usr/local/bin:/usr/bin:/bin".to_string())];
+        keep_own_path(&mut vars, Some("/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin"));
+        assert_eq!(vars[1].1, "/usr/local/bin:/usr/bin:/bin:/usr/local/cargo/bin");
+        // No PATH from the login shell: the server's own stays in force as it is.
+        let mut none = vec![("HOME".to_string(), "/root".to_string())];
+        keep_own_path(&mut none, Some("/a:/b"));
+        assert_eq!(none.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_users_shell_is_known_without_shell_set() {
+        assert!(account_shell().is_some_and(|s| s.starts_with('/')));
     }
 }
