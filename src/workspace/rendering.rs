@@ -363,6 +363,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_second_sidebar))
             .on_action(cx.listener(Self::toggle_classic_layout))
             .on_action(cx.listener(Self::toggle_zen_mode))
+            .on_action(cx.listener(Self::import_settings))
             .on_action(cx.listener(Self::toggle_problems))
             .on_action(cx.listener(Self::toggle_results))
             .on_action(cx.listener(Self::rerun_failed_tests))

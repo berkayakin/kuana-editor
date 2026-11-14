@@ -92,6 +92,7 @@ mod commands;
 mod compare;
 mod file_tree;
 mod git_ops;
+mod import;
 mod copilot;
 mod database;
 mod extension_ui;
@@ -189,6 +190,8 @@ actions!(
         ToggleClassicLayout,
         /// Everything but the editor hidden, its text centered (`workspace/zen.rs`).
         ToggleZenMode,
+        /// Another editor's settings, shortcuts and snippets (`workspace/import.rs`).
+        ImportSettings,
         ToggleProblems,
         ToggleTerminal,
         ToggleGitLog,

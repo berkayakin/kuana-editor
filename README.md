@@ -42,7 +42,9 @@ WebAssembly.
 
 **⌨️ Feels like home.** Search Everywhere on double Shift, Find Action, ⌥↩ for context
 actions: Kuana behaves like a JetBrains IDE. One click switches to the **VS Code**, **Sublime
-Text** or **Zed** keymap instead, and Vim mode is built in.
+Text** or **Zed** keymap instead, and Vim mode is built in. Coming from VS Code or a JetBrains
+IDE? [Import Settings](docs/settings.md#importing-from-vs-code-or-jetbrains) brings your
+settings, shortcuts, snippets and language extensions along.
 
 **🔋 Batteries included.** Language servers, a debugger, Git, a terminal, test running and
 formatting work without hunting for plugins. If a language server is missing, the status bar
