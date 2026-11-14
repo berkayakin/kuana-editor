@@ -319,7 +319,7 @@ impl Workspace {
 /// A file's lines up to `last` (0-based): read only that far.
 fn read_lines(path: &Path, last: usize) -> Vec<String> {
     use std::io::BufRead;
-    let Ok(file) = std::fs::File::open(path) else { return Vec::new() };
+    let Ok(file) = crate::fs::open(path) else { return Vec::new() };
     let mut reader = std::io::BufReader::new(file);
     let (mut lines, mut line) = (Vec::new(), Vec::new());
     while lines.len() <= last {

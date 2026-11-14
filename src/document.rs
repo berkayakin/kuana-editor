@@ -343,12 +343,12 @@ impl Document {
 
     fn read(path: &Path, binary: bool) -> std::io::Result<Self> {
         use std::io::Read;
-        let size = std::fs::metadata(path)?.len();
+        let size = crate::fs::metadata(path)?.len();
         if size > MAX_FILE_SIZE {
             return Err(std::io::Error::other(format!("{} MB is too large to open", size / 1_000_000)));
         }
         // The start first: a binary file isn't read further.
-        let mut file = std::fs::File::open(path)?;
+        let mut file = crate::fs::open(path)?;
         let mut bytes = Vec::new();
         (&mut file).take(8000).read_to_end(&mut bytes)?;
         if !binary && encoding::looks_binary(&bytes) {
@@ -367,7 +367,7 @@ impl Document {
     /// Whether the file at `path` reads as `text` (in `encoding`, else as
     /// `open` would read it; line endings as LF), like a document of it.
     pub fn file_has(path: &Path, text: &str, encoding: Option<TextEncoding>) -> bool {
-        let Ok(bytes) = std::fs::read(path) else { return false };
+        let Ok(bytes) = crate::fs::read(path) else { return false };
         let read = match encoding {
             Some(encoding) => encoding::decode_as(&bytes, encoding),
             None => encoding::decode(&bytes, None).0,
@@ -542,7 +542,7 @@ impl Document {
             if known.is_some() && mtime == known {
                 return Ok(None);
             }
-            let bytes = std::fs::read(&path)?;
+            let bytes = crate::fs::read(&path)?;
             let (text, encoding) = encoding::decode(&bytes, Some(encoding));
             let text = encoding::to_lf(text);
             let changes = if rope == text.as_str() { Changes::default() } else { Changes::between(&String::from(&rope), &text) };
@@ -609,7 +609,7 @@ impl Document {
         let path = self.path.clone().ok_or_else(|| std::io::Error::other("document has no path"))?;
         // Before reading: a write after it is noticed next time.
         let mtime = mtime(&path);
-        let bytes = std::fs::read(&path)?;
+        let bytes = crate::fs::read(&path)?;
         let (text, encoding) = encoding::decode(&bytes, Some(self.encoding));
         let text = encoding::to_lf(text);
         self.encoding = encoding;
@@ -626,7 +626,7 @@ impl Document {
     /// Unsaved edits are lost; callers ask first. Nothing to undo after it.
     pub fn reload_with_encoding(&mut self, encoding: TextEncoding) -> std::io::Result<()> {
         let path = self.path.clone().ok_or_else(|| std::io::Error::other("document has no path"))?;
-        let bytes = std::fs::read(&path)?;
+        let bytes = crate::fs::read(&path)?;
         self.encoding = encoding;
         self.disk_mtime = mtime(&path);
         let text = encoding::to_lf(encoding::decode_as(&bytes, encoding));
@@ -1814,7 +1814,7 @@ impl LspChanges {
 }
 
 fn mtime(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+    crate::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 /// What a save writes, taken from a document (`Document::save_job`): its

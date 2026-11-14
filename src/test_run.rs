@@ -6,6 +6,7 @@
 //! `status_of` match them to the gutter's run targets (`RunTarget::test`),
 //! and `rerun_failed` makes the command that runs only the failed ones.
 
+use crate::fs::PathExt as _;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -168,9 +169,9 @@ fn entry<'a>(results: &'a mut Vec<TestResult>, id: &str, status: TestStatus) -> 
 fn find_file(name: &str, cwd: &Path) -> Option<PathBuf> {
     let path = Path::new(name);
     if path.is_absolute() {
-        return path.is_file().then(|| path.to_path_buf());
+        return path.is_file_on_host().then(|| path.to_path_buf());
     }
-    cwd.ancestors().map(|dir| dir.join(path)).find(|p| p.is_file())
+    cwd.ancestors().map(|dir| dir.join(path)).find(|p| p.is_file_on_host())
 }
 
 /// `path:line` or `path:line:column` at the start of `text`, for a file that exists.

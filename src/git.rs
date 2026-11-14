@@ -2,13 +2,13 @@
 //! credential helpers, SSH keys and hooks all apply. Every function here
 //! blocks; call them from a background task.
 
+use crate::fs::PathExt as _;
 use std::{
     borrow::Cow,
     collections::HashMap,
     io::{Read, Write},
     ops::Range,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
     sync::{Arc, Mutex, OnceLock, PoisonError},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -16,7 +16,10 @@ use std::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::encoding::TextEncoding;
+use crate::{
+    encoding::TextEncoding,
+    exec::{Child, Command, Stdio},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Change {
@@ -188,7 +191,7 @@ pub fn asking<T>(f: impl FnOnce() -> T) -> T {
 
 /// `git <args>` in `root`, a folder trusted or not.
 fn command_in(root: &Path, args: &[&str], trusted: bool) -> Command {
-    let mut cmd = crate::process::command("git");
+    let mut cmd = Command::new("git");
     // A repository's config can name a program for `git status` to run; and
     // signature lines (`log.showSignature`) run gpg and break --format output.
     cmd.args(["-c", "core.fsmonitor=false", "-c", "log.showSignature=false"]);
@@ -303,7 +306,7 @@ fn error_text(stderr: &[u8], stdout: &[u8]) -> String {
 }
 
 pub fn is_available() -> bool {
-    crate::process::command("git")
+    Command::new("git")
         .arg("--version")
         .env("PATH", crate::lsp::servers::search_path())
         .output()
@@ -312,7 +315,7 @@ pub fn is_available() -> bool {
 
 /// The working-tree root of the repository containing `path`.
 pub fn discover(path: &Path) -> Option<PathBuf> {
-    let dir = if path.is_dir() { path } else { path.parent()? };
+    let dir = if path.is_dir_on_host() { path } else { path.parent()? };
     let out = run(dir, &["rev-parse", "--show-toplevel"]).ok()?;
     let root = PathBuf::from(out.trim());
     Some(crate::paths::canonicalize(&root).unwrap_or(root))
@@ -373,7 +376,7 @@ pub fn pathspecs<'a>(root: &Path, paths: impl IntoIterator<Item = &'a Path>) -> 
         // The outermost repository it's in, below this one.
         let mut folders: Vec<&Path> = rel.ancestors().skip(1).filter(|a| !a.as_os_str().is_empty()).collect();
         folders.reverse();
-        let repo = folders.into_iter().find(|folder| *nested.entry(folder.to_path_buf()).or_insert_with(|| root.join(folder).join(".git").exists()));
+        let repo = folders.into_iter().find(|folder| *nested.entry(folder.to_path_buf()).or_insert_with(|| root.join(folder).join(".git").exists_on_host()));
         specs.insert(repo.unwrap_or(rel).to_path_buf());
     }
     loop {
@@ -639,7 +642,7 @@ fn index_blob_text(root: &Path, rel: &str) -> BlobText {
     match index_blob(root, rel) {
         Some(bytes) => BlobText::new(&bytes, None),
         None => {
-            let style = BlobText::new(&std::fs::read(root.join(rel)).unwrap_or_default(), None);
+            let style = BlobText::new(&crate::fs::read(root.join(rel)).unwrap_or_default(), None);
             BlobText { text: String::new(), raw: String::new(), ..style }
         }
     }
@@ -1011,7 +1014,7 @@ fn fetched_since(root: &Path, time: SystemTime) -> bool {
     let Ok(path) = run(root, &["rev-parse", "--git-path", "FETCH_HEAD"]) else { return false };
     // Some file systems keep modification times to the second or two.
     let time = time - Duration::from_secs(2);
-    std::fs::metadata(root.join(path.trim())).and_then(|m| m.modified()).is_ok_and(|m| m >= time)
+    crate::fs::metadata(root.join(path.trim())).and_then(|m| m.modified()).is_ok_and(|m| m >= time)
 }
 
 pub fn fetch(root: &Path) -> Result<String, String> {
@@ -1189,8 +1192,8 @@ pub fn last_commit(root: &Path) -> Option<CommitInfo> {
 
 /// A running `git clone`. Progress is read from its stderr; `cancel` stops it.
 pub struct CloneJob {
-    child: std::sync::Mutex<std::process::Child>,
-    stderr: std::sync::Mutex<Option<std::process::ChildStderr>>,
+    child: std::sync::Mutex<Child>,
+    stderr: std::sync::Mutex<Option<Box<dyn std::io::Read + Send>>>,
     /// The latest progress line, e.g. "Receiving objects:  45% (450/1000)".
     pub progress: std::sync::Mutex<String>,
     cancelled: std::sync::atomic::AtomicBool,
@@ -1241,7 +1244,7 @@ impl CloneJob {
         if self.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
             // Killed, so git couldn't clean up after itself. Callers only
             // clone into folders that didn't exist, so this is all ours.
-            std::fs::remove_dir_all(&self.dest).ok();
+            crate::fs::remove_dir_all(&self.dest).ok();
             Err("Cancelled".into())
         } else if status.success() {
             Ok(self.dest.clone())
@@ -1784,7 +1787,7 @@ pub fn stage_lines(root: &Path, rel: &str, current: &str, rows: Range<usize>) ->
     let hunks = diff_hunks(&index.text, &target);
     let staged = splice(&own_lines(&index.raw), &index.lines_for(&target), &hunks, |h| rows_touch(&h.new_rows, &rows));
     // All of a deleted file's lines: the deletion, not an empty file.
-    if staged.is_empty() && std::fs::symlink_metadata(root.join(rel)).is_err() {
+    if staged.is_empty() && crate::fs::symlink_metadata(root.join(rel)).is_err() {
         return stage(root, &[rel.to_string()]);
     }
     write_index(root, rel, &index.encode(&staged)?)
@@ -1819,7 +1822,7 @@ fn write_index(root: &Path, rel: &str, contents: &[u8]) -> Result<(), String> {
         .ok()
         .and_then(|out| out.split_whitespace().next().map(str::to_string))
         .unwrap_or_else(|| {
-            let executable = std::fs::metadata(root.join(rel)).is_ok_and(|m| is_executable(&m));
+            let executable = crate::fs::metadata(root.join(rel)).is_ok_and(|m| is_executable(&m));
             if executable { "100755" } else { "100644" }.to_string()
         });
     let info = format!("{mode},{},{rel}", sha.trim());
@@ -1827,13 +1830,12 @@ fn write_index(root: &Path, rel: &str, contents: &[u8]) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn is_executable(meta: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    meta.permissions().mode() & 0o111 != 0
+fn is_executable(meta: &crate::fs::Metadata) -> bool {
+    meta.executable()
 }
 
 #[cfg(not(unix))]
-fn is_executable(_: &std::fs::Metadata) -> bool {
+fn is_executable(_: &crate::fs::Metadata) -> bool {
     false
 }
 
@@ -1886,13 +1888,13 @@ pub fn git_dir(root: &Path) -> Option<PathBuf> {
 
 pub fn repo_state(root: &Path) -> Option<RepoState> {
     let dir = git_dir(root)?;
-    if dir.join("rebase-merge").is_dir() || dir.join("rebase-apply").is_dir() {
+    if dir.join("rebase-merge").is_dir_on_host() || dir.join("rebase-apply").is_dir_on_host() {
         Some(RepoState::Rebasing)
-    } else if dir.join("MERGE_HEAD").is_file() {
+    } else if dir.join("MERGE_HEAD").is_file_on_host() {
         Some(RepoState::Merging)
-    } else if dir.join("CHERRY_PICK_HEAD").is_file() {
+    } else if dir.join("CHERRY_PICK_HEAD").is_file_on_host() {
         Some(RepoState::CherryPicking)
-    } else if dir.join("REVERT_HEAD").is_file() {
+    } else if dir.join("REVERT_HEAD").is_file_on_host() {
         Some(RepoState::Reverting)
     } else {
         None
@@ -1901,7 +1903,7 @@ pub fn repo_state(root: &Path) -> Option<RepoState> {
 
 /// The message git prepared for the merge commit (MERGE_MSG), without comments.
 pub fn merge_message(root: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(git_dir(root)?.join("MERGE_MSG")).ok()?;
+    let text = crate::fs::read_to_string(git_dir(root)?.join("MERGE_MSG")).ok()?;
     let message: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
     Some(message.join("\n").trim().to_string()).filter(|m| !m.is_empty())
 }
@@ -1976,13 +1978,13 @@ pub fn resolve_simple(root: &Path, rels: &[String]) -> Result<SimpleResolved, St
     let mut done = SimpleResolved::default();
     for rel in rels {
         let path = root.join(rel);
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(text) = crate::fs::read_to_string(&path) else { continue };
         let (resolved, n, left) = crate::conflict::resolve_simple(&text);
         done.left += left;
         if n == 0 {
             continue;
         }
-        std::fs::write(&path, resolved).map_err(|e| format!("couldn't write {rel}: {e}"))?;
+        crate::fs::write(&path, resolved).map_err(|e| format!("couldn't write {rel}: {e}"))?;
         done.resolved += n;
         if left == 0 {
             done.files.push(rel.clone());

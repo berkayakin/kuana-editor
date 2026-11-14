@@ -2,8 +2,10 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 // The GPUI-free core (`crates/kuana-core`), at the root as before.
-use kuana_core::{encoding, paths, process, project, search, watcher};
+use kuana_core::{encoding, exec, fs, paths, process, project, search, watcher};
 mod about;
+#[cfg(test)]
+mod host_lint;
 mod askpass;
 mod autopilot;
 mod python;

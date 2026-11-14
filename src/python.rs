@@ -5,6 +5,7 @@
 //! none (the status bar's menu); the choice is saved in its session, like the
 //! interpreter VS Code remembers per workspace.
 
+use crate::fs::PathExt as _;
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
@@ -76,7 +77,7 @@ pub fn detect(dir: &Path) -> Option<PathBuf> {
 /// Venvs in the project's folder and the folders directly in it.
 pub fn candidates(root: &Path) -> Vec<PathBuf> {
     let mut dirs = vec![root.to_path_buf()];
-    if let Ok(entries) = std::fs::read_dir(root) {
+    if let Ok(entries) = crate::fs::read_dir(root) {
         let mut subdirs: Vec<PathBuf> = entries
             .filter_map(Result::ok)
             .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
@@ -90,7 +91,7 @@ pub fn candidates(root: &Path) -> Vec<PathBuf> {
 }
 
 fn is_venv(dir: &Path) -> bool {
-    dir.join("pyvenv.cfg").is_file()
+    dir.join("pyvenv.cfg").is_file_on_host()
 }
 
 /// Where the venv keeps its executables.
@@ -125,7 +126,7 @@ pub fn activate_command(venv: &Path, shell: &str) -> Option<String> {
         _ => ("activate", |s| format!(". {}", quote(s))),
     };
     let script = bin.join(script);
-    script.is_file().then(|| format!(" {}", line(&script.to_string_lossy())))
+    script.is_file_on_host().then(|| format!(" {}", line(&script.to_string_lossy())))
 }
 
 /// Shell lines that put the venv first on PATH, like its activate script,

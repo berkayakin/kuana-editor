@@ -116,7 +116,7 @@ impl Workspace {
         let fallback = self.terminal_cwd(cx);
         for (group, saved) in layout.groups.into_iter().enumerate() {
             for tab in saved.tabs {
-                let cwd = tab.cwd.filter(|d| d.is_dir()).unwrap_or_else(|| fallback.clone());
+                let cwd = tab.cwd.filter(|d| d.is_dir_on_host()).unwrap_or_else(|| fallback.clone());
                 // Into this group, which the first shell creates.
                 self.open_terminal(cwd, None, TerminalPlace::Tab { group, ix: None }, false, window, cx);
                 if let Some(name) = tab.name

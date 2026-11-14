@@ -3,6 +3,8 @@
 //! these modules at its root, so `crate::search` and the like work as before.
 
 pub mod encoding;
+pub mod exec;
+pub mod fs;
 pub mod paths;
 pub mod process;
 pub mod project;

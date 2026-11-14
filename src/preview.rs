@@ -2,6 +2,7 @@
 //! size and dimensions, and temporary copies of image versions from Git
 //! (GPUI decodes images from paths, with every format the `image` crate has).
 
+use crate::fs::PathExt as _;
 use std::path::{Path, PathBuf};
 
 /// Raster formats GPUI can decode. SVG is left out on purpose: it's text
@@ -28,7 +29,7 @@ impl ImageInfo {
         ImageInfo {
             format: if ext == "JPG" { "JPEG".into() } else { ext },
             dimensions: image::image_dimensions(path).ok(),
-            bytes: std::fs::metadata(path).map_or(0, |m| m.len()),
+            bytes: crate::fs::metadata(path).map_or(0, |m| m.len()),
         }
     }
 
@@ -58,10 +59,10 @@ pub fn temp_copy(bytes: &[u8], extension: &str) -> Option<PathBuf> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut hasher);
     let dir = std::env::temp_dir().join("kuana-images");
-    std::fs::create_dir_all(&dir).ok()?;
+    crate::fs::create_dir_all(&dir).ok()?;
     let path = dir.join(format!("{:016x}.{extension}", hasher.finish()));
-    if !path.exists() {
-        std::fs::write(&path, bytes).ok()?;
+    if !path.exists_on_host() {
+        crate::fs::write(&path, bytes).ok()?;
     }
     Some(path)
 }

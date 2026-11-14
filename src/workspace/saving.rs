@@ -61,7 +61,7 @@ impl Workspace {
         }
         if doc.changed_on_disk() {
             let name = doc.file_name();
-            let deleted = doc.path.as_deref().is_some_and(|p| !p.exists());
+            let deleted = doc.path.as_deref().is_some_and(|p| !p.exists_on_host());
             if self.auto_save_warned.insert(id) {
                 let (title, detail) = if deleted {
                     (format!("{name} was deleted"), "Auto-save is paused for this file so it doesn't bring it back. Save it manually to keep your version.")
@@ -121,7 +121,7 @@ impl Workspace {
             return None;
         }
         let name = doc.file_name();
-        let deleted = doc.path.as_deref().is_some_and(|p| !p.exists());
+        let deleted = doc.path.as_deref().is_some_and(|p| !p.exists_on_host());
         // Writing can't be undone, so Cancel comes first (see `ask`).
         let rx = if deleted {
             window.prompt(
@@ -410,7 +410,7 @@ impl Workspace {
                             result
                         }
                         // The picture as it is on disk, under the new name.
-                        PaneItem::Image(image) => match current.as_deref().map(|from| std::fs::copy(from, &path)) {
+                        PaneItem::Image(image) => match current.as_deref().map(|from| crate::fs::copy(from, &path)) {
                             Some(Ok(_)) => {
                                 image.update(cx, |i, cx| i.set_path(path, cx));
                                 Ok(())

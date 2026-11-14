@@ -214,7 +214,7 @@ impl Workspace {
     /// restored so far, so a file shown twice is one document.
     fn restore_editor(&mut self, tab: &TabSession, restored: &mut Vec<(PathBuf, Entity<Editor>)>, cx: &mut Context<Self>) -> Option<PaneItem> {
         // The file is gone and there's nothing unsaved to keep.
-        if tab.unsaved.is_none() && tab.path.as_deref().is_none_or(|p| !p.is_file()) {
+        if tab.unsaved.is_none() && tab.path.as_deref().is_none_or(|p| !p.is_file_on_host()) {
             return None;
         }
         let encoding = tab.encoding.as_deref().and_then(TextEncoding::from_key);
@@ -245,7 +245,7 @@ impl Workspace {
     }
 
     fn restore_image(&mut self, tab: &TabSession, cx: &mut Context<Self>) -> Option<PaneItem> {
-        let path = tab.path.clone().filter(|p| p.is_file())?;
+        let path = tab.path.clone().filter(|p| p.is_file_on_host())?;
         Some(cx.new(|cx| ImageView::new(path, cx)).into())
     }
 

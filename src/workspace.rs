@@ -1,6 +1,7 @@
 //! The window's root view: title bar, file tree, tabs, problems panel and
 //! status bar around the active editor.
 
+use crate::fs::PathExt as _;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -1433,7 +1434,7 @@ impl Workspace {
     /// `binary`: a file that looks binary opens as text too (Open Anyway).
     fn open_path_as(&mut self, path: PathBuf, binary: bool, window: &mut Window, cx: &mut Context<Self>) {
         let path = crate::paths::canonicalize(&path).unwrap_or(path);
-        if path.is_dir() {
+        if path.is_dir_on_host() {
             self.set_root(path, window, cx);
             return;
         }
@@ -1452,7 +1453,7 @@ impl Workspace {
         }
         let mut large = false;
         let opened = if crate::preview::is_image(&path) {
-            std::fs::metadata(&path).map(|_| PaneItem::from(cx.new(|cx| ImageView::new(path.clone(), cx))))
+            crate::fs::metadata(&path).map(|_| PaneItem::from(cx.new(|cx| ImageView::new(path.clone(), cx))))
         } else {
             let read = if binary { Document::open_anyway(&path) } else { Document::open(&path) };
             match read {

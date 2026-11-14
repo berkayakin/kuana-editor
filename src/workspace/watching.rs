@@ -65,7 +65,7 @@ impl Workspace {
     /// language servers and open files.
     pub(super) fn disk_changed(&mut self, changed: Classified, cx: &mut Context<Self>) {
         let Some(root) = self.root.clone() else { return };
-        if root.is_dir() == self.root_gone {
+        if root.is_dir_on_host() == self.root_gone {
             self.root_gone = !self.root_gone;
             if self.root_gone {
                 self.toast(ToastKind::Error, "The project folder was deleted", Some(clone_dialog::display_path(&root)), cx);
@@ -273,7 +273,7 @@ pub(super) fn classify(changes: Vec<FsChange>, state: &WatchState) -> Classified
     // Each path's kind of change, found once, and only when needed.
     let mut found: HashMap<PathBuf, Option<bool>> = HashMap::new();
     let mut kind_of = |change: &FsChange| {
-        let is_dir = *found.entry(change.path.clone()).or_insert_with(|| std::fs::metadata(&change.path).ok().map(|m| m.is_dir()));
+        let is_dir = *found.entry(change.path.clone()).or_insert_with(|| crate::fs::metadata(&change.path).ok().map(|m| m.is_dir()));
         let kind = match (is_dir, change.structural) {
             (None, _) => FileChange::Deleted,
             (Some(_), true) => FileChange::Created,

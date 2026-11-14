@@ -362,7 +362,7 @@ impl Workspace {
             PendingInput::Rename(path) => {
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 // Preselect the name without its extension, like JetBrains.
-                let stem = if path.is_dir() { name.len() } else { name.rfind('.').filter(|&i| i > 0).unwrap_or(name.len()) };
+                let stem = if path.is_dir_on_host() { name.len() } else { name.rfind('.').filter(|&i| i > 0).unwrap_or(name.len()) };
                 ("Rename", Icon::Pencil, format!("Rename {name}"), name.clone(), Some(0..stem))
             }
             PendingInput::RenameSymbol { current, .. } => {
@@ -529,14 +529,14 @@ impl Workspace {
         match self.pending_input.as_ref().ok_or("Nothing to do")? {
             PendingInput::NewFile(dir) => {
                 let path = dir.join(name);
-                if path.exists() {
+                if path.exists_on_host() {
                     return Err(format!("{name} already exists"));
                 }
                 let created = crate::file_history::topmost_new(&path);
                 if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                    crate::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
                 }
-                std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|e| e.to_string())?;
+                crate::fs::create_new(&path).map_err(|e| e.to_string())?;
                 self.file_history.record(format!("New File “{name}”"), crate::file_history::Change::Created(created.clone()));
                 self.reveal_in_tree(&path, cx);
                 self.after_fs_change(&[created], cx);
@@ -544,11 +544,11 @@ impl Workspace {
             }
             PendingInput::NewFolder(dir) => {
                 let path = dir.join(name);
-                if path.exists() {
+                if path.exists_on_host() {
                     return Err(format!("{name} already exists"));
                 }
                 let created = crate::file_history::topmost_new(&path);
-                std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+                crate::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
                 self.file_history.record(format!("New Folder “{name}”"), crate::file_history::Change::Created(created.clone()));
                 self.reveal_in_tree(&path, cx);
                 self.tree.update(cx, |t, _| t.expand(path));
@@ -560,11 +560,11 @@ impl Workspace {
                 if new == old {
                     return Ok(());
                 }
-                if new.exists() {
+                if new.exists_on_host() {
                     return Err(format!("{name} already exists"));
                 }
                 // Folders the new name adds go away again on undo.
-                let new_dirs = new.parent().map(crate::file_history::topmost_new).filter(|d| !d.exists());
+                let new_dirs = new.parent().map(crate::file_history::topmost_new).filter(|d| !d.exists_on_host());
                 self.rename_with_servers(old.clone(), new.clone(), cx, move |ws, cx| {
                     let old_name = old.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     let renamed = crate::file_history::Change::Renamed { from: old.clone(), to: new.clone() };
@@ -669,7 +669,7 @@ impl Workspace {
     /// Keeps open tabs, expanded folders and recents pointing at moved files.
     pub(super) fn moved(&mut self, old: &Path, new: &Path, cx: &mut Context<Self>) {
         self.nav.moved(old, new);
-        self.lsp.read(cx).did_rename(&[(old.to_path_buf(), new.to_path_buf(), new.is_dir())]);
+        self.lsp.read(cx).did_rename(&[(old.to_path_buf(), new.to_path_buf(), new.is_dir_on_host())]);
         let remap = |p: &Path| p.strip_prefix(old).ok().map(|rest| if rest.as_os_str().is_empty() { new.to_path_buf() } else { new.join(rest) });
         for editor in self.editors.clone() {
             let path = editor.read(cx).doc.read(cx).path.clone();
@@ -730,7 +730,7 @@ impl Workspace {
         }
         let problem = if dir.starts_with(&from) {
             Some("A folder can't go inside itself".to_string())
-        } else if to.exists() {
+        } else if to.exists_on_host() {
             Some(format!("{} already has {}", folder_name(&dir), name.to_string_lossy()))
         } else {
             None
@@ -758,9 +758,9 @@ impl Workspace {
     /// auto-save or listed like a rename's. A server that takes too long is
     /// left out.
     fn rename_with_servers(&mut self, old: PathBuf, new: PathBuf, cx: &mut Context<Self>, done: impl FnOnce(&mut Self, &mut Context<Self>) + 'static) {
-        let asking = self.lsp.read(cx).will_rename(&[(old.clone(), new.clone(), old.is_dir())], cx);
+        let asking = self.lsp.read(cx).will_rename(&[(old.clone(), new.clone(), old.is_dir_on_host())], cx);
         let rename = move |ws: &mut Self, cx: &mut Context<Self>| {
-            let result = new.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::rename(&old, &new));
+            let result = new.parent().map_or(Ok(()), crate::fs::create_dir_all).and_then(|_| crate::fs::rename(&old, &new));
             match result {
                 Ok(()) => done(ws, cx),
                 Err(err) => ws.toast(ToastKind::Error, "Couldn't rename", Some(err.to_string()), cx),
@@ -824,7 +824,7 @@ impl Workspace {
         self.after_fs_change(&added, cx);
         self.schedule_session_save(cx);
         let Some(repo) = self.repo(cx).filter(|r| added.iter().all(|p| p.starts_with(r))) else { return };
-        let ignored: Vec<bool> = added.iter().map(|p| self.ignore.as_ref().is_some_and(|i| i.matched_path_or_any_parents(p, p.is_dir()).is_ignore())).collect();
+        let ignored: Vec<bool> = added.iter().map(|p| self.ignore.as_ref().is_some_and(|i| i.matched_path_or_any_parents(p, p.is_dir_on_host()).is_ignore())).collect();
         let added: Vec<PathBuf> = added.into_iter().zip(ignored).filter(|(_, ignored)| !ignored).map(|(p, _)| p).collect();
         if added.is_empty() {
             return;
@@ -861,7 +861,7 @@ impl Workspace {
     /// files in this window.
     pub(super) fn open_dropped(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
         for path in paths {
-            if path.is_dir() {
+            if path.is_dir_on_host() {
                 self.open_project(path.clone(), OpenIn::Auto, window, cx);
             } else {
                 self.open_path(path.clone(), window, cx);
@@ -926,9 +926,9 @@ impl Workspace {
         let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
         let target = (1..100)
             .map(|n| dir.join(if n == 1 { format!("{stem} copy{ext}") } else { format!("{stem} copy {n}{ext}") }))
-            .find(|p| !p.exists());
+            .find(|p| !p.exists_on_host());
         let Some(target) = target else { return };
-        match std::fs::copy(&path, &target) {
+        match crate::fs::copy(&path, &target) {
             Ok(_) => {
                 self.file_history.record(format!("Duplicate “{stem}{ext}”"), crate::file_history::Change::Created(target.clone()));
                 self.after_fs_change(std::slice::from_ref(&target), cx);
@@ -945,7 +945,7 @@ impl Workspace {
             let doc = t.read(cx).doc.read(cx);
             doc.is_dirty() && doc.path.as_deref().is_some_and(|p| p.starts_with(&path))
         });
-        let mut detail = if path.is_dir() {
+        let mut detail = if path.is_dir_on_host() {
             format!("The folder and everything in it will be moved to the {}.", trash_name())
         } else {
             format!("You can restore it from the {}.", trash_name())
@@ -1032,8 +1032,8 @@ impl Workspace {
     pub(super) fn add_to_gitignore(&mut self, rel: String, cx: &mut Context<Self>) {
         let Some(repo) = self.repo(cx) else { return };
         let file = repo.join(".gitignore");
-        let entry = if repo.join(&rel).is_dir() { format!("/{rel}/") } else { format!("/{rel}") };
-        let existing = std::fs::read_to_string(&file).unwrap_or_default();
+        let entry = if repo.join(&rel).is_dir_on_host() { format!("/{rel}/") } else { format!("/{rel}") };
+        let existing = crate::fs::read_to_string(&file).unwrap_or_default();
         if existing.lines().any(|l| l.trim() == entry) {
             self.toast(ToastKind::Success, format!("{entry} is already ignored"), None, cx);
             return;
@@ -1044,7 +1044,7 @@ impl Workspace {
         }
         text.push_str(&entry);
         text.push('\n');
-        match std::fs::write(&file, text) {
+        match crate::fs::write(&file, text) {
             Ok(()) => {
                 self.toast(ToastKind::Success, format!("Added {entry} to .gitignore"), None, cx);
                 self.reload_changed_files(cx);

@@ -111,7 +111,7 @@ impl ProjectSnapshot {
             for p in under {
                 self.files.remove(&p);
             }
-            let Ok(meta) = std::fs::metadata(path) else { continue };
+            let Ok(meta) = crate::fs::metadata(path) else { continue };
             // In an ignored folder: Go to File doesn't list it.
             if path.parent().is_some_and(|parent| parent != self.root && self.ignored(parent, true)) {
                 continue;
@@ -179,7 +179,7 @@ fn add_tree(dir: &Path, files: &mut BTreeMap<PathBuf, bool>) {
         }
     }
     for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = crate::fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
             if entry.file_type().is_ok_and(|t| t.is_file()) && entry.file_name() != ".DS_Store" {
                 let path = entry.path();

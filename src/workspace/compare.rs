@@ -16,7 +16,7 @@ impl Workspace {
     fn file_to_compare(&mut self, cx: &mut Context<Self>) -> Option<PathBuf> {
         let path = self.active_editor(cx).and_then(|e| e.read(cx).doc.read(cx).path.clone()).or_else(|| {
             let item = self.active_item(cx)?;
-            Some(item.diff()?.read(cx).file()).filter(|p| p.is_file())
+            Some(item.diff()?.read(cx).file()).filter(|p| p.is_file_on_host())
         });
         if path.is_none() {
             self.toast(ToastKind::Info, "Open a file to compare", None, cx);

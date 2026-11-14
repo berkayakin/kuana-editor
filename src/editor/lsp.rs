@@ -1837,7 +1837,7 @@ impl Editor {
                 .spawn(async move {
                     merge_locations(found, |p| match path.as_deref() == Some(p) {
                         true => Some(rope.clone()),
-                        false => std::fs::read_to_string(p).ok().map(|text| ropey::Rope::from_str(&text)),
+                        false => crate::fs::read_to_string(p).ok().map(|text| ropey::Rope::from_str(&text)),
                     })
                 })
                 .await;

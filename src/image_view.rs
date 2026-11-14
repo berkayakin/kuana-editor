@@ -50,7 +50,7 @@ impl ImageView {
 }
 
 fn mtime(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+    crate::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 impl Focusable for ImageView {

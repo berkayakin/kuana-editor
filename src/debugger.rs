@@ -6,6 +6,7 @@
 
 pub mod launch;
 
+use crate::fs::PathExt as _;
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
@@ -236,7 +237,7 @@ impl DebugSession {
                 this.update(cx, |s, cx| s.push_line(Line::Info, &line, cx)).ok();
             }
             built.await?;
-            if !made.is_file() {
+            if !made.is_file_on_host() {
                 return Err(format!("The build made no {}", made.display()));
             }
             program = Some(made.clone());
@@ -483,7 +484,7 @@ impl DebugSession {
                 .collect();
             this.update(cx, |s, cx| {
                 // The first frame in code that exists here, not inside a library.
-                let first = frames.iter().position(|f| f.path.as_ref().is_some_and(|p| p.is_file())).unwrap_or(0);
+                let first = frames.iter().position(|f| f.path.as_ref().is_some_and(|p| p.is_file_on_host())).unwrap_or(0);
                 s.frames = frames;
                 s.select_frame(first, cx);
             })
@@ -502,7 +503,7 @@ impl DebugSession {
             cx.notify();
             return;
         };
-        if let Some(path) = frame.path.clone().filter(|p| p.is_file()) {
+        if let Some(path) = frame.path.clone().filter(|p| p.is_file_on_host()) {
             cx.emit(DebugEvent::Stopped { path, line: frame.line });
         }
         let Some(client) = self.client() else { return };
@@ -1041,7 +1042,7 @@ impl Render for DebugSession {
                     Some(p) => format!("{}:{}", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), f.line),
                     None => String::new(),
                 };
-                let ours = f.path.as_ref().is_some_and(|p| p.is_file());
+                let ours = f.path.as_ref().is_some_and(|p| p.is_file_on_host());
                 div()
                     .id(("debug-frame", ix))
                     .relative()
