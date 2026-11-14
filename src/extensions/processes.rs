@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn output_comes_in_batches_then_the_exit() {
-        let told = collect("test-streams", "talk", "echo one; echo two >&2; sleep 0.3; printf 'thr\\xffee\\n'; exit 3");
+        let told = collect("test-streams", "talk", "echo one; echo two >&2; sleep 0.3; printf 'thr\\377ee\\n'; exit 3");
         // What it printed first arrives while it still runs.
         let first = told.recv_timeout(Duration::from_secs(20)).unwrap();
         assert!(matches!(&first, Told::Lines(lines) if !lines.is_empty()), "{first:?}");
