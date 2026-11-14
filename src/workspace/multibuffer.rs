@@ -267,11 +267,13 @@ impl Workspace {
             }
             MultiBufferEvent::Open { path, offset } => {
                 let offset = *offset;
-                ws.open_path(path.clone(), window, cx);
-                if let Some(editor) = ws.tab_for(path, cx) {
-                    editor.update(cx, |e, cx| e.go_to(offset, window, cx));
-                    window.focus(&editor.focus_handle(cx));
-                }
+                ws.navigate(window, cx, |ws, window, cx| {
+                    ws.open_path(path.clone(), window, cx);
+                    if let Some(editor) = ws.tab_for(path, cx) {
+                        editor.update(cx, |e, cx| e.go_to(offset, window, cx));
+                        window.focus(&editor.focus_handle(cx));
+                    }
+                });
             }
             MultiBufferEvent::Changed => cx.notify(),
         });

@@ -203,7 +203,7 @@ impl Render for ProblemsPanel {
                                 problem_row(SharedString::from(format!("problem-{ix}")), icon, color, message, &theme)
                                     .on_click(move |_, window, cx| {
                                         if let Some(editor) = editor.as_ref() {
-                                            editor.update(cx, |e, cx| e.go_to(target, window, cx));
+                                            editor.update(cx, |e, cx| e.jump(target, window, cx));
                                         }
                                     })
                                     .child(div().text_color(theme.text_dim).flex_shrink_0().child(SharedString::from(d.rule.to_string())))

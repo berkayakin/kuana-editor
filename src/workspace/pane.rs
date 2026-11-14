@@ -571,7 +571,7 @@ impl Pane {
                     .text_color(color)
                     .hover_bg(theme.hover)
                     .on_click(move |_, window, cx| {
-                        editor.update(cx, |e, cx| e.go_to(offset, window, cx));
+                        editor.update(cx, |e, cx| e.jump(offset, window, cx));
                         window.focus(&editor.focus_handle(cx));
                     })
                     .child(crumb.name),

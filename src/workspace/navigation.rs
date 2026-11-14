@@ -118,7 +118,8 @@ impl Workspace {
             PickerEvent::GoTo(offset) => {
                 ws.close_modal(window, cx);
                 if let Some(editor) = ws.active_editor(cx) {
-                    editor.update(cx, |e, cx| e.go_to(*offset, window, cx));
+                    let offset = *offset;
+                    ws.navigate(window, cx, |_, window, cx| editor.update(cx, |e, cx| e.go_to(offset, window, cx)));
                 }
             }
             PickerEvent::SymbolQuery(query) => ws.query_symbols(query.clone(), cx),
@@ -279,13 +280,15 @@ impl Workspace {
         let subscription = cx.subscribe_in(&modal, window, move |ws, _, event: &GoToLineEvent, window, cx| match event {
             GoToLineEvent::Confirm { line, column } => {
                 ws.close_modal(window, cx);
-                let (line, column) = (*line, *column);
-                editor.update(cx, |e, cx| {
-                    let row = line - 1;
-                    let start = e.doc.read(cx).line_start(row);
-                    let text = e.doc.read(cx).line_text(row);
-                    let col = text.char_indices().nth(column - 1).map_or(text.len(), |(b, _)| b);
-                    e.go_to(start + col, window, cx);
+                let (line, column, editor) = (*line, *column, editor.clone());
+                ws.navigate(window, cx, |_, window, cx| {
+                    editor.update(cx, |e, cx| {
+                        let row = line - 1;
+                        let start = e.doc.read(cx).line_start(row);
+                        let text = e.doc.read(cx).line_text(row);
+                        let col = text.char_indices().nth(column - 1).map_or(text.len(), |(b, _)| b);
+                        e.go_to(start + col, window, cx);
+                    })
                 });
             }
             GoToLineEvent::Dismissed => ws.close_modal(window, cx),

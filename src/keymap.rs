@@ -23,7 +23,7 @@ use crate::{
     workspace::{
         CloseAllTabs, CloseOtherTabs, CloseTab, CloseTerminal, NextPane, PreviousPane, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPaneDown, Rerun, RunConfiguration, StopRun, SplitDown, SplitRight, TogglePinTab, DecreaseFontSize, NewTerminal, ToggleTerminal, FileStructure, Find, IncreaseFontSize, OpenKeymap, OpenSettings, ResetFontSize, RestartLanguageServer, CopilotSignIn, CopilotSignOut, FindAction, FindInFiles, FindNext, FindPrevious, GoToFile, GoToLine, OpenSettingsFile, SwitchHeaderSource,
         CloseWindow, MinimizeWindow, ZoomWindow, NewFile, NewWindow, NextTab, OpenFile, OpenFolder, OpenFolderInThisWindow,
-        PrevTab, Quit, RecentFiles, RecentProjects, RecentTab, RecentTabBack, Replace,
+        PrevTab, Quit, RecentFiles, RecentProjects, RecentTab, RecentTabBack, NavigateBack, NavigateForward, Replace,
         GitBranches, GitStash, ManageRemotes, GitClone, GitFetch, GitInit, GitPull, GitPush, GitSync, GitUndoCommit, OpenRemote, OpenThemesFolder, OpenSnippetsFolder, ReloadThemes, ReplaceInFiles,
         Save, SaveAs, SearchEverywhere, SelectTheme, ShowCommit, ShowFileHistory, ToggleCommit, ToggleGitLog, ToggleProblems,
         DebugConfiguration, Resume, PauseProgram, StepOver, StepInto, StepOut, ToggleDebugPanel, AttachToProcess, AddConditionalBreakpoint,
@@ -403,6 +403,14 @@ fn jetbrains(mac: bool) -> Vec<KeyBinding> {
     }
     // Go to Bookmark 0–9 on both platforms.
     b.extend(('0'..='9').map(|mnemonic| KeyBinding::new(&format!("ctrl-{mnemonic}"), GoToBookmark { mnemonic }, None)));
+    // Back / Forward.
+    b.extend(if mac {
+        [("cmd-[", true), ("cmd-]", false), ("cmd-alt-left", true), ("cmd-alt-right", false)].as_slice()
+    } else {
+        [("ctrl-alt-left", true), ("ctrl-alt-right", false)].as_slice()
+    }
+    .iter()
+    .map(|&(keys, back)| nav_binding(keys, back)));
     b
 }
 
@@ -524,6 +532,14 @@ fn vscode(mac: bool) -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-y", Redo, e),
         ]);
     }
+    // Go Back / Go Forward (shift+minus arrives as underscore on some layouts).
+    b.extend(if mac {
+        [("ctrl--", true), ("ctrl-shift--", false), ("ctrl-_", false), ("ctrl-shift-_", false)].as_slice()
+    } else {
+        [("alt-left", true), ("alt-right", false)].as_slice()
+    }
+    .iter()
+    .map(|&(keys, back)| nav_binding(keys, back)));
     b
 }
 
@@ -614,6 +630,14 @@ fn sublime_text(mac: bool) -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-y", Redo, e),
         ]);
     }
+    // Jump Back / Jump Forward.
+    b.extend(if mac {
+        [("ctrl--", true), ("ctrl-shift--", false), ("ctrl-_", false), ("ctrl-shift-_", false)].as_slice()
+    } else {
+        [("alt--", true), ("alt-shift--", false), ("alt-_", false), ("alt-shift-_", false)].as_slice()
+    }
+    .iter()
+    .map(|&(keys, back)| nav_binding(keys, back)));
     b
 }
 
@@ -741,7 +765,20 @@ fn zed(mac: bool) -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-y", Redo, e),
         ]);
     }
+    // Go Back / Go Forward.
+    b.extend(if mac {
+        [("ctrl--", true), ("ctrl-shift--", false), ("ctrl-_", false), ("ctrl-shift-_", false)].as_slice()
+    } else {
+        [("ctrl-alt--", true), ("ctrl-alt-shift--", false), ("ctrl-alt-_", false), ("ctrl-alt-shift-_", false)].as_slice()
+    }
+    .iter()
+    .map(|&(keys, back)| nav_binding(keys, back)));
     b
+}
+
+/// Back (`back`) or Forward on these keys.
+fn nav_binding(keys: &str, back: bool) -> KeyBinding {
+    if back { KeyBinding::new(keys, NavigateBack, None) } else { KeyBinding::new(keys, NavigateForward, None) }
 }
 
 /// Everything Find Action / Search Everywhere can run.
@@ -762,6 +799,8 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Welcome Setup", WelcomeSetup),
         a("Go to Line:Column", GoToLine),
         a("File Structure", FileStructure),
+        a("Navigate Back", NavigateBack),
+        a("Navigate Forward", NavigateForward),
         a("Go to Declaration", GoToDeclaration),
         a("Go to Implementation", GoToImplementation),
         a("Go to Type Definition", GoToTypeDefinition),

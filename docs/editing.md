@@ -132,6 +132,27 @@ multibuffer with every match marked, so a search across the project can be edite
   lists them, as for files changed without a tab).
 - Multiple carets stay within one excerpt.
 
+## Back and Forward
+
+**Back** goes to where the caret was before the last navigation, and **Forward** undoes a Back, as
+in a browser. Navigations are jumps: Go to Declaration (and Implementation, Type Definition), a
+result in the Find panel, Find Usages or a picker (Go to File, Go to Symbol, File Structure), Go to
+Line, bookmarks, a `file:line` link in the terminal, a sticky line, a breadcrumb or a problem, and
+switching to another tab. Typing and moving the caret with keys or clicks aren't, so Back skips
+them. A new navigation after Back drops what Forward had left, and places follow the edits made
+since, files that are renamed or moved in Kuana, and files closed since (they open again).
+
+| Keymap | Back / Forward on macOS | on Windows / Linux |
+| --- | --- | --- |
+| JetBrains | ⌘[ / ⌘], or ⌥⌘← / ⌥⌘→ | Ctrl+Alt+← / Ctrl+Alt+→ |
+| VS Code | ⌃- / ⌃⇧- | Alt+← / Alt+→ |
+| Sublime Text | ⌃- / ⌃⇧- | Alt+- / Alt+Shift+- |
+| Zed | ⌃- / ⌃⇧- | Ctrl+Alt+- / Ctrl+Alt+Shift+- |
+
+A mouse's back and forward buttons do the same. Both are at the top of the Navigate menu and in
+Find Action (Navigate Back / Navigate Forward). The history is the window's, from the project's
+opening; it isn't kept when Kuana quits.
+
 ## Bookmarks
 
 A bookmark marks a line to come back to, in any file. **Toggle Bookmark** (F3 on macOS, F11 on

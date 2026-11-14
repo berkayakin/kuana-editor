@@ -17,6 +17,7 @@ The table below is the JetBrains keymap.
 | Go to File | ⌘⇧O | Ctrl+Shift+N |
 | Switch Header/Source (C, C++) | ⌃⌘↑ | Alt+F10 |
 | Recent Files | ⌘E | Ctrl+E |
+| Back / Forward (also a mouse's back and forward buttons) | ⌘[ / ⌘], or ⌥⌘← / ⌥⌘→ | Ctrl+Alt+← / Ctrl+Alt+→ |
 | Find Action | ⌘⇧A | Ctrl+Shift+A |
 | Go to Line:Column | ⌘L | Ctrl+G |
 | File Structure | ⌘F12 | Ctrl+F12 |

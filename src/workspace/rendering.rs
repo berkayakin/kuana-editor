@@ -348,6 +348,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::prev_tab))
             .on_action(cx.listener(Self::recent_tab))
             .on_action(cx.listener(Self::recent_tab_back))
+            .on_action(cx.listener(Self::navigate_back))
+            .on_action(cx.listener(Self::navigate_forward))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_sidebar_position))
             .on_action(cx.listener(Self::toggle_second_sidebar))
@@ -472,6 +474,9 @@ impl Render for Workspace {
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .capture_key_down(cx.listener(Self::on_any_key_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_root_mouse_up))
+            // A mouse's back and forward buttons.
+            .on_mouse_down(MouseButton::Navigate(NavigationDirection::Back), cx.listener(|ws, _, window, cx| ws.navigate_back(&NavigateBack, window, cx)))
+            .on_mouse_down(MouseButton::Navigate(NavigationDirection::Forward), cx.listener(|ws, _, window, cx| ws.navigate_forward(&NavigateForward, window, cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_root_mouse_up))
             .on_drop(cx.listener(|ws, paths: &gpui::ExternalPaths, window, cx| ws.open_dropped(paths.paths(), window, cx)))
             .when_some(self.resizing, |el, resize| el.child(self.resize_tracker(resize, cx)))

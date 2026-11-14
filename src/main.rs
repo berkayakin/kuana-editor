@@ -51,6 +51,7 @@ mod lsp;
 mod markdown_preview;
 mod multibuffer;
 mod merge_view;
+mod nav_history;
 mod onboarding;
 mod pane_item;
 mod paths;
@@ -106,7 +107,7 @@ use crate::{
         Replace, ReplaceInFiles, Save, SaveAs, SearchEverywhere, SelectTheme, ShowCommit,
         ToggleProblems, ToggleResults, ToggleSidebar, ToggleSecondSidebar, WelcomeSetup, GoToSymbol, InstallShellCommand,
         DebugConfiguration, Resume, PauseProgram, StepOver, StepInto, StepOut, AttachToProcess, AddConditionalBreakpoint, AddLogpoint,
-        ToggleBookmark, ToggleBookmarkWithMnemonic, ShowBookmarks, NextBookmark, PreviousBookmark, ShowTodo, ProblemsInEditor,
+        ToggleBookmark, ToggleBookmarkWithMnemonic, ShowBookmarks, NextBookmark, PreviousBookmark, ShowTodo, ProblemsInEditor, NavigateBack, NavigateForward,
         NewScratchFile,
     },
 };
@@ -192,6 +193,9 @@ fn menus_for(mac: bool) -> Vec<Menu> {
         Menu {
             name: "Navigate".into(),
             items: vec![
+                MenuItem::action("Back", NavigateBack),
+                MenuItem::action("Forward", NavigateForward),
+                MenuItem::separator(),
                 MenuItem::action("Search Everywhere", SearchEverywhere),
                 MenuItem::action("Go to File…", GoToFile),
                 MenuItem::action("Recent Files…", RecentFiles),

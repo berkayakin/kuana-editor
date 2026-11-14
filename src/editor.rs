@@ -271,6 +271,15 @@ pub enum EditorEvent {
 
 impl EventEmitter<EditorEvent> for Editor {}
 
+/// The caret jumped elsewhere in the file by something the editor shows
+/// (a sticky line, a breadcrumb, a problem), leaving `from`: the workspace
+/// keeps it for Back.
+pub struct EditorJumped {
+    pub from: usize,
+}
+
+impl EventEmitter<EditorJumped> for Editor {}
+
 /// A right-click in the code editor, at this window position. Separate from
 /// [`EditorEvent`] because many views treat any `EditorEvent` as an edit.
 pub struct EditorContextMenu(pub Point<Pixels>);
@@ -978,6 +987,12 @@ impl Editor {
         self.set_selections(vec![Selection::cursor(offset)], 0, cx);
         self.center_on_next_frame = true;
         window.focus(&self.focus_handle);
+    }
+
+    /// `go_to` as a navigation: where the caret was can be gone back to.
+    pub fn jump(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(EditorJumped { from: self.primary_selection().head });
+        self.go_to(offset, window, cx);
     }
 
     /// Shows the document's Git changes from `diff` (the same one for every
@@ -3279,6 +3294,7 @@ impl Editor {
 
         // A pinned line jumps to its definition.
         if let Some(offset) = self.sticky_at(event.position) {
+            cx.emit(EditorJumped { from: self.primary_selection().head });
             self.set_selections(vec![Selection::cursor(offset)], 0, cx);
             self.center_on_next_frame = true;
             cx.notify();

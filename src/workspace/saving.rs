@@ -614,7 +614,7 @@ impl Workspace {
                 let paths: Vec<Option<PathBuf>> = tabs.iter().map(|t| t.path(cx)).collect();
                 let order = tabs_by_use(&paths, pane.read(cx).active_ix(), &self.recent);
                 let order = order.into_iter().map(|ix| tabs[ix].clone()).collect();
-                TabSwitch { pane: pane.entity_id(), order, at: 0, recent: self.recent.clone() }
+                TabSwitch { pane: pane.entity_id(), order, at: 0, recent: self.recent.clone(), from: self.here(cx) }
             }
         };
         let len = switch.order.len();
@@ -623,9 +623,16 @@ impl Workspace {
         }
         switch.at = if forward { (switch.at + 1) % len } else { (switch.at + len - 1) % len };
         let Some(ix) = tabs.iter().position(|t| *t == switch.order[switch.at]) else { return };
-        // The tabs passed on the way keep their places in `recent`.
+        // The tabs passed on the way keep their places in `recent`, and
+        // Back goes to where the switch started, not to them.
         self.recent = switch.recent.clone();
+        self.nav.pause();
         self.activate_in(&pane, ix, window, cx);
+        self.nav.resume();
+        if let Some(from) = switch.from.clone() {
+            let to = self.here(cx);
+            self.nav.record(from, to.as_ref());
+        }
         // Let go of the keys and the next press starts from the tab it ended on.
         if window.modifiers().modified() {
             self.tab_switch = Some(switch);

@@ -72,13 +72,15 @@ impl Workspace {
     }
 
     pub(super) fn open_location(&mut self, location: Location, encoding: Encoding, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_path(location.path.clone(), window, cx);
-        if let Some(editor) = self.tab_for(&location.path, cx) {
-            editor.update(cx, |e, cx| {
-                let offset = protocol::position_to_offset(e.doc.read(cx).rope(), location.range.start, encoding);
-                e.go_to(offset, window, cx);
-            });
-        }
+        self.navigate(window, cx, |ws, window, cx| {
+            ws.open_path(location.path.clone(), window, cx);
+            if let Some(editor) = ws.tab_for(&location.path, cx) {
+                editor.update(cx, |e, cx| {
+                    let offset = protocol::position_to_offset(e.doc.read(cx).rope(), location.range.start, encoding);
+                    e.go_to(offset, window, cx);
+                });
+            }
+        });
     }
 
     /// Each location's line (as it reads today, untrimmed): from the tab's

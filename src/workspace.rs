@@ -10,7 +10,7 @@ use std::{
 
 use gpui::{
     AnyElement, AnyView, App, Bounds, ClickEvent, Context, Div, Entity, EntityId, FocusHandle, Focusable, FontWeight, Hsla,
-    CursorStyle, KeyDownEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    CursorStyle, KeyDownEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, NavigationDirection,
     MouseUpEvent, PathPromptOptions, Pixels, PromptLevel, Render,
     SharedString, Stateful, StyleRefinement, Subscription, Task, TitlebarOptions, Window,
     WindowBounds, WindowControlArea, WindowHandle, WindowOptions, actions, div, img, point,
@@ -36,7 +36,7 @@ use crate::{
     debugger::{DebugEvent, DebugSession, launch},
     extensions,
     editor::{
-        self, Cancel, Editor, EditorBookmarksChanged, EditorBreakpointMenu, EditorBreakpointsChanged, EditorContextMenu, EditorEvent, EditorGitEvent, EditorLoaded,
+        self, Cancel, Editor, EditorBookmarksChanged, EditorJumped, EditorBreakpointMenu, EditorBreakpointsChanged, EditorContextMenu, EditorEvent, EditorGitEvent, EditorLoaded,
         EditorLspEvent, EditorPreviewToggle, EditorRunEvent, EditorRunSql, FormatError, GitFile, ToggleMarkdownPreview, Unloaded,
     },
     image_view::ImageView,
@@ -99,6 +99,7 @@ mod line_endings;
 mod local_history;
 mod menus;
 mod multibuffer;
+mod nav_history;
 mod navigation;
 mod pane;
 mod pane_tree;
@@ -163,6 +164,11 @@ actions!(
         RecentTab,
         /// Ctrl+Shift+Tab: the same order, the other way.
         RecentTabBack,
+        /// The place the caret left by the last navigation (Go to Declaration,
+        /// a result, another tab…), as a browser's Back.
+        NavigateBack,
+        /// Undoes a Back.
+        NavigateForward,
         ToggleSidebar,
         ToggleSidebarPosition,
         ToggleSecondSidebar,
@@ -512,6 +518,8 @@ struct TabSwitch {
     at: usize,
     /// `recent` when it started: only the tab it ends on counts as used.
     recent: Vec<PathBuf>,
+    /// Where the caret was when it started, for Back.
+    from: Option<crate::nav_history::Place>,
 }
 
 /// A pane's tabs, by index, in the order they were last used: the current
@@ -838,6 +846,8 @@ pub struct Workspace {
     root_gone: bool,
     /// Most recently used files, newest first.
     recent: Vec<PathBuf>,
+    /// Back / Forward (`workspace/nav_history.rs`).
+    nav: crate::nav_history::NavHistory,
     /// Ctrl+Tab held down, going through the tabs.
     tab_switch: Option<TabSwitch>,
     actions: Arc<Vec<ActionEntry>>,
@@ -1303,6 +1313,7 @@ impl Workspace {
             project_changes: Vec::new(),
             root_gone: false,
             recent: Vec::new(),
+            nav: Default::default(),
             tab_switch: None,
             actions: Arc::new(keymap::action_entries()),
             shift_down: false,
@@ -1484,19 +1495,19 @@ impl Workspace {
     /// Opens a file at a 1-based line and column (from terminal output).
     fn open_at(&mut self, path: PathBuf, line: Option<u32>, column: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
         let path = crate::paths::canonicalize(&path).unwrap_or(path);
-        self.open_path(path.clone(), window, cx);
-        let (Some(line), Some(editor)) = (line, self.tab_for(&path, cx)) else { return };
-        editor.update(cx, |e, cx| {
-            let row = (line as usize).saturating_sub(1).min(e.doc.read(cx).line_count().saturating_sub(1));
-            let start = e.doc.read(cx).line_start(row);
-            let text = e.doc.read(cx).line_text(row);
-            let col = column.map_or(0, |c| c as usize).saturating_sub(1);
-            let offset = start + text.char_indices().nth(col).map_or(text.len(), |(i, _)| i);
-            e.go_to(offset, window, cx);
-        });
-        if let Some(editor) = self.tab_for(&path, cx) {
+        self.navigate(window, cx, |ws, window, cx| {
+            ws.open_path(path.clone(), window, cx);
+            let (Some(line), Some(editor)) = (line, ws.tab_for(&path, cx)) else { return };
+            editor.update(cx, |e, cx| {
+                let row = (line as usize).saturating_sub(1).min(e.doc.read(cx).line_count().saturating_sub(1));
+                let start = e.doc.read(cx).line_start(row);
+                let text = e.doc.read(cx).line_text(row);
+                let col = column.map_or(0, |c| c as usize).saturating_sub(1);
+                let offset = start + text.char_indices().nth(col).map_or(text.len(), |(i, _)| i);
+                e.go_to(offset, window, cx);
+            });
             window.focus(&editor.focus_handle(cx));
-        }
+        });
     }
 
     fn add_tab(&mut self, item: PaneItem, window: &mut Window, cx: &mut Context<Self>) {
@@ -1546,6 +1557,9 @@ impl Workspace {
         }));
         subscriptions.push(cx.subscribe(editor, |ws, editor, _: &EditorBreakpointsChanged, cx| {
             ws.breakpoints_changed(&editor, cx);
+        }));
+        subscriptions.push(cx.subscribe(editor, |ws, editor, event: &EditorJumped, cx| {
+            ws.editor_jumped(&editor, event, cx);
         }));
         subscriptions.push(cx.subscribe(editor, |ws, _, _: &EditorBookmarksChanged, cx| {
             ws.bookmarks_changed(cx);
@@ -1718,6 +1732,8 @@ impl Workspace {
     }
 
     fn activate_in(&mut self, pane: &Entity<Pane>, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // Another tab is a navigation of its own, unless one is under way.
+        let from = if self.nav.is_paused() { None } else { self.here(cx) };
         if let Some(item) = pane.read(cx).tabs().get(ix).cloned() {
             if let Some(previous) = self.active_editor(cx)
                 && Some(&previous) != item.editor()
@@ -1745,6 +1761,10 @@ impl Workspace {
             }
             self.todo_scope_input_changed(todo::TodoScope::CurrentFile, cx);
             self.schedule_session_save(cx);
+            if let Some(from) = from {
+                let to = self.here(cx);
+                self.nav.record(from, to.as_ref());
+            }
         }
         cx.notify();
     }
