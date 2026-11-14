@@ -144,6 +144,15 @@ pub(super) struct HoverPopover {
     blocks: Vec<HoverBlock>,
     /// Editor-local position of the popover's bottom-left (it opens upward).
     anchor: Point<Pixels>,
+    /// Paused in the debugger: the hovered expression's value.
+    pub(super) debug: Option<super::debug_values::DebugHover>,
+}
+
+impl HoverPopover {
+    /// Nothing to show (yet).
+    pub(super) fn is_empty(&self) -> bool {
+        self.diagnostics.is_empty() && self.blocks.is_empty() && self.debug.as_ref().is_none_or(|d| d.result.is_none())
+    }
 }
 
 pub(super) struct SignatureHelp {
@@ -1136,9 +1145,20 @@ impl Editor {
             .filter(|d| d.range.start <= range.end && d.range.end >= range.start)
             .map(|d| (d.severity, d.message.to_string()))
             .collect();
-        if !diagnostics.is_empty() {
-            self.lsp.hover = Some(HoverPopover { range: range.clone(), diagnostics: diagnostics.clone(), blocks: Vec::new(), anchor });
+        // Paused here: the debugger evaluates what's hovered.
+        let expression = self.debug_expression(range.start, cx);
+        let debug = expression.clone().map(|expression| super::debug_values::DebugHover {
+            expression,
+            result: None,
+            children: Default::default(),
+            expanded: Default::default(),
+        });
+        if !diagnostics.is_empty() || debug.is_some() {
+            self.lsp.hover = Some(HoverPopover { range: range.clone(), diagnostics: diagnostics.clone(), blocks: Vec::new(), anchor, debug });
             cx.notify();
+        }
+        if let Some(expression) = expression {
+            cx.emit(super::debug_values::EditorEvaluate { expression });
         }
         let requests = self.position_requests("hoverProvider", range.start, cx);
         if requests.is_empty() {
@@ -1151,11 +1171,13 @@ impl Editor {
                 e.lsp.hover_pending = None;
                 // Every server's documentation, the main one's first.
                 let blocks: Vec<HoverBlock> = answers.iter().filter_map(|(_, r)| r.as_ref().ok()).flat_map(protocol::hover_blocks).collect();
-                if blocks.is_empty() && diagnostics.is_empty() {
+                // The debugger's part, evaluated meanwhile, stays.
+                let debug = e.lsp.hover.as_mut().filter(|h| h.range == range).and_then(|h| h.debug.take());
+                if blocks.is_empty() && diagnostics.is_empty() && debug.is_none() {
                     return;
                 }
                 e.lsp.hover_hide = None;
-                e.lsp.hover = Some(HoverPopover { range, diagnostics, blocks, anchor });
+                e.lsp.hover = Some(HoverPopover { range, diagnostics, blocks, anchor, debug });
                 cx.notify();
             })
             .ok();
@@ -2014,8 +2036,11 @@ impl Editor {
             }
         }
 
-        if let Some(hover) = self.lsp.hover.as_ref() {
+        if let Some(hover) = self.lsp.hover.as_ref().filter(|h| !h.is_empty()) {
             let mut body = div().flex().flex_col().gap_2();
+            if let Some(debug) = hover.debug.as_ref() {
+                body = body.children(self.debug_hover_rows(debug, &mono, cx));
+            }
             for (severity, message) in &hover.diagnostics {
                 let color = super::severity_color(&theme, *severity);
                 body = body.child(div().text_color(color).child(message.clone()));
@@ -2047,9 +2072,10 @@ impl Editor {
             let left = hover.anchor.x.min(right_edge - px(MAX_WIDTH)).max(px(0.));
             // Its text, for the Copy button (the popover's text isn't selectable).
             let text: String = hover
-                .diagnostics
+                .debug
                 .iter()
-                .map(|(_, m)| m.clone())
+                .filter_map(|d| d.result.as_ref().map(|v| format!("{} = {}", d.expression, v.value)))
+                .chain(hover.diagnostics.iter().map(|(_, m)| m.clone()))
                 .chain(hover.blocks.iter().map(|b| b.text.clone()))
                 .collect::<Vec<_>>()
                 .join("\n\n");

@@ -164,6 +164,30 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Hovering in the paused file: the debugger evaluates it for the hover.
+    pub(super) fn evaluate_for_hover(&mut self, editor: &Entity<Editor>, event: &EditorEvaluate, cx: &mut Context<Self>) {
+        let Some((session, _)) = self.debug.as_ref() else { return };
+        let Some(answer) = session.read(cx).evaluate_for_hover(event.expression.clone()) else { return };
+        let (editor, expression) = (editor.downgrade(), event.expression.clone());
+        cx.spawn(async move |_, cx| {
+            let result = answer.await;
+            editor.update(cx, |e, cx| e.debug_hover_result(&expression, result, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// A value opened in the hover: its children.
+    pub(super) fn debug_hover_children(&mut self, editor: &Entity<Editor>, event: &EditorDebugChildren, cx: &mut Context<Self>) {
+        let Some((session, _)) = self.debug.as_ref() else { return };
+        let Some(answer) = session.read(cx).children_of(event.reference) else { return };
+        let (editor, reference) = (editor.downgrade(), event.reference);
+        cx.spawn(async move |_, cx| {
+            let vars = answer.await;
+            editor.update(cx, |e, cx| e.debug_hover_children(reference, vars, cx)).ok();
+        })
+        .detach();
+    }
+
     pub(super) fn clear_debug_location(&mut self, cx: &mut Context<Self>) {
         if let Some((path, _)) = self.debug_location.take()
             && let Some(editor) = self.tab_for(&path, cx)

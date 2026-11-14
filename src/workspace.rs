@@ -36,7 +36,7 @@ use crate::{
     debugger::{DebugEvent, DebugSession, launch},
     extensions,
     editor::{
-        self, Cancel, Editor, EditorBookmarksChanged, EditorJumped, EditorBreakpointMenu, EditorBreakpointsChanged, EditorContextMenu, EditorEvent, EditorGitEvent, EditorLoaded,
+        self, Cancel, Editor, EditorBookmarksChanged, EditorDebugChildren, EditorEvaluate, EditorJumped, EditorBreakpointMenu, EditorBreakpointsChanged, EditorContextMenu, EditorEvent, EditorGitEvent, EditorLoaded,
         EditorLspEvent, EditorPreviewToggle, EditorRunEvent, EditorRunSql, FormatError, GitFile, ToggleMarkdownPreview, Unloaded,
     },
     image_view::ImageView,
@@ -1560,6 +1560,12 @@ impl Workspace {
         }));
         subscriptions.push(cx.subscribe(editor, |ws, editor, event: &EditorJumped, cx| {
             ws.editor_jumped(&editor, event, cx);
+        }));
+        subscriptions.push(cx.subscribe(editor, |ws, editor, event: &EditorEvaluate, cx| {
+            ws.evaluate_for_hover(&editor, event, cx);
+        }));
+        subscriptions.push(cx.subscribe(editor, |ws, editor, event: &EditorDebugChildren, cx| {
+            ws.debug_hover_children(&editor, event, cx);
         }));
         subscriptions.push(cx.subscribe(editor, |ws, _, _: &EditorBookmarksChanged, cx| {
             ws.bookmarks_changed(cx);
