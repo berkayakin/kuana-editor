@@ -17,7 +17,7 @@ them, searches them and runs Git there.
    checked against the release's signature). Later connections reuse it.
 4. Kuana asks for a folder there (`~/project`, or a full path) and opens it as a project.
 
-The window's project chip and Recent Projects show it as `host: ~/project`. A remote project comes
+Recent Projects show it as `host: ~/project`, and the status bar's first item names the machine. A remote project comes
 back like a local one: Recent Projects, and the last project at startup, connect first. One
 connection serves every window on that host.
 
@@ -69,10 +69,21 @@ happen inside the distribution, with its own tools.
 - Git and SSH questions asked there (a password, a passphrase, a new host for `git pull`) are
   asked in Kuana.
 
+## Ports
+
+A web app or a database running there is reached from here through a forwarded port: **Forward a
+Port…** (Find Action, or the status bar's remote item) asks for its port there and listens on the
+same port here when it's free (another one when it isn't; the toast says which). The status bar's
+item lists them, to open one in the browser or stop it. A project keeps its ports: they're
+forwarded again when it opens or reconnects. A dev container's `forwardPorts` are forwarded when it
+opens (ports of other Compose services, `db:5432`, aren't).
+
 ## When the connection drops
 
-Kuana notices within a few seconds and offers **Reconnect**. The window and its unsaved text stay
-as they were; once back, the tree, Git, the watcher and open files are read again.
+Kuana notices within a few seconds: the status bar's remote item turns red and Kuana offers
+**Reconnect** (also in that item's menu). The window and its unsaved text stay as they were; once
+back, the tree, Git, the watcher and open files are read again, language servers start again and
+forwarded ports come back.
 
 ## Trust
 

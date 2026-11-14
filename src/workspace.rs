@@ -164,6 +164,8 @@ actions!(
         AttachToContainer,
         /// The project in its dev container (`.devcontainer/devcontainer.json`).
         OpenInDevContainer,
+        /// A port on the remote project's machine, reached from here.
+        ForwardPort,
         RecentProjects,
         Save,
         SaveAs,
@@ -872,6 +874,12 @@ pub struct Workspace {
     connecting: Option<String>,
     reconnecting: Option<PathBuf>,
     connection_task: Option<Task<()>>,
+    /// The project's connection went (until it's back).
+    connection_lost: bool,
+    /// Ports there reached from here (`workspace/remote.rs`).
+    forwarded: Vec<remote::ForwardedPort>,
+    /// Ports to forward once this project opens (a dev container's).
+    pending_ports: Option<(PathBuf, Vec<u16>)>,
     /// Ctrl+Tab held down, going through the tabs.
     tab_switch: Option<TabSwitch>,
     actions: Arc<Vec<ActionEntry>>,
@@ -1341,6 +1349,9 @@ impl Workspace {
             connecting: None,
             reconnecting: None,
             connection_task: None,
+            connection_lost: false,
+            forwarded: Vec::new(),
+            pending_ports: None,
             tab_switch: None,
             actions: Arc::new(keymap::action_entries()),
             shift_down: false,

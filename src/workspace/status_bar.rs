@@ -74,6 +74,7 @@ impl Workspace {
         let theme = crate::ui::chrome_theme(Theme::get(cx));
         let fit = StatusFit::for_width(f32::from(self.viewport.width));
         let lsp_item = self.render_lsp_status(&theme, fit.lsp_chars, cx);
+        let remote_item = self.render_remote_status(&theme, cx);
         let copilot_item = self.render_copilot_status(&theme, cx);
         let extension_items = if fit.extensions { self.render_extension_status(&theme, cx) } else { Vec::new() };
         let active_editor = self.active_editor(cx);
@@ -247,6 +248,8 @@ impl Workspace {
             .px(px(GAP))
             .text_size(px(11.5))
             .text_color(theme.text_dim)
+            // Where a remote project is, first, as VS Code shows it.
+            .children(remote_item)
             .child(
                 div()
                     .id("diagnostic-counts")

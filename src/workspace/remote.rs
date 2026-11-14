@@ -9,6 +9,7 @@
 use std::time::Duration;
 
 use kuana_core::remote::{
+    client::Forwarded,
     connection::{self, Transport},
     container, ssh, wsl,
 };
@@ -185,6 +186,8 @@ impl Workspace {
                 }
                 let label = Transport::from_name(&host).label();
                 this.update(cx, |ws, cx| {
+                    ws.connection_lost = true;
+                    cx.notify();
                     ws.toast_with_button(ToastKind::Error, format!("The connection to {label} was lost"), Some("Files there can't be read or saved until it's back.".into()), Some(ToastButton::Reconnect), cx);
                 })
                 .ok();
@@ -204,8 +207,16 @@ impl Workspace {
         self.connect_host(host, None, window, cx);
     }
 
-    /// After a reconnect: the tree, Git, the watcher and open files again.
+    /// After a reconnect: the tree, Git, the watcher, open files and
+    /// language servers again.
     pub(super) fn reconnected(&mut self, cx: &mut Context<Self>) {
+        self.connection_lost = false;
+        if let Some(mount) = self.root.as_deref().and_then(crate::fs::mount_of) {
+            self.lsp.update(cx, |s, cx| s.restart_under(&mount, cx));
+        }
+        // The old connection's forwards went with it.
+        let ports: Vec<u16> = std::mem::take(&mut self.forwarded).into_iter().map(|f| f.remote).collect();
+        self.forward_ports(ports, cx);
         self.start_watching(cx);
         self.tree.update(cx, |t, cx| t.relist_all(cx));
         self.refresh_file_index(cx);
@@ -340,6 +351,7 @@ impl Workspace {
                         }
                         let name = Transport::Container { name: up.container, user: up.user }.name();
                         let project = crate::fs::local_path(&crate::fs::mount_root(&name), &up.workspace);
+                        ws.pending_ports = Some((project.clone(), up.forward_ports));
                         // The window's project reopens there.
                         ws.connect_host(name, Some((project, OpenIn::ThisWindow)), window, cx);
                     }
@@ -382,6 +394,143 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+}
+
+/// A port on the project's machine reached from here.
+pub(super) struct ForwardedPort {
+    /// Its port there.
+    pub remote: u16,
+    /// Where it's reached here (the same number when that was free).
+    pub local: u16,
+    _forwarded: Forwarded,
+}
+
+impl Workspace {
+    /// The project's machine, while connected.
+    fn project_host(&self) -> Option<(String, Arc<kuana_core::remote::RemoteHost>)> {
+        let name = self.root.as_deref().and_then(connection::host_of)?;
+        let connected = connection::connected(&name)?;
+        Some((connected.transport.label(), connected.host))
+    }
+
+    /// Forwards `ports` quietly (the project's saved ones, a dev container's);
+    /// a local project forwards nothing and forgets what the last one did.
+    pub(super) fn forward_ports(&mut self, ports: Vec<u16>, cx: &mut Context<Self>) {
+        self.forwarded.clear();
+        for port in ports {
+            let _ = self.forward_port(port, cx);
+        }
+        cx.notify();
+    }
+
+    /// Forwards `remote`: on the same local port when it's free, else on any.
+    fn forward_port(&mut self, remote: u16, cx: &mut Context<Self>) -> Result<u16, String> {
+        if let Some(known) = self.forwarded.iter().find(|f| f.remote == remote) {
+            return Ok(known.local);
+        }
+        let (_, host) = self.project_host().ok_or("The project's machine isn't connected")?;
+        let forwarded = host.forward_on(remote, remote).or_else(|_| host.forward_on(0, remote)).map_err(|e| e.to_string())?;
+        let local = forwarded.address.port();
+        self.forwarded.push(ForwardedPort { remote, local, _forwarded: forwarded });
+        self.forwarded.sort_by_key(|f| f.remote);
+        self.schedule_session_save(cx);
+        cx.notify();
+        Ok(local)
+    }
+
+    fn stop_forwarding(&mut self, remote: u16, cx: &mut Context<Self>) {
+        self.forwarded.retain(|f| f.remote != remote);
+        self.schedule_session_save(cx);
+        cx.notify();
+    }
+
+    /// Forward a Port…: asks which port there.
+    pub(super) fn ask_port_to_forward(&mut self, _: &ForwardPort, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((label, _)) = self.project_host() else {
+            self.toast(ToastKind::Info, "Ports are forwarded from a remote project's machine", Some("Open a project over SSH, in WSL or in a container first.".into()), cx);
+            return;
+        };
+        self.close_modal(window, cx);
+        let dialog = cx.new(|cx| InputDialog::new(format!("Forward a Port from {label}"), Icon::Link, "A port there, like 3000", "", None, window, cx));
+        let subscription = cx.subscribe_in(&dialog, window, move |ws, dialog, event: &InputDialogEvent, window, cx| {
+            let typed = match event {
+                InputDialogEvent::Confirm(text) => text.trim().to_string(),
+                InputDialogEvent::Dismissed => {
+                    ws.close_modal(window, cx);
+                    return;
+                }
+            };
+            let Some(port) = typed.parse::<u16>().ok().filter(|&p| p > 0) else {
+                dialog.update(cx, |d, cx| d.set_error("A port is a number from 1 to 65535".to_string(), cx));
+                return;
+            };
+            ws.close_modal(window, cx);
+            match ws.forward_port(port, cx) {
+                Ok(local) => ws.toast(ToastKind::Success, format!("Port {port} is forwarded"), Some(format!("http://localhost:{local} reaches port {port} on {label}."))
+                    , cx),
+                Err(err) => ws.toast(ToastKind::Error, format!("Couldn't forward port {port}"), Some(err), cx),
+            }
+        });
+        self.modals.open(Modal::Input(dialog), subscription);
+        cx.notify();
+    }
+
+    /// The status bar's remote item: where the project is, the connection's
+    /// state and the forwarded ports' count; a click opens its menu.
+    pub(super) fn render_remote_status(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let name = self.root.as_deref().and_then(connection::host_of)?;
+        let label = Transport::from_name(&name).label();
+        let (text, color, tip) = match () {
+            _ if self.connecting.is_some() => (format!("{label} · connecting…"), Hsla::from(theme.text_muted), format!("Connecting to {label}")),
+            _ if self.connection_lost => (format!("{label} · disconnected"), Hsla::from(theme.error), format!("The connection to {label} was lost")),
+            _ => (label.clone(), Hsla::from(theme.text_muted), format!("The project is on {label}")),
+        };
+        let ports = self.forwarded.len();
+        Some(
+            div()
+                .id("remote-status")
+                .flex()
+                .items_center()
+                .gap_1()
+                .h(px(24.))
+                .px_2()
+                .rounded(px(9.))
+                .cursor_pointer()
+                .text_color(color)
+                .hover_bg(theme.hover)
+                .child(icon_el(Icon::Link, px(13.), if self.connection_lost { color } else { theme.accent.into() }))
+                .child(text)
+                .when(ports > 0, |el| el.child(div().text_color(theme.text_dim).child(format!("· {ports} {}", if ports == 1 { "port" } else { "ports" }))))
+                // Not over its own menu.
+                .when(self.context_menu.is_none(), |el| el.tooltip(move |_, cx| tooltip_view(tip.clone(), cx)))
+                .on_click(cx.listener(|ws, event: &ClickEvent, window, cx| ws.open_remote_menu(event.position(), window, cx)))
+                .into_any_element(),
+        )
+    }
+
+    fn open_remote_menu(&mut self, position: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.root.as_deref().and_then(connection::host_of) else { return };
+        let call = |f: fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| Some(MenuAction::Call(std::rc::Rc::new(f)));
+        let mut entries = vec![MenuEntry::Header(Transport::from_name(&name).label().into())];
+        let mut actions = vec![None];
+        if self.connection_lost && self.connecting.is_none() {
+            entries.push(MenuEntry::item("Reconnect", Icon::Refresh));
+            actions.push(call(|ws, window, cx| ws.reconnect(window, cx)));
+        }
+        entries.push(MenuEntry::item("Forward a Port…", Icon::Link));
+        actions.push(call(|ws, window, cx| ws.ask_port_to_forward(&ForwardPort, window, cx)));
+        for port in &self.forwarded {
+            let (remote, local) = (port.remote, port.local);
+            entries.push(MenuEntry::Separator);
+            actions.push(None);
+            let place = if remote == local { format!("localhost:{local}") } else { format!("localhost:{local} → {remote}") };
+            entries.push(MenuEntry::item(format!("Open {place} in Browser"), Icon::ExternalLink));
+            actions.push(Some(MenuAction::Call(std::rc::Rc::new(move |_, _, cx: &mut Context<Workspace>| cx.open_url(&format!("http://localhost:{local}"))))));
+            entries.push(MenuEntry::text(format!("Stop Forwarding Port {remote}")));
+            actions.push(Some(MenuAction::Call(std::rc::Rc::new(move |ws: &mut Workspace, _, cx: &mut Context<Workspace>| ws.stop_forwarding(remote, cx)))));
+        }
+        self.show_context_menu(entries, actions, position, None, window, cx);
     }
 }
 

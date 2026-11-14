@@ -372,6 +372,9 @@ pub struct ProjectSession {
     /// again); one from a newer Kuana (a new way to debug) is dropped.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "none_if_bad")]
     pub last_run: Option<RunTarget>,
+    /// A remote project's forwarded ports (the remote side's).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forwarded_ports: Vec<u16>,
     /// Keys this version doesn't know (a newer Kuana wrote them), kept so
     /// that saving here doesn't drop them.
     #[serde(flatten)]
@@ -679,6 +682,7 @@ mod tests {
                 debug: Some(DebugSpec::Cargo { build: vec!["test".into(), "--no-run".into()], args: vec!["tests".into()] }),
                 test: None,
             }),
+            forwarded_ports: vec![3000, 5173],
             other: Default::default(),
         };
         let json = serde_json::to_string(&session).unwrap();

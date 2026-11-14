@@ -353,6 +353,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::connect_to_wsl))
             .on_action(cx.listener(Self::attach_to_container))
             .on_action(cx.listener(Self::open_in_dev_container))
+            .on_action(cx.listener(Self::ask_port_to_forward))
             .on_action(cx.listener(Self::navigate_forward))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_sidebar_position))

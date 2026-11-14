@@ -245,23 +245,38 @@ impl RemoteHost {
     /// adapter listening there). Each connection to it opens one there,
     /// retried for a while: the program may still be starting.
     pub fn forward(self: &Arc<Self>, port: u16) -> io::Result<std::net::SocketAddr> {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
-        let address = listener.local_addr()?;
-        let weak = Arc::downgrade(self);
-        std::thread::Builder::new().name("kuana-forward".into()).spawn(move || {
-            for local in listener.incoming().flatten() {
-                let Some(host) = weak.upgrade() else { break };
-                std::thread::spawn(move || host.relay(local, port));
-            }
-        })?;
-        Ok(address)
+        Ok(self.listen(0, port, true)?.detach())
     }
 
-    fn relay(&self, local: std::net::TcpStream, port: u16) {
+    /// `remote` on the host's loopback reached at `local` here (0: any free
+    /// port), until the result is dropped. A connection to it while nothing
+    /// listens there is closed at once, as a refused one would be.
+    pub fn forward_on(self: &Arc<Self>, local: u16, remote: u16) -> io::Result<Forwarded> {
+        self.listen(local, remote, false)
+    }
+
+    fn listen(self: &Arc<Self>, local: u16, remote: u16, patient: bool) -> io::Result<Forwarded> {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", local))?;
+        let address = listener.local_addr()?;
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (weak, stopped) = (Arc::downgrade(self), stop.clone());
+        std::thread::Builder::new().name("kuana-forward".into()).spawn(move || {
+            for local in listener.incoming().flatten() {
+                if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                let Some(host) = weak.upgrade() else { break };
+                std::thread::spawn(move || host.relay(local, remote, patient));
+            }
+        })?;
+        Ok(Forwarded { address, stop: Some(stop) })
+    }
+
+    fn relay(&self, local: std::net::TcpStream, port: u16, patient: bool) {
         let id = self.next_process.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let Ok(writer) = local.try_clone() else { return };
         self.sockets.lock().unwrap_or_else(|e| e.into_inner()).insert(id, writer);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(if patient { 15 } else { 0 });
         loop {
             match self.call("tcp/connect", json!({ "id": id, "port": port })) {
                 Ok(_) => break,
@@ -294,6 +309,30 @@ impl RemoteHost {
     pub fn scan(&self, path: &str) -> io::Result<Vec<(String, bool)>> {
         let files = self.call("scan", json!({ "path": path }))?;
         Ok(files.as_array().into_iter().flatten().filter_map(|f| Some((f[0].as_str()?.to_string(), f[1].as_bool().unwrap_or(false)))).collect())
+    }
+}
+
+/// A forwarded port (`RemoteHost::forward_on`): listening here until dropped.
+pub struct Forwarded {
+    pub address: std::net::SocketAddr,
+    stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl Forwarded {
+    /// Keeps it listening for as long as its host is there.
+    pub fn detach(mut self) -> std::net::SocketAddr {
+        self.stop = None;
+        self.address
+    }
+}
+
+impl Drop for Forwarded {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            // Wakes the listener's thread, which then sees `stop` and ends.
+            let _ = std::net::TcpStream::connect(self.address);
+        }
     }
 }
 
