@@ -1554,6 +1554,9 @@ impl LspStore {
                 Some(work) => LspStatus::Busy(format!("{}: {}", server.name, work.label())),
                 None => LspStatus::Ready(names()),
             },
+            // Kuana installs servers on this computer: a remote project's
+            // machine gets the command to run there instead.
+            ServerState::Missing(spec) if crate::fs::is_remote(&main.root) => LspStatus::Missing { command: spec.install, installer: None },
             ServerState::Missing(spec) => match install::for_spec(spec) {
                 Some(installer) if install::installing(installer.command) => LspStatus::Installing(installer.command),
                 installer => LspStatus::Missing { command: spec.install, installer },

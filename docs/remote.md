@@ -58,7 +58,9 @@ happen inside the distribution, with its own tools.
 - Git: the gutter, blame, the Commit view, staging, commits, branches, pull and push, the log.
 - Project settings (`.kuana/settings.json`), `.editorconfig`, formatters and ESLint run there.
 - Language servers run there, found on that machine's `PATH` as your login shell sets it (and in
-  the project's `node_modules` or virtual environment), and told that machine's own paths.
+  the project's `node_modules` or virtual environment), and told that machine's own paths. One
+  that isn't installed there shows its install command in the status bar (click to copy) to run
+  in a terminal there; Kuana's one-click installs are for this computer.
 - Terminals open a shell there (your login shell on that machine), with shell integration: command
   marks, Copy Command Output, the folder a link is relative to. Closing one asks first while a
   program runs in it, as locally.
@@ -92,6 +94,9 @@ A remote folder is trusted (or not) on its own, by its host and path, as local f
 you trust it, its project settings, formatters and Git hooks don't run.
 
 ## Notes
+
+- Copy Path copies a remote file's path as that machine knows it (`/home/me/project/…`); Reveal in
+  Finder isn't offered for remote files.
 
 - The remote machine needs Linux (x86_64 or aarch64) or macOS. Windows machines aren't supported as
   SSH remotes; use WSL there.
