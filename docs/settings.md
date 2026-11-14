@@ -43,6 +43,7 @@ and theme colors.
 | `show_whitespace` | `"selection"` | mark spaces and tabs: `"selection"`, `"boundary"` (indentation and line ends), `"trailing"`, `"all"`, `"none"` |
 | `inlay_hints` | `true` | types and parameter names from the language server |
 | `linked_editing` | `true` | typing in a tag's name (HTML, JSX, and grammars like them) renames its closing or opening tag too |
+| `document_colors` | `true` | a swatch before each color in CSS and HTML (and colors language servers find); click it for a picker |
 | `inline_values` | `true` | paused in the debugger, variables' values after the lines of the function that name them |
 | `code_lens` | `true` | the language server's code lenses above lines ("3 references", "▶ Run \| Debug") |
 | `minimap` | `false` | the document in miniature at the editor's right edge, in place of the scrollbar: code as colored blocks, the visible part as a slider, problems, search matches and Git changes along its edge |

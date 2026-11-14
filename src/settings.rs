@@ -418,6 +418,8 @@ pub struct EditorSettings {
     pub inline_values: Option<bool>,
     /// Typing in a tag's name renames its closing (or opening) tag too.
     pub linked_editing: Option<bool>,
+    /// A swatch before each color in CSS (and from language servers), opening a picker.
+    pub document_colors: Option<bool>,
     /// The document in miniature at the editor's right edge, in place of the
     /// scrollbar (off by default).
     pub minimap: Option<bool>,
@@ -446,6 +448,7 @@ impl EditorSettings {
             code_lens: self.code_lens.or(base.code_lens),
             inline_values: self.inline_values.or(base.inline_values),
             linked_editing: self.linked_editing.or(base.linked_editing),
+            document_colors: self.document_colors.or(base.document_colors),
             minimap: self.minimap.or(base.minimap),
             syntax_errors: self.syntax_errors.or(base.syntax_errors),
             edit_predictions: self.edit_predictions.or(base.edit_predictions),
@@ -527,6 +530,7 @@ pub const EDITOR_KEYS: &[&str] = &[
     "code_lens",
     "inline_values",
     "linked_editing",
+    "document_colors",
     "minimap",
     "syntax_errors",
     "edit_predictions",
@@ -549,6 +553,7 @@ pub struct FileSettings {
     pub code_lens: bool,
     pub inline_values: bool,
     pub linked_editing: bool,
+    pub document_colors: bool,
     pub minimap: bool,
     pub syntax_errors: bool,
     pub edit_predictions: bool,
@@ -798,6 +803,7 @@ impl Settings {
             "code_lens" => self.editor.code_lens.is_some(),
             "inline_values" => self.editor.inline_values.is_some(),
             "linked_editing" => self.editor.linked_editing.is_some(),
+            "document_colors" => self.editor.document_colors.is_some(),
             "minimap" => self.editor.minimap.is_some(),
             "syntax_errors" => self.editor.syntax_errors.is_some(),
             "edit_predictions" => self.editor.edit_predictions.is_some(),
@@ -936,6 +942,7 @@ impl Settings {
             code_lens: None,
             inline_values: None,
             linked_editing: None,
+            document_colors: None,
             minimap: None,
             syntax_errors: None,
             edit_predictions: None,
@@ -956,6 +963,7 @@ impl Settings {
             code_lens: s.code_lens.unwrap_or(true),
             inline_values: s.inline_values.unwrap_or(true),
             linked_editing: s.linked_editing.unwrap_or(true),
+            document_colors: s.document_colors.unwrap_or(true),
             minimap: s.minimap.unwrap_or(false),
             syntax_errors: s.syntax_errors.unwrap_or(true),
             edit_predictions: s.edit_predictions.unwrap_or(true),
@@ -1165,6 +1173,8 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // "inline_values": true,
   // Typing in a tag's name (HTML, JSX) renames its closing or opening tag too.
   // "linked_editing": true,
+  // A swatch before each color in CSS (and colors from language servers); click it to pick another.
+  // "document_colors": true,
   // The document in miniature at the editor's right edge, in place of the
   // scrollbar, and its width in pixels.
   // "minimap": false,

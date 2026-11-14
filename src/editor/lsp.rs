@@ -418,6 +418,7 @@ impl Editor {
     pub fn lsp_opened(&mut self, cx: &mut Context<Self>) {
         self.schedule_inlay_hints(cx);
         self.schedule_code_lenses(cx);
+        self.schedule_colors(cx);
     }
 
     /// The document's servers that are up, the main one first. Not
@@ -527,7 +528,7 @@ impl Editor {
         cx.notify();
     }
 
-    fn text_document(&self, cx: &App) -> Option<Value> {
+    pub(super) fn text_document(&self, cx: &App) -> Option<Value> {
         Some(json!({ "uri": path_to_uri(self.doc.read(cx).path.as_deref()?) }))
     }
 
@@ -1056,7 +1057,10 @@ impl Editor {
     pub(super) fn dismiss_lsp_popovers(&mut self, cx: &mut Context<Self>) -> bool {
         self.stop_ranking();
         self.stop_resolving();
-        let open = self.lsp.completion.take().is_some() | self.lsp.signature.take().is_some() | self.lsp.hover.take().is_some();
+        let open = self.lsp.completion.take().is_some()
+            | self.lsp.signature.take().is_some()
+            | self.lsp.hover.take().is_some()
+            | self.close_color_picker(cx);
         if open {
             cx.notify();
         }
@@ -2243,6 +2247,42 @@ mod tests {
         });
         editor.update(cx, |e, cx| e.run_code_lens(lens, cx));
         assert_eq!(*events.borrow(), [("lens lens".to_string(), 1)]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[gpui::test]
+    fn colors_come_from_a_server_that_finds_them(cx: &mut TestAppContext) {
+        if crate::lsp::servers::which("python3").is_none() {
+            return;
+        }
+        cx.executor().allow_parking();
+        crate::trust::set_trust_all(true);
+        let dir = std::env::temp_dir().join(format!("kuana-lsp-colors-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.txt");
+        std::fs::write(&path, "x = #ff0000 bg-blue-500\n").unwrap();
+        let store = cx.new(|_| {
+            let mut store = LspStore::new();
+            store.test_specs = Some(vec![fake_server("colors", "")]);
+            store
+        });
+        let editor: Entity<Editor> = cx.new(|cx| Editor::new(Document::open(&path).unwrap(), cx));
+        // Plain text isn't scanned: nothing until the server answers.
+        cx.run_until_parked();
+        assert!(editor.read_with(cx, |e, cx| e.doc.read(cx).colors().is_empty()));
+        store.update(cx, |s, cx| s.register(&editor, cx));
+        wait_for(cx, "the colors", |cx| {
+            cx.executor().advance_clock(std::time::Duration::from_millis(300));
+            editor.read_with(cx, |e, cx| e.doc.read(cx).colors().len() == 2)
+        });
+        let colors = editor.read_with(cx, |e, cx| e.doc.read(cx).colors().to_vec());
+        // CSS notation can be written back; a class can't.
+        assert_eq!((colors[0].range.clone(), colors[0].format.is_some()), (4..11, true));
+        assert_eq!((colors[1].range.clone(), colors[1].format.is_some()), (12..23, false));
+        assert_eq!(colors[0].color, crate::color::Color::rgba(1., 0., 0., 1.));
+        // Each has a swatch, among the inlays shown.
+        let swatches = editor.read_with(cx, |e, cx| e.doc.read(cx).swatches().iter().map(|h| h.offset).collect::<Vec<_>>());
+        assert_eq!(swatches, [4, 12]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

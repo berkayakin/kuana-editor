@@ -6,6 +6,7 @@ mod excerpt;
 mod fold;
 mod format;
 mod linked;
+mod colors;
 mod conflict;
 mod debug_values;
 mod extension;
@@ -312,7 +313,7 @@ struct Drag {
 }
 
 /// Geometry from the last frame, used for hit-testing and IME positioning.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct LayoutSnapshot {
     bounds: Bounds<Pixels>,
     text_left: Pixels,
@@ -394,6 +395,13 @@ pub struct Editor {
     test_statuses: Arc<crate::test_run::Statuses>,
     /// See `row_problems`, for a document state.
     row_problems: (Option<(u64, u64, u64)>, Arc<Vec<(usize, Option<usize>, usize)>>),
+    /// Colors: the scan or request for them, whether one was made yet (the
+    /// first starts at once), the open picker and the swatches drawn last
+    /// frame (window bounds, the color's start) for clicks (`editor/colors.rs`).
+    color_task: Option<Task<()>>,
+    colors_asked: bool,
+    color_picker: Option<colors::ColorPicker>,
+    color_hits: Vec<(Bounds<Pixels>, usize)>,
     /// The tag names being edited together (`editor/linked.rs`), valid while
     /// the document is at `linked_version`.
     linked: Option<(Range<usize>, Range<usize>)>,
@@ -584,6 +592,10 @@ impl Editor {
             debug_values: (None, Arc::default()),
             linked: None,
             linked_version: 0,
+            color_task: None,
+            colors_asked: false,
+            color_picker: None,
+            color_hits: Vec::new(),
             marked_range: None,
             indent_unit: String::new(),
             tab_size: file_settings.tab_size,
@@ -1164,6 +1176,7 @@ impl Editor {
         // Those in changed text went; the server's answer brings them back.
         self.schedule_inlay_hints(cx);
         self.schedule_code_lenses(cx);
+        self.schedule_colors(cx);
         cx.notify();
         Ok(true)
     }
@@ -1199,6 +1212,7 @@ impl Editor {
         self.wrap = None;
         self.schedule_inlay_hints(cx);
         self.schedule_code_lenses(cx);
+        self.schedule_colors(cx);
         cx.notify();
     }
 
@@ -1509,6 +1523,7 @@ impl Editor {
         self.doc.as_mut(cx).set_selections_after(&self.selections);
         self.schedule_inlay_hints(cx);
         self.schedule_code_lenses(cx);
+        self.schedule_colors(cx);
         self.schedule_lint(Duration::from_millis(150), cx);
         self.edited(cx);
         self.prediction_edited(cx);
@@ -1736,10 +1751,16 @@ impl Editor {
     /// lines with them.
     fn inlays<'a>(&self, cx: &'a App) -> wrap::Inlays<'a> {
         let doc = self.doc.read(cx);
-        if !self.file_settings.inlay_hints || doc.inlay_hints().is_empty() {
-            return wrap::Inlays::NONE;
-        }
-        wrap::Inlays { hints: doc.inlay_hints(), generation: doc.inlay_generation() }
+        let hints = self.file_settings.inlay_hints && !doc.inlay_hints().is_empty();
+        let swatches = self.colors_on(cx) && !doc.swatches().is_empty();
+        // Which list it is goes into the generation, so turning one on or off remeasures.
+        let (list, which) = match (hints, swatches) {
+            (true, true) => (doc.hints_and_swatches(), 1),
+            (true, false) => (doc.inlay_hints(), 2),
+            (false, true) => (doc.swatches(), 3),
+            (false, false) => return wrap::Inlays::NONE,
+        };
+        wrap::Inlays { hints: list, generation: doc.inlay_generation() * 4 + which }
     }
 
     /// Line `row` as displayed: tabs expanded, inlay hints in place (soft
@@ -3310,6 +3331,13 @@ impl Editor {
             return;
         }
 
+        // A swatch opens the color picker.
+        if let Some(&(bounds, start)) = self.color_hits.iter().find(|(b, _)| b.contains(&event.position))
+            && self.open_color_picker(start, bounds, cx)
+        {
+            return;
+        }
+
         // A pinned line jumps to its definition.
         if let Some(offset) = self.sticky_at(event.position) {
             cx.emit(EditorJumped { from: self.primary_selection().head });
@@ -3877,6 +3905,7 @@ impl Editor {
         let conflicts = if single { Arc::new(Vec::new()) } else { self.shown_conflicts(cx) };
         let debug_row = self.doc.read(cx).debug_row();
         self.conflict_hits.clear();
+        self.color_hits.clear();
         let highlights = self.visible_highlights(first_drow, last_drow, first_row, last_row, cx);
         // Bracket pairs around carets: the first few, or with many, the first on screen.
         let brackets: Vec<Range<usize>> = if focused && !single {
@@ -3894,6 +3923,7 @@ impl Editor {
         let row_problems = if single { Arc::default() } else { self.row_problems(cx) };
         // Paused in the debugger: values after the lines of the paused function.
         let debug_values = if single { Arc::default() } else { self.debug_value_rows(cx) };
+        let colors_shown = self.colors_on(cx) && !self.doc.read(cx).colors().is_empty();
 
         let mut frame = FrameLayout {
             text_bounds,
@@ -4130,6 +4160,9 @@ impl Editor {
 
             if !dl.inlays.is_empty() {
                 runs = inlay_runs(runs, &dl, editor_font.clone(), theme.text_dim.into());
+                if colors_shown {
+                    runs = colors::swatch_runs(runs, &dl, |column| self.swatch_color(line_start, column, cx));
+                }
             }
             let ghost = if dl.inlays.is_empty() { None } else { self.ghost_span(row, &dl, cx) };
             if !dl.controls.is_empty() {
@@ -4201,6 +4234,17 @@ impl Editor {
                     let continues = if last_seg { past_line_end } else { !side_by_side && de >= seg_range.end };
                     (s < e || continues).then_some((s, e, continues))
                 };
+
+                // Swatches take clicks (the picker).
+                if colors_shown {
+                    for span in dl.inlays.iter().filter(|s| s.label.start >= seg_range.start && s.label.end <= seg_range.end) {
+                        if dl.text.get(dl.local(span.label.clone())) == Some(crate::document::SWATCH) {
+                            let (x0, x1) = (x_of(span.label.start), x_of(span.label.end));
+                            let hit = Bounds::from_corners(point(origin.x + x0, y), point(origin.x + x1, y + line_height));
+                            self.color_hits.push((hit, line_start + span.column));
+                        }
+                    }
+                }
 
                 // The line a debug session is paused on.
                 if debug_row == Some(row) && !single && row_once {
@@ -6196,6 +6240,7 @@ impl Render for Editor {
         }
         let popover = self.render_hunk_popover(cx);
         let lsp_popovers = self.render_lsp_popovers(window, cx);
+        let color_picker = self.render_color_picker(cx);
         let preview_toggle = (self.is_markdown(cx) && self.excerpt.is_none()).then(|| {
             let theme = Theme::get(cx);
             let on = self.previewed;
@@ -6349,6 +6394,7 @@ impl Render for Editor {
             .child(EditorElement { editor: cx.entity() })
             .children(popover)
             .children(lsp_popovers)
+            .children(color_picker)
             .children(preview_toggle)
     }
 }

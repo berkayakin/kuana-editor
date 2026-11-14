@@ -11,6 +11,7 @@ mod branch_picker;
 mod busy;
 mod cli;
 mod clone_dialog;
+mod color;
 mod conflict;
 mod contrast;
 mod context_menu;
