@@ -109,6 +109,7 @@ pub fn roots(kind: Kind, server: Arc<Server>, items: Vec<Value>, label: Labeler)
                 .directions()
                 .into_iter()
                 .map(|(direction, open)| ResultNode {
+                    actions: Vec::new(),
                     leading: Leading::Icon(direction.icon()),
                     label: direction.label().into(),
                     highlight: None,
@@ -173,6 +174,7 @@ fn item_node(item: &Value, at: Option<LspRange>, note: Option<String>, encoding:
         detail = format!("{detail}  ·  {note}");
     }
     Some(ResultNode {
+        actions: Vec::new(),
         leading: Leading::File(path.clone()),
         label: name.to_string().into(),
         highlight: None,

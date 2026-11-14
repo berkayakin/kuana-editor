@@ -83,12 +83,14 @@ impl Workspace {
             self.refresh_git(cx);
             self.reload_documents(|_| true, cx);
             if let Some(root) = self.root.clone() {
+                self.tests_files_changed([root.clone()], cx);
                 self.todo_files_changed([root], cx);
             }
             cx.notify();
             return;
         }
         if !changed.files.is_empty() {
+            self.tests_files_changed(changed.files.iter().cloned(), cx);
             self.todo_files_changed(changed.files, cx);
         }
         if let Some(ignore) = changed.ignore {
@@ -198,6 +200,7 @@ impl Workspace {
             picker.update(cx, |p, cx| p.set_files(files, cx));
         }
         self.todo_project_listed(cx);
+        self.tests_project_listed(cx);
         self.project_updated_unchanged(cx);
     }
 

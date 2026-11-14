@@ -19,6 +19,7 @@ impl Workspace {
         self.bookmarks.clear();
         self.nav.clear();
         self.reset_todos();
+        self.reset_tests();
         self.problems.update(cx, |p, cx| {
             p.set_run(None, cx);
             p.set_root(Some(root.clone()), cx);

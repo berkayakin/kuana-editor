@@ -69,6 +69,22 @@ Unsaved files are saved first. Add your own commands in `settings.json`:
 `cwd` is relative to the project folder. Commands run through your login shell, so aliases and
 PATH work as in the terminal.
 
+### Test Explorer
+
+**Test Explorer** (Run menu, Find Action) lists the project's tests in a **Find** panel tab before
+anything runs: by file, then by module, class or `describe` block, found the way the gutter's ▶s are
+(Rust, Go `_test.go`, pytest's `test_*.py` and `*_test.py`, JavaScript and TypeScript `*.test.*`,
+`*.spec.*` and `__tests__`, and extension languages that say what runs). Each row has **Run** and,
+where it can be debugged, **Debug** at its right end (shown under the pointer and on the selected
+row): a test, a group, or a whole file (its module's tests for Rust, the file for pytest and the JS
+runners, its tests by name for Go). **Run All** runs the project's test command (cargo test,
+`go test ./...`, pytest) and **Refresh** reads everything again. Choosing a row opens the test.
+
+Every test run marks what it ran, ✓ or ✕, with each group showing its tests' worst. While the
+explorer is the panel's current tab, a run's results go to a tab beside it and the explorer stays in
+front; the notification's **Show Results** shows them. The project is read the first time you open
+the explorer; after that only files that change, on disk or in a tab, are read again.
+
 ### Test results
 
 When a test run ends (cargo test, `go test -v`, pytest, Jest, Vitest, `node --test`, `oxie test` or `lyth test`, from the

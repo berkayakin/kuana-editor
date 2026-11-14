@@ -1037,7 +1037,11 @@ impl Workspace {
         match button {
             ToastButton::UndoFile(_) => self.step_file_history(false, false, window, cx),
             ToastButton::SaveBackground => self.save_background(false, false, cx),
-            ToastButton::ShowTestResults => self.toggle_results(&ToggleResults, window, cx),
+            ToastButton::ShowTestResults => {
+                // The results, not the Test Explorer that stayed in front of them.
+                self.results.update(cx, |p, cx| p.activate_kind("test-results", cx));
+                self.toggle_results(&ToggleResults, window, cx)
+            }
             ToastButton::InstallExtension(id) => self.install_suggested_extension(id, cx),
             ToastButton::Reconnect => self.reconnect(window, cx),
             ToastButton::OpenInDevContainer => self.open_in_dev_container(&OpenInDevContainer, window, cx),

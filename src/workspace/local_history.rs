@@ -87,6 +87,7 @@ fn history_tree(versions: &[Version], now: SystemTime, open: impl Fn(&Version) -
         let day = day_label(version.time, now);
         if days.last().is_none_or(|d| d.label.as_ref() != day) {
             days.push(ResultNode {
+                actions: Vec::new(),
                 leading: Leading::Icon(Icon::History),
                 label: day.into(),
                 highlight: None,
@@ -99,6 +100,7 @@ fn history_tree(versions: &[Version], now: SystemTime, open: impl Fn(&Version) -
             });
         }
         let node = ResultNode {
+            actions: Vec::new(),
             leading: Leading::Blank,
             label: clock(version.time).into(),
             highlight: None,

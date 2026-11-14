@@ -143,6 +143,7 @@ impl Workspace {
         self.breakpoints.clear();
         self.bookmarks.clear();
         self.reset_todos();
+        self.reset_tests();
         // Searches, test results and Local History list the old project's files.
         self.results.update(cx, |p, cx| p.clear(cx));
         self.has_results = false;

@@ -31,7 +31,7 @@ use crate::{
         ToggleResults, NextResult, PreviousResult, RerunFailedTests, ShowLocalHistory,
         ToggleAutoSave, ToggleSidebar, ToggleSidebarPosition, ToggleSecondSidebar, ToggleClassicLayout, ToggleZenMode, ImportSettings, CheckForUpdates, WelcomeSetup, GoToSymbol, SplitTerminal, RenameTerminal, SelectOpenedFile, InstallShellCommand,
         ToggleDatabase, NewDatabaseConnection, ToggleDatabaseResults, RunSqlStatement, RunSqlScript, NewSqlScript,
-        ToggleBookmark, ToggleBookmarkWithMnemonic, EditBookmarkDescription, ShowBookmarks, NextBookmark, PreviousBookmark, GoToBookmark, ShowTodo,
+        ToggleBookmark, ToggleBookmarkWithMnemonic, EditBookmarkDescription, ShowBookmarks, NextBookmark, PreviousBookmark, GoToBookmark, ShowTodo, ShowTestExplorer,
         OpenResultsInEditor, ProblemsInEditor, CompareWithClipboard, CompareWithFile, CompareWithBranch, NewScratchFile, ShowScratches,
     },
 };
@@ -916,6 +916,7 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Toggle Find Panel", ToggleResults),
         a("Next Result", NextResult),
         a("Rerun Failed Tests", RerunFailedTests),
+        a("Test Explorer", ShowTestExplorer),
         a("Local History…", ShowLocalHistory),
         a("Previous Result", PreviousResult),
         a("Duplicate Line or Selection", DuplicateLine),

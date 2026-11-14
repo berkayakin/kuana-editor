@@ -456,6 +456,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::previous_bookmark))
             .on_action(cx.listener(Self::go_to_bookmark))
             .on_action(cx.listener(Self::show_todo))
+            .on_action(cx.listener(Self::show_test_explorer))
             .on_action(cx.listener(Self::open_results_in_editor))
             .on_action(cx.listener(Self::problems_in_editor))
             .on_action(cx.listener(Self::compare_with_clipboard_action))

@@ -102,6 +102,27 @@ impl std::fmt::Debug for Opener {
     }
 }
 
+/// A button at a row's right end, shown while the pointer is over the row
+/// or it's selected (a test's Run and Debug).
+#[derive(Clone)]
+pub struct RowAction {
+    pub icon: Icon,
+    pub tooltip: SharedString,
+    pub run: Rc<dyn Fn(&mut Window, &mut App)>,
+}
+
+impl PartialEq for RowAction {
+    fn eq(&self, other: &Self) -> bool {
+        self.icon == other.icon && self.tooltip == other.tooltip && Rc::ptr_eq(&self.run, &other.run)
+    }
+}
+
+impl std::fmt::Debug for RowAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RowAction({})", self.tooltip)
+    }
+}
+
 impl PartialEq for Loader {
     fn eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.0, &other.0)
@@ -129,12 +150,15 @@ pub struct ResultNode {
     /// Fetches the children (until it has run).
     pub loader: Option<Loader>,
     pub expanded: bool,
+    /// Buttons at the row's right end.
+    pub actions: Vec<RowAction>,
 }
 
 impl ResultNode {
     /// A row without a place or children: "Loading…", "None", an error.
     pub fn message(text: impl Into<SharedString>) -> Self {
         ResultNode {
+            actions: Vec::new(),
             leading: Leading::Blank,
             label: SharedString::default(),
             highlight: None,
@@ -430,20 +454,75 @@ impl ResultsPanel {
         self.tabs.iter().any(|t| t.kind.as_ref().is_some_and(|k| k == kind))
     }
 
+    /// Makes the `kind` tab current, if it's open.
+    pub fn activate_kind(&mut self, kind: &str, cx: &mut Context<Self>) {
+        if let Some(ix) = self.tabs.iter().position(|t| t.kind.as_ref().is_some_and(|k| k == kind)) {
+            self.active = ix;
+            cx.notify();
+        }
+    }
+
+    /// Whether the current tab is the `kind` tab.
+    pub fn shows_kind(&self, kind: &str) -> bool {
+        self.tabs.get(self.active).and_then(|t| t.kind.as_ref()).is_some_and(|k| k == kind)
+    }
+
+    /// Fills the `kind` tab, opening it if there's none: made current like
+    /// `show_kind`, unless `behind`, when what's current stays so and a new
+    /// tab goes after the others (test results while the Test Explorer,
+    /// which shows their marks itself, is current). Its tab shows no count.
+    pub fn fill_kind(&mut self, kind: &str, title: SharedString, nodes: Vec<ResultNode>, buttons: Vec<TabButton>, behind: bool, cx: &mut Context<Self>) {
+        if let Some(ix) = self.tabs.iter().position(|t| t.kind.as_ref().is_some_and(|k| k == kind)) {
+            if !behind {
+                self.active = ix;
+            }
+            self.update_kind(kind.to_string(), title, nodes, buttons, cx);
+            return;
+        }
+        if !behind || self.tabs.is_empty() {
+            self.show(title, nodes, buttons, false, cx);
+            if let Some(tab) = self.tabs.get_mut(self.active) {
+                tab.kind = Some(kind.to_string().into());
+            }
+            return;
+        }
+        self.next_id += 1;
+        let mut tab = ResultTab::new(self.next_id, title, nodes);
+        tab.buttons = buttons;
+        tab.kind = Some(kind.to_string().into());
+        tab.count = None;
+        let loads = tab.take_open_loaders();
+        if self.tabs.len() >= MAX_TABS
+            && let Some(oldest) = (0..self.tabs.len()).find(|&ix| ix != self.active && !self.tabs[ix].pinned && self.tabs[ix].kind.is_none())
+        {
+            self.tabs.remove(oldest);
+            if oldest < self.active {
+                self.active -= 1;
+            }
+        }
+        self.tabs.push(tab);
+        for (path, loader) in loads {
+            self.load(self.next_id, path, loader, cx);
+        }
+        cx.notify();
+    }
+
     /// Fills the `kind` tab with new nodes, if it's open: groups closed
     /// before stay closed, and the selected place stays selected. False when
     /// there's no such tab.
     pub fn update_kind(&mut self, kind: impl Into<SharedString>, title: SharedString, mut nodes: Vec<ResultNode>, buttons: Vec<TabButton>, cx: &mut Context<Self>) -> bool {
         let kind = Some(kind.into());
         let Some(tab) = self.tabs.iter_mut().find(|t| t.kind == kind) else { return false };
-        let closed: Vec<&Leading> = tab.nodes.iter().filter(|n| !n.expanded && !n.children.is_empty()).map(|n| &n.leading).collect();
-        for node in &mut nodes {
-            if closed.contains(&&node.leading) {
-                node.expanded = false;
-            }
-        }
+        // Groups keep how they were left, opened or closed, at any depth.
+        let mut was: Vec<(NodeKey, bool)> = Vec::new();
+        remember_expanded(&tab.nodes, &mut Vec::new(), &mut was);
+        apply_expanded(&mut nodes, &mut Vec::new(), &was);
         let selected = tab.selected.and_then(|s| tab.rows.get(s)).map(|r| tab.node(&r.path).clone());
         let mut fresh = ResultTab::new(tab.id, title, nodes);
+        // Not counted before (test results), not counted now.
+        if tab.count.is_none() {
+            fresh.count = None;
+        }
         fresh.pinned = tab.pinned;
         fresh.buttons = buttons;
         fresh.kind = tab.kind.take();
@@ -728,6 +807,7 @@ impl ResultsPanel {
         let selected_bg = if focused { theme.accent_soft } else { theme.active };
         div()
             .id(("results-row", ix))
+            .group("results-row")
             .w_full()
             .h(px(ROW_HEIGHT))
             .flex()
@@ -749,6 +829,35 @@ impl ResultsPanel {
                     .child(label),
             )
             .children(node.detail.clone().map(|d| div().flex_shrink_0().text_size(px(12.)).text_color(theme.text_dim).child(d)))
+            .when(!node.actions.is_empty(), |el| {
+                el.child(div().flex_1()).child(
+                    div()
+                        .flex()
+                        .flex_shrink_0()
+                        .gap_0p5()
+                        .when(!selected, |el| el.invisible().group_hover("results-row", |s| s.visible()))
+                        .children(node.actions.iter().enumerate().map(|(n, action)| {
+                            let run = action.run.clone();
+                            let tooltip = action.tooltip.clone();
+                            div()
+                                .id(("results-row-action", ix * 8 + n))
+                                .size(px(20.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(6.))
+                                .cursor_pointer()
+                                .child(icon_el(action.icon, px(14.), theme.text_muted.into()))
+                                // The row under it already has the hover fill.
+                                .hover_bg(theme.active)
+                                .tooltip(move |_, cx| crate::ui::tooltip_view(tooltip.clone(), cx))
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    run(window, cx);
+                                })
+                        })),
+                )
+            })
             .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                 window.focus(&this.focus);
                 let Some(tab) = this.tabs.get(this.active) else { return };
@@ -763,6 +872,39 @@ impl ResultsPanel {
                 this.select(ix, Some(opens), window, cx);
             }))
             .into_any_element()
+    }
+}
+
+/// Says which node a node is across a tab's refills: its place, else its
+/// look, with its parents'.
+type NodeKey = Vec<(Option<ResultTarget>, Leading, SharedString)>;
+
+fn node_key(node: &ResultNode) -> (Option<ResultTarget>, Leading, SharedString) {
+    // A test's mark changes with its runs; it's the same test.
+    let leading = match &node.leading {
+        Leading::Tinted(..) => Leading::Blank,
+        other => other.clone(),
+    };
+    (node.target.clone(), leading, node.label.clone())
+}
+
+fn remember_expanded(nodes: &[ResultNode], parents: &mut NodeKey, out: &mut Vec<(NodeKey, bool)>) {
+    for node in nodes.iter().filter(|n| !n.children.is_empty()) {
+        parents.push(node_key(node));
+        out.push((parents.clone(), node.expanded));
+        remember_expanded(&node.children, parents, out);
+        parents.pop();
+    }
+}
+
+fn apply_expanded(nodes: &mut [ResultNode], parents: &mut NodeKey, was: &[(NodeKey, bool)]) {
+    for node in nodes.iter_mut().filter(|n| !n.children.is_empty()) {
+        parents.push(node_key(node));
+        if let Some((_, expanded)) = was.iter().find(|(key, _)| key == parents) {
+            node.expanded = *expanded;
+        }
+        apply_expanded(&mut node.children, parents, was);
+        parents.pop();
     }
 }
 
@@ -924,6 +1066,7 @@ pub fn usages_tree(locations: Vec<Location>, lines: Vec<String>, encoding: Encod
         };
         let (text, highlight) = preview(&line, start..end);
         let usage = ResultNode {
+            actions: Vec::new(),
             leading: Leading::Line(location.range.start.line + 1),
             label: text.into(),
             highlight: Some(highlight),
@@ -943,6 +1086,7 @@ pub fn usages_tree(locations: Vec<Location>, lines: Vec<String>, encoding: Encod
                     None => (None, shown),
                 };
                 files.push(ResultNode {
+                    actions: Vec::new(),
                     leading: Leading::File(location.path.clone()),
                     label: name.into(),
                     highlight: None,
@@ -1037,12 +1181,14 @@ mod tests {
     fn kind_tabs_update_in_place(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext;
         let place = |file: &str, line: u32| ResultNode {
+            actions: Vec::new(),
             leading: Leading::Line(line + 1),
             label: format!("TODO {line}").into(),
             target: Some(ResultTarget { path: file.into(), position: Position { line, character: 0 }, encoding: Encoding::Utf8 }),
             ..ResultNode::message("")
         };
         let file = |name: &str, lines: &[u32]| ResultNode {
+            actions: Vec::new(),
             leading: Leading::File(name.into()),
             label: name.to_string().into(),
             children: lines.iter().map(|&l| place(name, l)).collect(),
@@ -1070,9 +1216,49 @@ mod tests {
         });
     }
 
+    /// Groups keep being open or closed at any depth (the Test Explorer's
+    /// files and modules), and test results filled behind the explorer
+    /// leave it in front.
+    #[gpui::test]
+    fn refills_keep_nested_groups_and_can_go_behind(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        let test = |name: &str, line: u32, tone: Option<Tone>| ResultNode {
+            leading: tone.map_or(Leading::Icon(Icon::Function), |t| Leading::Tinted(Icon::CircleCheck, t)),
+            label: name.to_string().into(),
+            target: Some(ResultTarget { path: "a.rs".into(), position: Position { line, character: 0 }, encoding: Encoding::Utf8 }),
+            ..ResultNode::message("")
+        };
+        let tree = |tone: Option<Tone>| {
+            let mut module = test("tests", 0, None);
+            module.children = vec![test("adds", 1, tone), test("subtracts", 2, tone)];
+            module.expanded = true;
+            vec![ResultNode { leading: Leading::File("a.rs".into()), label: "a.rs".into(), children: vec![module], expanded: false, ..ResultNode::message("") }]
+        };
+        let panel = cx.new(ResultsPanel::new);
+        panel.update(cx, |p, cx| {
+            p.show_kind("tests", "Tests".into(), tree(None), Vec::new(), cx);
+            let tab = &mut p.tabs[0];
+            // Opens the file, closes its module.
+            tab.set_expanded(0, true);
+            tab.set_expanded(1, false);
+            assert!(p.update_kind("tests", "Tests".into(), tree(Some(Tone::Success)), Vec::new(), cx));
+            let tab = &p.tabs[0];
+            assert!(tab.nodes[0].expanded, "the file stays open");
+            assert!(!tab.nodes[0].children[0].expanded, "its module stays closed, its tests' marks changed");
+            p.fill_kind("test-results", "Run".into(), vec![test("adds", 1, None)], Vec::new(), true, cx);
+            assert_eq!(p.tabs.len(), 2);
+            assert!(p.shows_kind("tests"));
+            p.fill_kind("test-results", "Run again".into(), Vec::new(), Vec::new(), true, cx);
+            assert_eq!((p.tabs.len(), p.tabs[1].title.as_ref()), (2, "Run again"));
+            p.activate_kind("test-results", cx);
+            assert!(p.shows_kind("test-results"));
+        });
+    }
+
     #[test]
     fn lazy_nodes_load_once_when_opened() {
         let lazy = |label: &str, expanded| ResultNode {
+            actions: Vec::new(),
             leading: Leading::Blank,
             label: label.to_string().into(),
             loader: Some(Loader::new(|_| Task::ready(Ok(Vec::new())))),

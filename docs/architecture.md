@@ -47,6 +47,9 @@ bindings, colors, icons) are in the [contributing guide](../CONTRIBUTING.md).
 - `src/run.rs`, `src/editor/run.rs` — run and test targets and the gutter ▶
 - `src/test_run.rs` — test results read from a run's output (cargo, go, pytest, Jest, Vitest,
   node, `oxie test`, `lyth test`), their tree, the gutter's ✓ / ✕ and Rerun Failed
+- `src/test_explorer.rs`, `src/workspace/test_explorer.rs` — the Test Explorer: the project's
+  tests found from each file's run targets, nested by the lines groups span, in a Find panel tab
+  with Run and Debug per row
 - `src/local_history.rs`, `src/workspace/local_history.rs` — Local History: files' earlier
   versions under `<config>/local_history/`, listed with a diff and Restore
 - `src/keymap.rs` — JetBrains-style key bindings

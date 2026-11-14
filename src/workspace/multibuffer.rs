@@ -306,6 +306,7 @@ impl Workspace {
                 }
                 ws.schedule_auto_save(&editor, cx);
                 ws.todo_edited(&editor, cx);
+                ws.tests_edited(&editor, cx);
             }),
             cx.subscribe_in(editor, window, |ws, editor, event: &EditorContextMenu, window, cx| {
                 ws.open_editor_menu(editor.clone(), event.0, window, cx);

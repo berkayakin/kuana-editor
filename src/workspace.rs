@@ -120,6 +120,7 @@ mod sidebar_tabs;
 mod status_bar;
 mod suggestions;
 mod tab_bar;
+mod test_explorer;
 mod todo;
 mod terminal_panel;
 mod terminals;
@@ -224,6 +225,8 @@ actions!(
         PreviousBookmark,
         /// The project's TODO comments in the Find panel.
         ShowTodo,
+        /// The project's tests in the Find panel, each with Run and Debug.
+        ShowTestExplorer,
         /// The Find panel's current places as a multibuffer.
         OpenResultsInEditor,
         /// Every open file's errors and warnings, and the last Run's, as a multibuffer.
@@ -851,6 +854,8 @@ pub struct Workspace {
     bookmarks_task: Option<Task<()>>,
     /// The TODO list, once asked for.
     todo: todo::TodoList,
+    /// The Test Explorer's tests, once asked for.
+    tests: test_explorer::TestExplorer,
     /// The status bar's venv for a folder (looked up once, not every frame).
     venv_shown: std::cell::RefCell<Option<(PathBuf, Option<PathBuf>)>>,
     sidebar_width: Pixels,
@@ -1342,6 +1347,7 @@ impl Workspace {
             bookmarks: HashMap::new(),
             bookmarks_task: None,
             todo: Default::default(),
+            tests: Default::default(),
             venv_shown: Default::default(),
             problems_height: px(state.problems_height.unwrap_or(200.).clamp(90., 4000.)),
             sidebar_width: px(state.sidebar_width.unwrap_or(250.).clamp(SIDEBAR_MIN_WIDTH, 4000.)),
@@ -1591,6 +1597,7 @@ impl Workspace {
             ws.schedule_auto_save(&editor, cx);
             ws.schedule_session_save(cx);
             ws.todo_edited(&editor, cx);
+            ws.tests_edited(&editor, cx);
         }));
         subscriptions.push(cx.subscribe_in(editor, window, |ws, editor, event: &EditorContextMenu, window, cx| {
             ws.open_editor_menu(editor.clone(), event.0, window, cx);

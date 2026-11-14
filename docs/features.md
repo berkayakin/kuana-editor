@@ -132,7 +132,9 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   languages whose extension adds them, such as Oxie and Lyth),
   project commands (cargo, npm scripts, go, make, pytest) and your own run configurations, each
   in its own terminal tab with a pass/fail icon; test runs (cargo, go, pytest, Jest, Vitest, node, `oxie test`, `lyth test`) show
-  their results as a tree in the Find panel and ✓ / ✕ in the gutter, with Rerun Failed; see
+  their results as a tree in the Find panel and ✓ / ✕ in the gutter, with Rerun Failed; the
+  [Test Explorer](run-and-debug.md#test-explorer) lists every test in the project before anything
+  runs, with Run and Debug per test, group or file and the last runs' marks; see
   [Run and test](run-and-debug.md#run-and-test)
 - Image preview: PNG, JPEG, GIF (animated), WebP, BMP, TIFF, ICO, TGA and QOI files open as a
   picture with their dimensions and size (SVG stays text); Git diffs show an image's before and after

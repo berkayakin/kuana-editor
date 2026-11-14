@@ -149,7 +149,7 @@ fn comment_spans(line: &str, line_token: Option<&str>, block: Option<(&str, &str
 
 /// Reads a file the way Find in Files does: not too big, not binary, UTF-8,
 /// with `\n` line ends.
-fn read(path: &Path) -> Option<String> {
+pub(crate) fn read(path: &Path) -> Option<String> {
     if crate::fs::metadata(path).ok()?.len() > MAX_FILE_SIZE {
         return None;
     }
