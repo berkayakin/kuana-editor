@@ -152,12 +152,24 @@ pub fn encode(text: &str, encoding: TextEncoding) -> Result<Vec<u8>, String> {
 /// encodings encoded whole first, so a character one lacks fails the save
 /// before the file is touched (see `encode`).
 pub fn write_file<'a>(path: &std::path::Path, text: impl Iterator<Item = &'a str>, encoding: TextEncoding) -> std::io::Result<()> {
-    use std::io::Write;
     if encoding.encoding != UTF_8 && !encoding.is_utf16() {
         let text: String = text.collect();
-        return std::fs::write(path, encode(&text, encoding).map_err(std::io::Error::other)?);
+        return crate::fs::write(path, encode(&text, encoding).map_err(std::io::Error::other)?);
+    }
+    // A remote host takes the file whole.
+    if crate::fs::is_remote(path) {
+        let mut bytes = Vec::new();
+        write_pieces(&mut bytes, text, encoding)?;
+        return crate::fs::write(path, bytes);
     }
     let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    write_pieces(&mut out, text, encoding)?;
+    out.into_inner().map_err(std::io::IntoInnerError::into_error)?;
+    Ok(())
+}
+
+/// UTF-8 (with its BOM if it had one) or UTF-16 (with its BOM), piece by piece.
+fn write_pieces<'a>(out: &mut impl std::io::Write, text: impl Iterator<Item = &'a str>, encoding: TextEncoding) -> std::io::Result<()> {
     if encoding.is_utf16() {
         let big = encoding.encoding == UTF_16BE;
         out.write_all(if big { &[0xFE, 0xFF] } else { &[0xFF, 0xFE] })?;
@@ -175,7 +187,6 @@ pub fn write_file<'a>(path: &std::path::Path, text: impl Iterator<Item = &'a str
             out.write_all(piece.as_bytes())?;
         }
     }
-    out.into_inner().map_err(std::io::IntoInnerError::into_error)?;
     Ok(())
 }
 

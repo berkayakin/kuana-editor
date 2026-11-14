@@ -66,7 +66,7 @@ impl Workspace {
         let here = self.here(cx);
         while let Some(place) = self.nav.take(back) {
             let open = self.tab_for(&place.path, cx);
-            if open.is_none() && !place.path.is_file() {
+            if open.is_none() && !place.path.is_file_on_host() {
                 continue;
             }
             if let (Some(here), Some(editor)) = (&here, &open) {

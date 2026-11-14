@@ -7,6 +7,7 @@
 //! comments are hidden, and other tags are dropped with their text kept.
 //! Code blocks have Copy, and shell ones Run (in a Run tab, see `PreviewEvent`).
 
+use crate::fs::PathExt as _;
 use std::{
     ops::Range,
     path::{Path, PathBuf},
@@ -316,7 +317,7 @@ impl Builder {
     }
 
     fn local_image(&self, src: &str) -> Option<PathBuf> {
-        self.base.as_ref().map(|b| b.join(src)).filter(|p| !src.contains("://") && p.is_file())
+        self.base.as_ref().map(|b| b.join(src)).filter(|p| !src.contains("://") && p.is_file_on_host())
     }
 
     /// HTML, from a block or an inline tag: its tags as the Markdown they

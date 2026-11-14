@@ -534,7 +534,7 @@ pub(crate) fn counterpart(path: &std::path::Path, files: &[PathBuf]) -> Option<P
     let wanted = if source { HEADER_EXTENSIONS } else { SOURCE_EXTENSIONS };
     let stem = path.file_stem()?;
     let dir = path.parent()?;
-    let beside = wanted.iter().map(|ext| dir.join(stem).with_extension(ext)).find(|p| p.is_file());
+    let beside = wanted.iter().map(|ext| dir.join(stem).with_extension(ext)).find(|p| p.is_file_on_host());
     if beside.is_some() {
         return beside;
     }

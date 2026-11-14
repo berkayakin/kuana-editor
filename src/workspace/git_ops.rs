@@ -108,7 +108,7 @@ impl Workspace {
         let text = |b: Option<Vec<u8>>| b.map(|b| String::from_utf8_lossy(&b).into_owned());
         let (base, ours, theirs) = (text(base).unwrap_or_default(), text(ours), text(theirs));
         // Each side as the markers name it ("HEAD", a branch, "Stashed changes").
-        if path.exists() {
+        if path.exists_on_host() {
             self.open_path(path.clone(), window, cx);
         }
         let Some(file) = self.tab_for(&path, cx) else {
@@ -409,7 +409,7 @@ impl Workspace {
             let unresolved: Vec<&String> = rels
                 .iter()
                 .filter(|rel| self.git_status(cx).conflicted().any(|f| &f.rel == *rel))
-                .filter(|rel| std::fs::read_to_string(repo.join(rel)).is_ok_and(|t| !crate::conflict::parse(&t).is_empty()))
+                .filter(|rel| crate::fs::read_to_string(repo.join(rel)).is_ok_and(|t| !crate::conflict::parse(&t).is_empty()))
                 .collect();
             if !unresolved.is_empty() {
                 let message = match unresolved.as_slice() {

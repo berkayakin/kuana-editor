@@ -3,6 +3,7 @@
 //! the workspace runs in a terminal tab, and the problems their output
 //! reports (for the Problems panel).
 
+use crate::fs::PathExt as _;
 use std::{
     path::{Path, PathBuf},
     sync::LazyLock,
@@ -147,7 +148,7 @@ pub fn powershell_string(s: &str) -> String {
 const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
 
 fn nearest_with(file: &Path, marker: &str) -> Option<PathBuf> {
-    file.ancestors().skip(1).find(|d| d.join(marker).is_file()).map(Path::to_path_buf)
+    file.ancestors().skip(1).find(|d| d.join(marker).is_file_on_host()).map(Path::to_path_buf)
 }
 
 fn node_text<'a>(node: Node, text: &'a str) -> &'a str {
@@ -174,7 +175,7 @@ fn testing(mut target: RunTarget, framework: Framework, key: String) -> RunTarge
 
 /// `[package] name` from a Cargo.toml (the default binary's name).
 fn cargo_package_name(crate_dir: &Path) -> Option<String> {
-    let manifest = std::fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
+    let manifest = crate::fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
     let mut in_package = false;
     for line in manifest.lines().map(str::trim) {
         if line.starts_with('[') {
@@ -224,7 +225,7 @@ fn extension_targets(language: Language, path: &Path, text: &str, tree: &Tree, o
     let Some(query) = crate::syntax::queries(language).and_then(|q| q.runnables.as_ref()) else { return };
     let Some(run) = query.capture_index_for_name("run") else { return };
     let dir = path.parent().unwrap_or(path);
-    let root = path.ancestors().find(|d| d.join(".git").exists()).unwrap_or(dir);
+    let root = path.ancestors().find(|d| d.join(".git").exists_on_host()).unwrap_or(dir);
     let display = |p: &Path| p.to_string_lossy().into_owned();
     let base = [
         ("ZED_FILE", display(path)),
@@ -325,10 +326,10 @@ fn native_plan(path: &Path, cpp: bool) -> Option<NativePlan> {
 fn cmake_root(path: &Path) -> Option<PathBuf> {
     let mut found = None;
     for dir in path.ancestors().skip(1) {
-        if dir.join("CMakeLists.txt").is_file() {
+        if dir.join("CMakeLists.txt").is_file_on_host() {
             found = Some(dir.to_path_buf());
         }
-        if dir.join(".git").exists() {
+        if dir.join(".git").exists_on_host() {
             break;
         }
     }
@@ -343,7 +344,7 @@ fn cmake_plan(root: &Path, path: &Path) -> Option<NativePlan> {
     let (name, program) = file_api_target(&build, root, path).or_else(|| cmakelists_target(root, path, &build))?;
     let s = |p: &Path| p.to_string_lossy().into_owned();
     let mut steps = Vec::new();
-    if !build.join("CMakeCache.txt").is_file() {
+    if !build.join("CMakeCache.txt").is_file_on_host() {
         let query = build.join(".cmake/api/v1/query");
         steps.push(vec!["cmake".into(), "-E".into(), "make_directory".into(), s(&query)]);
         steps.push(vec!["cmake".into(), "-E".into(), "touch".into(), s(&query.join("codemodel-v2"))]);
@@ -366,8 +367,8 @@ fn cmake_plan(root: &Path, path: &Path) -> Option<NativePlan> {
 fn file_api_target(build: &Path, root: &Path, path: &Path) -> Option<(String, PathBuf)> {
     use serde_json::Value;
     let reply = build.join(".cmake/api/v1/reply");
-    let read = |file: &str| -> Option<Value> { serde_json::from_str(&std::fs::read_to_string(reply.join(file)).ok()?).ok() };
-    let mut indexes: Vec<String> = std::fs::read_dir(&reply).ok()?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("index-")).collect();
+    let read = |file: &str| -> Option<Value> { serde_json::from_str(&crate::fs::read_to_string(reply.join(file)).ok()?).ok() };
+    let mut indexes: Vec<String> = crate::fs::read_dir(&reply).ok()?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("index-")).collect();
     indexes.sort();
     let index = read(indexes.last()?)?;
     let codemodel = index["objects"].as_array()?.iter().find(|o| o["kind"] == "codemodel")?["jsonFile"].as_str()?.to_string();
@@ -394,7 +395,7 @@ fn cmakelists_target(root: &Path, path: &Path, build: &Path) -> Option<(String, 
     static ADD_EXECUTABLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)add_executable\s*\(\s*([A-Za-z0-9_.+-]+)([^)]*)\)").unwrap());
     let file = path.file_name()?.to_string_lossy().into_owned();
     for dir in path.ancestors().skip(1) {
-        if let Ok(lists) = std::fs::read_to_string(dir.join("CMakeLists.txt")) {
+        if let Ok(lists) = crate::fs::read_to_string(dir.join("CMakeLists.txt")) {
             let rel = path.strip_prefix(dir).ok()?.to_string_lossy().replace('\\', "/");
             for found in ADD_EXECUTABLE.captures_iter(&lists) {
                 let names_it = found[2].split_whitespace().map(|s| s.trim_matches('"')).any(|s| s == rel || s.ends_with(&format!("/{file}")) || s == file);
@@ -428,7 +429,7 @@ fn single_file_plan(path: &Path, cpp: bool) -> Option<NativePlan> {
         step.push("-std=c++20".into());
     }
     if let Some(dir) = nearest_with(path, "compile_flags.txt")
-        && let Ok(flags) = std::fs::read_to_string(dir.join("compile_flags.txt"))
+        && let Ok(flags) = crate::fs::read_to_string(dir.join("compile_flags.txt"))
     {
         // Relative include folders are relative to that file's folder.
         step.extend(flags.lines().map(str::trim).filter(|l| !l.is_empty()).map(|flag| match flag.strip_prefix("-I") {
@@ -533,7 +534,7 @@ fn rust_targets(path: &Path, text: &str, root: Node, out: &mut Vec<RunTarget>) {
         vec!["--bin".into(), stem.clone()]
     } else if rel_str.starts_with("examples/") {
         vec!["--example".into(), stem.clone()]
-    } else if rel_str != "src/main.rs" && crate_dir.join("src/lib.rs").is_file() {
+    } else if rel_str != "src/main.rs" && crate_dir.join("src/lib.rs").is_file_on_host() {
         vec!["--lib".into()]
     } else {
         package.iter().flat_map(|p| ["--bin".to_string(), p.clone()]).collect()
@@ -732,7 +733,7 @@ fn node_debug(runtime: &str, args: &[&str]) -> Option<DebugSpec> {
 
 /// The test runner a package uses.
 fn js_test_runner(package_dir: &Path) -> &'static str {
-    let package = std::fs::read_to_string(package_dir.join("package.json")).unwrap_or_default();
+    let package = crate::fs::read_to_string(package_dir.join("package.json")).unwrap_or_default();
     if package.contains("\"vitest\"") {
         "vitest"
     } else if package.contains("\"jest\"") {
@@ -804,16 +805,16 @@ pub fn project_targets(root: &Path, current: Option<(&Path, Language)>) -> Vec<R
         add("oxie build".into(), "oxie build".into(), root, None);
         add("oxie fmt".into(), "oxie fmt".into(), root, None);
     }
-    if root.join("Cargo.toml").is_file() {
+    if root.join("Cargo.toml").is_file_on_host() {
         // The default binary by name, so the debug build makes one executable.
         let run_debug = match cargo_package_name(root) {
-            Some(bin) if root.join("src/main.rs").is_file() => cargo(&["build", "--bin", &bin]),
+            Some(bin) if root.join("src/main.rs").is_file_on_host() => cargo(&["build", "--bin", &bin]),
             _ => None,
         };
         add("cargo run".into(), "cargo run".into(), root, run_debug);
         add("cargo test".into(), "cargo test".into(), root, None);
         add("cargo build".into(), "cargo build".into(), root, None);
-        if let Ok(bins) = std::fs::read_dir(root.join("src/bin")) {
+        if let Ok(bins) = crate::fs::read_dir(root.join("src/bin")) {
             for bin in bins.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "rs")) {
                 let name = bin.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                 let debug = cargo(&["build", "--bin", &name]);
@@ -821,15 +822,15 @@ pub fn project_targets(root: &Path, current: Option<(&Path, Language)>) -> Vec<R
             }
         }
     }
-    if let Ok(package) = std::fs::read_to_string(root.join("package.json"))
+    if let Ok(package) = crate::fs::read_to_string(root.join("package.json"))
         && let Ok(json) = serde_json::from_str::<serde_json::Value>(&package)
         && let Some(scripts) = json.get("scripts").and_then(|s| s.as_object())
     {
-        let manager = if root.join("pnpm-lock.yaml").exists() {
+        let manager = if root.join("pnpm-lock.yaml").exists_on_host() {
             "pnpm"
-        } else if root.join("yarn.lock").exists() {
+        } else if root.join("yarn.lock").exists_on_host() {
             "yarn"
-        } else if root.join("bun.lockb").exists() || root.join("bun.lock").exists() {
+        } else if root.join("bun.lockb").exists_on_host() || root.join("bun.lock").exists_on_host() {
             "bun"
         } else {
             "npm"
@@ -841,30 +842,30 @@ pub fn project_targets(root: &Path, current: Option<(&Path, Language)>) -> Vec<R
         }
     }
     // Lyth modules: Go modules whose packages are .lyth files, which lyth compiles
-    if root.join("go.mod").is_file() && has_lyth_files(root, 3) {
+    if root.join("go.mod").is_file_on_host() && has_lyth_files(root, 3) {
         add("lyth run .".into(), "lyth run .".into(), root, None);
         // -v names every test, for the test results
         add("lyth test ./...".into(), "lyth test -v ./...".into(), root, None);
         add("lyth build ./...".into(), "lyth build ./...".into(), root, None);
         add("lyth vet ./...".into(), "lyth vet ./...".into(), root, None);
     }
-    if root.join("go.mod").is_file() {
+    if root.join("go.mod").is_file_on_host() {
         let debug = Some(DebugSpec::Go { mode: "debug".into(), program: root.to_path_buf(), args: Vec::new() });
         add("go run .".into(), "go run .".into(), root, debug);
         add("go test ./...".into(), "go test -v ./...".into(), root, None);
         add("go build ./...".into(), "go build ./...".into(), root, None);
     }
     // CMake: configure once (with compile_commands.json for clangd), then build.
-    if root.join("CMakeLists.txt").is_file() {
+    if root.join("CMakeLists.txt").is_file_on_host() {
         let build = root.join("build");
         let mut steps = Vec::new();
-        if !build.join("CMakeCache.txt").is_file() {
+        if !build.join("CMakeCache.txt").is_file_on_host() {
             let s = |p: &Path| p.to_string_lossy().into_owned();
             steps.push(vec!["cmake".into(), "-S".into(), s(root), "-B".into(), s(&build), "-DCMAKE_BUILD_TYPE=Debug".into(), "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON".into()]);
         }
         add("cmake --build build".into(), chain(&steps, &["cmake".into(), "--build".into(), "build".into()]), root, None);
     }
-    if let Ok(makefile) = std::fs::read_to_string(root.join("Makefile")) {
+    if let Ok(makefile) = crate::fs::read_to_string(root.join("Makefile")) {
         for line in makefile.lines() {
             // `name:` rules, not variables (`A := b`) or special targets.
             let Some((target, rest)) = line.split_once(':') else { continue };
@@ -876,7 +877,7 @@ pub fn project_targets(root: &Path, current: Option<(&Path, Language)>) -> Vec<R
             }
         }
     }
-    if root.join("pyproject.toml").is_file() || root.join("pytest.ini").is_file() {
+    if root.join("pyproject.toml").is_file_on_host() || root.join("pytest.ini").is_file_on_host() {
         let debug = Some(DebugSpec::Python { program: None, module: Some("pytest".into()), args: Vec::new() });
         add("pytest".into(), format!("{PYTHON} -m pytest -v"), root, debug);
     }
@@ -910,22 +911,22 @@ pub fn project_targets(root: &Path, current: Option<(&Path, Language)>) -> Vec<R
 
 /// A Cargo crate written in Oxie: it builds with `oxie-build`, or has `src/main.oxi` / `src/lib.oxi`.
 fn is_oxie_project(root: &Path) -> bool {
-    root.join("src/main.oxi").is_file()
-        || root.join("src/lib.oxi").is_file()
-        || std::fs::read_to_string(root.join("Cargo.toml")).is_ok_and(|manifest| manifest.contains("oxie-build"))
+    root.join("src/main.oxi").is_file_on_host()
+        || root.join("src/lib.oxi").is_file_on_host()
+        || crate::fs::read_to_string(root.join("Cargo.toml")).is_ok_and(|manifest| manifest.contains("oxie-build"))
 }
 
 /// Whether `dir` or its folders `depth` levels down hold a .lyth file
 /// (hidden folders, dependencies and build output aside).
 fn has_lyth_files(dir: &Path, depth: usize) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+    let Ok(entries) = crate::fs::read_dir(dir) else { return false };
     let mut subdirs = Vec::new();
     for path in entries.filter_map(|e| e.ok()).map(|e| e.path()) {
-        if path.extension().is_some_and(|e| e == "lyth") && path.is_file() {
+        if path.extension().is_some_and(|e| e == "lyth") && path.is_file_on_host() {
             return true;
         }
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        if depth > 0 && path.is_dir() && !name.starts_with('.') && !matches!(name.as_str(), "node_modules" | "target" | "vendor") {
+        if depth > 0 && path.is_dir_on_host() && !name.starts_with('.') && !matches!(name.as_str(), "node_modules" | "target" | "vendor") {
             subdirs.push(path);
         }
     }
@@ -1031,7 +1032,7 @@ pub fn output_problems(output: &str, cwd: &Path) -> Vec<OutputProblem> {
         let path = Path::new(text.trim());
         // Without `./` in it, so it matches the path of an open tab.
         let path: PathBuf = if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) }.components().collect();
-        path.is_file().then_some(path)
+        path.is_file_on_host().then_some(path)
     };
     let number = |text: Option<regex::Match>| text.and_then(|m| m.as_str().parse::<u32>().ok());
     let mut out: Vec<OutputProblem> = Vec::new();

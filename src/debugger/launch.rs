@@ -5,6 +5,7 @@
 //! `launch` or `attach` arguments each adapter expects, and the processes
 //! Attach to Process lists.
 
+use crate::fs::PathExt as _;
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
@@ -235,7 +236,7 @@ fn js_debug() -> Result<Adapter, String> {
     if let Some(program) = servers::which("js-debug-adapter") {
         return Ok(Adapter { id: "pwa-node", program, args: listen, port: Some(port) });
     }
-    let server = crate::theme::config_dir().map(|d| d.join("debug-adapters/js-debug/src/dapDebugServer.js")).filter(|p| p.is_file());
+    let server = crate::theme::config_dir().map(|d| d.join("debug-adapters/js-debug/src/dapDebugServer.js")).filter(|p| p.is_file_on_host());
     let Some(server) = server else {
         return Err("Debugging JavaScript needs js-debug: unpack js-debug-dap-*.tar.gz from github.com/microsoft/vscode-js-debug/releases \
                     into ~/.config/kuana/debug-adapters (or put js-debug-adapter on PATH)."
@@ -263,12 +264,12 @@ fn xcrun_lldb_dap() -> Option<PathBuf> {
     }
     let output = crate::process::command("xcrun").args(["-f", "lldb-dap"]).stderr(Stdio::null()).output().ok()?;
     let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    (output.status.success() && path.is_file()).then_some(path)
+    (output.status.success() && path.is_file_on_host()).then_some(path)
 }
 
 /// The project's venv Python, else python3 on PATH.
 fn python_for(cwd: &Path) -> Option<PathBuf> {
-    crate::python::venv(cwd).map(|v| crate::python::interpreter(&v)).filter(|p| p.is_file()).or_else(|| servers::which("python3"))
+    crate::python::venv(cwd).map(|v| crate::python::interpreter(&v)).filter(|p| p.is_file_on_host()).or_else(|| servers::which("python3"))
 }
 
 /// `initialize` arguments (what Kuana supports as a client).
@@ -390,7 +391,7 @@ pub fn launch_arguments(spec: &DebugSpec, cwd: &Path, program: Option<&Path>, ad
 /// filled in (`${workspaceFolder}`, `${file}`, `${env:HOME}`; Zed's
 /// `$ZED_WORKTREE_ROOT`, `$ZED_FILE`…). `file` is the current file.
 pub fn project_configurations(root: &Path, file: Option<&Path>) -> Vec<RunTarget> {
-    let read = |path: &Path| -> Option<Value> { serde_json::from_str(&crate::settings::strip_jsonc(&std::fs::read_to_string(path).ok()?)).ok() };
+    let read = |path: &Path| -> Option<Value> { serde_json::from_str(&crate::settings::strip_jsonc(&crate::fs::read_to_string(path).ok()?)).ok() };
     // (name, adapter, configuration)
     let mut found: Vec<(String, String, Value)> = Vec::new();
     if let Some(launch) = read(&root.join(".vscode/launch.json")) {
@@ -535,7 +536,7 @@ pub fn processes() -> Vec<Process> {
         .filter(|(pid, _)| *pid != std::process::id())
         .map(|(pid, comm)| {
             // Linux's `comm` is a short name; the real path is in /proc.
-            let program = std::fs::read_link(format!("/proc/{pid}/exe")).unwrap_or_else(|_| PathBuf::from(&comm));
+            let program = crate::fs::read_link(format!("/proc/{pid}/exe")).unwrap_or_else(|_| PathBuf::from(&comm));
             let name = program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(comm);
             let command = commands.get(&pid).cloned().unwrap_or_default();
             Process { pid, name, command, program }
@@ -556,7 +557,7 @@ fn rust_formatters(cwd: &Path) -> Option<Vec<String>> {
         .ok()?;
     let etc = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()).join("lib/rustlib/etc");
     let (lookup, commands) = (etc.join("lldb_lookup.py"), etc.join("lldb_commands"));
-    (lookup.is_file() && commands.is_file()).then(|| {
+    (lookup.is_file_on_host() && commands.is_file_on_host()).then(|| {
         vec![
             format!("command script import \"{}\"", lookup.display()),
             format!("command source -s 0 \"{}\"", commands.display()),

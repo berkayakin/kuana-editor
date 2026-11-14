@@ -250,7 +250,7 @@ impl Workspace {
     }
 
     fn open_bookmark(&mut self, path: PathBuf, row: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if !path.is_file() {
+        if !path.is_file_on_host() {
             // The file went (outside Kuana): its bookmarks go with it.
             self.bookmarks.remove(&path);
             self.schedule_session_save(cx);

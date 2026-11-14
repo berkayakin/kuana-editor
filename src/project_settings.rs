@@ -48,7 +48,7 @@ static LAYERS: LazyLock<Mutex<HashMap<PathBuf, Layer>>> = LazyLock::new(Default:
 static PROBLEMS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 fn stamp(dir: &Path) -> Option<(SystemTime, u64)> {
-    let meta = std::fs::metadata(dir.join(FILE)).ok()?;
+    let meta = crate::fs::metadata(dir.join(FILE)).ok()?;
     meta.is_file().then(|| (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len()))
 }
 
@@ -61,7 +61,7 @@ fn read(dir: &Path) -> Layer {
     // "app/.kuana/settings.json": the folder's name tells which project.
     let folder = dir.file_name().map(|n| format!("{}/", n.to_string_lossy())).unwrap_or_default();
     let label = format!("{folder}{FILE}: ");
-    let text = std::fs::read_to_string(dir.join(FILE)).unwrap_or_default();
+    let text = crate::fs::read_to_string(dir.join(FILE)).unwrap_or_default();
     let (settings, problems) = parse(&text);
     PROBLEMS.lock().unwrap_or_else(|e| e.into_inner()).extend(problems.into_iter().map(|p| format!("{label}{p}")));
     Layer { stamp, settings: settings.map(Arc::new) }

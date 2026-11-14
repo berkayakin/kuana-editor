@@ -25,7 +25,7 @@ impl Workspace {
         });
         let mut session = ProjectSession::load(&root);
         // The folders that were open last time, if they still exist.
-        let expanded: Vec<PathBuf> = session.iter().flat_map(|s| s.expanded.iter().map(|p| root.join(p))).filter(|p| p.is_dir()).collect();
+        let expanded: Vec<PathBuf> = session.iter().flat_map(|s| s.expanded.iter().map(|p| root.join(p))).filter(|p| p.is_dir_on_host()).collect();
         if let Some(session) = &mut session {
             self.breakpoints = session.breakpoints.iter().map(|b| (root.join(&b.path), b.breakpoints.clone())).collect();
             self.bookmarks = session.bookmarks.iter().map(|b| (root.join(&b.path), b.bookmarks.clone())).collect();
@@ -81,7 +81,7 @@ impl Workspace {
 
     /// Reopens the folder from the previous session, if it still exists.
     pub fn restore_last_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = SessionState::load().last_root.filter(|r| r.is_dir()) else {
+        let Some(root) = SessionState::load().last_root.filter(|r| r.is_dir_on_host()) else {
             return;
         };
         self.set_root(root, window, cx);
@@ -277,14 +277,14 @@ impl Workspace {
 pub(super) fn copy_into(source: &Path, dir: &Path) -> std::io::Result<PathBuf> {
     let name = source.file_name().ok_or_else(|| std::io::Error::other("no file name"))?;
     let mut target = dir.join(name);
-    if target.exists() {
+    if target.exists_on_host() {
         let path = Path::new(name);
         let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        let ext = path.extension().filter(|_| !source.is_dir()).map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
-        let stem = if source.is_dir() { name.to_string_lossy().into_owned() } else { stem };
+        let ext = path.extension().filter(|_| !source.is_dir_on_host()).map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+        let stem = if source.is_dir_on_host() { name.to_string_lossy().into_owned() } else { stem };
         target = (1..1000)
             .map(|n| dir.join(if n == 1 { format!("{stem} copy{ext}") } else { format!("{stem} copy {n}{ext}") }))
-            .find(|p| !p.exists())
+            .find(|p| !p.exists_on_host())
             .ok_or_else(|| std::io::Error::other("no free name"))?;
     }
     copy_recursive(source, &target)?;
@@ -293,14 +293,14 @@ pub(super) fn copy_into(source: &Path, dir: &Path) -> std::io::Result<PathBuf> {
 
 
 pub(super) fn copy_recursive(source: &Path, target: &Path) -> std::io::Result<()> {
-    if source.is_dir() {
-        std::fs::create_dir(target)?;
-        for entry in std::fs::read_dir(source)? {
+    if source.is_dir_on_host() {
+        crate::fs::create_dir(target)?;
+        for entry in crate::fs::read_dir(source)? {
             let entry = entry?;
             copy_recursive(&entry.path(), &target.join(entry.file_name()))?;
         }
         Ok(())
     } else {
-        std::fs::copy(source, target).map(|_| ())
+        crate::fs::copy(source, target).map(|_| ())
     }
 }

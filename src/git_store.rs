@@ -548,7 +548,7 @@ fn perform(dir: &Path, op: GitOp, status: &RepoStatus) -> Result<Outcome, String
         GitOp::Commit { message, amend, all, untracked, push: and_push } => {
             // A checked file deleted since it was listed would fail the
             // whole commit (and leave what `all` staged behind).
-            let untracked: Vec<String> = untracked.into_iter().filter(|rel| std::fs::symlink_metadata(dir.join(rel)).is_ok()).collect();
+            let untracked: Vec<String> = untracked.into_iter().filter(|rel| crate::fs::symlink_metadata(dir.join(rel)).is_ok()).collect();
             // Untracked files only when checked: a commit of "everything"
             // mustn't pick up build output or notes nobody chose.
             if all {

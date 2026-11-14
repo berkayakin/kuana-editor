@@ -112,7 +112,7 @@ impl Compared {
     fn text(&self, repo: &Path) -> String {
         match self {
             Compared::Text { text, .. } => text.to_string(),
-            Compared::File(path) => std::fs::read(path).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default(),
+            Compared::File(path) => crate::fs::read(path).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default(),
             Compared::Revision { rev, rel } => git::text_at(repo, rev, rel).unwrap_or_default(),
         }
     }
@@ -302,7 +302,7 @@ impl DiffView {
                                 git::index_text(&repo, &file.rel).unwrap_or_default()
                             };
                             // Read bytes, not UTF-8 text, so binary files are detected rather than empty.
-                            let read = || std::fs::read(&file.path).ok().map(|b| String::from_utf8_lossy(&b).into_owned());
+                            let read = || crate::fs::read(&file.path).ok().map(|b| String::from_utf8_lossy(&b).into_owned());
                             let current = buffer.clone().or_else(read).unwrap_or_default();
                             (base, current, file.path.clone())
                         }
@@ -311,11 +311,11 @@ impl DiffView {
                             (base, current, repo.join(&file.rel))
                         }
                         DiffSource::History { path, text, .. } => {
-                            let read = || std::fs::read(path).ok().map(|b| String::from_utf8_lossy(&b).into_owned());
+                            let read = || crate::fs::read(path).ok().map(|b| String::from_utf8_lossy(&b).into_owned());
                             (text.to_string(), buffer.clone().or_else(read).unwrap_or_default(), path.clone())
                         }
                         DiffSource::Compare { path, with } => {
-                            let read = || std::fs::read(path).ok().map(|b| String::from_utf8_lossy(&b).into_owned());
+                            let read = || crate::fs::read(path).ok().map(|b| String::from_utf8_lossy(&b).into_owned());
                             (with.text(&repo), buffer.clone().or_else(read).unwrap_or_default(), path.clone())
                         }
                     };
@@ -470,7 +470,7 @@ fn load_images(repo: &Path, source: &DiffSource) -> Option<ImageSides> {
         ),
         DiffSource::Working { file, staged: false, .. } => {
             let before = if file.unstaged == Some(Change::Untracked) { None } else { git::blob_bytes(repo, &format!(":{}", file.rel)) };
-            (file.path.clone(), before, std::fs::read(&file.path).ok())
+            (file.path.clone(), before, crate::fs::read(&file.path).ok())
         }
         // Kept as text: no pictures.
         DiffSource::History { .. } | DiffSource::Compare { .. } => return None,

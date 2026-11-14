@@ -95,7 +95,7 @@ impl Workspace {
             let Ok(Ok(Some(mut paths))) = rx.await else { return };
             let Some(path) = paths.pop() else { return };
             this.update(cx, |ws, cx| {
-                if path.join("pyvenv.cfg").is_file() {
+                if path.join("pyvenv.cfg").is_file_on_host() {
                     ws.set_venv(Some(crate::python::Choice::Venv(path)), cx);
                 } else {
                     let detail = format!("{} has no pyvenv.cfg. Pick the folder python -m venv created.", path.display());

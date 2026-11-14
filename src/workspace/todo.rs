@@ -172,7 +172,7 @@ impl Workspace {
         let openable = self.project.openable();
         for path in pending {
             files.retain(|p, _| p == &path || !p.starts_with(&path));
-            if path.is_dir() {
+            if path.is_dir_on_host() {
                 wanted.extend(openable.iter().filter(|p| p.starts_with(&path)).cloned());
             } else {
                 wanted.push(path);
@@ -182,7 +182,7 @@ impl Workspace {
         let (project, ignore) = (self.project.clone(), self.ignore.clone());
         wanted.retain(|path| {
             let listed = project.is_searchable(path);
-            let unlisted = !project.lists(path) && path.is_file() && !ignore.as_ref().is_some_and(|i| i.matched_path_or_any_parents(path, false).is_ignore());
+            let unlisted = !project.lists(path) && path.is_file_on_host() && !ignore.as_ref().is_some_and(|i| i.matched_path_or_any_parents(path, false).is_ignore());
             if !(listed || unlisted) {
                 files.remove(path);
             }

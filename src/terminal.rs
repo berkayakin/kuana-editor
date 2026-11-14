@@ -5,6 +5,7 @@
 //! work (what an IME composes shows at the cursor until it's committed).
 //! Find (⌘F) searches the scrollback and the screen.
 
+use crate::fs::PathExt as _;
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -1266,12 +1267,12 @@ fn process_cwd(pid: u32) -> Option<PathBuf> {
     // SAFETY: the kernel fills `vip_path` with a NUL-terminated path.
     let path = unsafe { CStr::from_ptr(info.pvi_cdir.vip_path.as_ptr().cast()) };
     let path = PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes()));
-    path.is_dir().then_some(path)
+    path.is_dir_on_host().then_some(path)
 }
 
 #[cfg(target_os = "linux")]
 fn process_cwd(pid: u32) -> Option<PathBuf> {
-    std::fs::read_link(format!("/proc/{pid}/cwd")).ok().filter(|p| p.is_dir())
+    crate::fs::read_link(format!("/proc/{pid}/cwd")).ok().filter(|p| p.is_dir_on_host())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -1307,7 +1308,7 @@ fn process_name(pid: u32) -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn process_name(pid: u32) -> Option<String> {
-    let name = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let name = crate::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
     Some(name.trim_end().to_string()).filter(|n| !n.is_empty())
 }
 
@@ -1368,7 +1369,7 @@ fn parse_link(text: &str, cwd: &Path) -> Option<Link> {
         Some(rest) => std::env::var_os("HOME").map(PathBuf::from)?.join(rest),
         None => cwd.join(path),
     };
-    path.is_file().then_some(Link::File { path, line, column })
+    path.is_file_on_host().then_some(Link::File { path, line, column })
 }
 
 impl Drop for TerminalView {

@@ -17,6 +17,7 @@
 //! to match, Enter opens one, Escape (or leaving the tree) ends the search;
 //! Escape without one goes back to the editor, as in JetBrains.
 
+use crate::fs::PathExt as _;
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
@@ -540,7 +541,7 @@ impl ProjectTree {
     fn open_entry(&mut self, path: PathBuf, is_dir: bool, focus: bool, cx: &mut Context<Self>) {
         self.selected = Some(path.clone());
         // Never open a folder as a file (opening a folder makes it the project).
-        if is_dir || path.is_dir() {
+        if is_dir || path.is_dir_on_host() {
             if !self.expanded.remove(&path) {
                 self.expanded.insert(path);
             }
@@ -1162,7 +1163,7 @@ fn read_listing(dir: &Path) -> Arc<[Child]> {
 /// A folder's entries, folders first: (path, is a folder, is a link back to
 /// a folder it's in, name).
 pub fn children(dir: &Path) -> Vec<(PathBuf, bool, bool, String)> {
-    let Ok(read) = std::fs::read_dir(dir) else { return Vec::new() };
+    let Ok(read) = crate::fs::read_dir(dir) else { return Vec::new() };
     let mut here: Option<Option<PathBuf>> = None;
     let mut children: Vec<(PathBuf, bool, bool, String)> = read
         .filter_map(|e| e.ok())
@@ -1176,8 +1177,8 @@ pub fn children(dir: &Path) -> Vec<(PathBuf, bool, bool, String)> {
             // A link to a folder is a folder; one to a folder around it
             // would expand forever, so it doesn't.
             let (is_dir, cycle) = if file_type.is_symlink() {
-                let target = std::fs::canonicalize(&path).ok().filter(|t| t.is_dir());
-                let here = here.get_or_insert_with(|| std::fs::canonicalize(dir).ok());
+                let target = crate::fs::canonicalize(&path).ok().filter(|t| t.is_dir_on_host());
+                let here = here.get_or_insert_with(|| crate::fs::canonicalize(dir).ok());
                 let cycle = target.as_ref().zip(here.as_ref()).is_some_and(|(t, h)| h.starts_with(t));
                 (target.is_some(), cycle)
             } else {

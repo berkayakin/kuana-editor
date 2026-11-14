@@ -671,7 +671,7 @@ impl Render for Pane {
                 pane.set_file_drop(ev.bounds.contains(&ev.event.position), cx)
             }))
             .on_drag_move(cx.listener(|pane, ev: &gpui::DragMoveEvent<crate::project_tree::DraggedEntry>, _, cx| {
-                let over = ev.bounds.contains(&ev.event.position) && !ev.drag(cx).path.is_dir();
+                let over = ev.bounds.contains(&ev.event.position) && !ev.drag(cx).path.is_dir_on_host();
                 pane.set_file_drop(over, cx)
             }))
             .child(
@@ -715,7 +715,7 @@ pub(super) fn file_drop_overlay(group: SharedString, theme: &Theme) -> Div {
         .group_drag_over::<gpui::ExternalPaths>(group.clone(), |s| s.visible())
         .group_drag_over::<crate::project_tree::DraggedEntry>(group, |s| s.visible())
         // A tree folder isn't opened by dropping it here.
-        .can_drop(|dragged, _, _| dragged.downcast_ref::<crate::project_tree::DraggedEntry>().is_none_or(|entry| !entry.path.is_dir()))
+        .can_drop(|dragged, _, _| dragged.downcast_ref::<crate::project_tree::DraggedEntry>().is_none_or(|entry| !entry.path.is_dir_on_host()))
         .absolute()
         .inset_0()
         .child(

@@ -3,11 +3,11 @@
 //! so carets and undo behave. Language-server formatting is in
 //! `editor/format.rs`.
 
+use crate::fs::PathExt as _;
 use std::{
     io::Write,
     ops::Range,
     path::{Path, PathBuf},
-    process::Stdio,
     time::Duration,
 };
 
@@ -69,7 +69,7 @@ pub fn find(language: Language, file: &Path, configured: Option<&[String]>) -> O
             .skip(1)
             .map(|d| d.join("node_modules").join(".bin").join(name))
             .chain(venv.as_deref().map(|v| crate::python::bin_dir(v).join(name)))
-            .find(|p| p.is_file());
+            .find(|p| p.is_file_on_host());
         let project_local = local.is_some();
         let Some(program) = local.or_else(|| servers::which(name)) else { continue };
         let args = args.iter().map(|a| expand(a, file)).collect();
@@ -91,7 +91,7 @@ fn expand(arg: &str, file: &Path) -> String {
 fn rust_edition(file: &Path) -> String {
     file.ancestors()
         .skip(1)
-        .find_map(|d| std::fs::read_to_string(d.join("Cargo.toml")).ok())
+        .find_map(|d| crate::fs::read_to_string(d.join("Cargo.toml")).ok())
         .and_then(|toml| {
             toml.lines().find_map(|l| {
                 let (key, value) = l.split_once('=')?;
@@ -106,13 +106,13 @@ impl Formatter {
     /// after ten seconds.
     pub fn run(&self, text: &str, file: &Path) -> Result<String, String> {
         let dir = file.parent().unwrap_or(Path::new("."));
-        let mut child = crate::process::command(&self.program)
+        let mut child = crate::exec::Command::new(&self.program)
             .args(&self.args)
             .current_dir(dir)
             .env("PATH", servers::search_path())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdin(crate::exec::Stdio::piped())
+            .stdout(crate::exec::Stdio::piped())
+            .stderr(crate::exec::Stdio::piped())
             .spawn()
             .map_err(|e| format!("Couldn't run {}: {e}", self.name))?;
         // Write on another thread: a formatter may fill stdout before

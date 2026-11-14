@@ -23,7 +23,7 @@ impl EditorConfig {
     pub fn for_file(path: &Path) -> EditorConfig {
         let mut files = Vec::new();
         for dir in path.ancestors().skip(1) {
-            if let Ok(text) = std::fs::read_to_string(dir.join(".editorconfig")) {
+            if let Ok(text) = crate::fs::read_to_string(dir.join(".editorconfig")) {
                 let root = is_root(&text);
                 files.push((dir.to_path_buf(), text));
                 if root {

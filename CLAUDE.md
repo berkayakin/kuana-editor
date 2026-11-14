@@ -35,8 +35,10 @@ scripts/smoke.sh <kuana> <folder> <out>  # CI's smoke test: plays scripts/smoke.
 A Cargo workspace: the app is the root package (`src/`, the `kuana` binary); `crates/kuana-core` is the
 GPUI-free part it shares with `crates/kuana-server`, the headless side of remote development (see
 `plans/remote-dev.md`). The app re-exports the core's modules at its root (`use kuana_core::{encoding,
-paths, process, project, search, watcher}` in `main.rs`), so `crate::search` and the like work as
-before; the table lists them under their old names. Keep the core free of GPUI. The window's root
+paths, process, project, search, watcher}` in `main.rs`, with `fs` and `exec`), so `crate::search` and the
+like work as before; the table lists them under their old names. `fs` (mounts, `Host`, `Metadata`/`ReadDir`
+for either host, `PathExt`) and `exec` (`Command`/`Child`/`Output` for either host, `Runner`, `Spec`) are
+the remote-development layer. Keep the core free of GPUI. The window's root
 view is `Workspace`; every open file is an `Entity<Editor>` owning a `Document`.
 
 | File | Role |
@@ -133,6 +135,12 @@ view is `Workspace`; every open file is an `Entity<Editor>` owning a `Document`.
 
 ## Conventions and patterns
 
+- **Project files and tools go through the host** (`crate::fs`, `crate::exec`, from `kuana-core`): they
+  mirror `std::fs` / `std::process` and send a path under a remote mount (`/kuana-remote/<host>/…`) to
+  that host; anything else is local as before. Project-side modules (`src/host_lint.rs` lists them, and
+  fails on `std::fs` or `std::process` in their own code) use `crate::fs::read`, `.is_file_on_host()`
+  (`fs::PathExt`) and `crate::exec::Command`; Kuana's own files (config, sessions, extensions) use
+  `std::fs`. See `plans/remote-dev.md`.
 - **Offsets are UTF-8 byte offsets** everywhere (rope, tree-sitter, oxc, diagnostics, git
   hunks use rows). Convert to UTF-16 only at the IME boundary and to chars only for UI.
 - **Cached views:** the workspace draws editors, terminals, the Git panel/log and the debug panel through

@@ -6,6 +6,7 @@
 //! the Trash and stores `Trashed(a)`, and redoing that restores it. Deleting
 //! always goes through the Trash, so it can be undone too.
 
+use crate::fs::PathExt as _;
 use std::{
     io,
     path::{Path, PathBuf},
@@ -28,6 +29,8 @@ pub enum Change {
 #[derive(Clone, Debug)]
 pub struct Trashed {
     pub original: PathBuf,
+    /// A remote host's trash: where it went there (under the same mount).
+    remote: Option<PathBuf>,
     /// Where macOS put it.
     #[cfg(target_os = "macos")]
     location: PathBuf,
@@ -45,16 +48,16 @@ impl Change {
                 Ok(Change::Restored(trashed.original))
             }
             Change::Renamed { from, to } => {
-                if !to.exists() {
+                if !to.exists_on_host() {
                     return Err(io::Error::other(format!("{} isn't there any more", to.display())));
                 }
-                if from.exists() {
+                if from.exists_on_host() {
                     return Err(io::Error::other(format!("{} exists again", from.display())));
                 }
                 if let Some(parent) = from.parent() {
-                    std::fs::create_dir_all(parent)?;
+                    crate::fs::create_dir_all(parent)?;
                 }
-                std::fs::rename(&to, &from)?;
+                crate::fs::rename(&to, &from)?;
                 Ok(Change::Renamed { from: to, to: from })
             }
             Change::Batch(changes) => {
@@ -79,6 +82,16 @@ impl Change {
 
 /// Moves `path` to the Trash in a way that can be restored.
 pub fn move_to_trash(path: &Path) -> io::Result<Trashed> {
+    if let Some(location) = crate::fs::trash_remote(path) {
+        return Ok(Trashed {
+            original: path.to_path_buf(),
+            remote: Some(location?),
+            #[cfg(target_os = "macos")]
+            location: PathBuf::new(),
+            #[cfg(not(target_os = "macos"))]
+            item: None,
+        });
+    }
     #[cfg(target_os = "macos")]
     {
         use objc2_foundation::{NSFileManager, NSString, NSURL};
@@ -89,7 +102,7 @@ pub fn move_to_trash(path: &Path) -> io::Result<Trashed> {
             .map_err(|e| io::Error::other(e.localizedDescription().to_string()))?;
         let location = resulting.and_then(|u| u.path()).map(|p| PathBuf::from(p.to_string()));
         let location = location.ok_or_else(|| io::Error::other("the Trash didn't say where it went"))?;
-        Ok(Trashed { original: path.to_path_buf(), location })
+        Ok(Trashed { original: path.to_path_buf(), remote: None, location })
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -98,20 +111,23 @@ pub fn move_to_trash(path: &Path) -> io::Result<Trashed> {
         let item = trash::os_limited::list()
             .ok()
             .and_then(|items| items.into_iter().filter(|i| i.original_path() == path).max_by_key(|i| i.time_deleted));
-        Ok(Trashed { original: path.to_path_buf(), item })
+        Ok(Trashed { original: path.to_path_buf(), remote: None, item })
     }
 }
 
 fn restore(trashed: &Trashed) -> io::Result<()> {
-    if trashed.original.exists() {
+    if trashed.original.exists_on_host() {
         return Err(io::Error::other(format!("{} exists again", trashed.original.display())));
     }
     if let Some(parent) = trashed.original.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::fs::create_dir_all(parent)?;
+    }
+    if let Some(location) = &trashed.remote {
+        return crate::fs::rename(location, &trashed.original);
     }
     #[cfg(target_os = "macos")]
     {
-        std::fs::rename(&trashed.location, &trashed.original)
+        crate::fs::rename(&trashed.location, &trashed.original)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -196,7 +212,7 @@ impl FileHistory {
 pub fn topmost_new(path: &Path) -> PathBuf {
     let mut top = path.to_path_buf();
     for dir in path.ancestors().skip(1) {
-        if dir.exists() {
+        if dir.exists_on_host() {
             break;
         }
         top = dir.to_path_buf();

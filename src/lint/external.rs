@@ -1,11 +1,11 @@
 //! Delegates to the project's own ESLint (with its config) when installed.
 //! Runs as a child process with the buffer on stdin, so unsaved text works.
 
+use crate::fs::PathExt as _;
 use std::{
     borrow::Cow,
     io::Write,
     path::{Path, PathBuf},
-    process::Stdio,
 };
 
 use ropey::Rope;
@@ -25,7 +25,7 @@ pub fn find_for(file: &Path) -> Option<ExternalLinter> {
     let bin = if cfg!(windows) { "eslint.cmd" } else { "eslint" };
     file.ancestors().skip(1).find_map(|dir| {
         let program = dir.join("node_modules").join(".bin").join(bin);
-        program.is_file().then(|| ExternalLinter {
+        program.is_file_on_host().then(|| ExternalLinter {
             name: "ESLint",
             program,
             project_dir: dir.to_path_buf(),
@@ -36,14 +36,14 @@ pub fn find_for(file: &Path) -> Option<ExternalLinter> {
 impl ExternalLinter {
     /// Runs the linter; blocking, so call it from a background thread.
     pub fn run(&self, file: &Path, rope: &Rope) -> Result<Vec<Diagnostic>, String> {
-        let mut command = crate::process::command(&self.program);
+        let mut command = crate::exec::Command::new(&self.program);
         command
             .current_dir(&self.project_dir)
             .args(["--format", "json", "--stdin", "--stdin-filename"])
             .arg(file)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdin(crate::exec::Stdio::piped())
+            .stdout(crate::exec::Stdio::piped())
+            .stderr(crate::exec::Stdio::piped());
         let mut child = command.spawn().map_err(|e| e.to_string())?;
         if let Some(mut stdin) = child.stdin.take() {
             for chunk in rope.chunks() {

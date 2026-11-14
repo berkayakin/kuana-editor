@@ -77,7 +77,7 @@ impl Workspace {
     /// window brings that window to the front instead.
     pub(super) fn open_project(&mut self, path: PathBuf, target: OpenIn, window: &mut Window, cx: &mut Context<Self>) {
         let path = crate::paths::canonicalize(&path).unwrap_or(path);
-        if !path.is_dir() {
+        if !path.is_dir_on_host() {
             self.toast(ToastKind::Error, "Folder not found", Some(clone_dialog::display_path(&path)), cx);
             self.update_recent_projects(|list| list.retain(|p| p != &path), cx);
             cx.notify();
@@ -287,8 +287,8 @@ impl Workspace {
     /// Opens a config file in a tab, creating it from `template` first.
     pub(super) fn open_config_file(&mut self, path: Option<PathBuf>, template: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = path else { return };
-        if !path.exists() {
-            let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&path, template));
+        if !path.exists_on_host() {
+            let written = path.parent().map_or(Ok(()), crate::fs::create_dir_all).and_then(|_| crate::fs::write(&path, template));
             if let Err(err) = written {
                 let _ = window.prompt(PromptLevel::Warning, "Couldn't create the file", Some(&err.to_string()), &["OK"], cx);
                 return;

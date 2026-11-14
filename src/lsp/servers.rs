@@ -2,6 +2,7 @@
 //! project's (`node_modules/.bin`, a venv), then one on PATH, then a copy Kuana
 //! installed itself (see `install.rs`, the status bar's Install).
 
+use crate::fs::PathExt as _;
 use std::{
     collections::HashMap,
     ffi::OsString,
@@ -250,7 +251,7 @@ pub fn root_for(spec: &ServerSpec, file: &Path, workspace_root: Option<&Path>) -
     }
     let dir = file.parent().unwrap_or(file);
     dir.ancestors()
-        .find(|d| spec.root_markers.iter().chain(&[".git"]).any(|m| d.join(m).exists()))
+        .find(|d| spec.root_markers.iter().chain(&[".git"]).any(|m| d.join(m).exists_on_host()))
         .unwrap_or(dir)
         .to_path_buf()
 }
@@ -492,7 +493,7 @@ pub(crate) fn executable(path: &Path) -> Option<PathBuf> {
     {
         for ext in ["exe", "cmd", "bat"] {
             let p = path.with_extension(ext);
-            if p.is_file() {
+            if p.is_file_on_host() {
                 return Some(p);
             }
         }
@@ -501,6 +502,7 @@ pub(crate) fn executable(path: &Path) -> Option<PathBuf> {
     #[cfg(not(windows))]
     {
         use std::os::unix::fs::PermissionsExt;
+        // This computer's PATH (a remote host's programs are found there).
         let meta = std::fs::metadata(path).ok()?;
         (meta.is_file() && meta.permissions().mode() & 0o111 != 0).then(|| path.to_path_buf())
     }
@@ -525,7 +527,7 @@ pub fn search_path() -> &'static OsString {
                 add(home.join(sub));
             }
             // nvm keeps node (and global npm packages) per version; use the newest.
-            if let Ok(versions) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+            if let Ok(versions) = crate::fs::read_dir(home.join(".nvm/versions/node")) {
                 let mut found: Vec<PathBuf> = versions.filter_map(|e| e.ok()).map(|e| e.path().join("bin")).collect();
                 found.sort();
                 if let Some(newest) = found.pop() {
