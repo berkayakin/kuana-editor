@@ -3935,12 +3935,14 @@ dependencies = [
 name = "kuana-core"
 version = "0.2.0"
 dependencies = [
+ "base64 0.22.1",
  "encoding_rs",
  "futures",
  "ignore",
  "notify",
  "regex",
  "ropey",
+ "serde_json",
 ]
 
 [[package]]
