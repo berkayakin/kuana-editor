@@ -5,7 +5,8 @@
 # Kuana
 
 **A fast, beautiful code editor, written in Rust and drawn by your GPU.**
-JetBrains-style comfort, native speed, works with Zed extensions. Free and open source.
+JetBrains-style comfort, native speed and remote development built in. Works with Zed
+extensions. Free and open source.
 
 [Download](https://github.com/berkayakin/kuana-editor/releases/latest) ·
 [Features](docs/features.md) ·
@@ -47,6 +48,14 @@ Text** or **Zed** keymap instead, and Vim mode is built in.
 formatting work without hunting for plugins. If a language server is missing, the status bar
 installs it with one click.
 
+**🌐 Remote development, built in.** Open a project on another machine [over SSH](docs/remote.md),
+in WSL or inside a container, [dev containers](docs/remote.md#containers) included, with no
+extension to install. The window and everything you type stay on your computer, so typing never
+waits on the network, while a small server Kuana copies over does the work there: files, search,
+Git, language servers, terminals, tests and the debugger all run on that machine with its own
+tools. It uses your own `ssh`, config and keys, forwards ports to your browser and reconnects by
+itself when the connection drops.
+
 **🔒 Yours.** No account, no telemetry. Folders you haven't trusted open in
 [Restricted Mode](docs/settings.md#project-trust), so cloned code can't run on its own.
 Updates are signed.
@@ -61,6 +70,7 @@ Updates are signed.
 | **Run & debug** | ▶ next to every test and `main` (Rust, Go, Python, JS/TS), [test results](docs/run-and-debug.md#test-results) as a tree with ✓ / ✕ in the gutter and Rerun Failed, a [debugger](docs/run-and-debug.md#debugging) with conditional breakpoints and logpoints, errors from a run's output in Problems |
 | **Databases** | A [Database](docs/database.md) view for PostgreSQL, MySQL, MariaDB, SQLite and Oracle: browse tables, views, functions and procedures, edit and save routines with errors in place, run SQL with results in a grid; drivers built in |
 | **Terminal** | Your login shell in tabs and splits, full colors and mouse support, Find in scrollback, ⌘-click paths to open them |
+| **Remote** | Projects on [SSH hosts](docs/remote.md) from your `~/.ssh/config`, in WSL and in running containers or [dev containers](docs/remote.md#containers) (`devcontainer.json`), with the language servers, terminals, Run, debugger and Git of that machine; forwarded ports, reconnecting by itself |
 | **Linting** | Built-in rules for JavaScript/TypeScript (oxc), HTML and Markdown, syntax errors for the rest, plus your project's ESLint |
 | **Projects** | Multiple windows, hot exit (unsaved edits survive a quit), [Local History](docs/editing.md#local-history) of every file, shared [project settings](docs/settings.md#project-settings), live file watching, file operations you can undo, image preview, any text encoding |
 
@@ -110,6 +120,7 @@ read what it [doesn't do yet](#known-limitations).
 | [Languages](docs/languages.md) | Language servers, formatting, Python environments |
 | [Editing, panes and windows](docs/editing.md) | Splits, tabs, Vim mode, snippets, Copilot's suggestions, projects |
 | [Terminal, run and debug](docs/run-and-debug.md) | Terminal, running tests, the debugger |
+| [Remote development](docs/remote.md) | Projects over SSH, in WSL and in containers, ports, reconnecting |
 | [Git](docs/git.md) | Everything Git |
 | [Databases](docs/database.md) | PostgreSQL, MySQL/MariaDB, SQLite and Oracle connections, browsing, editing objects, running SQL |
 | [Extensions](docs/extensions.md) | Installing and writing extensions |
@@ -127,8 +138,10 @@ says what's planned):
   first launch ([how](docs/install.md#first-launch-on-macos); the install script above doesn't),
   and Windows SmartScreen warns. Updates are signed.
 - **Windows and Linux are in beta**, see above. No Linux packages (AppImage, `.deb`, Flatpak) yet.
-- **No remote development**: no SSH, dev containers or WSL folders. One folder per window (no
-  multi-root workspaces).
+- **One folder per window** (no multi-root workspaces).
+- **Remote development is new**: the other machine must run Linux or macOS (a Windows PC is
+  reached through WSL), and language servers it lacks are installed there by hand, not with
+  Kuana's one-click install.
 - **AI**: GitHub Copilot's suggestions only ([Edit predictions](docs/editing.md#edit-predictions)),
   no chat or agent panel; agents like Claude Code or Codex run in the terminal.
 - **Languages**: 13 have highlighting built in; others come from [extensions](docs/extensions.md),

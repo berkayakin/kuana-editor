@@ -29,8 +29,8 @@ install GPUI's dependencies (the list is in [`.github/workflows/ci.yml`](.github
 ```bash
 cargo build                 # debug build: dependencies optimized, Kuana itself rebuilds quickly
 cargo run --release -- <folder> [<file>…]
-cargo test
-cargo clippy --all-targets
+cargo test --workspace      # the app's tests, kuana-core's and kuana-server's
+cargo clippy --workspace --all-targets
 ```
 
 The first build compiles GPUI, tree-sitter grammars and rumdl, which takes several minutes;
@@ -44,8 +44,8 @@ XDG_CONFIG_HOME=/tmp/kuana-test ./target/release/kuana <folder>
 
 ## Before you open a pull request
 
-- `cargo test` passes.
-- `cargo clippy --all-targets` has **no warnings**: CI builds with `-D warnings` on Linux, then
+- `cargo test --workspace` passes.
+- `cargo clippy --workspace --all-targets` has **no warnings**: CI builds with `-D warnings` on Linux, then
   runs the tests on macOS and Windows.
 - User-facing changes are documented in [`docs/`](docs) (and the README if it's a headline
   feature). A new setting gets a row in [`docs/settings.md`](docs/settings.md).
@@ -56,8 +56,9 @@ XDG_CONFIG_HOME=/tmp/kuana-test ./target/release/kuana <folder>
 
 ## How the code is organized
 
-Start with [Architecture](docs/architecture.md): Kuana is one Rust crate on
-[GPUI](https://www.gpui.rs). `Workspace` is the window's root view, and each open file is an
+Start with [Architecture](docs/architecture.md): Kuana is a Rust app on
+[GPUI](https://www.gpui.rs), with the part remote development shares with its server in
+`crates/kuana-core`. `Workspace` is the window's root view, and each open file is an
 `Editor` showing a `Document` (a `ropey` rope, undo history, syntax tree and diagnostics).
 
 ## Conventions
@@ -69,6 +70,9 @@ These keep Kuana consistent; reviews will point back to them.
 - **Background work:** spawn heavy work with `cx.background_executor()`. When it finishes, check
   that the document's `version()` (or a request id) hasn't changed before applying the result.
 - **Text fields are editors** (`Editor::single_line` / `multi_line`), not custom widgets.
+- **A project's files and tools go through `crate::fs` and `crate::exec`**, not `std::fs` and
+  `std::process`, so they work on remote projects too (a test lists the modules this applies to);
+  Kuana's own files (settings, sessions) use `std::fs`.
 - **Colors:** never hard-code one; use `Theme::get(cx)`. A new color needs a field in `Theme`, an
   entry in `color_keys!`, a value in **every** `assets/themes/*.json` (a test checks this) and a
   row in [`docs/themes.md`](docs/themes.md).
@@ -98,7 +102,7 @@ Things we'd love help with:
 
 - Git: a three-way merge editor, interactive rebase
 - Vim: registers, macros, marks, `:s`
-- Language servers: semantic tokens, choosing and ordering servers per language
+- Language servers: choosing and ordering servers per language
 - Extensions: debug adapters and completion labels from extensions' code, Zed's older extension
   APIs, more languages in the registry
 - Debugger: hit counts, exception breakpoint options

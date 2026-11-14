@@ -1,9 +1,11 @@
 # Remote development
 
-Kuana opens projects on other machines over SSH, in WSL distributions and in containers. The
-window, the open files and everything you type stay on your computer, so typing never waits on the
-network; a small headless `kuana-server` on the remote machine reads and writes its files, watches
-them, searches them and runs Git there.
+Kuana opens projects on other machines: over SSH, in WSL distributions and in containers, dev
+containers included. The window, the open files and everything you type stay on your computer, so
+typing never waits on the network. A small headless `kuana-server`, which Kuana copies over the
+first time, does the work on that machine: it reads, writes, watches and searches the project's
+files and runs its Git, language servers, terminals, tests and debugger with the tools installed
+there. There's no extension to add and nothing to install there by hand.
 
 ## Connecting
 
@@ -17,9 +19,9 @@ them, searches them and runs Git there.
    checked against the release's signature). Later connections reuse it.
 4. Kuana asks for a folder there (`~/project`, or a full path) and opens it as a project.
 
-Recent Projects show it as `host: ~/project`, and the status bar's first item names the machine. A remote project comes
-back like a local one: Recent Projects, and the last project at startup, connect first. One
-connection serves every window on that host.
+Recent Projects show it as `host: ~/project`, and the status bar's first item names the machine.
+A remote project comes back like a local one: Recent Projects, and the last project at startup,
+connect first. One connection serves every window on that host.
 
 ## WSL (Windows)
 
@@ -86,9 +88,9 @@ opens (ports of other Compose services, `db:5432`, aren't).
 ## When the connection drops
 
 Kuana notices within a few seconds and connects again by itself. If that fails, the status bar's
-remote item turns red and Kuana offers **Reconnect** (also in that item's menu). The window and its unsaved text stay as they were; once
-back, the tree, Git, the watcher and open files are read again, language servers start again and
-forwarded ports come back.
+remote item turns red and Kuana offers **Reconnect** (also in that item's menu). The window and
+its unsaved text stay as they were; once back, the tree, Git, the watcher and open files are read
+again, language servers start again and forwarded ports come back.
 
 ## Trust
 
@@ -99,7 +101,6 @@ you trust it, its project settings, formatters and Git hooks don't run.
 
 - Copy Path copies a remote file's path as that machine knows it (`/home/me/project/…`); Reveal in
   Finder isn't offered for remote files.
-
 - The remote machine needs Linux (x86_64 or aarch64) or macOS. Windows machines aren't supported as
   SSH remotes; use WSL there.
 - Kuana keeps one SSH control connection per host (in its config folder, `ssh/`), as `ssh -o
