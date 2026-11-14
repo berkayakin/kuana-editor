@@ -169,7 +169,8 @@ mod tests {
         assert!(target.command.ends_with("/cfg/scratches/scratch_2.py"), "{}", target.command);
         let rust = run_target(Language::Rust, Path::new("/cfg/scratches/scratch_3.rs"), 3).unwrap();
         assert!(rust.command.contains("rustc"), "{}", rust.command);
-        assert!(rust.command.contains("/cfg/scratches/.build/scratch_3"), "{}", rust.command);
+        let program = Path::new("/cfg/scratches").join(".build").join("scratch_3");
+        assert!(rust.command.contains(&*program.to_string_lossy()), "{}", rust.command);
         assert!(run_target(Language::Markdown, Path::new("/cfg/scratches/scratch_4.md"), 1).is_none());
     }
 }
