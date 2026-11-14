@@ -1014,6 +1014,7 @@ impl Workspace {
             ToastButton::SaveBackground => !self.documents.read(cx).kept(cx).is_empty(),
             ToastButton::ShowTestResults => self.has_results && !self.shows(BottomPanel::Results),
             ToastButton::InstallExtension(_) => true,
+            ToastButton::Reconnect => self.connecting.is_none() && self.root.as_deref().and_then(kuana_core::remote::ssh::host_of).is_some_and(|h| kuana_core::remote::ssh::connected(&h).is_none()),
         }
     }
 
@@ -1026,6 +1027,7 @@ impl Workspace {
             ToastButton::SaveBackground => self.save_background(false, false, cx),
             ToastButton::ShowTestResults => self.toggle_results(&ToggleResults, window, cx),
             ToastButton::InstallExtension(id) => self.install_suggested_extension(id, cx),
+            ToastButton::Reconnect => self.reconnect(window, cx),
         }
     }
 

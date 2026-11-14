@@ -22,7 +22,7 @@ use crate::{
     theme::{self, config_dir},
     workspace::{
         CloseAllTabs, CloseOtherTabs, CloseTab, CloseTerminal, NextPane, PreviousPane, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPaneDown, Rerun, RunConfiguration, StopRun, SplitDown, SplitRight, TogglePinTab, DecreaseFontSize, NewTerminal, ToggleTerminal, FileStructure, Find, IncreaseFontSize, OpenKeymap, OpenSettings, ResetFontSize, RestartLanguageServer, CopilotSignIn, CopilotSignOut, FindAction, FindInFiles, FindNext, FindPrevious, GoToFile, GoToLine, OpenSettingsFile, SwitchHeaderSource,
-        CloseWindow, MinimizeWindow, ZoomWindow, NewFile, NewWindow, NextTab, OpenFile, OpenFolder, OpenFolderInThisWindow,
+        CloseWindow, MinimizeWindow, ZoomWindow, NewFile, NewWindow, NextTab, OpenFile, OpenFolder, OpenFolderInThisWindow, ConnectToHost,
         PrevTab, Quit, RecentFiles, RecentProjects, RecentTab, RecentTabBack, NavigateBack, NavigateForward, Replace,
         GitBranches, GitStash, ManageRemotes, GitClone, GitFetch, GitInit, GitPull, GitPush, GitSync, GitUndoCommit, OpenRemote, OpenThemesFolder, OpenSnippetsFolder, ReloadThemes, ReplaceInFiles,
         Save, SaveAs, SearchEverywhere, SelectTheme, ShowCommit, ShowFileHistory, ToggleCommit, ToggleGitLog, ToggleProblems,
@@ -882,6 +882,7 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Open File…", OpenFile),
         a("Open Folder…", OpenFolder),
         a("Open Folder in This Window…", OpenFolderInThisWindow),
+        a("Connect to SSH Host…", ConnectToHost),
         a("Recent Projects…", RecentProjects),
         a("New Window", NewWindow),
         a("Close Window", CloseWindow),

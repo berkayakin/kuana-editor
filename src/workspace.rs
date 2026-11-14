@@ -103,6 +103,7 @@ mod multibuffer;
 mod nav_history;
 mod navigation;
 mod pane;
+mod remote;
 mod pane_tree;
 mod pane_view;
 mod panes;
@@ -155,6 +156,8 @@ actions!(
         OpenFile,
         OpenFolder,
         OpenFolderInThisWindow,
+        /// A project on another machine over SSH (`workspace/remote.rs`).
+        ConnectToHost,
         RecentProjects,
         Save,
         SaveAs,
@@ -373,6 +376,8 @@ enum ToastButton {
     /// Install the registry's extension with this id, offered for a file
     /// (see `suggest_extension`).
     InstallExtension(&'static str),
+    /// Connect a remote project's host again (`workspace/remote.rs`).
+    Reconnect,
 }
 
 impl ToastButton {
@@ -382,6 +387,7 @@ impl ToastButton {
             ToastButton::SaveBackground => "Save All",
             ToastButton::ShowTestResults => "Show Results",
             ToastButton::InstallExtension(_) => "Install",
+            ToastButton::Reconnect => "Reconnect",
         }
     }
 }
@@ -851,6 +857,12 @@ pub struct Workspace {
     recent: Vec<PathBuf>,
     /// Back / Forward (`workspace/nav_history.rs`).
     nav: crate::nav_history::NavHistory,
+    /// Remote projects (`workspace/remote.rs`): the host being connected to,
+    /// the project waiting for its host to come back, and the task watching
+    /// the project's connection.
+    connecting: Option<String>,
+    reconnecting: Option<PathBuf>,
+    connection_task: Option<Task<()>>,
     /// Ctrl+Tab held down, going through the tabs.
     tab_switch: Option<TabSwitch>,
     actions: Arc<Vec<ActionEntry>>,
@@ -1317,6 +1329,9 @@ impl Workspace {
             root_gone: false,
             recent: Vec::new(),
             nav: Default::default(),
+            connecting: None,
+            reconnecting: None,
+            connection_task: None,
             tab_switch: None,
             actions: Arc::new(keymap::action_entries()),
             shift_down: false,

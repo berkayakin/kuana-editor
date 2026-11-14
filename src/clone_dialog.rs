@@ -416,12 +416,16 @@ fn progress_percent(line: &str) -> Option<f32> {
     line[start..pct].parse().ok()
 }
 
-fn home_dir() -> Option<PathBuf> {
+pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
 }
 
 /// Shows paths under the home folder as `~/…`.
 pub fn display_path(path: &Path) -> String {
+    // A remote project's: `box: ~/project`.
+    if let Some(shown) = kuana_core::remote::ssh::display(path) {
+        return shown;
+    }
     match home_dir().and_then(|h| path.strip_prefix(&h).ok().map(Path::to_path_buf)) {
         Some(rel) if rel.as_os_str().is_empty() => "~".into(),
         Some(rel) => format!("~{}{}", std::path::MAIN_SEPARATOR, rel.display()),

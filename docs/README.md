@@ -6,6 +6,7 @@
 - [Languages](languages.md): language servers, formatting, Python environments
 - [Editing, panes and windows](editing.md): splits and tabs, Vim mode, snippets, Copilot's suggestions, projects, hot exit
 - [Terminal, run and debug](run-and-debug.md): the terminal, running tests, the debugger
+- [Remote development](remote.md): projects on other machines over SSH
 - [Git](git.md): gutter, staging, diffs, log, branches, merge conflicts
 - [Databases](database.md): PostgreSQL, MySQL/MariaDB, SQLite and Oracle connections, browsing schemas, editing objects, running SQL
 - [Extensions](extensions.md): Zed-format extensions for languages, themes and icons

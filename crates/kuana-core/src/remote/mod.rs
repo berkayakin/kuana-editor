@@ -6,6 +6,7 @@
 pub mod client;
 pub mod rpc;
 pub mod server;
+pub mod ssh;
 #[cfg(test)]
 mod tests;
 

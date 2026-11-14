@@ -76,6 +76,13 @@ impl Workspace {
     /// Opens a project folder. A folder that's already open in another
     /// window brings that window to the front instead.
     pub(super) fn open_project(&mut self, path: PathBuf, target: OpenIn, window: &mut Window, cx: &mut Context<Self>) {
+        // A remote project whose host isn't connected: connect, then open it.
+        if let Some(host) = kuana_core::remote::ssh::host_of(&path)
+            && kuana_core::remote::ssh::connected(&host).is_none()
+        {
+            self.connect_host(host, Some(path), window, cx);
+            return;
+        }
         let path = crate::paths::canonicalize(&path).unwrap_or(path);
         if !path.is_dir_on_host() {
             self.toast(ToastKind::Error, "Folder not found", Some(clone_dialog::display_path(&path)), cx);

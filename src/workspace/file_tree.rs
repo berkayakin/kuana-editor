@@ -48,6 +48,8 @@ impl Workspace {
         crate::python::set_choice(&root, venv);
         self.venv_shown.take();
         self.root = Some(root.clone());
+        // A remote project: its connection is watched.
+        self.watch_connection(cx);
         self.refresh_extension_views(cx);
         self.extension_callers_changed(cx);
         self.show_sidebar = SessionState::load().show_sidebar.unwrap_or(true);
@@ -81,10 +83,17 @@ impl Workspace {
 
     /// Reopens the folder from the previous session, if it still exists.
     pub fn restore_last_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = SessionState::load().last_root.filter(|r| r.is_dir_on_host()) else {
+        let Some(root) = SessionState::load().last_root else { return };
+        // A remote project's host is connected first.
+        if let Some(host) = kuana_core::remote::ssh::host_of(&root)
+            && kuana_core::remote::ssh::connected(&host).is_none()
+        {
+            self.connect_host(host, Some(root), window, cx);
             return;
-        };
-        self.set_root(root, window, cx);
+        }
+        if root.is_dir_on_host() {
+            self.set_root(root, window, cx);
+        }
     }
 }
 
