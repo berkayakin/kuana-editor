@@ -342,6 +342,13 @@ type RunRows = (
     Arc<Vec<(usize, Option<crate::test_run::TestStatus>)>>,
 );
 
+/// How an editor looks in Zen mode (`Editor::set_zen`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ZenLook {
+    /// Line numbers stay (`zen_line_numbers`).
+    pub line_numbers: bool,
+}
+
 pub struct Editor {
     pub doc: Entity<Document>,
     mode: EditorMode,
@@ -504,6 +511,9 @@ pub struct Editor {
     sticky_spans: (Option<(Arc<Vec<crate::syntax::Symbol>>, u64)>, Arc<Vec<(usize, usize, usize)>>),
     /// The pointer is over the gutter, so fold arrows show.
     gutter_hovered: bool,
+    /// Zen mode's look, from the workspace (`Workspace::zen`): while it's
+    /// set, no minimap, and no line numbers unless it keeps them.
+    zen: Option<ZenLook>,
     /// Runnable targets for a version and path (gutter ▶).
     run_targets: derived::Derived<(u64, Option<std::path::PathBuf>, crate::syntax::Language), Vec<crate::run::RunTarget>>,
     /// The workspace runs this SQL file's statements, split by these rules
@@ -657,6 +667,7 @@ impl Editor {
             breadcrumbs: None,
             sticky_spans: (None, Arc::default()),
             gutter_hovered: false,
+            zen: None,
             run_targets: derived::Derived::new(),
             sql_runs: None,
             sql_statements: derived::Derived::new(),
@@ -857,6 +868,19 @@ impl Editor {
     /// Text fields (single- or multi-line) have no gutter, linting or scrollbar.
     fn is_chromeless(&self) -> bool {
         self.mode != EditorMode::Full
+    }
+
+    /// Zen mode's look while it's on, None for the usual one.
+    pub fn set_zen(&mut self, zen: Option<ZenLook>, cx: &mut Context<Self>) {
+        if self.zen != zen {
+            self.zen = zen;
+            cx.notify();
+        }
+    }
+
+    /// Whether the gutter shows line numbers: not in Zen mode, unless it keeps them.
+    fn shows_line_numbers(&self) -> bool {
+        self.zen.is_none_or(|zen| zen.line_numbers)
     }
 
     fn submit(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
@@ -3831,8 +3855,9 @@ impl Editor {
 
         let line_count = self.doc.read(cx).line_count();
         let digits = line_count.to_string().len().max(3);
-        // Diagnostic dot, numbers, fold arrow, git bar.
-        let gutter_width = if single { px(0.) } else { char_width * digits as f32 + px(58.) };
+        // Diagnostic dot, numbers (not in Zen mode, unless it keeps them), fold arrow, git bar.
+        let numbers_width = if self.shows_line_numbers() { char_width * digits as f32 } else { px(0.) };
+        let gutter_width = if single { px(0.) } else { numbers_width + px(58.) };
         let text_bounds = Bounds::from_corners(
             point(bounds.left() + gutter_width, bounds.top()),
             bounds.bottom_right(),
@@ -4562,7 +4587,7 @@ impl Editor {
                                 }
                             }
                         }
-                    } else {
+                    } else if self.shows_line_numbers() {
                         frame.numbers.push((point(nx, y), number_line));
                     }
 
@@ -7503,6 +7528,37 @@ mod frame_tests {
     fn frame(host: &Entity<Host>, cx: &mut VisualTestContext) -> FrameLayout {
         cx.draw(point(px(0.), px(0.)), size(px(800.), px(600.)), |_, _| AnyView::from(host.clone()));
         host.update(cx, |h, _| h.frame.borrow_mut().take()).expect("laid out")
+    }
+
+    /// Zen mode's look drops the minimap and, unless it keeps them, the line
+    /// numbers, whose room goes back to the text; leaving it puts both back.
+    #[gpui::test]
+    fn zen_mode_hides_line_numbers_and_the_minimap(cx: &mut TestAppContext) {
+        let (editor, host, cx) = editor("fn main() {}\n".repeat(50), cx);
+        editor.update(cx, |e, _| e.file_settings.minimap = true);
+        let gutter = |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.layout.as_ref().map(|l| l.gutter_width).unwrap());
+        let usual = frame(&host, cx);
+        let usual_gutter = gutter(cx);
+        assert!(!usual.numbers.is_empty());
+        assert!(usual.minimap_bounds.is_some());
+
+        editor.update(cx, |e, cx| e.set_zen(Some(ZenLook { line_numbers: false }), cx));
+        let zen = frame(&host, cx);
+        assert!(zen.numbers.is_empty());
+        assert!(zen.minimap_bounds.is_none());
+        assert!(gutter(cx) < usual_gutter);
+
+        // `zen_line_numbers` keeps them; the minimap stays away.
+        editor.update(cx, |e, cx| e.set_zen(Some(ZenLook { line_numbers: true }), cx));
+        let kept = frame(&host, cx);
+        assert_eq!(kept.numbers.len(), usual.numbers.len());
+        assert!(kept.minimap_bounds.is_none());
+        assert_eq!(gutter(cx), usual_gutter);
+
+        editor.update(cx, |e, cx| e.set_zen(None, cx));
+        let back = frame(&host, cx);
+        assert_eq!(back.numbers.len(), usual.numbers.len());
+        assert!(back.minimap_bounds.is_some());
     }
 
     /// A file of `lines` lines with a caret, a problem and a code lens on

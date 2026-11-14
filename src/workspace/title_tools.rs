@@ -21,7 +21,9 @@ impl Workspace {
     /// Whether the window has the title bar row: the tools are in it, and
     /// Welcome Setup (which lays out its own top) isn't showing.
     pub(super) fn has_title_row(&self, cx: &App) -> bool {
-        tools_in_title_bar(cx) && self.onboarding.is_none()
+        // Zen mode hides it, until the sidebar is opened in it: its view tabs
+        // sit under this row, clear of the traffic lights.
+        tools_in_title_bar(cx) && self.onboarding.is_none() && (self.zen.is_none() || self.show_sidebar)
     }
 
     /// The title bar row, as tall as the tab row it stands in for, so the

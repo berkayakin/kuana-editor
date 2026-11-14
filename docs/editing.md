@@ -20,6 +20,24 @@ split commands. Pinned tabs stay first, show a pin (click it to unpin) and are k
 Others / Close All. The panes, as rows and columns, their tabs, sizes and pins come back with the
 project.
 
+## Zen mode
+
+**Toggle Zen Mode** (View → Zen Mode, or Find Action) hides everything but the editor: the
+activity bar, the sidebars, the panels, the status bar, the editor's tabs and breadcrumbs, the
+minimap and the line numbers. The window goes full screen and a lone pane's text is centered, 100
+characters wide; split panes keep the whole width. The VS Code keymap has it on ⌘K Z (Ctrl+K Z off
+macOS) and Sublime Text's on ⌃⇧⌘F (Shift+F11); the JetBrains and Zed keymaps have no shortcut for
+it, so give it one in Settings → Keymap if you like.
+
+Move the pointer to the window's top for an **Exit Zen Mode** button, or toggle it again, to have
+everything back as it was. A panel or the sidebar can still be opened while it's on (the terminal,
+Problems, ⌘1); leaving Zen mode puts back the layout from before it. Quitting in Zen mode leaves
+nothing hidden for the next launch either.
+
+Settings → Appearance → Zen mode chooses whether it goes full screen (`zen_full_screen`), how wide
+the text column is in characters (`zen_width`), and whether line numbers (`zen_line_numbers`) and
+the editor's tabs (`zen_tabs`) stay.
+
 ## Vim mode
 
 With `"vim_mode": true` (Settings → Editor → Vim), editors start in Normal mode with a block caret;
