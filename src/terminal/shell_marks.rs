@@ -487,7 +487,7 @@ mod tests {
         assert_eq!(env[0], ("ZDOTDIR".to_string(), dir.join("zsh").display().to_string()));
         assert!(dir.join("zsh/.zshrc").is_file());
         let (command, env) = integration("/bin/bash", &["-l".into()], &dir).unwrap();
-        assert_eq!(command.unwrap()[1..3], ["--init-file".to_string(), dir.join("bash/kuana.bash").display().to_string()]);
+        assert_eq!(command.unwrap()[1..3], ["--init-file".to_string(), dir.join("bash").join("kuana.bash").display().to_string()]);
         assert_eq!(env, [("KUANA_BASH_LOGIN".to_string(), "1".to_string())]);
         let (command, _) = integration("/opt/homebrew/bin/fish", &[], &dir).unwrap();
         assert_eq!(command.unwrap()[1], "-l");

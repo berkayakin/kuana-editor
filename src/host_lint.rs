@@ -56,6 +56,8 @@ fn project_side_code_goes_through_the_host() {
     let mut found = Vec::new();
     for file in PROJECT_SIDE {
         let text = std::fs::read_to_string(src.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+        // A Windows checkout may have CRLF line endings.
+        let text = text.replace("\r\n", "\n");
         let own = text.split("#[cfg(test)]\nmod ").next().unwrap_or("");
         for (n, line) in own.lines().enumerate() {
             let code = line.split("//").next().unwrap_or("");
