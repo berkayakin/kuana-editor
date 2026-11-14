@@ -41,7 +41,9 @@ use gpui::{
     Window, actions, div, fill, font, point, prelude::*, px, relative, size,
 };
 
+mod commands;
 mod run_log;
+pub mod shell_marks;
 
 use run_log::{RunLog, Teed};
 
@@ -54,7 +56,21 @@ use crate::{
     ui::{HoverFill, icon_el, input_box, tooltip_view},
 };
 
-actions!(terminal, [TerminalCopy, TerminalPaste, TerminalClear, TerminalFind]);
+actions!(
+    terminal,
+    [
+        TerminalCopy,
+        TerminalPaste,
+        TerminalClear,
+        TerminalFind,
+        /// Shell integration: scrolls to the command before the view's top.
+        TerminalPreviousCommand,
+        /// Shell integration: scrolls to the command after the view's top.
+        TerminalNextCommand,
+        /// Shell integration: copies the last command's output.
+        TerminalCopyCommandOutput
+    ]
+);
 
 /// Matches beyond this aren't collected (a huge scrollback full of hits):
 /// the newest ones are kept.
@@ -143,6 +159,10 @@ pub struct TerminalView {
     search: Option<Search>,
     /// What an input method is composing, not sent to the shell yet.
     marked: Option<Marked>,
+    /// Shell integration: the marks the shell sends, and what they said
+    /// (`terminal/commands.rs`).
+    shell_marks: Option<shell_marks::Marks>,
+    commands: commands::Commands,
     _events: Task<()>,
 }
 
@@ -169,6 +189,8 @@ enum Pty {
 struct Started {
     notifier: Notifier,
     process: Option<ShellProcess>,
+    /// A shell's marks (`shell_marks`), when integration is on.
+    marks: Option<shell_marks::Marks>,
 }
 
 /// A terminal's processes, to tell its shell at the prompt from a command
@@ -236,6 +258,7 @@ impl TerminalView {
     /// `TerminalEvent::Failed` says if it couldn't.
     pub fn create(cwd: PathBuf, run: Option<RunTarget>, cx: &mut App) -> Entity<Self> {
         let configured = Settings::get(cx).terminal_shell.clone();
+        let integrate = run.is_none() && Settings::get(cx).terminal_shell_integration.unwrap_or(true);
         let (tx, rx) = mpsc::unbounded();
         let listener = Listener(tx);
         let term = Arc::new(FairMutex::new(Term::new(Config::default(), &TermSize::new(80, 24), listener.clone())));
@@ -243,7 +266,7 @@ impl TerminalView {
         cx.new(|cx: &mut Context<Self>| {
             let start = {
                 let (term, cwd, run, log) = (term.clone(), cwd.clone(), run.clone(), run_log.clone());
-                cx.background_executor().spawn(async move { start_pty(configured, &cwd, run.as_ref(), term, listener, log) })
+                cx.background_executor().spawn(async move { start_pty(configured, integrate, &cwd, run.as_ref(), term, listener, log) })
             };
             cx.spawn(async move |this, cx| {
                 let mut started = Some(start.await);
@@ -273,9 +296,10 @@ impl TerminalView {
     /// size the view has by now.
     fn pty_started(&mut self, started: std::io::Result<Started>, cx: &mut Context<Self>) {
         match started {
-            Ok(Started { notifier, process }) => {
+            Ok(Started { notifier, process, marks }) => {
                 let Pty::Starting(typed) = std::mem::replace(&mut self.pty, Pty::Running(notifier)) else { return };
                 self.process = process;
+                self.shell_marks = marks;
                 if let (Pty::Running(notifier), Some(size)) = (&mut self.pty, self.size) {
                     notifier.on_resize(window_size(size));
                 }
@@ -354,6 +378,8 @@ impl TerminalView {
             last_mouse: None,
             search: None,
             marked: None,
+            shell_marks: None,
+            commands: Default::default(),
             _events: events,
         }
     }
@@ -384,8 +410,12 @@ impl TerminalView {
         self.process.as_ref()?.foreground_command()
     }
 
-    /// The folder the shell is in now (after any `cd`), else where it started.
+    /// The folder the shell is in now (after any `cd`; said by the shell with
+    /// shell integration), else where it started.
     pub fn current_dir(&self) -> PathBuf {
+        if let Some(cwd) = &self.commands.cwd {
+            return cwd.clone();
+        }
         self.process.as_ref().and_then(ShellProcess::shell).and_then(process_cwd).unwrap_or_else(|| self.cwd.clone())
     }
 
@@ -421,6 +451,7 @@ impl TerminalView {
                 cx.emit(TerminalEvent::Exited);
             }
             TermEvent::Wakeup => {
+                self.take_marks();
                 if let Some(search) = self.search.as_mut() {
                     search.stale = true;
                     // While output streams, at most one search at a time.
@@ -809,7 +840,9 @@ impl TerminalView {
         let chars: Vec<char> = (0..term.columns()).map(|c| row[Column(c)].c).collect();
         drop(term);
         let (range, text) = word_at(&chars, point.column.0)?;
-        Some((screen_row, range, parse_link(&text, &self.cwd)?))
+        // Relative to the shell's folder when it says it (shell integration).
+        let cwd = self.commands.cwd.as_deref().unwrap_or(&self.cwd);
+        Some((screen_row, range, parse_link(&text, cwd)?))
     }
 
     fn update_link(&mut self, position: Point<Pixels>, modifiers: &Modifiers, cx: &mut Context<Self>) {
@@ -1043,6 +1076,10 @@ impl TerminalView {
         let x_of = |col: usize| inner.origin.x + cell_w * col as f32;
         let y_of = |row: usize| inner.origin.y + cell_h * row as f32;
         let mut frame = TerminalFrame { bounds, line_height: cell_h, ..Default::default() };
+        if self.commands.seen {
+            let term = self.term.lock();
+            self.paint_command_marks(&term, &mut frame, inner.origin, cell_h, offset, cx);
+        }
         // Find's matches on screen, a row at a time (a match can wrap).
         if let Some(search) = &self.search {
             for (ix, m) in search.matches.iter().enumerate() {
@@ -1393,6 +1430,8 @@ pub struct TerminalFrame {
     marked: Option<Composition>,
     /// Under the link the pointer is on (⌘/Ctrl held).
     link: Option<PaintQuad>,
+    /// Shell integration's dots and edge marks (`commands.rs`).
+    marks: Vec<PaintQuad>,
     hitbox: Option<Hitbox>,
 }
 
@@ -1409,6 +1448,7 @@ struct Composition {
 /// the command, the venv it activates, the pty and the thread reading it.
 fn start_pty(
     configured: Option<Vec<String>>,
+    integrate: bool,
     cwd: &Path,
     run: Option<&RunTarget>,
     term: Arc<FairMutex<Term<Listener>>>,
@@ -1453,6 +1493,25 @@ fn start_pty(
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
     env.insert("TERM_PROGRAM".to_string(), "Kuana".to_string());
+    // Shell integration: Kuana's script for zsh, bash and fish; marks from
+    // any shell that makes them itself are read too.
+    let mut shell = shell;
+    let marks = (integrate && cfg!(unix)).then(shell_marks::Marks::default);
+    if marks.is_some() {
+        let program = configured.as_ref().and_then(|c| c.first().cloned()).or_else(|| std::env::var("SHELL").ok());
+        let args: Vec<String> = configured.as_ref().map(|c| c[1..].to_vec()).unwrap_or_default();
+        // Tests keep out of the user's config folder.
+        let dir = if cfg!(test) { Some(std::env::temp_dir().join("kuana-test-shell-integration")) } else { crate::theme::config_dir().map(|d| d.join("shell-integration")) };
+        if let (Some(program), Some(dir)) = (program, dir)
+            && let Some((command, extra)) = shell_marks::integration(&program, &args, &dir)
+        {
+            if command.is_some() {
+                shell = command;
+            }
+            env.extend(extra);
+            env.insert("KUANA_SHELL_INTEGRATION".to_string(), "1".to_string());
+        }
+    }
     let shell = shell.and_then(|command| {
         let (program, args) = command.split_first()?;
         Some(tty::Shell::new(program.clone(), args.to_vec()))
@@ -1480,14 +1539,18 @@ fn start_pty(
     });
     #[cfg(not(unix))]
     let process = None;
-    let event_loop = EventLoop::new(term, listener, Teed::new(pty, log), false, false)?;
+    let teed = match &marks {
+        Some(marks) => Teed::new(pty, log).with_marks(shell_marks::MarkFilter::new(marks.clone())),
+        None => Teed::new(pty, log),
+    };
+    let event_loop = EventLoop::new(term, listener, teed, false, false)?;
     let notifier = Notifier(event_loop.channel());
     event_loop.spawn();
     if let Some(line) = activate {
         // The shell reads it once it's ready.
         notifier.notify((line + "\r").into_bytes());
     }
-    Ok(Started { notifier, process })
+    Ok(Started { notifier, process, marks })
 }
 
 /// No signals blocked on this thread while it lives. A process inherits its
@@ -2055,6 +2118,9 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::on_find_newer))
             .on_action(cx.listener(Self::on_find_up))
             .on_action(cx.listener(Self::on_find_down))
+            .on_action(cx.listener(Self::previous_command))
+            .on_action(cx.listener(Self::next_command))
+            .on_action(cx.listener(Self::copy_command_output))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             // Moves and releases: `TerminalElement::paint`, window-wide.
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
@@ -2234,7 +2300,7 @@ impl Element for TerminalElement {
             if let Some(underline) = frame.link.take() {
                 window.paint_quad(underline);
             }
-            for quad in frame.backgrounds.drain(..).chain(frame.highlights.drain(..)) {
+            for quad in frame.backgrounds.drain(..).chain(frame.highlights.drain(..)).chain(frame.marks.drain(..)) {
                 window.paint_quad(quad);
             }
             if let Some(cursor) = frame.cursor.take() {
@@ -2778,7 +2844,7 @@ mod tests {
             let (tx, rx) = mpsc::unbounded();
             let term = Arc::new(FairMutex::new(Term::new(Config::default(), &TermSize::new(80, 24), Listener(tx.clone()))));
             let shell = Some(vec!["/bin/sleep".into(), "30".into()]);
-            (start_pty(shell, &std::env::temp_dir(), None, term, Listener(tx), None).unwrap(), rx)
+            (start_pty(shell, false, &std::env::temp_dir(), None, term, Listener(tx), None).unwrap(), rx)
         })
         .join()
         .unwrap();
@@ -2808,7 +2874,7 @@ mod tests {
         let log = RunLog::default();
         // Waits so the output is read before the pty closes.
         let shell = Some(vec!["/bin/sh".into(), "-c".into(), "seq 1 15000; sleep 1".into()]);
-        let started = start_pty(shell, &std::env::temp_dir(), None, term.clone(), Listener(tx), Some(log.clone())).unwrap();
+        let started = start_pty(shell, false, &std::env::temp_dir(), None, term.clone(), Listener(tx), Some(log.clone())).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
             match events.try_recv() {
@@ -2847,7 +2913,7 @@ mod tests {
     fn command_in_foreground(shell: Option<Vec<String>>) {
         let (tx, _events) = mpsc::unbounded();
         let term = Arc::new(FairMutex::new(Term::new(Config::default(), &TermSize::new(80, 24), Listener(tx.clone()))));
-        let started = start_pty(shell, &std::env::temp_dir(), None, term, Listener(tx), None).unwrap();
+        let started = start_pty(shell, false, &std::env::temp_dir(), None, term, Listener(tx), None).unwrap();
         let process = started.process.as_ref().unwrap();
         let wait_for = |what: &str, done: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + Duration::from_secs(20);

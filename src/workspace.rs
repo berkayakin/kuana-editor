@@ -619,6 +619,8 @@ enum MenuAction {
 #[derive(Clone, Copy, PartialEq)]
 enum TerminalTabAction {
     Copy,
+    /// The output of the command at this window position (shell integration).
+    CopyCommandOutput(gpui::Point<Pixels>),
     Paste,
     SelectAll,
     Find,

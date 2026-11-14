@@ -257,6 +257,27 @@ Python, JavaScript, TypeScript (Node 22.6 or later), shell, Go, PHP and Rust scr
 their first line that runs the file in a Run tab (Rust compiles it with `rustc` first). A language
 server may not know a file outside its project: it treats a scratch as a file of its own.
 
+## Terminal shell integration
+
+In zsh, bash and fish, Kuana's terminal knows where each command starts and how it ended:
+
+- A dot left of each prompt whose command ran: gray when it succeeded, red when it failed, in the
+  accent color while it runs. Marks at the terminal's right edge show every command in the
+  scrollback the same way.
+- **Previous Command** / **Next Command** (⌘↑ / ⌘↓ on macOS, Ctrl+↑ / Ctrl+↓ elsewhere, in the
+  terminal) scroll the prompt before or after the top of the view to the top.
+- **Copy Command Output** on the terminal's right-click menu copies the output of the command
+  you clicked; **Terminal: Copy Last Command Output** (Find Action) the last one's.
+- `file:line` links in the output are relative to the folder the shell is in now, and the folder a
+  terminal comes back in with the project is the shell's.
+
+Kuana starts these shells with a small script of its own that reads your usual files first (zsh:
+through `ZDOTDIR`; bash: `--init-file`, reading the login profile itself; fish: `--init-command`),
+then marks prompts with the OSC 133 and OSC 7 sequences VS Code and iTerm use. Other shells that
+send those marks themselves work too. The scripts are in `<config>/shell-integration/`. Turn it
+off with `"terminal_shell_integration": false` (Settings → Terminal); it applies to new terminals.
+Not on Windows yet.
+
 ## Windows and projects
 
 Each window holds one project folder, so several projects can be open side by side.
