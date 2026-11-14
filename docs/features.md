@@ -62,6 +62,8 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   `<br>`, `<details>` (shown open) and tables; comments are hidden and other tags dropped with their
   text kept. Remote images (badges) show their alt text. Zoom it with the − / + control at its top right
   (click the percentage to reset) or ⌘/Ctrl + scroll
+- Color swatches before colors in CSS and HTML (and from language servers such as Tailwind's), with a
+  picker that rewrites the color in its own notation; see [Colors](editing.md#colors)
 - Linked editing: typing in an HTML or JSX tag's name renames its closing tag too; see
   [Linked editing](editing.md#linked-editing)
 - Find/Replace bar with case, whole-word and regex options; Find/Replace in Files with preview

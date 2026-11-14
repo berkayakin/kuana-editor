@@ -1893,6 +1893,8 @@ while True:
             caps["textDocumentSync"] = {"openClose": True, "change": 1, "save": True}
         if name == "resolve":
             caps["completionProvider"]["resolveProvider"] = True
+        if name == "colors":
+            caps["colorProvider"] = True
         if name == "pull":
             caps["diagnosticProvider"] = {"identifier": "fake", "interFileDependencies": False, "workspaceDiagnostics": False}
         if name == "renames":
@@ -1951,6 +1953,11 @@ while True:
         problem = {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "severity": 1, "message": message}
         if name != "pull":
             send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {"uri": spelled(uri), "diagnostics": [problem]}})
+    elif method == "textDocument/documentColor":
+        # A CSS color and a utility class (Tailwind's), on the first line.
+        at = lambda a, b: {"start": {"line": 0, "character": a}, "end": {"line": 0, "character": b}}
+        colors = [{"range": at(4, 11), "color": {"red": 1, "green": 0, "blue": 0, "alpha": 1}}, {"range": at(12, 23), "color": {"red": 0.23, "green": 0.51, "blue": 0.96, "alpha": 1}}]
+        send({"jsonrpc": "2.0", "id": id, "result": colors})
     elif method == "textDocument/codeLens":
         # Unresolved: the title comes with codeLens/resolve.
         lines = range(0, len(text.split("\n")) - 1, 100) if name == "lenses" else [0]

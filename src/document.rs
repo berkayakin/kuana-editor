@@ -264,8 +264,16 @@ pub struct Document {
     /// the next answer replaces them.
     inlay_hints: Vec<InlayHint>,
     /// Counts the hints' replacements (not hints following edits), so soft
-    /// wrap knows when to look for lines whose hints changed.
+    /// wrap knows when to look for lines whose hints changed. Swatches count too.
     inlay_generation: u64,
+    /// The colors written in the text (`editor/colors.rs`), sorted, following
+    /// edits until the next scan or server answer replaces them.
+    colors: Vec<DocColor>,
+    /// A swatch (`SWATCH`) before each color, and those merged with the
+    /// server's hints: which one an editor shows depends on its settings
+    /// (`Editor::inlays`).
+    swatches: Vec<InlayHint>,
+    hints_and_swatches: Vec<InlayHint>,
     /// The chunks of lines (the editor's `HINT_CHUNK`s) whose hints were
     /// asked for as of a `hint_stamp`: the others, and all of them after an
     /// edit or a server's word, are due (`hints_fresh`).
@@ -427,6 +435,9 @@ impl Document {
             tree_version: 0,
             inlay_hints: Vec::new(),
             inlay_generation: 1,
+            colors: Vec::new(),
+            swatches: Vec::new(),
+            hints_and_swatches: Vec::new(),
             hint_chunks: ((0, 0), Vec::new()),
             hint_refreshes: 0,
             code_lenses: Vec::new(),
@@ -1188,6 +1199,7 @@ impl Document {
         self.bookmarks = bookmarks;
         self.debug_line = self.debug_line.and_then(|offset| self.line_moved(offset, patch, old, exact));
         self.shift_inlay_hints(patch);
+        self.shift_colors(patch);
         self.code_lenses = std::mem::take(&mut self.code_lenses)
             .into_iter()
             .filter_map(|lens| Some(CodeLens { line_start: self.line_moved(lens.line_start, patch, old, exact)?, ..lens }))
@@ -1269,6 +1281,78 @@ impl Document {
         hints.sort_by_key(|h| h.offset);
         self.inlay_hints = hints;
         self.inlay_generation += 1;
+        self.merge_swatches();
+    }
+
+    /// The swatches before colors (see `swatches`).
+    pub fn swatches(&self) -> &[InlayHint] {
+        &self.swatches
+    }
+
+    /// The server's hints with the swatches among them.
+    pub fn hints_and_swatches(&self) -> &[InlayHint] {
+        &self.hints_and_swatches
+    }
+
+    pub fn colors(&self) -> &[DocColor] {
+        &self.colors
+    }
+
+    /// The color written from `start` on, if one is.
+    pub fn color_at(&self, start: usize) -> Option<&DocColor> {
+        let ix = self.colors.partition_point(|c| c.range.start < start);
+        self.colors.get(ix).filter(|c| c.range.start == start)
+    }
+
+    /// The colors in the text at `version` (None: a newer version came, and
+    /// they're dropped); each gets a swatch.
+    pub fn set_colors(&mut self, version: u64, mut colors: Vec<DocColor>) {
+        if version != self.version {
+            return;
+        }
+        colors.sort_by_key(|c| c.range.start);
+        colors.dedup_by_key(|c| c.range.start);
+        if colors == self.colors {
+            return;
+        }
+        self.swatches = colors.iter().map(|c| InlayHint { offset: c.range.start, label: SWATCH.into(), pad_left: false, pad_right: true }).collect();
+        self.colors = colors;
+        self.inlay_generation += 1;
+        self.merge_swatches();
+    }
+
+    fn merge_swatches(&mut self) {
+        self.hints_and_swatches.clear();
+        if self.swatches.is_empty() {
+            return;
+        }
+        let (mut hints, mut swatches) = (self.inlay_hints.iter().peekable(), self.swatches.iter().peekable());
+        loop {
+            // A swatch goes before a hint at its offset: it's the color's own.
+            let next = match (hints.peek(), swatches.peek()) {
+                (Some(h), Some(s)) if h.offset < s.offset => hints.next(),
+                (_, Some(_)) => swatches.next(),
+                (Some(_), None) => hints.next(),
+                (None, None) => break,
+            };
+            self.hints_and_swatches.extend(next.cloned());
+        }
+    }
+
+    /// Colors (and their swatches) after an edit: ranges move with the text;
+    /// one whose text went entirely goes.
+    fn shift_colors(&mut self, patch: &Patch) {
+        if self.colors.is_empty() {
+            return;
+        }
+        self.colors.retain_mut(|c| {
+            let (start, end) = (patch.map(c.range.start), patch.map(c.range.end));
+            c.range = start..end;
+            start < end
+        });
+        self.colors.dedup_by_key(|c| c.range.start);
+        self.swatches = self.colors.iter().map(|c| InlayHint { offset: c.range.start, label: SWATCH.into(), pad_left: false, pad_right: true }).collect();
+        self.merge_swatches();
     }
 
     /// What inlay hints are asked for at: the version and how many times
@@ -1309,6 +1393,7 @@ impl Document {
         if self.inlay_hints[first..last] != hints[..] {
             self.inlay_hints.splice(first..last, hints);
             self.inlay_generation += 1;
+            self.merge_swatches();
         }
     }
 
@@ -1578,6 +1663,21 @@ impl LineEdit {
         let row = rope.byte_to_line(range.start);
         LineEdit { row, old_rows: rope.byte_to_line(range.end) - row + 1, new_rows: 1 + text.bytes().filter(|&b| b == b'\n').count() }
     }
+}
+
+/// The label of a color's swatch among the inlay hints: the editor draws
+/// it in the color (`editor/colors.rs`).
+pub const SWATCH: &str = "■";
+
+/// A color written in the text, from a scan (`crate::color::find`) or a
+/// language server (`textDocument/documentColor`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocColor {
+    pub range: Range<usize>,
+    pub color: crate::color::Color,
+    /// How it's written, when it's CSS notation the picker can write again
+    /// (a server's colors can be anything, as Tailwind's `bg-red-500`).
+    pub format: Option<crate::color::Format>,
 }
 
 /// A type or parameter name from the language server, shown in the text

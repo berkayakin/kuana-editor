@@ -132,6 +132,20 @@ multibuffer with every match marked, so a search across the project can be edite
   lists them, as for files changed without a tab).
 - Multiple carets stay within one excerpt.
 
+## Colors
+
+In CSS, SCSS, Less, HTML and the like, each color in the text (`#e11d48`, `rgb(…)`, `rgba(…)`,
+`hsl(…)`, `hsla(…)`) has a swatch before it. Clicking the swatch opens a picker: a
+saturation/brightness field, a hue bar and an alpha bar. The color in the text changes as you drag,
+written the way it was (hex stays hex, `rgb()` stays `rgb()`, with alpha added only when it isn't
+opaque), and the whole change is one undo step. Escape or a click elsewhere closes the picker. A
+`#name` in a selector isn't taken for a color.
+
+A language server that finds colors (`colorProvider`: the CSS server, Tailwind's for `bg-red-500`)
+supplies them instead of the scan, in any language. Its colors written in CSS notation can be
+picked; others (a class name) show only the swatch. Turn swatches off with
+`"document_colors": false` (Settings → Editor → Hints), per language too.
+
 ## Linked editing
 
 Typing in a tag's name changes its closing tag with it, and the other way round: `<li>` → `<link>`
