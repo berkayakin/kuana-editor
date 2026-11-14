@@ -898,16 +898,15 @@ impl LspStore {
                         client.respond(id, Value::Null);
                         self.pull_all(key, cx);
                     }
-                    "workspace/inlayHint/refresh" | "workspace/codeLens/refresh" => {
+                    "workspace/inlayHint/refresh" | "workspace/codeLens/refresh" | "workspace/semanticTokens/refresh" => {
                         client.respond(id, Value::Null);
-                        let hints = method == "workspace/inlayHint/refresh";
                         let docs: Vec<Entity<Document>> = self.documents.values().filter(|d| d.opened(key)).filter_map(|d| d.doc.upgrade()).collect();
                         for doc in docs {
                             doc.update(cx, |d, cx| {
-                                if hints {
-                                    d.hints_changed();
-                                } else {
-                                    d.lenses_changed();
+                                match method.as_str() {
+                                    "workspace/inlayHint/refresh" => d.hints_changed(),
+                                    "workspace/codeLens/refresh" => d.lenses_changed(),
+                                    _ => d.semantic_changed(),
                                 }
                                 cx.notify();
                             });
@@ -1621,6 +1620,7 @@ fn initialize_params(root: &Path, initialization_options: Value) -> Value {
                 // Hints and lenses are asked for again when it says they changed.
                 "inlayHint": { "refreshSupport": true },
                 "codeLens": { "refreshSupport": true },
+                "semanticTokens": { "refreshSupport": true },
                 "diagnostics": { "refreshSupport": true },
                 "fileOperations": { "willRename": true, "didRename": true },
             },
@@ -1660,6 +1660,16 @@ fn initialize_params(root: &Path, initialization_options: Value) -> Value {
                 "publishDiagnostics": {},
                 "inlayHint": {},
                 "codeLens": {},
+                "colorProvider": {},
+                "semanticTokens": {
+                    "requests": { "full": true },
+                    "tokenTypes": crate::editor::semantic_token_types(),
+                    "tokenModifiers": crate::editor::semantic_token_modifiers(),
+                    "formats": ["relative"],
+                    "overlappingTokenSupport": false,
+                    "multilineTokenSupport": false,
+                    "augmentsSyntaxTokens": true,
+                },
             },
             // Commands Kuana runs itself, so servers send code lenses that use
             // them (rust-analyzer's Run, Debug and references lenses).
@@ -1895,6 +1905,8 @@ while True:
             caps["completionProvider"]["resolveProvider"] = True
         if name == "colors":
             caps["colorProvider"] = True
+        if name == "semantic":
+            caps["semanticTokensProvider"] = {"legend": {"tokenTypes": ["variable", "macro", "brace"], "tokenModifiers": ["declaration", "mutable"]}, "full": True}
         if name == "pull":
             caps["diagnosticProvider"] = {"identifier": "fake", "interFileDependencies": False, "workspaceDiagnostics": False}
         if name == "renames":
@@ -1953,6 +1965,9 @@ while True:
         problem = {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "severity": 1, "message": message}
         if name != "pull":
             send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {"uri": spelled(uri), "diagnostics": [problem]}})
+    elif method == "textDocument/semanticTokens/full":
+        # `let mut count = make!();`: count (variable, mutable), make (macro), a brace (left to tree-sitter).
+        send({"jsonrpc": "2.0", "id": id, "result": {"data": [0, 8, 5, 0, 3, 0, 8, 4, 1, 0, 0, 6, 1, 2, 0]}})
     elif method == "textDocument/documentColor":
         # A CSS color and a utility class (Tailwind's), on the first line.
         at = lambda a, b: {"start": {"line": 0, "character": a}, "end": {"line": 0, "character": b}}

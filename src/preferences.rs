@@ -151,6 +151,7 @@ enum Setting {
     InlineValues,
     LinkedEditing,
     DocumentColors,
+    SemanticTokens,
     CodeLens,
     Minimap,
     MinimapWidth,
@@ -174,7 +175,7 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Setting; 42] = [
+    const ALL: [Setting; 43] = [
         Setting::Theme,
         Setting::IconTheme,
         Setting::VisualEffects,
@@ -196,6 +197,7 @@ impl Setting {
         Setting::InlayHints,
         Setting::InlineValues,
         Setting::DocumentColors,
+        Setting::SemanticTokens,
         Setting::CodeLens,
         Setting::Minimap,
         Setting::MinimapWidth,
@@ -230,7 +232,7 @@ impl Setting {
             Setting::BaseKeymap => Page::Keymap,
             Setting::FontFamily | Setting::FontSize | Setting::LineHeight => Page::Editor,
             Setting::TabSize | Setting::HardTabs | Setting::LinkedEditing | Setting::SoftWrap => Page::Editor,
-            Setting::Rulers | Setting::ShowWhitespace | Setting::InlayHints | Setting::InlineValues | Setting::DocumentColors | Setting::CodeLens | Setting::VimMode | Setting::TodoPatterns => Page::Editor,
+            Setting::Rulers | Setting::ShowWhitespace | Setting::InlayHints | Setting::InlineValues | Setting::DocumentColors | Setting::SemanticTokens | Setting::CodeLens | Setting::VimMode | Setting::TodoPatterns => Page::Editor,
             Setting::Minimap | Setting::MinimapWidth | Setting::EditPredictions => Page::Editor,
             Setting::AutoSave
             | Setting::AutoSaveDelay
@@ -257,6 +259,7 @@ impl Setting {
             Setting::SoftWrap => "Wrapping",
             Setting::Rulers | Setting::ShowWhitespace => "Guides",
             Setting::InlayHints | Setting::InlineValues | Setting::DocumentColors | Setting::CodeLens => "Hints",
+            Setting::SemanticTokens => "Colors",
             Setting::Minimap | Setting::MinimapWidth => "Minimap",
             Setting::EditPredictions => "Edit predictions",
             Setting::VimMode => "Vim",
@@ -296,6 +299,7 @@ impl Setting {
             Setting::InlineValues => "Inline values while debugging",
             Setting::LinkedEditing => "Rename tag pairs together",
             Setting::DocumentColors => "Color swatches",
+            Setting::SemanticTokens => "Semantic highlighting",
             Setting::CodeLens => "Code lens",
             Setting::Minimap => "Show minimap",
             Setting::MinimapWidth => "Width",
@@ -343,6 +347,7 @@ impl Setting {
             Setting::InlineValues => "Paused in the debugger, variables' values after the lines of the function that name them.",
             Setting::LinkedEditing => "Typing in a tag's name (HTML, JSX) changes its closing or opening tag too.",
             Setting::DocumentColors => "A swatch before each color in CSS and HTML (and colors language servers find); click it to pick another.",
+            Setting::SemanticTokens => "The language server's colors over the syntax colors: types, parameters, macros; mutable variables underlined.",
             Setting::CodeLens => "The language server's links above lines: references, implementations, Run and Debug.",
             Setting::Minimap => "The file in miniature at the editor's right edge, in place of the scrollbar. Drag it or click to jump.",
             Setting::MinimapWidth => "In pixels.",
@@ -393,6 +398,7 @@ impl Setting {
             Setting::InlineValues => "inline values debugger debug variables paused breakpoint",
             Setting::LinkedEditing => "linked editing rename tag closing html jsx xml auto rename",
             Setting::DocumentColors => "color swatch picker css hex rgb hsl decorators tailwind",
+            Setting::SemanticTokens => "semantic tokens highlighting colors language server lsp mutable",
             Setting::CodeLens => "code lens references implementations run debug language server",
             Setting::Minimap => "minimap overview scrollbar outline map document preview scroll",
             Setting::MinimapWidth => "minimap width size pixels",
@@ -1683,6 +1689,7 @@ impl Preferences {
             Setting::InlineValues => self.switch_with_default("pref-inline-values", "inline_values", settings.editor.inline_values, true, cx),
             Setting::LinkedEditing => self.switch_with_default("pref-linked-editing", "linked_editing", settings.editor.linked_editing, true, cx),
             Setting::DocumentColors => self.switch_with_default("pref-document-colors", "document_colors", settings.editor.document_colors, true, cx),
+            Setting::SemanticTokens => self.switch_with_default("pref-semantic-tokens", "semantic_tokens", settings.editor.semantic_tokens, true, cx),
             Setting::CodeLens => self.switch_with_default("pref-code-lens", "code_lens", settings.editor.code_lens, true, cx),
             Setting::Minimap => self.bool_switch("pref-minimap", "minimap", settings.editor.minimap, cx),
             Setting::MinimapWidth => {
@@ -2984,6 +2991,7 @@ fn setting_key(setting: Setting) -> &'static str {
         Setting::InlineValues => "inline_values",
         Setting::LinkedEditing => "linked_editing",
         Setting::DocumentColors => "document_colors",
+        Setting::SemanticTokens => "semantic_tokens",
         Setting::CodeLens => "code_lens",
         Setting::Minimap => "minimap",
         Setting::MinimapWidth => "minimap_width",

@@ -132,6 +132,17 @@ multibuffer with every match marked, so a search across the project can be edite
   lists them, as for files changed without a tab).
 - Multiple carets stay within one excerpt.
 
+## Semantic highlighting
+
+Highlighting comes from tree-sitter, which knows the syntax but not what a name is. A language
+server that sends semantic tokens (rust-analyzer, gopls, TypeScript's and Python's servers…) colors
+over it what only it knows: a name that's a type, a constant, an enum member, a parameter or a
+macro, and a library's own functions and types. A mutable variable is underlined, as in VS Code and
+JetBrains IDEs. The theme's colors apply (`variable.parameter`, `function.macro`… fall back to their
+base color); token kinds a theme has no color for keep tree-sitter's. Typing keeps the server's
+colors where the text didn't change, and they're asked for again once you pause. Turn it off with
+`"semantic_tokens": false` (Settings → Editor → Colors), per language too.
+
 ## Colors
 
 In CSS, SCSS, Less, HTML and the like, each color in the text (`#e11d48`, `rgb(…)`, `rgba(…)`,
