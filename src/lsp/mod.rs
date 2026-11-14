@@ -1903,6 +1903,7 @@ last_uri = None
 text = ""
 version = 0
 hint_requests = 0
+busy_answered = set()
 while True:
     m = held.pop(0) if held else read()
     method, id = m.get("method"), m.get("id")
@@ -1919,14 +1920,14 @@ while True:
     elif method == "initialize":
         init = m["params"].get("initializationOptions") or {}
         caps = {"textDocumentSync": 1, "completionProvider": {"triggerCharacters": triggers}, "codeActionProvider": True, "codeLensProvider": {"resolveProvider": True}, "definitionProvider": True, "referencesProvider": True}
-        if name == "hints":
+        if name in ("hints", "busy-hints"):
             caps["inlayHintProvider"] = True
             caps["textDocumentSync"] = {"openClose": True, "change": 1, "save": True}
         if name == "resolve":
             caps["completionProvider"]["resolveProvider"] = True
         if name == "colors":
             caps["colorProvider"] = True
-        if name == "semantic":
+        if name in ("semantic", "busy-hints"):
             caps["semanticTokensProvider"] = {"legend": {"tokenTypes": ["variable", "macro", "brace"], "tokenModifiers": ["declaration", "mutable"]}, "full": True}
         if name == "pull":
             caps["diagnosticProvider"] = {"identifier": "fake", "interFileDependencies": False, "workspaceDiagnostics": False}
@@ -1958,6 +1959,10 @@ while True:
             send({"jsonrpc": "2.0", "id": "refresh", "method": "workspace/inlayHint/refresh", "params": None})
     elif method == "textDocument/inlayHint":
         hint_requests += 1
+        # Still loading, as rust-analyzer answers then.
+        if name == "busy-hints" and hint_requests == 1:
+            send({"jsonrpc": "2.0", "id": id, "error": {"code": -32801, "message": "content modified"}})
+            continue
         lines = text.split("\n")
         asked = m["params"]["range"]
         rows = range(asked["start"]["line"], min(asked["end"]["line"] + 1, len(lines)))
@@ -1989,6 +1994,10 @@ while True:
         problem = {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "severity": 1, "message": message}
         if name != "pull":
             send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {"uri": spelled(uri), "diagnostics": [problem]}})
+    elif name == "busy-hints" and method in ("textDocument/semanticTokens/full", "textDocument/codeLens") and method not in busy_answered:
+        # Still loading: the first lens and token requests are busy too.
+        busy_answered.add(method)
+        send({"jsonrpc": "2.0", "id": id, "error": {"code": -32801, "message": "content modified"}})
     elif method == "textDocument/semanticTokens/full":
         # `let mut count = make!();`: count (variable, mutable), make (macro), a brace (left to tree-sitter).
         send({"jsonrpc": "2.0", "id": id, "result": {"data": [0, 8, 5, 0, 3, 0, 8, 4, 1, 0, 0, 6, 1, 2, 0]}})
