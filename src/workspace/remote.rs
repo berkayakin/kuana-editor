@@ -126,15 +126,19 @@ impl Workspace {
                 ws.connecting = None;
                 match result {
                     // Back after a lost connection: the project is read again.
-                    Ok(_) if ws.reconnecting.take().is_some() => ws.reconnected(cx),
+                    Ok(_) if ws.reconnecting.take().is_some() => {
+                        ws.toast(ToastKind::Success, format!("Reconnected to {label}"), None, cx);
+                        ws.reconnected(window, cx);
+                    }
                     Ok(connected) => match then {
                         Some((path, target)) => ws.open_project(path, target, window, cx),
                         None => ws.ask_for_remote_folder(connected, window, cx),
                     },
-                    Err(err) => {
-                        ws.reconnecting = None;
-                        ws.toast(ToastKind::Error, format!("Couldn't connect to {label}"), Some(err), cx);
+                    // Tried again by itself after the connection went: the user may try once more.
+                    Err(err) if ws.reconnecting.take().is_some() => {
+                        ws.toast_with_button(ToastKind::Error, format!("Couldn't reconnect to {label}"), Some(format!("{err}. Files there can't be read or saved until it's back.")), Some(ToastButton::Reconnect), cx);
                     }
+                    Err(err) => ws.toast(ToastKind::Error, format!("Couldn't connect to {label}"), Some(err), cx),
                 }
             })
             .ok();
@@ -174,21 +178,22 @@ impl Workspace {
         cx.notify();
     }
 
-    /// For a remote project: notices its connection going, and offers it again.
-    pub(super) fn watch_connection(&mut self, cx: &mut Context<Self>) {
+    /// For a remote project: notices its connection going and connects
+    /// again by itself, once (a network blip, a restarted machine); when that
+    /// fails, a toast and the status bar's menu offer Reconnect.
+    pub(super) fn watch_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.connection_task = None;
         let Some(host) = self.root.as_deref().and_then(connection::host_of) else { return };
-        self.connection_task = Some(cx.spawn(async move |this, cx| {
+        self.connection_task = Some(cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(CHECK_EVERY).await;
                 if connection::connected(&host).is_some() {
                     continue;
                 }
-                let label = Transport::from_name(&host).label();
-                this.update(cx, |ws, cx| {
+                this.update_in(cx, |ws, window, cx| {
                     ws.connection_lost = true;
                     cx.notify();
-                    ws.toast_with_button(ToastKind::Error, format!("The connection to {label} was lost"), Some("Files there can't be read or saved until it's back.".into()), Some(ToastButton::Reconnect), cx);
+                    ws.reconnect(window, cx);
                 })
                 .ok();
                 break;
@@ -209,7 +214,7 @@ impl Workspace {
 
     /// After a reconnect: the tree, Git, the watcher, open files and
     /// language servers again.
-    pub(super) fn reconnected(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn reconnected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.connection_lost = false;
         if let Some(mount) = self.root.as_deref().and_then(crate::fs::mount_of) {
             self.lsp.update(cx, |s, cx| s.restart_under(&mount, cx));
@@ -222,7 +227,7 @@ impl Workspace {
         self.refresh_file_index(cx);
         self.refresh_git(cx);
         self.reload_documents(|_| true, cx);
-        self.watch_connection(cx);
+        self.watch_connection(window, cx);
         cx.notify();
     }
 

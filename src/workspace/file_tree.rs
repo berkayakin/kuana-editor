@@ -51,7 +51,7 @@ impl Workspace {
         self.venv_shown.take();
         self.root = Some(root.clone());
         // A remote project: its connection is watched.
-        self.watch_connection(cx);
+        self.watch_connection(window, cx);
         self.forward_ports(ports, cx);
         self.offer_dev_container(cx);
         self.refresh_extension_views(cx);

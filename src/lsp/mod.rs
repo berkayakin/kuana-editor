@@ -937,7 +937,14 @@ impl LspStore {
                 } else {
                     format!("The language server stopped: {detail}")
                 };
-                if !matches!(self.servers.get(key), Some(ServerState::Failed(_))) {
+                // Its machine's connection went: that's said already, and a
+                // reconnect starts it again (`restart_under`).
+                let machine_gone = kuana_core::remote::connection::host_of(&key.root).is_some() && crate::fs::remote(&key.root).is_none_or(|(host, _)| !host.connected());
+                if machine_gone {
+                    self.servers.insert(key.clone(), ServerState::Failed("The connection to its machine was lost".into()));
+                    self.progress.remove(key);
+                    cx.notify();
+                } else if !matches!(self.servers.get(key), Some(ServerState::Failed(_))) {
                     self.fail(key, message, cx);
                 }
                 // What it found is no longer kept up to date.
