@@ -143,7 +143,10 @@ impl Workspace {
         if !is_root {
             add(MenuEntry::item("Copy Relative Path", Icon::Clipboard), Some(TreeAction::CopyRelativePath(path.clone())));
         }
-        add(MenuEntry::item(reveal_label(), Icon::FolderOpen), Some(TreeAction::Reveal(path.clone())));
+        // A remote file isn't on this computer to show.
+        if !crate::fs::is_remote(&path) {
+            add(MenuEntry::item(reveal_label(), Icon::FolderOpen), Some(TreeAction::Reveal(path.clone())));
+        }
         if !is_dir {
             add(MenuEntry::item("Local History", Icon::History), Some(TreeAction::LocalHistory(path.clone())));
             add(MenuEntry::item("Compare With…", Icon::GitCompare), Some(TreeAction::CompareWith(path.clone())));

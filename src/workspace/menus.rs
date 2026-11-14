@@ -134,7 +134,10 @@ impl Workspace {
                     Some(MenuAction::Tree(TreeAction::CopyRelativePath(path.clone()))),
                 );
             }
-            add(MenuEntry::item(reveal_label(), Icon::FolderOpen), Some(MenuAction::Tree(TreeAction::Reveal(path))));
+            // A remote file isn't on this computer to show.
+            if !crate::fs::is_remote(&path) {
+                add(MenuEntry::item(reveal_label(), Icon::FolderOpen), Some(MenuAction::Tree(TreeAction::Reveal(path))));
+            }
         }
         self.show_context_menu(entries, actions, position, None, window, cx);
     }
@@ -194,7 +197,10 @@ impl Workspace {
             add(MenuEntry::item("Copy Relative Path", Icon::Clipboard), Some(TreeAction::CopyRelativePath(file.path.clone())));
         }
         if !deleted {
-            add(MenuEntry::item(reveal_label(), Icon::FolderOpen), Some(TreeAction::Reveal(file.path.clone())));
+            // A remote file isn't on this computer to show.
+            if !crate::fs::is_remote(&file.path) {
+                add(MenuEntry::item(reveal_label(), Icon::FolderOpen), Some(TreeAction::Reveal(file.path.clone())));
+            }
             add(MenuEntry::Separator, None);
             add(
                 MenuEntry::item(if cfg!(windows) { "Move to Recycle Bin" } else { "Move to Trash" }, Icon::Trash).danger(),
@@ -318,11 +324,16 @@ impl Workspace {
             TreeAction::Duplicate(path) => self.duplicate_file(path, window, cx),
             TreeAction::Delete(path) => self.confirm_trash(path, window, cx),
             TreeAction::CopyPath(path) => {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.display().to_string()));
+                // A remote file's path as its machine knows it.
+                let text = crate::fs::remote(&path).map(|(_, there)| there).unwrap_or_else(|| path.display().to_string());
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
             }
             TreeAction::CopyRelativePath(path) => {
                 let base = self.root.clone().unwrap_or_default();
-                let rel = path.strip_prefix(&base).unwrap_or(&path).to_string_lossy().into_owned();
+                let mut rel = path.strip_prefix(&base).unwrap_or(&path).to_string_lossy().into_owned();
+                if crate::fs::is_remote(&path) {
+                    rel = rel.replace('\\', "/");
+                }
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(rel));
             }
             TreeAction::Reveal(path) => cx.reveal_path(&path),

@@ -229,7 +229,10 @@ impl Workspace {
                 );
             }
             add(MenuEntry::item("Copy Path", Icon::Clipboard), Some(MenuAction::Tree(TreeAction::CopyPath(path.clone()))));
-            add(MenuEntry::item(reveal_label(), Icon::FolderOpen), Some(MenuAction::Tree(TreeAction::Reveal(path.clone()))));
+            // A remote file isn't on this computer to show.
+            if !crate::fs::is_remote(&path) {
+                add(MenuEntry::item(reveal_label(), Icon::FolderOpen), Some(MenuAction::Tree(TreeAction::Reveal(path.clone()))));
+            }
             // Extensions' commands for the tab's file.
             let language = item.editor().map(|e| e.read(cx).doc.read(cx).language.name());
             let file = crate::extensions::contrib::FileSubject { path: &path, folder: false, language };
