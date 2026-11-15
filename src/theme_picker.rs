@@ -68,17 +68,20 @@ impl ThemePicker {
     fn update_rows(&mut self, cx: &mut Context<Self>) {
         let query = self.query.read(cx).text(cx);
         let registry = cx.global::<ThemeRegistry>();
-        let mut rows: Vec<Row> = registry
+        let mut rows: Vec<(u8, Row)> = registry
             .entries
             .iter()
-            .filter(|e| name_matches(&e.theme.name, &query))
-            .map(|e| Row {
-                theme: e.theme.clone(),
-                custom: e.path.is_some(),
+            .filter_map(|e| {
+                let appearance = if e.theme.appearance == Appearance::Light { "light" } else { "dark" };
+                let tier = match_tier(&e.theme.name, appearance, &query)?;
+                Some((tier, Row { theme: e.theme.clone(), custom: e.path.is_some() }))
             })
             .collect();
-        // Dark themes first, then light; each in registry order.
-        rows.sort_by_key(|r| r.theme.appearance == Appearance::Light);
+        // Best matches first ("ember" puts Ember before Ember Soft, "light"
+        // the light themes before Lighthouse Night); within a tier, dark
+        // themes first, then light, each in registry order.
+        rows.sort_by_key(|(tier, r)| (*tier, r.theme.appearance == Appearance::Light));
+        let rows: Vec<Row> = rows.into_iter().map(|(_, row)| row).collect();
         self.rows = Arc::new(rows);
         self.select(0, cx);
     }
@@ -142,6 +145,37 @@ impl Focusable for ThemePicker {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.query.focus_handle(cx)
     }
+}
+
+/// How well a theme matches `query`, best first, or None when it doesn't:
+/// its whole name (0), one of its words ("Light" in One Light, 1), its
+/// appearance named ("light", 2), the name's start ("Lighthouse", 3), a
+/// word's start (4), anywhere in the name (5). Case and accents don't count.
+fn match_tier(name: &str, appearance: &str, query: &str) -> Option<u8> {
+    let query = fold(query.trim());
+    if query.is_empty() {
+        return Some(0);
+    }
+    let folded = fold(name);
+    let words: Vec<&str> = folded.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    if folded == query {
+        Some(0)
+    } else if words.contains(&query.as_str()) {
+        Some(1)
+    } else if appearance == query {
+        Some(2)
+    } else if folded.starts_with(&query) {
+        Some(3)
+    } else if words.iter().any(|w| w.starts_with(&query)) {
+        Some(4)
+    } else {
+        name_matches(name, &query).then_some(5)
+    }
+}
+
+/// Lowercase without accents, as nucleo compares (é is e).
+fn fold(text: &str) -> String {
+    text.chars().map(nucleo_matcher::chars::normalize).collect::<String>().to_lowercase()
 }
 
 /// Whether `name` contains `query`, ignoring case and accents ("rose" finds
@@ -311,7 +345,7 @@ impl Render for ThemePicker {
 
 #[cfg(test)]
 mod tests {
-    use super::name_matches;
+    use super::{match_tier, name_matches};
 
     #[test]
     fn theme_names_match_without_case_or_accents() {
@@ -319,5 +353,24 @@ mod tests {
         assert!(name_matches("Rosé Pine", "ROSÉ p"));
         assert!(name_matches("Tokyo Night", ""));
         assert!(!name_matches("Tokyo Night", "dawn"));
+    }
+
+    /// The name typed wins over names that merely start with it, and an
+    /// appearance named finds its themes before a name that starts with it.
+    #[test]
+    fn themes_rank_by_how_well_they_match() {
+        let tier = |name, appearance, query| match_tier(name, appearance, query);
+        assert!(tier("Ember", "dark", "ember") < tier("Ember Soft", "dark", "ember"));
+        assert!(tier("One Light", "light", "light") < tier("Lighthouse Night", "dark", "light"));
+        // A light theme without "light" in its name still comes before it.
+        assert!(tier("Rosé Pine Dawn", "light", "light") < tier("Lighthouse Night", "dark", "light"));
+        // Accents don't count: "rose" is a word of Rosé Pine, "ros" its start.
+        assert_eq!(tier("Rosé Pine", "dark", "rose"), Some(1));
+        assert_eq!(tier("Rosé Pine", "dark", "ros"), Some(3));
+        assert_eq!(tier("Tokyo Night", "dark", "night"), Some(1));
+        assert_eq!(tier("Tokyo Night", "dark", "nig"), Some(4));
+        assert_eq!(tier("Catppuccin Mocha", "dark", "ppuc"), Some(5));
+        assert_eq!(tier("Tokyo Night", "dark", "dawn"), None);
+        assert_eq!(tier("Tokyo Night", "dark", "  "), Some(0));
     }
 }

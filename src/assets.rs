@@ -245,6 +245,12 @@ pub enum Icon {
 }
 
 impl Icon {
+    /// Find Action's icon: the Command key's ⌘ on macOS, where it means
+    /// commands; elsewhere ⌘ is a key the keyboard doesn't have, so a bolt.
+    pub fn action() -> Icon {
+        if cfg!(target_os = "macos") { Icon::Command } else { Icon::Bolt }
+    }
+
     pub fn path(self) -> &'static str {
         match self {
             Icon::Database => "icons/database.svg",

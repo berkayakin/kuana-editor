@@ -859,7 +859,7 @@ impl Render for Picker {
                 Icon::FolderOpen,
                 if cfg!(target_os = "macos") { "⌘↩ opens in a new window" } else { "Ctrl+Enter opens in a new window" },
             ),
-            PickerMode::Actions => ("Actions", Icon::Command, ""),
+            PickerMode::Actions => ("Actions", Icon::action(), ""),
             PickerMode::Structure => ("File Structure", Icon::Braces, ""),
             PickerMode::Locations => ("", Icon::Search, ""),
             PickerMode::Run => ("Run", Icon::Play, ""),
@@ -953,7 +953,7 @@ impl Render for Picker {
                                                 .child(highlighted(dir.clone(), dir_hl, theme.text_muted.into())),
                                         ),
                                     Item::Action { ix, hl } => row
-                                        .child(icon_el(Icon::Command, px(14.), theme.text_muted.into()))
+                                        .child(icon_el(Icon::action(), px(14.), theme.text_muted.into()))
                                         .child(
                                             div()
                                                 .flex_1()

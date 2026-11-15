@@ -321,7 +321,7 @@ impl Workspace {
                             .on_click(cx.listener(|ws, _, w, cx| ws.search_everywhere(&SearchEverywhere, w, cx))),
                     )
                     .child(
-                        welcome_row("w-q-action", Icon::Command, "Find Action…", binding_label(&FindAction, window), &theme, cx)
+                        welcome_row("w-q-action", Icon::action(), "Find Action…", binding_label(&FindAction, window), &theme, cx)
                             .on_click(cx.listener(|ws, _, w, cx| ws.find_action(&FindAction, w, cx))),
                     )
                     .when(self.folders.is_some(), |el| {
