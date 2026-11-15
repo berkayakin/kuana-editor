@@ -194,6 +194,10 @@ actions!(
         ToggleSecondSidebar,
         /// Switches the window between the Modern and Classic layouts (`ui_style`).
         ToggleClassicLayout,
+        /// Moves the tool buttons between the activity bar and a title bar row (`tools_location`).
+        ToggleToolsInTitleBar,
+        /// The activity bar at its compact size or its full one (`compact_activity_bar`).
+        ToggleCompactActivityBar,
         /// Everything but the editor hidden, its text centered (`workspace/zen.rs`).
         ToggleZenMode,
         /// Another editor's settings, shortcuts and snippets (`workspace/import.rs`).

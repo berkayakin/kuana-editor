@@ -362,6 +362,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_sidebar_position))
             .on_action(cx.listener(Self::toggle_second_sidebar))
             .on_action(cx.listener(Self::toggle_classic_layout))
+            .on_action(cx.listener(Self::toggle_tools_in_title_bar))
+            .on_action(cx.listener(Self::toggle_compact_activity_bar))
             .on_action(cx.listener(Self::toggle_zen_mode))
             .on_action(cx.listener(Self::import_settings))
             .on_action(cx.listener(Self::toggle_problems))
