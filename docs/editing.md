@@ -357,7 +357,11 @@ using it:
 - Folders are all on one machine: a remote project's Add Folder… asks for a folder on that machine.
 - Each folder's Git repository is its own: the Commit panel shows the current file's, and its
   repository button picks another (see [Several repositories](git.md)).
-- Not yet: Run and Debug go by the first folder.
+- Run… and Debug… list each folder's commands and debug configurations, named after their folder
+  (`web: npm run test`); the settings' run configurations are the current file's folder's. The Test
+  Explorer groups tests by folder, each with Run for its folder's test command, and Run All runs
+  them all. A new terminal starts in the current file's folder; each folder keeps its own Python
+  venv and project settings (Open Project Settings opens the current file's folder's).
 
 ## Remembered state
 

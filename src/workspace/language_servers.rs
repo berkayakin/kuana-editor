@@ -304,7 +304,8 @@ impl Workspace {
     /// The project's `.kuana/settings.json`, created from a template when
     /// it has none.
     pub(super) fn open_project_settings(&mut self, _: &OpenProjectSettings, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = self.primary_dir() else {
+        // The current file's folder's (each project folder has its own).
+        let Some(root) = self.active_folder(cx) else {
             self.toast(ToastKind::Info, "Open a folder to give it settings", None, cx);
             return;
         };

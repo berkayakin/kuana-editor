@@ -380,6 +380,9 @@ pub struct ProjectSession {
     /// when absent.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "none_if_bad")]
     pub python_venv: Option<String>,
+    /// The other folders' venv picks, by folder (`python_venv` is the primary's).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub folder_venvs: std::collections::BTreeMap<PathBuf, String>,
     /// The terminal panel; absent in sessions from before it was saved.
     #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "none_if_bad")]
     pub terminals: Option<TerminalLayout>,
@@ -673,6 +676,7 @@ mod tests {
             ])),
             expanded: vec!["src".into(), "src/lsp".into()],
             python_venv: Some("off".into()),
+            folder_venvs: [("/work/site".into(), "/work/site/.venv".to_string())].into_iter().collect(),
             terminals: Some(TerminalLayout {
                 open: true,
                 groups: vec![

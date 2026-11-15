@@ -56,8 +56,11 @@ impl Workspace {
         // The run widget shows what this project ran last.
         self.last_run = session.as_mut().and_then(|s| s.last_run.take());
         // Before any tab's language server starts.
-        let venv = session.and_then(|s| s.python_venv).map(|saved| crate::python::Choice::from_saved(&saved));
-        crate::python::set_choice(&root, venv);
+        let (venv, folder_venvs) = session.map(|s| (s.python_venv, s.folder_venvs)).unwrap_or_default();
+        crate::python::set_choice(&root, venv.map(|saved| crate::python::Choice::from_saved(&saved)));
+        for folder in &project.folders()[1..] {
+            crate::python::set_choice(folder, folder_venvs.get(folder).map(|saved| crate::python::Choice::from_saved(saved)));
+        }
         self.venv_shown.take();
         self.update_recent_projects_for(&project, cx);
         self.folders = Some(project);

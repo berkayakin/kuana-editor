@@ -214,22 +214,57 @@ impl Workspace {
         let files = self.tests.files.as_ref().unwrap_or(&empty);
         let statuses = &self.test_statuses;
         let open = files.len() <= OPEN_FILES;
-        let mut nodes: Vec<ResultNode> =
-            files.iter().map(|(path, items)| file_node(path, items, &self.location_label(path), open, statuses, &launch)).collect();
+        let folders: Vec<PathBuf> = self.folders.as_ref().map(|p| p.folders().to_vec()).unwrap_or_default();
+        // What each folder runs all its tests with (cargo test, go test ./..., pytest).
+        let run_all: Vec<RunTarget> = folders
+            .iter()
+            .filter_map(|folder| crate::run::project_targets(folder, None).into_iter().find(|t| Framework::of(&t.command).is_some()))
+            .collect();
+        let mut nodes: Vec<ResultNode> = match folders.as_slice() {
+            // Several folders: a row each, its files under it.
+            [_, _, ..] => folders
+                .iter()
+                .filter_map(|folder| {
+                    let children: Vec<ResultNode> = files
+                        .iter()
+                        .filter(|(path, _)| path.starts_with(folder))
+                        .map(|(path, items)| {
+                            let shown = path.strip_prefix(folder).unwrap_or(path).to_string_lossy().replace('\\', "/");
+                            file_node(path, items, &shown, open, statuses, &launch)
+                        })
+                        .collect();
+                    let tests: usize = files.iter().filter(|(path, _)| path.starts_with(folder)).map(|(_, items)| items.iter().map(TestItem::count).sum::<usize>()).sum();
+                    (!children.is_empty()).then(|| ResultNode {
+                        leading: Leading::Icon(Icon::Folder),
+                        label: crate::project_folders::folder_name(folder).into(),
+                        highlight: None,
+                        detail: Some(plural_tests(tests).into()),
+                        target: None,
+                        open: None,
+                        children,
+                        loader: None,
+                        expanded: true,
+                        actions: run_all.iter().find(|t| t.cwd.starts_with(folder)).map(|t| launch.actions(t)).unwrap_or_default(),
+                    })
+                })
+                .collect(),
+            _ => files.iter().map(|(path, items)| file_node(path, items, &self.location_label(path), open, statuses, &launch)).collect(),
+        };
         if nodes.is_empty() {
             nodes.push(ResultNode::message(if self.tests.scanning { "Looking for tests…" } else { "No tests found in the project" }));
         }
         let mut buttons = Vec::new();
-        // What the project runs all its tests with (cargo test, go test ./..., pytest).
-        let all = self.primary_folder().and_then(|root| crate::run::project_targets(root, None).into_iter().find(|t| Framework::of(&t.command).is_some()));
-        if let Some(all) = all {
+        if !run_all.is_empty() {
             let this = this.clone();
             buttons.push(TabButton {
                 icon: Icon::Play,
                 label: "Run All".into(),
                 on: false,
                 on_click: Rc::new(move |window, cx| {
-                    this.update(cx, |ws, cx| ws.run_target(all.clone(), window, cx)).ok();
+                    // Each folder's in a Run tab of its own.
+                    for target in &run_all {
+                        this.update(cx, |ws, cx| ws.run_target(target.clone(), window, cx)).ok();
+                    }
                 }),
             });
         }
