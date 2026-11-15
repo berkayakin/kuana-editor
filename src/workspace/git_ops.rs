@@ -20,42 +20,65 @@ impl Workspace {
         self.git.read(cx).status().clone()
     }
 
+    /// The primary folder's store finds its repository (again).
     pub(super) fn detect_repo(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
         let project = self.primary_dir();
-        self.git.update(cx, |g, cx| g.detect(dir, project, cx));
+        self.primary_git.update(cx, |g, cx| g.detect(dir, project, cx));
     }
 
-    /// What the store reports: shown here, in the panels and in the editors.
-    pub(super) fn on_git_event(&mut self, _: &Entity<GitStore>, event: &GitEvent, window: &mut Window, cx: &mut Context<Self>) {
+    /// What a store reports: the shown one's in the panels too; any one's in
+    /// the tree and the editors of its files.
+    pub(super) fn on_git_event(&mut self, store: &Entity<GitStore>, event: &GitEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let shown = *store == self.git;
         match event {
-            GitEvent::RepoChanged => self.repo_changed(cx),
+            GitEvent::RepoChanged => {
+                self.watch_repo(store, cx);
+                if shown {
+                    self.repo_changed(cx);
+                } else {
+                    let editors = self.editors.clone();
+                    self.load_diff_bases(editors, cx);
+                    self.decorate_tree(cx);
+                }
+                // A repository found for the active file is shown.
+                self.follow_active_repo(cx);
+            }
             GitEvent::StatusRead { stashes, changed } => {
-                if let Some(stashes) = stashes {
+                if let Some(stashes) = stashes.as_ref().filter(|_| shown) {
                     self.git_panel.update(cx, |p, cx| p.set_stashes(stashes.clone(), cx));
                 }
                 if let Some(changed) = changed {
-                    self.show_status(changed, cx);
+                    self.show_status(store, changed, cx);
                 }
                 self.todo_scope_input_changed(super::todo::TodoScope::ChangedFiles, cx);
             }
-            GitEvent::Started(label) => self.git_panel.update(cx, |p, cx| p.set_busy(Some(label.clone()), cx)),
+            GitEvent::Started(label) if shown => self.git_panel.update(cx, |p, cx| p.set_busy(Some(label.clone()), cx)),
+            GitEvent::Started(_) => {}
             GitEvent::Finished { op, result } => self.git_finished(op, result, window, cx),
         }
     }
 
-    /// Another repository (or none) is the project's now.
-    fn repo_changed(&mut self, cx: &mut Context<Self>) {
-        let (repo, project) = {
-            let git = self.git.read(cx);
+    /// A repository above its project folder: its .git is watched too (the
+    /// watcher sees the project's folders only).
+    fn watch_repo(&mut self, store: &Entity<GitStore>, cx: &mut Context<Self>) {
+        let (repo, root) = {
+            let git = store.read(cx);
             (git.repo().cloned(), git.root().cloned())
         };
-        // A repository above the project folder: watch its .git too.
-        if let (Some(repo), Some(root), Some(watcher)) = (&repo, self.folders.as_ref().map(Project::primary), self.watcher.as_mut())
-            && !repo.starts_with(root)
+        if let (Some(repo), Some(root), Some(watcher)) = (repo, root, self.watcher.as_mut())
+            && !repo.starts_with(&root)
             && let Err(err) = watcher.add(&repo.join(".git"))
         {
             eprintln!("couldn't watch {}: {err}", repo.display());
         }
+    }
+
+    /// Another repository (or none) is shown now.
+    pub(super) fn repo_changed(&mut self, cx: &mut Context<Self>) {
+        let (repo, project) = {
+            let git = self.git.read(cx);
+            (git.repo().cloned(), git.root().cloned())
+        };
         self.git_log.update(cx, |l, cx| l.set_repo(repo.clone(), cx));
         self.git_panel.update(cx, |p, cx| {
             p.set_repo(repo, project, cx);
@@ -235,23 +258,22 @@ impl Workspace {
     pub(super) fn start_auto_fetch(window: &mut Window, cx: &mut Context<Self>) {
         const AUTO_FETCH_EVERY: Duration = Duration::from_secs(180);
         cx.spawn_in(window, async move |this, cx| {
-            let mut last: Option<(PathBuf, Instant)> = None;
+            let mut last: HashMap<PathBuf, Instant> = HashMap::new();
             loop {
                 cx.background_executor().timer(Duration::from_secs(20)).await;
-                let Ok(target) = this.update_in(cx, |ws, window, cx| ws.auto_fetch_target(window, cx)) else { break };
-                let Some(repo) = target else { continue };
-                if last.as_ref().is_some_and(|(r, at)| *r == repo && at.elapsed() < AUTO_FETCH_EVERY) {
-                    continue;
-                }
-                last = Some((repo.clone(), Instant::now()));
+                let Ok(targets) = this.update_in(cx, |ws, window, cx| ws.auto_fetch_targets(window, cx)) else { break };
+                // The repository fetched longest ago (or never) first; one a round.
+                let due = targets.into_iter().filter(|(_, repo)| last.get(repo).is_none_or(|at: &Instant| at.elapsed() >= AUTO_FETCH_EVERY));
+                let Some((store, repo)) = due.min_by_key(|(_, repo)| last.get(repo).copied()) else { continue };
+                last.insert(repo.clone(), Instant::now());
                 let dir = repo.clone();
                 let fetched = cx.background_executor().spawn(async move { git::fetch(&dir).is_ok() }).await;
-                let shown = this.update(cx, |ws, cx| {
-                    if fetched && ws.repo(cx).as_ref() == Some(&repo) {
-                        ws.refresh_git(cx);
+                let alive = this.update(cx, |_, cx| {
+                    if fetched {
+                        store.update(cx, |g, cx| g.refresh(cx));
                     }
                 });
-                if shown.is_err() {
+                if alive.is_err() {
                     break;
                 }
             }
@@ -259,32 +281,40 @@ impl Workspace {
         .detach();
     }
 
-    /// The repository to fetch in the background now, if any: the setting is
-    /// on, the window is in use, the project is trusted, it has a remote, and
-    /// no Git operation is running or stopped halfway.
-    fn auto_fetch_target(&self, window: &Window, cx: &App) -> Option<PathBuf> {
-        let git = self.git.read(cx);
-        let repo = git.repo()?;
-        let ready = Settings::get(cx).auto_fetch()
-            && window.is_window_active()
-            && git.remote().is_some()
-            && !git.busy().is_running()
-            && git.status().state.is_none()
-            && crate::trust::is_trusted(repo);
-        ready.then(|| repo.clone())
+    /// The repositories to fetch in the background now: the setting is on,
+    /// the window is in use, and each is trusted, has a remote, and has no
+    /// Git operation running or stopped halfway.
+    fn auto_fetch_targets(&self, window: &Window, cx: &App) -> Vec<(Entity<GitStore>, PathBuf)> {
+        if !Settings::get(cx).auto_fetch() || !window.is_window_active() {
+            return Vec::new();
+        }
+        self.repositories(cx)
+            .into_iter()
+            .filter(|(store, repo)| {
+                let git = store.read(cx);
+                git.remote().is_some() && !git.busy().is_running() && git.status().state.is_none() && crate::trust::is_trusted(repo)
+            })
+            .collect()
     }
 
     /// Reads all of `git status` again in the background: a project
     /// opened, `.git` changed (HEAD, the index, refs), a Git operation ran.
     pub(super) fn refresh_git(&mut self, cx: &mut Context<Self>) {
-        self.git.update(cx, |g, cx| g.refresh(cx));
+        // Once per repository: two folders in one share the first's store.
+        let stores: Vec<Entity<GitStore>> = self.repositories(cx).into_iter().map(|(store, _)| store).collect();
+        for store in stores {
+            store.update(cx, |g, cx| g.refresh(cx));
+        }
     }
 
     /// The Commit view opens: it lists the whole repository's changes, and
     /// the watcher only sees the project folder's (and `.git`), so one
     /// above the project folder is read again, as is one not watched.
     pub(super) fn refresh_commit_view(&mut self, cx: &mut Context<Self>) {
-        let outside = self.repo(cx).as_deref().zip(self.primary_folder()).is_some_and(|(repo, root)| repo != root);
+        let outside = {
+            let git = self.git.read(cx);
+            git.repo().zip(git.root()).is_some_and(|(repo, root)| repo != root)
+        };
         if outside || self.watcher.is_none() {
             self.refresh_git(cx);
         }
@@ -304,22 +334,44 @@ impl Workspace {
     /// Reads Git status again in the background, of what `work` covers
     /// (see `GitStore::read_status`).
     pub(super) fn read_status(&mut self, work: StatusWork, cx: &mut Context<Self>) {
-        self.git.update(cx, |g, cx| g.read_status(work, cx));
+        if work.is_empty() {
+            return;
+        }
+        // All of it (`.git` changed somewhere): every repository's.
+        if work.all {
+            self.refresh_git(cx);
+            return;
+        }
+        // Each path to its repository.
+        let mut by_store: Vec<(Entity<GitStore>, Vec<PathBuf>)> = Vec::new();
+        for path in work.paths {
+            let Some(store) = self.store_for(&path, cx) else { continue };
+            match by_store.iter_mut().find(|(s, _)| *s == store) {
+                Some((_, paths)) => paths.push(path),
+                None => by_store.push((store, vec![path])),
+            }
+        }
+        for (store, paths) in by_store {
+            store.update(cx, |g, cx| g.read_status(StatusWork::paths(paths), cx));
+        }
     }
 
-    /// Shows a status that differs from the one before: the tree's colors,
-    /// diff bases, the Git panel, the diff view.
-    fn show_status(&mut self, changed: &StatusChange, cx: &mut Context<Self>) {
-        if changed.branch_moved && self.shows(BottomPanel::GitLog) {
+    /// Shows a repository's status that differs from the one before: the
+    /// tree's colors, its files' diff bases, and for the shown repository the
+    /// Git panel, the log and the diff view.
+    fn show_status(&mut self, store: &Entity<GitStore>, changed: &StatusChange, cx: &mut Context<Self>) {
+        let shown = *store == self.git;
+        if shown && changed.branch_moved && self.shows(BottomPanel::GitLog) {
             self.git_log.update(cx, |l, cx| l.reload(cx));
         }
         self.decorate_tree(cx);
-        let new = self.git_status(cx);
+        let repo = store.read(cx).repo().cloned();
+        let in_repo = |path: &Path| repo.as_ref().is_some_and(|r| path.starts_with(r));
         // Diff bases are read again only where HEAD or a file's index blob
         // moved (commits, staging, checkouts), not for every change in the
         // working tree.
         let stale: Vec<Entity<Editor>> = if changed.head_moved {
-            self.editors.clone()
+            self.editors.iter().filter(|t| t.read(cx).doc.read(cx).path.as_deref().is_some_and(in_repo)).cloned().collect()
         } else {
             self.editors
                 .iter()
@@ -328,10 +380,13 @@ impl Workspace {
                 .collect()
         };
         self.load_diff_bases(stale, cx);
-        for diff in self.diff_views(cx) {
-            diff.update(cx, |v, cx| v.status_changed(&new, cx));
+        if shown {
+            let new = self.git_status(cx);
+            for diff in self.diff_views(cx) {
+                diff.update(cx, |v, cx| v.status_changed(&new, cx));
+            }
+            self.git_panel.update(cx, |p, cx| p.set_status(new, cx));
         }
-        self.git_panel.update(cx, |p, cx| p.set_status(new, cx));
         cx.notify();
     }
 
@@ -343,7 +398,24 @@ impl Workspace {
     /// Loads several files' HEAD and index text with one `git cat-file`,
     /// once per document however many tabs show it (they share its diff).
     pub(super) fn load_diff_bases(&mut self, editors: Vec<Entity<Editor>>, cx: &mut Context<Self>) {
-        let Some(repo) = self.repo(cx) else { return };
+        // Each file's base is its own repository's.
+        let mut by_store: Vec<(Option<Entity<GitStore>>, Vec<Entity<Editor>>)> = Vec::new();
+        for editor in editors {
+            let store = editor.read(cx).doc.read(cx).path.clone().and_then(|p| self.store_for(&p, cx));
+            match by_store.iter_mut().find(|(s, _)| *s == store) {
+                Some((_, list)) => list.push(editor),
+                None => by_store.push((store, vec![editor])),
+            }
+        }
+        for (store, editors) in by_store {
+            self.load_diff_bases_in(store, editors, cx);
+        }
+    }
+
+    /// `load_diff_bases` for the files of one repository (`store`; none:
+    /// files outside every repository, which have no base).
+    fn load_diff_bases_in(&mut self, store: Option<Entity<GitStore>>, editors: Vec<Entity<Editor>>, cx: &mut Context<Self>) {
+        let repo = store.as_ref().and_then(|s| s.read(cx).repo().cloned()).unwrap_or_default();
         let mut wanted = Vec::new();
         let mut seen = HashSet::new();
         for editor in editors {
@@ -357,7 +429,7 @@ impl Workspace {
             if !seen.insert(doc.entity_id()) {
                 continue;
             }
-            let Ok(rel) = path.strip_prefix(&repo) else {
+            let Some(rel) = path.strip_prefix(&repo).ok().filter(|_| store.is_some()) else {
                 diff.update(cx, |d, cx| d.set_base(None, None, None, cx));
                 continue;
             };
@@ -368,8 +440,9 @@ impl Workspace {
         if wanted.is_empty() {
             return;
         }
-        let user = self.git.read(cx).user().cloned();
-        let head = self.git_status(cx).head_oid.clone();
+        let Some(store) = store else { return };
+        let user = store.read(cx).user().cloned();
+        let head = store.read(cx).status().head_oid.clone();
         cx.spawn(async move |_, cx| {
             let specs: Vec<String> = wanted.iter().flat_map(|(_, rel, _)| [format!("HEAD:{rel}"), format!(":{rel}")]).collect();
             let repo2 = repo.clone();

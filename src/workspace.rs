@@ -93,6 +93,7 @@ mod commands;
 mod compare;
 mod file_tree;
 mod folders;
+mod repos;
 mod git_ops;
 mod import;
 mod copilot;
@@ -637,6 +638,8 @@ enum MenuAction {
     Launch(RunTarget, bool),
     /// A line number's breakpoint menu.
     Breakpoint(BreakpointEdit, Entity<Editor>, usize),
+    /// The Commit view's repository picker: show this repository.
+    ShowRepository(Entity<GitStore>),
     /// Status bar: the project's Python venv (None: detect).
     Venv(Option<crate::python::Choice>),
     /// Status bar: pick a venv folder.
@@ -695,6 +698,7 @@ impl Clone for MenuAction {
             MenuAction::Launch(target, debug) => MenuAction::Launch(target.clone(), *debug),
             MenuAction::Breakpoint(edit, editor, row) => MenuAction::Breakpoint(*edit, editor.clone(), *row),
             MenuAction::Venv(choice) => MenuAction::Venv(choice.clone()),
+            MenuAction::ShowRepository(store) => MenuAction::ShowRepository(store.clone()),
             MenuAction::ChooseVenv => MenuAction::ChooseVenv,
             MenuAction::Terminal(terminal) => MenuAction::Terminal(terminal.clone()),
             MenuAction::TerminalTab(action, terminal) => MenuAction::TerminalTab(*action, terminal.clone()),
@@ -967,8 +971,16 @@ pub struct Workspace {
     /// file it merges. Closed with this window and on a project change.
     push_window: Option<(WindowHandle<ToolWindow<PushDialog>>, Subscription)>,
     merge_window: Option<(WindowHandle<ToolWindow<crate::merge_view::MergeView>>, PathBuf, Subscription)>,
-    /// The project's Git repository: its status and the running operation.
+    /// The shown Git repository's store (`workspace/repos.rs`): the Commit
+    /// view, branch, log and Git operations are its.
     git: Entity<GitStore>,
+    /// The primary folder's store, kept for the window's life.
+    primary_git: Entity<GitStore>,
+    /// Each project folder's store, the primary's first.
+    repos: Vec<repos::FolderRepo>,
+    /// The repositories' tree data merged (`all_git_paths`), by the maps it was made of.
+    #[allow(clippy::type_complexity)]
+    merged_git: std::cell::RefCell<Option<(Vec<(usize, usize)>, Arc<HashMap<PathBuf, git::Change>>, Arc<HashSet<PathBuf>>)>>,
     /// Project folders opened before, newest first.
     recent_projects: Vec<PathBuf>,
     toasts: Vec<Toast>,
@@ -1436,6 +1448,9 @@ impl Workspace {
             diff_return: None,
             push_window: None,
             merge_window: None,
+            primary_git: git.clone(),
+            repos: Vec::new(),
+            merged_git: Default::default(),
             git,
             recent_projects: state.recent_projects.clone(),
             toasts: Vec::new(),
@@ -1860,6 +1875,7 @@ impl Workspace {
                 self.find_bar.update(cx, |f, cx| f.set_target(item.editor().cloned(), cx));
             }
             self.todo_scope_input_changed(todo::TodoScope::CurrentFile, cx);
+            self.follow_active_repo(cx);
             self.schedule_session_save(cx);
             if let Some(from) = from {
                 let to = self.here(cx);

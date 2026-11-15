@@ -196,7 +196,7 @@ impl Workspace {
     pub(super) fn decorate_tree(&mut self, cx: &mut Context<Self>) {
         let active_path = self.active_item(cx).and_then(|t| t.path(cx));
         let menu_target = self.context_menu.as_ref().and_then(|m| m.target.clone());
-        let (git_paths, git_ignored) = (self.git.read(cx).paths().clone(), self.git.read(cx).ignored().clone());
+        let (git_paths, git_ignored) = self.all_git_paths(cx);
         self.tree.update(cx, |t, cx| t.decorate(git_paths, git_ignored, active_path, menu_target, cx));
     }
 
