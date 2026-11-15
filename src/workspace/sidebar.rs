@@ -5,7 +5,7 @@ use super::*;
 
 impl Workspace {
     /// The Commit view's header: branch (opens Branches…), fetch, pull, push.
-    pub(super) fn render_git_toolbar(&self, cx: &mut Context<Self>) -> [AnyElement; 4] {
+    pub(super) fn render_git_toolbar(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = Theme::get(cx).clone();
         let s = &self.git_status(cx);
         let branch = self.branch_label(cx);
@@ -31,29 +31,56 @@ impl Workspace {
                 .when(count > 0, |el| el.child(count.to_string()))
                 .into_any_element()
         };
-        [
+        // Several repositories: the shown one's name, which picks another.
+        let repository = (self.repositories(cx).len() > 1).then(|| {
+            let name = self.repo(cx).map(|r| crate::project_folders::folder_name(&r)).unwrap_or_default();
             div()
-                .id("sidebar-branch")
+                .id("sidebar-repository")
                 .flex()
+                .flex_shrink_0()
                 .items_center()
-                .gap_1p5()
-                .flex_1()
-                .min_w_0()
+                .gap_1()
+                .max_w(px(140.))
                 .h(px(24.))
                 .px_1p5()
                 .rounded(px(5.))
                 .cursor_pointer()
                 .text_size(px(12.5))
                 .hover_bg(theme.hover)
-                .tooltip(|window, cx| status_tooltip("Branches…", &GitBranches, window, cx))
-                .on_click(cx.listener(|ws, _, window, cx| ws.git_branches(&GitBranches, window, cx)))
-                .child(icon_el(Icon::GitBranch, px(14.), theme.text_dim.into()))
-                .child(div().truncate().text_color(theme.text).child(branch))
-                .into_any_element(),
-            button("sidebar-fetch", Icon::Refresh, "Fetch", 0, GitOp::Fetch, cx),
-            button("sidebar-pull", Icon::ArrowDown, "Update Project (Pull)", s.behind, GitOp::Pull(None), cx),
-            button("sidebar-push", Icon::ArrowUp, "Push", s.ahead, GitOp::Push, cx),
-        ]
+                // Not over its own menu.
+                .when(self.context_menu.is_none(), |el| el.tooltip(|_, cx| tooltip_view("Repository", cx)))
+                .on_click(cx.listener(|ws, event: &gpui::ClickEvent, window, cx| ws.open_repository_menu(event.position(), window, cx)))
+                .child(icon_el(Icon::Folder, px(14.), theme.text_dim.into()))
+                .child(div().truncate().text_color(theme.text).child(name))
+                .child(icon_el(Icon::ChevronDown, px(12.), theme.text_dim.into()))
+                .into_any_element()
+        });
+        repository
+            .into_iter()
+            .chain([
+                div()
+                    .id("sidebar-branch")
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(24.))
+                    .px_1p5()
+                    .rounded(px(5.))
+                    .cursor_pointer()
+                    .text_size(px(12.5))
+                    .hover_bg(theme.hover)
+                    .tooltip(|window, cx| status_tooltip("Branches…", &GitBranches, window, cx))
+                    .on_click(cx.listener(|ws, _, window, cx| ws.git_branches(&GitBranches, window, cx)))
+                    .child(icon_el(Icon::GitBranch, px(14.), theme.text_dim.into()))
+                    .child(div().truncate().text_color(theme.text).child(branch))
+                    .into_any_element(),
+                button("sidebar-fetch", Icon::Refresh, "Fetch", 0, GitOp::Fetch, cx),
+                button("sidebar-pull", Icon::ArrowDown, "Update Project (Pull)", s.behind, GitOp::Pull(None), cx),
+                button("sidebar-push", Icon::ArrowUp, "Push", s.ahead, GitOp::Push, cx),
+            ])
+            .collect()
     }
 
     pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {

@@ -195,6 +195,10 @@ impl Workspace {
         // Extensions' views for the project go, and their code hears it closed.
         self.refresh_extension_views(cx);
         self.show_sidebar = false;
+        for repo in std::mem::take(&mut self.repos) {
+            repo.store.update(cx, |g, cx| g.close(cx));
+        }
+        self.git = self.primary_git.clone();
         self.git.update(cx, |g, cx| g.close(cx));
         window.focus(&self.focus_handle);
         cx.notify();

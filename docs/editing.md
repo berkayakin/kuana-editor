@@ -355,8 +355,9 @@ using it:
 - The project remembers its folders: reopening its first folder, from Recent Projects or at startup,
   brings back all of them with the tabs. Recent Projects names it by all its folders (`api, web`).
 - Folders are all on one machine: a remote project's Add Folder… asks for a folder on that machine.
-- Not yet: Git shows the first folder's repository only; the other folders' repositories, and
-  Run and Debug per folder, come next.
+- Each folder's Git repository is its own: the Commit panel shows the current file's, and its
+  repository button picks another (see [Several repositories](git.md)).
+- Not yet: Run and Debug go by the first folder.
 
 ## Remembered state
 

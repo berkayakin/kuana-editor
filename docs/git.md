@@ -105,6 +105,11 @@ background fetch never does, and stays quiet instead.
   deleting a branch with commits no other branch has) have **Cancel** as the default: Return
   doesn't confirm them.
   **Show History** (editor right-click menu, Git menu) lists one file's commits, following renames.
+- **Several repositories:** in a project of several folders, each folder's repository is
+  found and kept apart. The gutter, inline blame, the file tree's colors and the background fetch
+  cover every one. The Commit panel, the branch in the title bar, the log and Git operations are
+  the shown repository's: the one of the file you're editing (or right-clicked in the tree), and
+  the Commit panel's repository button lists them all to pick another.
 - **Push / Pull / Fetch:** from the Commit panel, the keyboard, or Find Action. Pushing a
   new branch sets its upstream. Results appear as notifications.
 - **Fetching in the background:** every few minutes while the window is in use, Kuana fetches

@@ -68,7 +68,7 @@ impl Workspace {
         open.extend(self.diff_views(cx).iter().flat_map(|d| d.read(cx).disk_files().into_iter().map(Path::to_path_buf).collect::<Vec<_>>()));
         Some(WatchState {
             folders,
-            git_ignored: self.git.read(cx).ignored().clone(),
+            git_ignored: self.all_git_paths(cx).1,
             tree_read: self.tree.read(cx).read_folders(),
             open,
             watchers: self.lsp.read(cx).file_watchers(),
@@ -568,7 +568,7 @@ mod tests {
         assert!(classify(vec![change(web.clone())], &state).everything);
         // web's .gitignore: its rules only.
         let c = classify(vec![FsChange { path: web.join(".gitignore"), structural: false }], &state);
-        assert_eq!(c.ignores.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>(), [web.clone()]);
+        assert_eq!(c.ignores.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>(), std::slice::from_ref(&web));
         std::fs::remove_dir_all(&base).ok();
     }
 }

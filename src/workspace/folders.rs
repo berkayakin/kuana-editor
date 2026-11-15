@@ -102,6 +102,7 @@ impl Workspace {
         self.folders_gone.retain(|f| folders.contains(f));
         self.refresh_file_index(cx);
         self.start_watching(cx);
+        self.sync_repos(window, cx);
         // A server rooted in a folder that came or went starts again with its new root.
         self.lsp.update(cx, |s, cx| {
             s.set_folders(folders.clone());

@@ -140,8 +140,7 @@ says what's planned):
   first launch ([how](docs/install.md#first-launch-on-macos); the install script above doesn't),
   and Windows SmartScreen warns. Updates are signed.
 - **Windows and Linux are in beta**, see above. No Linux packages (AppImage, `.deb`, Flatpak) yet.
-- **Several folders in one window are new**: Git shows the first folder's repository only, and Run
-  and Debug go by the first folder.
+- **Several folders in one window are new**: Run and Debug go by the first folder.
 - **Remote development is new**: the other machine must run Linux or macOS (a Windows PC is
   reached through WSL), and language servers it lacks are installed there by hand, not with
   Kuana's one-click install.

@@ -74,6 +74,7 @@ impl Workspace {
         self.refresh_file_index(cx);
         self.start_watching(cx);
         self.detect_repo(root, cx);
+        self.sync_repos(window, cx);
         self.save_state(cx);
         // Problems in the project's settings file show when it opens.
         if let Some(project) = &self.folders {
@@ -119,6 +120,10 @@ impl Workspace {
 
     pub(super) fn open_tree_menu(&mut self, path: PathBuf, is_dir: bool, position: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         self.close_modal(window, cx);
+        // Its Git items act on its own repository: that one is shown.
+        if let Some(store) = self.store_for(&path, cx) {
+            self.show_repo(store, cx);
+        }
         let mut entries: Vec<MenuEntry> = Vec::new();
         let mut actions: Vec<Option<MenuAction>> = Vec::new();
         let mut add = |entry: MenuEntry, action: Option<TreeAction>| {
@@ -287,6 +292,7 @@ impl Workspace {
                     Some(MenuAction::Breakpoint(BreakpointEdit::Toggle, editor, row)) => editor.update(cx, |e, cx| e.toggle_breakpoint_at(row, cx)),
                     Some(MenuAction::Breakpoint(edit, editor, row)) => ws.edit_breakpoint(edit, editor, row, window, cx),
                     Some(MenuAction::Venv(choice)) => ws.set_venv(choice, cx),
+                    Some(MenuAction::ShowRepository(store)) => ws.show_repo(store, cx),
                     Some(MenuAction::ChooseVenv) => ws.choose_venv_folder(window, cx),
                     Some(MenuAction::Terminal(terminal)) => {
                         if let Some((g, ix)) = ws.terminal_position(&terminal, cx) {
