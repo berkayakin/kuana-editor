@@ -194,11 +194,13 @@ impl Workspace {
             let folders = SessionState::load().project_folders;
             let list = self.recent_projects.iter().enumerate().map(|(ix, path)| {
                 let name = crate::state::recent_project_name(path, &folders);
+                // The avatar is the first folder's; a badge counts the others.
+                let others = folders.get(path).map_or(0, Vec::len);
                 let parent = path.parent().map(clone_dialog::display_path).unwrap_or_default();
                 let current = self.primary_folder() == Some(path.as_path());
                 let missing = !path.exists();
                 let group = SharedString::from(format!("recent-{ix}"));
-                let color = monogram_color(&name, &theme);
+                let color = monogram_color(&folder_name(path), &theme);
                 let open = path.clone();
                 let remove = path.clone();
                 div()
@@ -218,6 +220,7 @@ impl Workspace {
                     }))
                     .child(
                         div()
+                            .relative()
                             .size(px(30.))
                             .flex_shrink_0()
                             .flex()
@@ -227,7 +230,8 @@ impl Workspace {
                             .bg(color.alpha(0.16))
                             .text_color(color)
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default()),
+                            .child(name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default())
+                            .children(super::title_bar::folders_badge(others, 9., theme.background.into(), &theme)),
                     )
                     .child(
                         div()

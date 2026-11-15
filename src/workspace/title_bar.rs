@@ -313,8 +313,12 @@ impl Workspace {
     pub(super) fn render_project_chip(&self, chars: Option<usize>, avatar: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = crate::ui::chrome_theme(Theme::get(cx));
         let name = self.folders.as_ref().map(Project::name).unwrap_or_default();
-        let initial = name.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().to_string()).unwrap_or_default();
-        let tint = monogram_color(&name, &theme);
+        // The avatar is the first folder's, whatever folders join it: a
+        // project keeps its look; the badge counts the others.
+        let primary = self.primary_folder().map(folder_name).unwrap_or_default();
+        let initial = primary.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+        let tint = monogram_color(&primary, &theme);
+        let others = self.folders.as_ref().map_or(0, |p| p.folders().len() - 1);
         div()
             .id("project-chip")
             .flex()
@@ -335,6 +339,7 @@ impl Workspace {
             .when(chars.is_none(), |el| el.pr(px(3.)))
             .when(avatar, |el| el.child(
                 div()
+                    .relative()
                     .size(px(CHIP_HEIGHT - 6.))
                     .flex()
                     .flex_shrink_0()
@@ -355,7 +360,8 @@ impl Workspace {
                     .text_size(px(10.))
                     .font_weight(FontWeight::BOLD)
                     .text_color(monogram_letter(tint, &theme))
-                    .child(initial),
+                    .child(initial)
+                    .children(folders_badge(others, 7.5, theme.panel.into(), &theme)),
             ))
             .when_some(chars, |el, chars| el.child(div().whitespace_nowrap().child(ellipsize(&name, chars))))
     }
@@ -645,6 +651,32 @@ pub(super) fn monogram_letter(tint: Hsla, theme: &Theme) -> Hsla {
 }
 
 /// A stable tint per project name for its monogram.
+/// A project avatar's "+N": its folders besides the first, on the
+/// avatar's lower right corner (none for a project of one folder). Ringed
+/// in the color behind the avatar (`ring`) so it reads apart from it.
+pub(super) fn folders_badge(others: usize, size: f32, ring: Hsla, theme: &Theme) -> Option<gpui::AnyElement> {
+    (others > 0).then(|| {
+        div()
+            .absolute()
+            .right(px(-size * 0.8))
+            .bottom(px(-size * 0.45))
+            .h(px(size + 3.))
+            .px(px(2.))
+            .flex()
+            .items_center()
+            .rounded_full()
+            .border_1()
+            .border_color(ring)
+            .bg(theme.text_muted)
+            .text_size(px(size))
+            .line_height(px(size + 1.))
+            .font_weight(FontWeight::BOLD)
+            .text_color(ring)
+            .child(format!("+{others}"))
+            .into_any_element()
+    })
+}
+
 pub(super) fn monogram_color(name: &str, theme: &Theme) -> Hsla {
     let palette = [theme.accent, theme.success, theme.info, theme.warning, theme.syntax.function, theme.syntax.keyword, theme.git_added, theme.git_modified];
     let hash = name.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
