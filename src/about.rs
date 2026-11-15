@@ -46,7 +46,11 @@ pub fn open(cx: &mut App) {
         app_id: Some("dev.kuana.editor".into()),
         ..Default::default()
     };
-    if let Err(err) = cx.open_window(options, |window, cx| cx.new(|cx| AboutWindow::new(window, cx))) {
+    let opened = cx.open_window(options, |window, cx| {
+        crate::window_frame::opened(window, cx);
+        cx.new(|cx| AboutWindow::new(window, cx))
+    });
+    if let Err(err) = opened {
         eprintln!("couldn't open the About window: {err}");
     }
 }

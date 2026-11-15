@@ -39,9 +39,13 @@ pub fn open_window(
         // bar's height, tabs in the top row included, so they couldn't be
         // dragged; Kuana's free chrome moves it instead (`window_drag_area`).
         is_movable: !cfg!(target_os = "macos"),
+        window_decorations: crate::window_frame::decorations(),
         ..Default::default()
     };
-    let window = match cx.open_window(options, |window, cx| cx.new(|cx| Workspace::new(window, cx))) {
+    let window = match cx.open_window(options, |window, cx| {
+        crate::window_frame::opened(window, cx);
+        cx.new(|cx| Workspace::new(window, cx))
+    }) {
         Ok(window) => window,
         Err(err) => {
             eprintln!("couldn't open a window: {err}");

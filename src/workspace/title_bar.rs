@@ -15,6 +15,8 @@ use gpui::svg;
 /// handles, so it's occluded (the workspace root's focus-on-click would
 /// count), which hides it from whatever is behind: drops that should land
 /// there go on it too. macOS: a press hands the window to the window server.
+/// Linux: a press asks the window manager to move it, a double click zooms,
+/// and a right click opens the window manager's menu for it.
 pub fn window_drag_area(id: impl Into<gpui::ElementId>) -> Stateful<Div> {
     div()
         .id(id)
@@ -29,6 +31,22 @@ pub fn window_drag_area(id: impl Into<gpui::ElementId>) -> Stateful<Div> {
                 } else {
                     #[cfg(target_os = "macos")]
                     drag_window();
+                }
+            })
+        })
+        .when(crate::window_frame::moves_window(), |el| {
+            el.on_mouse_down(MouseButton::Left, |event, window, cx| {
+                cx.stop_propagation();
+                if event.click_count >= 2 {
+                    window.zoom_window();
+                } else {
+                    window.start_window_move();
+                }
+            })
+            .on_mouse_down(MouseButton::Right, |event, window, cx| {
+                if matches!(window.window_decorations(), gpui::Decorations::Client { .. }) {
+                    cx.stop_propagation();
+                    window.show_window_menu(event.position);
                 }
             })
         })
@@ -232,9 +250,9 @@ impl Workspace {
             .flex_row()
             .when(cfg!(windows), |el| el.occlude())
             .child(self.track_title_end(false, cx))
-            .map(|el| match cfg!(target_os = "macos") {
-                true => el.child(window_drag_area("titlebar-end").flex_shrink_0().w(px(GAP + 2.))),
-                false => el.child(div().w(px(GAP)).h_full().flex_shrink_0()).child(self.render_window_controls(window, cx)),
+            .map(|el| match crate::window_frame::draws_controls(window) {
+                false => el.child(window_drag_area("titlebar-end").flex_shrink_0().w(px(GAP + 2.))),
+                true => el.child(div().w(px(GAP)).h_full().flex_shrink_0()).child(self.render_window_controls(window, cx)),
             })
     }
 
@@ -687,6 +705,10 @@ pub(super) fn monogram_color(name: &str, theme: &Theme) -> Hsla {
 /// own title bar (the workspace's, Preferences').
 pub fn window_controls(window: &Window, cx: &App) -> impl IntoElement + use<> {
     let theme = Theme::get(cx);
+    let maximized = window.is_maximized();
+    if !cfg!(windows) {
+        return linux_window_controls(window, maximized, theme).into_any_element();
+    }
     let font = crate::theme::caption_font(cx);
     let button = |id: &'static str, glyph: &'static str, area: WindowControlArea, hover: Hsla| {
         div()
@@ -704,13 +726,58 @@ pub fn window_controls(window: &Window, cx: &App) -> impl IntoElement + use<> {
             .child(glyph)
     };
     // Maximized, the middle one restores (and shows it).
-    let max = if window.is_maximized() { "\u{E923}" } else { "\u{E922}" };
+    let max = if maximized { "\u{E923}" } else { "\u{E922}" };
     div()
         .flex()
         .h_full()
         .child(button("min", "\u{E921}", WindowControlArea::Min, theme.hover.into()))
         .child(button("max", max, WindowControlArea::Max, theme.hover.into()))
         .child(button("close", "\u{E8BB}", WindowControlArea::Close, rgb(0xc42b1c).into()))
+        .into_any_element()
+}
+
+/// One of Linux's window buttons: `LINUX_CONTROL` wide.
+const LINUX_CONTROL: f32 = 34.;
+
+/// The width the window's buttons take, where Kuana draws them.
+pub fn window_controls_width() -> f32 {
+    if cfg!(windows) { 3. * 46. } else { 3. * LINUX_CONTROL }
+}
+
+/// Linux's buttons, drawn (the caption font is Windows'), each a round hover
+/// target that calls the window manager: minimize, maximize or restore,
+/// and close, which goes through the window's own Close Window (a project
+/// window's hot exit, Settings' unsaved field). Buttons the system can't
+/// honor (`window_controls()`) are left out.
+fn linux_window_controls(window: &Window, maximized: bool, theme: &Theme) -> impl IntoElement + use<> {
+    let can = window.window_controls();
+    let ink: Hsla = theme.text_muted.into();
+    let hover: Hsla = theme.hover.into();
+    // The whole column is the target; the round mark lights while it's hovered.
+    let button = |id: &'static str, mark: AnyElement| {
+        div().id(id).group(id).w(px(LINUX_CONTROL)).h_full().flex().items_center().justify_center().child(
+            div().size(px(24.)).rounded_full().flex().items_center().justify_center().group_hover(id, move |s| s.bg(hover)).child(mark),
+        )
+    };
+    let line = || div().w(px(10.)).h(px(1.)).bg(ink);
+    let frame = |size: f32| div().size(px(size)).border_1().border_color(ink).rounded(px(1.));
+    // Restore: two frames, the back one peeking out above and to the right.
+    let max_mark = if maximized {
+        div().relative().size(px(10.)).child(frame(8.).absolute().top_0().right_0()).child(frame(8.).absolute().bottom_0().left_0().bg(theme.panel)).into_any_element()
+    } else {
+        frame(10.).into_any_element()
+    };
+    div()
+        .flex()
+        .h_full()
+        .when(can.minimize, |el| {
+            el.child(button("min", line().into_any_element()).on_click(|_, window, _| window.minimize_window()))
+        })
+        .when(can.maximize, |el| el.child(button("max", max_mark).on_click(|_, window, _| window.zoom_window())))
+        .child(
+            button("close", icon_el(Icon::X, px(16.), ink).into_any_element())
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(CloseWindow), cx)),
+        )
 }
 
 #[cfg(test)]

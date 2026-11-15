@@ -2157,7 +2157,10 @@ mod tests {
         let slots = fit_tabs(&[150.; 3], 0, 120.);
         assert_eq!(slots, vec![Fixed(72.), Hidden, Hidden]);
         assert_eq!(fit_tabs(&[150.], 0, 80.), vec![Fixed(80.)]);
+        // Narrower than a compact tab: its icon alone, no name or close button
+        // squeezed in beside the menu.
+        assert_eq!(fit_tabs(&[150.; 3], 0, 90.), vec![Icon(42.), Hidden, Hidden]);
         // Never below its icon.
-        assert_eq!(fit_tabs(&[150.; 3], 0, 30.)[0], Fixed(TAB_ICON_WIDTH));
+        assert_eq!(fit_tabs(&[150.; 3], 0, 30.)[0], Icon(TAB_ICON_WIDTH));
     }
 }

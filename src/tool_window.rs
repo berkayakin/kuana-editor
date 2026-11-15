@@ -104,9 +104,11 @@ pub fn open<V: Render + Focusable>(
         window_min_size: Some(min),
         is_minimizable: false,
         app_id: Some("dev.kuana.editor".into()),
+        window_decorations: crate::window_frame::decorations(),
         ..Default::default()
     };
     let opened = cx.open_window(options, |window, cx| {
+        crate::window_frame::opened(window, cx);
         let view = build(window, cx);
         cx.new(|cx| ToolWindow::new(kind, title, view, window, cx))
     });
@@ -195,7 +197,7 @@ impl<V: Render + Focusable> Render for ToolWindow<V> {
                     .text_color(theme.text_muted)
                     .child(div().min_w_0().truncate().child(self.title.clone())),
             )
-            .when(!cfg!(target_os = "macos"), |el| el.child(workspace::window_controls(window, cx)));
+            .when(crate::window_frame::draws_controls(window), |el| el.child(workspace::window_controls(window, cx)));
         div()
             .id("tool-window")
             // ⌘W closes the window; it has no tabs.
@@ -208,7 +210,9 @@ impl<V: Render + Focusable> Render for ToolWindow<V> {
             .font_family(theme.ui_font.clone())
             .text_size(px(theme.ui_font_size))
             .text_color(theme.text)
-            .child(title_bar)
+            .relative()
+            .when(crate::window_frame::own_title_row(window), |el| el.child(title_bar))
             .child(div().flex_1().min_h_0().child(self.view.clone()))
+            .children(crate::window_frame::resize_edges(window))
     }
 }
