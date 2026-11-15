@@ -24,8 +24,7 @@ Making what's there dependable on every platform before adding more.
 
 ## Next
 
-- **Editing**: Emmet, spell checking in comments, strings and Markdown, ESLint as you type
-  (through its language server).
+- **Editing**: Emmet, spell checking in comments, strings and Markdown.
 - **Git**: reordering commits and splitting one (interactive rebase beyond reword, squash and drop), the whole log
   instead of the latest 3,000 commits.
 - **Debugger**: hit counts, exception breakpoint options, attaching to a debugpy or Node inspector

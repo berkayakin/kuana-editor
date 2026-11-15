@@ -127,11 +127,21 @@ impl Workspace {
                     .into_any_element(),
             );
             if let Some((name, error)) = e.external_linter_status() {
-                let (icon, color, label) = match error {
-                    None => (Icon::CircleCheck, Hsla::from(theme.success), name.to_string()),
-                    Some(_) => (Icon::TriangleAlert, Hsla::from(theme.warning), format!("{name} failed")),
+                // Checking on open and save; its language server would check as you type.
+                let missing = e.doc.read(cx).path.as_deref().and_then(|path| self.lsp.read(cx).eslint_missing(path));
+                let (icon, color, label) = match (error, missing) {
+                    (Some(_), _) => (Icon::TriangleAlert, Hsla::from(theme.warning), format!("{name} failed")),
+                    (None, Some(true)) => (Icon::Download, Hsla::from(theme.accent), format!("Installing {name} server…")),
+                    (None, _) => (Icon::CircleCheck, Hsla::from(theme.success), name.to_string()),
                 };
-                let detail = error.map(|e| e.to_string());
+                let detail = match (error, missing) {
+                    (Some(error), _) => Some(error.to_string()),
+                    (None, Some(false)) => Some(format!(
+                        "{name} checks this file when it opens and when it's saved. Click to check as you type: installs ESLint's language server (the npm package vscode-langservers-extracted)."
+                    )),
+                    _ => None,
+                };
+                let installable = missing == Some(false);
                 right.push(
                     item(
                         div()
@@ -143,6 +153,13 @@ impl Workspace {
                             .child(label)
                             .when_some(detail, |el, detail| {
                                 el.tooltip(move |_, cx| tooltip_view(detail.clone(), cx))
+                            })
+                            .when(installable, |el| {
+                                el.cursor_pointer().on_click(cx.listener(|ws, _, _, cx| {
+                                    if let Some(path) = ws.active_editor(cx).and_then(|e| e.read(cx).doc.read(cx).path.clone()) {
+                                        ws.lsp.update(cx, |s, cx| s.install_eslint(&path, cx));
+                                    }
+                                }))
                             })
                             .into_any_element(),
                     )

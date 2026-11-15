@@ -941,10 +941,12 @@ impl Editor {
     }
 
     /// The project's ESLint, which runs its JavaScript config: only in a
-    /// trusted project.
+    /// trusted project, and not while ESLint's language server checks the
+    /// file (as you type, `eslint_server_opened`).
     pub fn detect_external_linter(&mut self, cx: &App) {
         self.external = match (&self.doc.read(cx).path, self.doc.read(cx).language) {
             (Some(path), _) if !crate::trust::is_trusted(path) => None,
+            _ if self.eslint_server_runs(cx) => None,
             (
                 Some(path),
                 crate::syntax::Language::JavaScript | crate::syntax::Language::TypeScript | crate::syntax::Language::Tsx,
@@ -952,6 +954,25 @@ impl Editor {
             _ => None,
         };
         self.external_error = None;
+    }
+
+    /// Whether ESLint's language server has the file.
+    pub fn eslint_server_runs(&self, cx: &App) -> bool {
+        self.lsp_servers(cx).iter().any(|s| s.id == crate::lsp::servers::ESLINT.id)
+    }
+
+    /// A server has the file now: once it's ESLint's, the command-line
+    /// ESLint (on open and save) stops and what it found goes; the server's
+    /// problems take their place.
+    pub(crate) fn eslint_server_opened(&mut self, cx: &mut Context<Self>) {
+        if self.external.is_none() || !self.eslint_server_runs(cx) {
+            return;
+        }
+        self.external = None;
+        self.external_error = None;
+        self.external_task = None;
+        self.doc.as_mut(cx).set_external_diagnostics(Vec::new());
+        cx.notify();
     }
 
     /// Name of the project linter in use and its last error, if any.

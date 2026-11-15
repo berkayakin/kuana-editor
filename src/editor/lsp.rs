@@ -425,6 +425,13 @@ impl Editor {
     /// A server opened this editor's document: its hints and lenses can be
     /// asked for.
     pub fn lsp_opened(&mut self, cx: &mut Context<Self>) {
+        // The store is telling it, mid-update: which servers it has is read after.
+        if self.external_linter_status().is_some() {
+            let this = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                this.update(cx, |e, cx| e.eslint_server_opened(cx)).ok();
+            });
+        }
         self.schedule_inlay_hints(cx);
         self.schedule_code_lenses(cx);
         self.schedule_colors(cx);
