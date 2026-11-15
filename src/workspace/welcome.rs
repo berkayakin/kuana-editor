@@ -191,8 +191,9 @@ impl Workspace {
                     .child(div().text_size(px(12.)).text_color(theme.text_dim).child("Folders you open or clone show up here")),
             );
         } else {
+            let folders = SessionState::load().project_folders;
             let list = self.recent_projects.iter().enumerate().map(|(ix, path)| {
-                let name = folder_name(path);
+                let name = crate::state::recent_project_name(path, &folders);
                 let parent = path.parent().map(clone_dialog::display_path).unwrap_or_default();
                 let current = self.primary_folder() == Some(path.as_path());
                 let missing = !path.exists();

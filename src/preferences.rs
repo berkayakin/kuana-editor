@@ -29,7 +29,7 @@ use crate::{
     format,
     git::PullStrategy,
     lsp::servers,
-    settings::{self, AutoSave, BaseKeymap, EditPredictionProvider, RunConfiguration, Settings, ShowWhitespace, SidebarDock, ToolsLocation, UiStyle, VisualEffects},
+    settings::{self, AutoSave, BaseKeymap, EditPredictionProvider, OpenFolderIn, RunConfiguration, Settings, ShowWhitespace, SidebarDock, ToolsLocation, UiStyle, VisualEffects},
     syntax::Language,
     theme::{self, Appearance, Theme, ThemeRegistry},
     workspace::Find,
@@ -129,6 +129,7 @@ impl Page {
 /// languages and actions instead.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Setting {
+    OpenFolderIn,
     Theme,
     IconTheme,
     VisualEffects,
@@ -179,7 +180,7 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Setting; 47] = [
+    const ALL: [Setting; 48] = [
         Setting::Theme,
         Setting::IconTheme,
         Setting::VisualEffects,
@@ -212,6 +213,7 @@ impl Setting {
         Setting::EditPredictions,
         Setting::VimMode,
         Setting::TodoPatterns,
+        Setting::OpenFolderIn,
         Setting::AutoSave,
         Setting::AutoSaveDelay,
         Setting::FormatOnSave,
@@ -241,7 +243,7 @@ impl Setting {
             Setting::BaseKeymap => Page::Keymap,
             Setting::FontFamily | Setting::FontSize | Setting::LineHeight => Page::Editor,
             Setting::TabSize | Setting::HardTabs | Setting::LinkedEditing | Setting::SoftWrap => Page::Editor,
-            Setting::Rulers | Setting::ShowWhitespace | Setting::InlayHints | Setting::InlineValues | Setting::DocumentColors | Setting::SemanticTokens | Setting::CodeLens | Setting::VimMode | Setting::TodoPatterns => Page::Editor,
+            Setting::Rulers | Setting::ShowWhitespace | Setting::InlayHints | Setting::InlineValues | Setting::DocumentColors | Setting::SemanticTokens | Setting::CodeLens | Setting::VimMode | Setting::TodoPatterns | Setting::OpenFolderIn => Page::Editor,
             Setting::Minimap | Setting::MinimapWidth | Setting::EditPredictions => Page::Editor,
             Setting::AutoSave
             | Setting::AutoSaveDelay
@@ -274,6 +276,7 @@ impl Setting {
             Setting::EditPredictions => "Edit predictions",
             Setting::VimMode => "Vim",
             Setting::TodoPatterns => "TODO",
+            Setting::OpenFolderIn => "Projects",
             Setting::AutoSave | Setting::AutoSaveDelay => "Auto-save",
             Setting::FormatOnSave | Setting::TrimWhitespace | Setting::FinalNewline => "On save",
             Setting::Shell | Setting::OptionAsMeta | Setting::ShellIntegration => "Terminal",
@@ -308,6 +311,7 @@ impl Setting {
             Setting::SoftWrap => "Soft wrap",
             Setting::Rulers => "Rulers",
             Setting::TodoPatterns => "TODO patterns",
+            Setting::OpenFolderIn => "Open a folder",
             Setting::ShowWhitespace => "Show whitespace",
             Setting::InlayHints => "Inlay hints",
             Setting::InlineValues => "Inline values while debugging",
@@ -359,6 +363,7 @@ impl Setting {
             Setting::HardTabs => "Use tab characters when a file doesn't show a style of its own.",
             Setting::SoftWrap => "Wrap long lines at the edge of the editor. Markdown and plain text wrap either way.",
             Setting::Rulers => "Columns for vertical guides, e.g. 80, 120. Empty uses .editorconfig's max_line_length.",
+            Setting::OpenFolderIn => "What Open… does with a folder while a project is open: ask, open it in a new window or this one, or add it to the project.",
             Setting::TodoPatterns => "Words that make a comment a TODO item, in any case, e.g. TODO, FIXME. Listed by Show TODO and highlighted in the editor.",
             Setting::ShowWhitespace => "Mark spaces with dots and tabs with lines.",
             Setting::InlayHints => "Types and parameter names from the language server, shown in the code.",
@@ -415,6 +420,7 @@ impl Setting {
             Setting::SoftWrap => "word wrap lines",
             Setting::Rulers => "ruler guide column line length margin 80",
             Setting::TodoPatterns => "todo fixme hack xxx comments tasks patterns",
+            Setting::OpenFolderIn => "open folder project window new add multi root workspace folders ask",
             Setting::ShowWhitespace => "whitespace spaces tabs invisible characters dots render",
             Setting::InlayHints => "inlay hints types parameters names language server",
             Setting::InlineValues => "inline values debugger debug variables paused breakpoint",
@@ -468,6 +474,7 @@ enum Menu {
     FontFamily,
     VisualEffects,
     UiStyle,
+    OpenFolderIn,
     SidebarDock,
     ToolsLocation,
     PullStrategy,
@@ -1743,6 +1750,14 @@ impl Preferences {
                 self.dropdown(Menu::UiStyle, ui_style_label(current).into(), px(200.), options, cx, move |this, ix, _, cx| {
                     this.menu = None;
                     this.write(Settings::set_ui_style(UiStyle::ALL[ix]), cx);
+                })
+            }
+            Setting::OpenFolderIn => {
+                let current = settings.open_folder_in();
+                let options = OpenFolderIn::ALL.iter().map(|c| (open_folder_in_label(*c).into(), *c == current)).collect();
+                self.dropdown(Menu::OpenFolderIn, open_folder_in_label(current).into(), px(200.), options, cx, move |this, ix, _, cx| {
+                    this.menu = None;
+                    this.write(Settings::set_open_folder_in(OpenFolderIn::ALL[ix]), cx);
                 })
             }
             Setting::SidebarDock => {
@@ -3025,6 +3040,7 @@ fn setting_key(setting: Setting) -> &'static str {
         Setting::SoftWrap => "soft_wrap",
         Setting::Rulers => "rulers",
         Setting::TodoPatterns => "todo_patterns",
+        Setting::OpenFolderIn => "open_folder_in",
         Setting::ShowWhitespace => "show_whitespace",
         Setting::InlayHints => "inlay_hints",
         Setting::InlineValues => "inline_values",
@@ -3057,6 +3073,15 @@ fn ui_style_label(style: UiStyle) -> &'static str {
     match style {
         UiStyle::Modern => "Modern",
         UiStyle::Classic => "Classic",
+    }
+}
+
+fn open_folder_in_label(choice: OpenFolderIn) -> &'static str {
+    match choice {
+        OpenFolderIn::Ask => "Ask",
+        OpenFolderIn::NewWindow => "New Window",
+        OpenFolderIn::ThisWindow => "This Window",
+        OpenFolderIn::AddToProject => "Add to Project",
     }
 }
 

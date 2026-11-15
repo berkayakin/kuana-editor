@@ -12,19 +12,24 @@ use crate::lsp::{FileWatchers, ServerKey};
 impl Workspace {
     // ---- Watching the disk --------------------------------------------------------
 
-    /// Watches the project folder so changes made outside Kuana show up right away.
+    /// Watches the project's folders so changes made outside Kuana show up right away.
     pub(super) fn start_watching(&mut self, cx: &mut Context<Self>) {
         self.watcher = None;
         self.watch_task = None;
-        let Some(root) = self.primary_dir() else { return };
-        self.ignore = project_ignore(&root).map(Arc::new);
-        let (watcher, mut changes) = match Watcher::new(&root) {
+        let Some(project) = self.folders.clone() else { return };
+        self.ignores = project.folders().iter().filter_map(|f| Some((f.clone(), Arc::new(project_ignore(f)?)))).collect();
+        let (mut watcher, mut changes) = match Watcher::new(project.primary()) {
             Ok(watching) => watching,
             Err(err) => {
-                eprintln!("couldn't watch {}: {err}", root.display());
+                eprintln!("couldn't watch {}: {err}", project.primary().display());
                 return;
             }
         };
+        for folder in &project.folders()[1..] {
+            if let Err(err) = watcher.add(folder) {
+                eprintln!("couldn't watch {}: {err}", folder.display());
+            }
+        }
         self.watcher = Some(watcher);
         self.watch_task = Some(cx.spawn(async move |this, cx| {
             use futures::StreamExt as _;
@@ -44,15 +49,25 @@ impl Workspace {
         }));
     }
 
+    /// Whether the project's own ignore rules (its folder's .gitignore) ignore `path`.
+    pub(super) fn project_ignores(&self, path: &Path, is_dir: bool) -> bool {
+        self.searched_files().ignores(path, is_dir)
+    }
+
+    /// Which files Find in Files reads, as things are now, to take along
+    /// where the workspace can't be read (a list being changed).
+    pub(super) fn searched_files(&self) -> SearchedFiles {
+        SearchedFiles { files: self.files.clone(), project: self.folders.clone(), ignores: self.ignores.clone() }
+    }
+
     /// What sorting out a batch of changes goes by, as it is now.
     fn watch_state(&self, cx: &App) -> Option<WatchState> {
-        let root = self.primary_dir()?;
+        let folders = self.folders.as_ref()?.folders().iter().map(|f| (f.clone(), self.ignores.get(f).cloned())).collect();
         let mut open: HashSet<PathBuf> = self.shown_editors(cx).iter().filter_map(|e| e.read(cx).doc.read(cx).path.clone()).collect();
         open.extend(self.images(cx).iter().map(|i| i.read(cx).path().to_path_buf()));
         open.extend(self.diff_views(cx).iter().flat_map(|d| d.read(cx).disk_files().into_iter().map(Path::to_path_buf).collect::<Vec<_>>()));
         Some(WatchState {
-            root,
-            ignore: self.ignore.clone(),
+            folders,
             git_ignored: self.git.read(cx).ignored().clone(),
             tree_read: self.tree.read(cx).read_folders(),
             open,
@@ -64,15 +79,23 @@ impl Workspace {
     /// it out): the tree (in folders it has read), Go to File, Git status,
     /// language servers and open files.
     pub(super) fn disk_changed(&mut self, changed: Classified, cx: &mut Context<Self>) {
-        let Some(root) = self.primary_dir() else { return };
-        if root.is_dir_on_host() == self.root_gone {
-            self.root_gone = !self.root_gone;
-            if self.root_gone {
-                self.toast(ToastKind::Error, "The project folder was deleted", Some(clone_dialog::display_path(&root)), cx);
+        let Some(project) = self.folders.clone() else { return };
+        for folder in project.folders() {
+            let gone = !folder.is_dir_on_host();
+            if gone == self.folders_gone.contains(folder) {
+                continue;
+            }
+            if gone {
+                self.folders_gone.insert(folder.clone());
+                self.toast(ToastKind::Error, "A project folder was deleted", Some(clone_dialog::display_path(folder)), cx);
+            } else {
+                self.folders_gone.remove(folder);
             }
             // Gone: the branch, changes and log go with it (no repository is
             // found there); back: they're read again.
-            self.detect_repo(root, cx);
+            if folder.as_path() == project.primary() {
+                self.detect_repo(folder.clone(), cx);
+            }
         }
         // A venv may have been created or removed.
         self.venv_shown.take();
@@ -82,10 +105,8 @@ impl Workspace {
             self.refresh_file_index(cx);
             self.refresh_git(cx);
             self.reload_documents(|_| true, cx);
-            if let Some(root) = self.primary_dir() {
-                self.tests_files_changed([root.clone()], cx);
-                self.todo_files_changed([root], cx);
-            }
+            self.tests_files_changed(project.folders().to_vec(), cx);
+            self.todo_files_changed(project.folders().to_vec(), cx);
             cx.notify();
             return;
         }
@@ -93,8 +114,11 @@ impl Workspace {
             self.tests_files_changed(changed.files.iter().cloned(), cx);
             self.todo_files_changed(changed.files, cx);
         }
-        if let Some(ignore) = changed.ignore {
-            self.ignore = ignore;
+        for (folder, ignore) in changed.ignores {
+            match ignore {
+                Some(ignore) => self.ignores.insert(folder, ignore),
+                None => self.ignores.remove(&folder),
+            };
         }
         if !changed.tree.is_empty() {
             self.tree.update(cx, |t, cx| t.paths_changed(changed.tree.iter().map(PathBuf::as_path), cx));
@@ -141,16 +165,24 @@ impl Workspace {
         }
     }
 
-    /// Scans the project's files in the background (a new project, new
-    /// ignore rules); changes waiting meanwhile are applied after.
+    /// Scans every project folder's files in the background (a new
+    /// project, lost watcher events); changes waiting meanwhile are applied after.
     pub(super) fn refresh_file_index(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.primary_dir() else {
-            return;
-        };
+        let Some(project) = self.folders.clone() else { return };
         self.project_changes.clear();
+        self.scan_folders(project.folders().to_vec(), cx);
+    }
+
+    /// Scans `folders` again (new ignore rules in one), in the background.
+    fn scan_folders(&mut self, folders: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.project_task = Some(cx.spawn(async move |this, cx| {
-            let snapshot = cx.background_executor().spawn(async move { ProjectSnapshot::scan(&root) }).await;
-            this.update(cx, |ws, cx| ws.project_updated(snapshot, cx)).ok();
+            let scans = cx.background_executor().spawn(async move { folders.iter().map(|f| ProjectSnapshot::scan(f)).collect::<Vec<_>>() }).await;
+            this.update(cx, |ws, cx| {
+                let Some(project) = ws.folders.clone() else { return };
+                let files = scans.into_iter().fold(ws.files.clone(), |files, scan| files.with(scan, project.folders()));
+                ws.project_updated(files, cx);
+            })
+            .ok();
         }));
     }
 
@@ -168,35 +200,67 @@ impl Workspace {
             return;
         }
         let paths = std::mem::take(&mut self.project_changes);
-        let base = self.project.clone();
+        // Each folder's scan takes its own paths.
+        let mut by_folder: Vec<(Arc<ProjectSnapshot>, Vec<PathBuf>)> = Vec::new();
+        for path in paths {
+            let Some(scan) = self.files.snapshot_of(&path) else { continue };
+            match by_folder.iter_mut().find(|(s, _)| Arc::ptr_eq(s, scan)) {
+                Some((_, list)) => list.push(path),
+                None => by_folder.push((scan.clone(), vec![path])),
+            }
+        }
         self.project_task = Some(cx.spawn(async move |this, cx| {
-            let (snapshot, applied) = cx
+            let results = cx
                 .background_executor()
                 .spawn(async move {
-                    let mut snapshot = (*base).clone();
-                    let applied = snapshot.apply(paths.iter().map(PathBuf::as_path));
-                    (snapshot, applied)
+                    by_folder
+                        .into_iter()
+                        .map(|(base, paths)| {
+                            let mut scan = (*base).clone();
+                            let applied = scan.apply(paths.iter().map(PathBuf::as_path));
+                            (scan, applied)
+                        })
+                        .collect::<Vec<_>>()
                 })
                 .await;
-            this.update(cx, |ws, cx| match applied {
-                Applied::Rescan => ws.refresh_file_index(cx),
-                Applied::Changed => ws.project_updated(snapshot, cx),
-                Applied::Unchanged => ws.project_updated_unchanged(cx),
+            this.update(cx, |ws, cx| {
+                let Some(project) = ws.folders.clone() else { return };
+                let mut files = ws.files.clone();
+                let (mut changed, mut rescan) = (false, Vec::new());
+                for (scan, applied) in results {
+                    match applied {
+                        Applied::Rescan => rescan.push(scan.root().to_path_buf()),
+                        Applied::Changed => {
+                            files = files.with(scan, project.folders());
+                            changed = true;
+                        }
+                        Applied::Unchanged => {}
+                    }
+                }
+                if !rescan.is_empty() {
+                    if changed {
+                        ws.files = files;
+                    }
+                    ws.scan_folders(rescan, cx);
+                } else if changed {
+                    ws.project_updated(files, cx);
+                } else {
+                    ws.project_updated_unchanged(cx);
+                }
             })
             .ok();
         }));
     }
 
-    fn project_updated(&mut self, snapshot: ProjectSnapshot, cx: &mut Context<Self>) {
+    fn project_updated(&mut self, files: ProjectFiles, cx: &mut Context<Self>) {
         // The tree's search looks through the files too. It lets go of the
-        // old ones first, so they're freed with the old snapshot.
-        let files = snapshot.openable();
-        self.tree.update(cx, |t, cx| t.set_files(files, cx));
+        // old ones first, so they're freed with the old scans.
+        self.tree.update(cx, |t, cx| t.set_files(files.openable(), cx));
         // Freeing a big project's paths takes a while: not on the UI thread.
-        let old = std::mem::replace(&mut self.project, Arc::new(snapshot));
+        let old = std::mem::replace(&mut self.files, files);
         cx.background_executor().spawn(async move { drop(old) }).detach();
         if let Some(Modal::Picker(picker)) = &self.modals.current {
-            let files = self.project.openable();
+            let files = self.files.openable();
             picker.update(cx, |p, cx| p.set_files(files, cx));
         }
         self.todo_project_listed(cx);
@@ -214,12 +278,32 @@ impl Workspace {
     }
 }
 
+/// Which files Find in Files reads (`Workspace::searched_files`).
+pub(super) struct SearchedFiles {
+    files: ProjectFiles,
+    project: Option<Project>,
+    ignores: HashMap<PathBuf, Arc<Gitignore>>,
+}
+
+impl SearchedFiles {
+    /// Whether its folder's own rules ignore `path`.
+    fn ignores(&self, path: &Path, is_dir: bool) -> bool {
+        let folder = self.project.as_ref().and_then(|p| p.folder_of(path));
+        folder.and_then(|f| self.ignores.get(f)).is_some_and(|i| i.matched_path_or_any_parents(path, is_dir).is_ignore())
+    }
+
+    /// Whether Find in Files reads `path`: listed and not ignored, or new
+    /// since the last scan, a file, and not ignored by its folder's rules.
+    pub(super) fn reads(&self, path: &Path) -> bool {
+        self.files.is_searchable(path) || (!self.files.lists(path) && path.is_file_on_host() && !self.ignores(path, false))
+    }
+}
+
 /// What a batch of changes is sorted out by (`classify`), taken from the
 /// workspace when it comes.
 pub(super) struct WatchState {
-    root: PathBuf,
-    /// The project's own ignore rules.
-    ignore: Option<Arc<Gitignore>>,
+    /// The project's folders, each with its own ignore rules.
+    folders: Vec<(PathBuf, Option<Arc<Gitignore>>)>,
     /// What Git reported as ignored.
     git_ignored: Arc<HashSet<PathBuf>>,
     /// The folders the tree has read (or is reading).
@@ -239,8 +323,8 @@ pub(super) struct Classified {
     /// Created, removed or renamed in the project, for Go to File (which
     /// skips what's in ignored folders itself).
     structural: Vec<PathBuf>,
-    /// The project's ignore rules, read again (a .gitignore changed).
-    ignore: Option<Option<Arc<Gitignore>>>,
+    /// Project folders' ignore rules, read again (their .gitignore changed).
+    ignores: Vec<(PathBuf, Option<Arc<Gitignore>>)>,
     /// Git status to read again: all of it (`.git` changed), or paths'.
     git: StatusWork,
     /// Open files that changed.
@@ -258,21 +342,24 @@ pub(super) struct Classified {
 /// `target` or `node_modules` folder that's ignored matter to the tree (and
 /// open files) only.
 pub(super) fn classify(changes: Vec<FsChange>, state: &WatchState) -> Classified {
-    let root = &state.root;
     let mut out = Classified::default();
-    if changes.iter().any(|c| &c.path == root) {
+    if changes.iter().any(|c| state.folders.iter().any(|(f, _)| *f == c.path)) {
         out.everything = true;
         return out;
     }
-    // New rules count for the whole batch.
-    let mut ignore = state.ignore.clone();
-    let in_project = |path: &Path, ignore: Option<&Gitignore>| path.starts_with(root) && !in_ignored_heavy_folder(path, state, ignore);
-    if changes.iter().any(|c| {
-        in_project(&c.path, ignore.as_deref()) && c.path.file_name().is_some_and(|n| n == ".gitignore") && watcher::git_path(&c.path) == GitPath::WorkTree
-    }) {
-        ignore = project_ignore(root).map(Arc::new);
-        out.ignore = Some(ignore.clone());
+    // A folder's new rules count for the whole batch.
+    let mut ignores: Vec<(PathBuf, Option<Arc<Gitignore>>)> = state.folders.clone();
+    for (folder, ignore) in &mut ignores {
+        let rules_changed = changes.iter().any(|c| {
+            c.path.parent() == Some(folder.as_path()) && c.path.file_name().is_some_and(|n| n == ".gitignore") && watcher::git_path(&c.path) == GitPath::WorkTree
+        });
+        if rules_changed {
+            *ignore = project_ignore(folder).map(Arc::new);
+            out.ignores.push((folder.clone(), ignore.clone()));
+        }
     }
+    // The project folder holding a path, with its rules as they are now.
+    let folder_of = |path: &Path| ignores.iter().find(|(f, _)| path.starts_with(f)).map(|(f, i)| (f.as_path(), i.as_deref()));
     // Each path's kind of change, found once, and only when needed.
     let mut found: HashMap<PathBuf, Option<bool>> = HashMap::new();
     let mut kind_of = |change: &FsChange| {
@@ -295,21 +382,19 @@ pub(super) fn classify(changes: Vec<FsChange>, state: &WatchState) -> Classified
                 if change.structural && (change.path.parent().is_some_and(tree_read) || tree_read(&change.path)) {
                     out.tree.push(change.path.clone());
                 }
-                if !change.path.starts_with(root) {
-                    continue;
-                }
+                let Some((folder, ignore)) = folder_of(&change.path) else { continue };
                 // Generated code a tab shows (a build script's output) is read again.
                 if state.open.contains(&change.path) {
                     out.open.insert(change.path.clone());
                 }
-                if !in_project(&change.path, ignore.as_deref()) {
+                if in_ignored_heavy_folder(&change.path, folder, state, ignore) {
                     continue;
                 }
                 out.files.push(change.path.clone());
                 if change.structural {
                     out.structural.push(change.path.clone());
                 }
-                if let Some(path) = status_path(&change, state, ignore.as_deref(), &mut kind_of) {
+                if let Some(path) = status_path(&change, folder, state, ignore, &mut kind_of) {
                     out.git.add_path(path);
                 }
                 if !state.watchers.is_empty() {
@@ -322,14 +407,14 @@ pub(super) fn classify(changes: Vec<FsChange>, state: &WatchState) -> Classified
     out
 }
 
-/// Whether `path` is in a `target` or `node_modules` folder that the
-/// project's rules or Git ignore: build output and dependencies, whose churn
-/// is skipped without a look at each path. One that isn't ignored (a Java
-/// package named `target`) is the project's like any other folder.
-fn in_ignored_heavy_folder(path: &Path, state: &WatchState, ignore: Option<&Gitignore>) -> bool {
-    let Some(folder) = watcher::heavy_folder(&state.root, path) else { return false };
-    folder.ancestors().take_while(|a| a.starts_with(&state.root)).any(|a| state.git_ignored.contains(a))
-        || ignore.is_some_and(|i| i.matched_path_or_any_parents(&folder, true).is_ignore())
+/// Whether `path` is in a `target` or `node_modules` folder that its
+/// project folder's rules or Git ignore: build output and dependencies,
+/// whose churn is skipped without a look at each path. One that isn't
+/// ignored (a Java package named `target`) is the project's like any other.
+fn in_ignored_heavy_folder(path: &Path, root: &Path, state: &WatchState, ignore: Option<&Gitignore>) -> bool {
+    let Some(heavy) = watcher::heavy_folder(root, path) else { return false };
+    heavy.ancestors().take_while(|a| a.starts_with(root)).any(|a| state.git_ignored.contains(a))
+        || ignore.is_some_and(|i| i.matched_path_or_any_parents(&heavy, true).is_ignore())
 }
 
 /// What of Git status a change in the work tree needs read again: its
@@ -341,6 +426,7 @@ fn in_ignored_heavy_folder(path: &Path, state: &WatchState, ignore: Option<&Giti
 /// it); for a .gitignore, its folder's.
 fn status_path(
     change: &FsChange,
+    root: &Path,
     state: &WatchState,
     ignore: Option<&Gitignore>,
     kind_of: &mut impl FnMut(&FsChange) -> (FileChange, bool),
@@ -365,7 +451,7 @@ fn status_path(
         (FileChange::Changed, _) => None,
         (FileChange::Deleted, _) => Some(path.clone()),
         (FileChange::Created, is_dir) => {
-            let mut folders: Vec<&Path> = path.ancestors().take_while(|a| *a != state.root.as_path()).collect();
+            let mut folders: Vec<&Path> = path.ancestors().take_while(|a| *a != root).collect();
             folders.reverse();
             let top = folders.into_iter().find(|a| ignore.matched(a, *a != path.as_path() || is_dir).is_ignore());
             Some(top.unwrap_or(path).to_path_buf())
@@ -379,8 +465,7 @@ mod tests {
 
     fn watch_state(root: &Path) -> WatchState {
         WatchState {
-            root: root.to_path_buf(),
-            ignore: project_ignore(root).map(Arc::new),
+            folders: vec![(root.to_path_buf(), project_ignore(root).map(Arc::new))],
             git_ignored: Arc::new([root.join("dist"), root.join("old.log")].into_iter().collect()),
             tree_read: [root.to_path_buf(), root.join("src")].into_iter().collect(),
             open: [root.join("src/a.rs")].into_iter().collect(),
@@ -446,10 +531,44 @@ mod tests {
         assert!(classify(vec![change(".git/objects/ab/cdef", true)], &state).git.is_empty());
         // New ignore rules: read again, and the status of their folder.
         let c = classify(vec![change(".gitignore", false)], &state);
-        assert!(c.ignore.is_some());
+        assert_eq!(c.ignores.iter().map(|(f, _)| f).collect::<Vec<_>>(), [&root]);
         assert_eq!(c.git.paths.iter().collect::<Vec<_>>(), [&root]);
+        // A .gitignore further down isn't the folder's own rules.
+        assert!(classify(vec![change("src/.gitignore", false)], &state).ignores.is_empty());
         // The watcher lost track: everything.
         assert!(classify(vec![FsChange { path: root.clone(), structural: true }], &state).everything);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Each change goes by the folder it's in: that folder's ignore rules,
+    /// and none for paths outside every folder.
+    #[test]
+    fn several_folders_are_sorted_out_by_their_own_rules() {
+        let base = std::env::temp_dir().join(format!("kuana-classify-folders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (api, web) = (base.join("api"), base.join("web"));
+        for dir in [api.join("src"), web.join("src"), web.join("out")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(web.join(".gitignore"), "out/\n").unwrap();
+        std::fs::write(web.join("out/bundle.js"), "").unwrap();
+        let state = WatchState {
+            folders: vec![(api.clone(), project_ignore(&api).map(Arc::new)), (web.clone(), project_ignore(&web).map(Arc::new))],
+            git_ignored: Arc::default(),
+            tree_read: HashSet::new(),
+            open: HashSet::new(),
+            watchers: FileWatchers::default(),
+        };
+        let change = |path: PathBuf| FsChange { path, structural: true };
+        let c = classify(vec![change(api.join("src/a.rs")), change(web.join("out/bundle.js")), change(base.join("notes.txt"))], &state);
+        assert_eq!(c.files, [api.join("src/a.rs"), web.join("out/bundle.js")]);
+        // web's rules ignore its output: its status is read as the folder, not the file.
+        assert_eq!(c.git.paths.iter().cloned().collect::<HashSet<_>>(), [api.join("src/a.rs"), web.join("out")].into_iter().collect());
+        // Either folder itself going: everything.
+        assert!(classify(vec![change(web.clone())], &state).everything);
+        // web's .gitignore: its rules only.
+        let c = classify(vec![FsChange { path: web.join(".gitignore"), structural: false }], &state);
+        assert_eq!(c.ignores.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>(), [web.clone()]);
+        std::fs::remove_dir_all(&base).ok();
     }
 }

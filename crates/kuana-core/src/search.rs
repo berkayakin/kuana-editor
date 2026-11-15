@@ -214,8 +214,13 @@ fn walker(root: &Path) -> ignore::Walk {
 /// Matches go to `found` in batches as they're found (with the number of
 /// files with matches so far), so the list fills while it runs; `cancel`
 /// stops it between files (a newer query took over).
+/// Labels paths relative to `root` (whole, outside it), for `search_project`.
+pub fn relative_to(root: &Path) -> impl Fn(&Path) -> String + Sync + '_ {
+    move |path: &Path| path.strip_prefix(root).unwrap_or(path).to_string_lossy().into_owned()
+}
+
 pub fn search_project(
-    root: &Path,
+    label: &(dyn Fn(&Path) -> String + Sync),
     paths: Vec<PathBuf>,
     query: &SearchQuery,
     overrides: &HashMap<PathBuf, Arc<str>>,
@@ -239,7 +244,7 @@ pub fn search_project(
                 while !cancel.load(Ordering::Relaxed) && !full() {
                     let ix = next.fetch_add(1, Ordering::Relaxed);
                     let Some(path) = paths.get(ix) else { break };
-                    let matches = search_file(root, path, query, overrides);
+                    let matches = search_file(label, path, query, overrides);
                     if !matches.is_empty() {
                         matched.fetch_add(matches.len(), Ordering::Relaxed);
                         matched_files.fetch_add(1, Ordering::Relaxed);
@@ -293,7 +298,7 @@ pub fn search_project(
 
 /// The matches in one file (at most `MAX_MATCHES`); none when it's too big,
 /// binary or unreadable.
-fn search_file(root: &Path, path: &Path, query: &SearchQuery, overrides: &HashMap<PathBuf, Arc<str>>) -> Vec<ProjectMatch> {
+fn search_file(label: &(dyn Fn(&Path) -> String + Sync), path: &Path, query: &SearchQuery, overrides: &HashMap<PathBuf, Arc<str>>) -> Vec<ProjectMatch> {
     let contents: Arc<str> = match overrides.get(path) {
         Some(text) => text.clone(),
         None => {
@@ -316,7 +321,7 @@ fn search_file(root: &Path, path: &Path, query: &SearchQuery, overrides: &HashMa
     if ranges.is_empty() {
         return Vec::new();
     }
-    let relative = path.strip_prefix(root).unwrap_or(path).to_string_lossy().into_owned();
+    let relative = label(path);
     let mut matches = Vec::new();
     let mut line = 0;
     let mut line_start = 0;
@@ -440,14 +445,14 @@ mod tests {
         let path = PathBuf::from("/p/min.js");
         let overrides = HashMap::from([(path.clone(), long.clone())]);
         let mut all = Vec::new();
-        let end = search_project(Path::new("/p"), vec![path.clone()], &q, &overrides, &AtomicBool::new(false), |batch, _| all.extend(batch));
+        let end = search_project(&relative_to(Path::new("/p")), vec![path.clone()], &q, &overrides, &AtomicBool::new(false), |batch, _| all.extend(batch));
         assert!(!end.truncated);
         assert_eq!(all.len(), 2);
         assert!(all.iter().all(|m| m.line_text.len() <= SNIPPET_BEFORE + 1 + SNIPPET_AFTER));
         assert_eq!(&all[1].line_text[all[1].line_range.clone()], "x");
         // Cancelled before it starts: nothing.
         let mut none = Vec::new();
-        search_project(Path::new("/p"), vec![path], &q, &overrides, &AtomicBool::new(true), |batch, _| none.extend(batch));
+        search_project(&relative_to(Path::new("/p")), vec![path], &q, &overrides, &AtomicBool::new(true), |batch, _| none.extend(batch));
         assert!(none.is_empty());
     }
 
@@ -456,7 +461,7 @@ mod tests {
         let q = SearchQuery::new("x", SearchOptions::default()).unwrap().unwrap();
         let search = |paths: &[PathBuf], overrides: &HashMap<PathBuf, Arc<str>>| {
             let (mut all, mut counts) = (Vec::new(), Vec::new());
-            let end = search_project(Path::new("/p"), paths.to_vec(), &q, overrides, &AtomicBool::new(false), |batch, files| {
+            let end = search_project(&relative_to(Path::new("/p")), paths.to_vec(), &q, overrides, &AtomicBool::new(false), |batch, files| {
                 all.extend(batch);
                 counts.push(files);
             });
@@ -503,7 +508,7 @@ mod tests {
             let q = SearchQuery::new(text, SearchOptions::default()).unwrap().unwrap();
             let started = Instant::now();
             let mut count = 0;
-            let end = search_project(&dir, files.clone(), &q, &HashMap::new(), &AtomicBool::new(false), |batch, _| count += batch.len());
+            let end = search_project(&relative_to(&dir), files.clone(), &q, &HashMap::new(), &AtomicBool::new(false), |batch, _| count += batch.len());
             println!("{} files, {text:?}: {count} matches (truncated: {}) in {:?}", files.len(), end.truncated, started.elapsed());
         }
     }

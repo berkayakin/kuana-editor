@@ -53,6 +53,8 @@ struct TreeEntry {
     name: SharedString,
     depth: usize,
     is_dir: bool,
+    /// A project folder's own row (only with several folders).
+    root: bool,
 }
 
 /// An entry of a folder, as read.
@@ -75,8 +77,14 @@ pub enum TreeEvent {
     /// A file to open; `focus`: in its editor (a double click, Enter), else
     /// the tree keeps the keyboard (a click).
     Open { path: PathBuf, focus: bool },
-    /// A row (or empty space: the project folder) was right-clicked.
+    /// A row (or empty space: the project's one folder) was right-clicked.
     Menu { path: PathBuf, is_dir: bool, position: Point<Pixels> },
+    /// Empty space was right-clicked with several project folders: no one
+    /// folder is meant.
+    SpaceMenu { position: Point<Pixels> },
+    /// Folders from Finder were dropped on empty space with several project
+    /// folders: to add to the project.
+    AddFolders(Vec<PathBuf>),
     /// A row was dropped into a folder.
     Move { from: PathBuf, into: PathBuf },
     /// Files from Finder were dropped into a folder.
@@ -133,7 +141,9 @@ impl Search {
 }
 
 pub struct ProjectTree {
-    root: Option<PathBuf>,
+    /// The project's folders. One shows its entries at the top; several
+    /// each get a row of their own, with their entries under it.
+    roots: Vec<PathBuf>,
     expanded: HashSet<PathBuf>,
     /// The folders read so far, their entries in order (folders first).
     /// A closed one is kept too, until something in it changes.
@@ -170,7 +180,7 @@ pub struct ProjectTree {
 impl ProjectTree {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
-            root: None,
+            roots: Vec::new(),
             expanded: HashSet::new(),
             listings: HashMap::new(),
             unread: HashSet::new(),
@@ -191,10 +201,10 @@ impl ProjectTree {
         }
     }
 
-    /// A new project, with the folders that were open in it last time.
-    pub fn set_root(&mut self, root: Option<PathBuf>, expanded: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
-        self.expanded = root.iter().cloned().chain(expanded).collect();
-        self.root = root;
+    /// A new project's folders, with the folders that were open in it last time.
+    pub fn set_roots(&mut self, roots: Vec<PathBuf>, expanded: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
+        self.expanded = roots.iter().cloned().chain(expanded).collect();
+        self.roots = roots;
         self.listings.clear();
         self.unread.clear();
         self.reading.clear();
@@ -238,12 +248,35 @@ impl ProjectTree {
         self.listings.keys().chain(&self.reading).cloned().collect()
     }
 
+    /// The project's folders changed (one added or removed): what's read
+    /// and open in the others stays, an added one shows open.
+    pub fn update_roots(&mut self, roots: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let gone: Vec<PathBuf> = self.roots.iter().filter(|r| !roots.contains(r)).cloned().collect();
+        for root in &gone {
+            self.forget(root);
+        }
+        for root in roots.iter().filter(|r| !self.roots.contains(r)) {
+            self.expanded.insert(root.clone());
+        }
+        self.roots = roots;
+        self.rebuild(cx);
+    }
+
     /// Makes the rows again from the folders read; open folders not read
     /// yet are read in the background, their rows coming then.
     pub fn rebuild(&mut self, cx: &mut Context<Self>) {
         self.entries.clear();
-        if let Some(root) = self.root.clone() {
-            self.push_children(&root, 0);
+        match self.roots.clone().as_slice() {
+            [root] => self.push_children(root, 0),
+            roots => {
+                for root in roots {
+                    let name = crate::project_folders::folder_name(root).into();
+                    self.entries.push(TreeEntry { path: root.clone(), name, depth: 0, is_dir: true, root: true });
+                    if self.expanded.contains(root) {
+                        self.push_children(root, 1);
+                    }
+                }
+            }
         }
         if let Some(target) = self.scroll_to.clone() {
             if let Some(ix) = self.entries.iter().position(|e| e.path == target) {
@@ -266,7 +299,7 @@ impl ProjectTree {
             return;
         };
         for child in listing.iter() {
-            self.entries.push(TreeEntry { path: child.path.clone(), name: child.name.clone(), depth, is_dir: child.is_dir });
+            self.entries.push(TreeEntry { path: child.path.clone(), name: child.name.clone(), depth, is_dir: child.is_dir, root: false });
             if child.is_dir && !child.cycle && self.expanded.contains(&child.path) {
                 self.push_children(&child.path, depth + 1);
             }
@@ -348,10 +381,10 @@ impl ProjectTree {
         self.expanded.insert(dir);
     }
 
-    /// Closes every folder but the project's.
+    /// Closes every folder but the project's own.
     pub fn collapse_all(&mut self, cx: &mut Context<Self>) {
-        let root = self.root.clone();
-        self.expanded.retain(|p| Some(p) == root.as_ref());
+        let roots = self.roots.clone();
+        self.expanded.retain(|p| roots.contains(p));
         self.rebuild(cx);
     }
 
@@ -387,7 +420,7 @@ impl ProjectTree {
 
     /// Opens the folders down to `path` (listed on the next `rebuild`).
     pub fn reveal(&mut self, path: &Path) {
-        let Some(root) = self.root.clone() else { return };
+        let Some(root) = self.root_of(path).map(Path::to_path_buf) else { return };
         for dir in path.ancestors().skip(1) {
             if !dir.starts_with(&root) {
                 break;
@@ -420,14 +453,28 @@ impl ProjectTree {
         }
     }
 
-    fn drop_on_root(&self) -> bool {
-        self.drop_target.is_some() && self.drop_target == self.root
+    /// The project folder holding `path`.
+    fn root_of(&self, path: &Path) -> Option<&Path> {
+        self.roots.iter().find(|r| path.starts_with(r)).map(PathBuf::as_path)
     }
 
-    /// The project folder has been read and lists nothing (what the tree
-    /// hides, `.git` and the like, aside), and no search is showing.
+    /// The project's one folder, when it has just one (its entries are the
+    /// tree's top: a drop on the list goes there).
+    fn single_root(&self) -> Option<&PathBuf> {
+        match self.roots.as_slice() {
+            [root] => Some(root),
+            _ => None,
+        }
+    }
+
+    fn drop_on_root(&self) -> bool {
+        self.drop_target.is_some() && self.drop_target.as_ref() == self.single_root()
+    }
+
+    /// The project's one folder has been read and lists nothing (what the
+    /// tree hides, `.git` and the like, aside), and no search is showing.
     fn is_empty_project(&self) -> bool {
-        self.search.is_none() && self.root.as_ref().and_then(|root| self.listings.get(root)).is_some_and(|l| l.is_empty())
+        self.search.is_none() && self.single_root().and_then(|root| self.listings.get(root)).is_some_and(|l| l.is_empty())
     }
 
     /// An empty project's tree: what goes in it and how, over the (empty)
@@ -435,7 +482,7 @@ impl ProjectTree {
     /// into the folder, unlike one on a pane, which opens; so it says that,
     /// and where, while something is dragged over it.
     fn render_empty(&self, dropping: bool, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let name = self.root.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = self.single_root().and_then(|r| r.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let action = |id: &'static str, icon: Icon, label: &'static str, folder: bool| {
             div()
                 .id(id)
@@ -454,7 +501,7 @@ impl ProjectTree {
                 .hover_fill(theme.elevated, theme.hover)
                 .on_click(cx.listener(move |tree, _: &gpui::ClickEvent, _, cx| {
                     cx.stop_propagation();
-                    if let Some(dir) = tree.root.clone() {
+                    if let Some(dir) = tree.single_root().cloned() {
                         cx.emit(TreeEvent::Create { dir, folder });
                     }
                 }))
@@ -612,11 +659,12 @@ impl ProjectTree {
     /// Selects a match and shows it: the folders down to it open, and the
     /// ones the search opened for another match close again.
     fn show_match(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let (Some(search), Some(root)) = (&mut self.search, &self.root) else { return };
+        let Some(root) = self.root_of(&path).map(Path::to_path_buf) else { return };
+        let Some(search) = &mut self.search else { return };
         for dir in search.opened.drain() {
             self.expanded.remove(&dir);
         }
-        for dir in path.ancestors().skip(1).take_while(|dir| dir.starts_with(root)) {
+        for dir in path.ancestors().skip(1).take_while(|dir| dir.starts_with(&root)) {
             if self.expanded.insert(dir.to_path_buf()) {
                 search.opened.insert(dir.to_path_buf());
             }
@@ -629,7 +677,9 @@ impl ProjectTree {
     /// Starts a search (if there's none) and gives its query field the
     /// keyboard.
     fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<Editor>> {
-        self.root.as_ref()?;
+        if self.roots.is_empty() {
+            return None;
+        }
         let input = match &self.search {
             Some(search) => search.input.clone(),
             None => {
@@ -678,7 +728,7 @@ impl ProjectTree {
     /// an input method or a dead key composes (a lone accent finds nothing):
     /// what it commits is an edit, searched then.
     fn research(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.root.clone() else { return };
+        let roots = self.roots.clone();
         let Some(search) = self.search.as_mut() else { return };
         if search.input.read(cx).composing() {
             return;
@@ -698,7 +748,16 @@ impl ProjectTree {
                 .background_executor()
                 .spawn({
                     let query = query.clone();
-                    async move { find_matches(&root, &files, &listings, &query) }
+                    async move {
+                        // Each folder's matches, in the tree's order of folders.
+                        let mut all = (Vec::new(), HashMap::new());
+                        for root in &roots {
+                            let (found, marks) = find_matches(root, &files, &listings, &query);
+                            all.0.extend(found);
+                            all.1.extend(marks);
+                        }
+                        all
+                    }
                 })
                 .await;
             window.update(cx, |_, window, cx| tree.update(cx, |tree, cx| tree.searched(query, found, marks, window, cx))).ok();
@@ -951,7 +1010,8 @@ impl Render for ProjectTree {
                                 .when(cursor, |el| el.bg(theme.selection))
                                 .row_hover(theme.hover)
                                 .on_click(cx.listener(move |tree, event: &gpui::ClickEvent, window, cx| tree.clicked(ix, event.click_count(), window, cx)))
-                                .on_drag(dragged, |entry, _, _, cx| cx.new(|_| DragLabel(entry.name.clone())))
+                                // A project folder stays where it is.
+                                .when(!e.root, |el| el.on_drag(dragged, |entry, _, _, cx| cx.new(|_| DragLabel(entry.name.clone()))))
                                 // While dragging, the folder a drop goes into lights up.
                                 .when(is_target, |el| el.bg(theme.accent_soft).border_1().border_color(Hsla::from(theme.accent).alpha(0.7)))
                                 .on_drag_move(cx.listener({
@@ -997,7 +1057,7 @@ impl Render for ProjectTree {
                                     el.child(icon_el(if is_open { Icon::ChevronDown } else { Icon::ChevronRight }, px(13.), theme.text_dim.into()))
                                 }))
                                 .child(icon)
-                                .child(div().flex_1().min_w_0().truncate().text_color(name_color).map(|el| match marks {
+                                .child(div().flex_1().min_w_0().truncate().text_color(name_color).when(e.root, |el| el.font_weight(gpui::FontWeight::SEMIBOLD)).map(|el| match marks {
                                     // In the color of the editor's current search match, the name
                                     // kept readable on it (a dim, ignored one most of all) over the
                                     // row's own fill.
@@ -1091,36 +1151,39 @@ impl Render for ProjectTree {
                     .min_h_0()
                     // A click below the rows ends a search, as one on a row does.
                     .on_click(cx.listener(|tree, _: &gpui::ClickEvent, window, cx| tree.end_search(window, cx)))
-                    // Over the tree but not on a row, a drop goes to the project folder;
-                    // rows (told later) narrow it to theirs.
+                    // Over the tree but not on a row, a drop goes to the project's one
+                    // folder; rows (told later) narrow it to theirs.
                     .on_drag_move(cx.listener(|tree, ev: &DragMoveEvent<DraggedEntry>, _, cx| {
-                        let target = ev.bounds.contains(&ev.event.position).then(|| tree.root.clone()).flatten();
+                        let target = ev.bounds.contains(&ev.event.position).then(|| tree.single_root().cloned()).flatten();
                         tree.set_drop_target(target, cx);
                     }))
                     .on_drag_move(cx.listener(|tree, ev: &DragMoveEvent<gpui::ExternalPaths>, _, cx| {
-                        let target = ev.bounds.contains(&ev.event.position).then(|| tree.root.clone()).flatten();
+                        let target = ev.bounds.contains(&ev.event.position).then(|| tree.single_root().cloned()).flatten();
                         tree.set_drop_target(target, cx);
                     }))
                     .on_drop(cx.listener(|tree, dragged: &DraggedEntry, _, cx| {
                         tree.set_drop_target(None, cx);
-                        if let Some(root) = tree.root.clone() {
+                        if let Some(root) = tree.single_root().cloned() {
                             cx.emit(TreeEvent::Move { from: dragged.path.clone(), into: root });
                         }
                     }))
                     .on_drop(cx.listener(|tree, paths: &gpui::ExternalPaths, _, cx| {
                         cx.stop_propagation();
                         tree.set_drop_target(None, cx);
-                        if let Some(root) = tree.root.clone() {
-                            cx.emit(TreeEvent::CopyIn { paths: paths.paths().to_vec(), into: root });
+                        let paths = paths.paths().to_vec();
+                        match tree.single_root().cloned() {
+                            Some(root) => cx.emit(TreeEvent::CopyIn { paths, into: root }),
+                            None if !tree.roots.is_empty() => cx.emit(TreeEvent::AddFolders(paths)),
+                            None => {}
                         }
                     }))
-                    // Right-clicking empty space targets the project root.
+                    // Right-clicking empty space targets the project's one folder.
                     .on_mouse_down(
                         MouseButton::Right,
-                        cx.listener(|tree, ev: &MouseDownEvent, _, cx| {
-                            if let Some(root) = tree.root.clone() {
-                                cx.emit(TreeEvent::Menu { path: root, is_dir: true, position: ev.position });
-                            }
+                        cx.listener(|tree, ev: &MouseDownEvent, _, cx| match tree.single_root().cloned() {
+                            Some(root) => cx.emit(TreeEvent::Menu { path: root, is_dir: true, position: ev.position }),
+                            None if !tree.roots.is_empty() => cx.emit(TreeEvent::SpaceMenu { position: ev.position }),
+                            None => {}
                         }),
                     )
                     .child(list)
@@ -1235,7 +1298,8 @@ fn find_matches(
             }
         }
     }
-    for child in listings.values().flat_map(|listing| listing.iter()) {
+    // Only this folder's: the tree's other folders are searched on their own.
+    for child in listings.values().flat_map(|listing| listing.iter()).filter(|c| c.path.starts_with(root) && c.path != root) {
         candidates.insert(&child.path, child.is_dir);
     }
     let mut matcher = Matcher::new(Config::DEFAULT);
@@ -1345,6 +1409,55 @@ mod tests {
 
     use super::*;
 
+    /// Several project folders: each a row of its own with its entries
+    /// under it, closed and opened like a folder; one added keeps what the
+    /// others show; one removed goes with what's under it.
+    #[gpui::test]
+    fn several_folders_each_have_a_row(cx: &mut TestAppContext) {
+        let base = std::env::temp_dir().join(format!("kuana-tree-roots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (api, web, docs) = (base.join("api"), base.join("web"), base.join("docs"));
+        for file in [api.join("src/main.rs"), web.join("app.ts"), docs.join("guide.md")] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "").unwrap();
+        }
+        let tree = cx.new(ProjectTree::new);
+        let rows = |cx: &mut TestAppContext| {
+            tree.read_with(cx, |t, _| t.entries.iter().map(|e| format!("{}{}", "  ".repeat(e.depth), e.name)).collect::<Vec<_>>())
+        };
+        tree.update(cx, |t, cx| t.set_roots(vec![api.clone(), web.clone()], [api.join("src")], cx));
+        cx.run_until_parked();
+        assert_eq!(rows(cx), ["api", "  src", "    main.rs", "web", "  app.ts"]);
+        tree.read_with(cx, |t, _| assert!(t.entries[0].root && t.entries[3].root && !t.entries[1].root));
+        // A folder's row closes like a folder.
+        tree.update(cx, |t, cx| t.click(3, cx));
+        assert_eq!(rows(cx), ["api", "  src", "    main.rs", "web"]);
+        // Added: shown open after the others, which stay as they were.
+        tree.update(cx, |t, cx| t.update_roots(vec![api.clone(), web.clone(), docs.clone()], cx));
+        cx.run_until_parked();
+        assert_eq!(rows(cx), ["api", "  src", "    main.rs", "web", "docs", "  guide.md"]);
+        // Removed: its row and entries go; one folder left is the top again.
+        tree.update(cx, |t, cx| t.update_roots(vec![api.clone()], cx));
+        assert_eq!(rows(cx), ["src", "  main.rs"]);
+        tree.read_with(cx, |t, _| assert!(!t.listings.keys().any(|p| p.starts_with(&web) || p.starts_with(&docs))));
+
+        // A search finds matches in every folder, each folder's in its place.
+        tree.update(cx, |t, cx| t.update_roots(vec![api.clone(), web.clone()], cx));
+        let files = Arc::new(vec![api.join("src/main.rs"), web.join("app.ts")]);
+        tree.update(cx, |t, cx| t.set_files(files, cx));
+        cx.run_until_parked();
+        let found = |query: &str| {
+            let mut all = Vec::new();
+            for root in [&api, &web] {
+                let (found, _) = find_matches(root, &[api.join("src/main.rs"), web.join("app.ts")], &HashMap::new(), query);
+                all.extend(found);
+            }
+            all
+        };
+        assert_eq!(found("a"), [api.join("src/main.rs"), web.join("app.ts")]);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     #[gpui::test]
     fn folders_are_read_in_the_background_and_again_only_where_changed(cx: &mut TestAppContext) {
         let dir = std::env::temp_dir().join(format!("kuana-tree-{}", std::process::id()));
@@ -1358,7 +1471,7 @@ mod tests {
         let rows = |cx: &mut TestAppContext| {
             tree.read_with(cx, |t, _| t.entries.iter().map(|e| format!("{}{}", "  ".repeat(e.depth), e.name)).collect::<Vec<_>>())
         };
-        tree.update(cx, |t, cx| t.set_root(Some(dir.clone()), [dir.join("a")], cx));
+        tree.update(cx, |t, cx| t.set_roots(vec![dir.clone()], [dir.join("a")], cx));
         assert!(rows(cx).is_empty(), "read in the background");
         cx.run_until_parked();
         // Folders first, then by name whatever its case.
@@ -1484,7 +1597,7 @@ mod tests {
             std::fs::write(dir.join(file), "").unwrap();
         }
         let tree = cx.new(ProjectTree::new);
-        tree.update(cx, |t, cx| t.set_root(Some(dir.clone()), [dir.join("src")], cx));
+        tree.update(cx, |t, cx| t.set_roots(vec![dir.clone()], [dir.join("src")], cx));
         cx.run_until_parked();
         let selected = |cx: &mut TestAppContext| tree.read_with(cx, |t, _| t.selected.clone());
         let delete = |path: PathBuf, cx: &mut TestAppContext| {
@@ -1541,7 +1654,7 @@ mod tests {
             .detach();
         });
         tree.update(cx, |t, cx| {
-            t.set_root(Some(dir.clone()), [], cx);
+            t.set_roots(vec![dir.clone()], [], cx);
             t.set_files(crate::project::ProjectSnapshot::scan(&dir).openable(), cx);
         });
         cx.run_until_parked();
@@ -1652,7 +1765,7 @@ mod tests {
         let (tree, cx) = cx.add_window_view(|_, cx| ProjectTree::new(cx));
         let files = crate::project::ProjectSnapshot::scan(&dir).openable();
         tree.update(cx, |t, cx| {
-            t.set_root(Some(dir.clone()), [], cx);
+            t.set_roots(vec![dir.clone()], [], cx);
             t.set_files(files.clone(), cx);
         });
         cx.update(|window, cx| {

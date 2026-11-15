@@ -159,6 +159,72 @@ impl ProjectSnapshot {
     }
 }
 
+/// The project's files across its folders (`project_folders::Project`):
+/// each folder's own scan, kept and updated apart (a change, or new ignore
+/// rules, in one folder rereads only that folder), offered as one list.
+#[derive(Clone, Default)]
+pub struct ProjectFiles {
+    /// In the project's folder order.
+    folders: Vec<Arc<ProjectSnapshot>>,
+    /// Every folder's openable files, in folder order.
+    openable: Arc<Vec<PathBuf>>,
+}
+
+impl ProjectFiles {
+    /// The scans of `folders` that `self` has, in that order; folders not
+    /// scanned yet are left out until `with` brings their scan.
+    pub fn keeping(&self, folders: &[PathBuf]) -> Self {
+        let kept = folders.iter().filter_map(|f| self.folders.iter().find(|s| s.root() == f.as_path()).cloned()).collect();
+        Self::from_snapshots(kept)
+    }
+
+    /// With `snapshot` as its folder's scan (in place of an older one),
+    /// ordered as `folders` says.
+    pub fn with(&self, snapshot: ProjectSnapshot, folders: &[PathBuf]) -> Self {
+        let mut all: Vec<Arc<ProjectSnapshot>> = self.folders.iter().filter(|s| s.root() != snapshot.root()).cloned().collect();
+        all.push(Arc::new(snapshot));
+        all.retain(|s| folders.iter().any(|f| f.as_path() == s.root()));
+        all.sort_by_key(|s| folders.iter().position(|f| f.as_path() == s.root()));
+        Self::from_snapshots(all)
+    }
+
+    fn from_snapshots(folders: Vec<Arc<ProjectSnapshot>>) -> Self {
+        let openable = match folders.as_slice() {
+            [one] => one.openable(),
+            many => Arc::new(many.iter().flat_map(|s| s.openable().iter().cloned().collect::<Vec<_>>()).collect()),
+        };
+        Self { folders, openable }
+    }
+
+    /// Whether every one of `folders` is scanned.
+    pub fn covers(&self, folders: &[PathBuf]) -> bool {
+        folders.iter().all(|f| self.folders.iter().any(|s| s.root() == f.as_path()))
+    }
+
+    /// The scan of the folder holding `path`.
+    pub fn snapshot_of(&self, path: &Path) -> Option<&Arc<ProjectSnapshot>> {
+        self.folders.iter().find(|s| path.starts_with(s.root()))
+    }
+
+    /// Files to offer in Go to File: each folder's, sorted, in folder order.
+    pub fn openable(&self) -> Arc<Vec<PathBuf>> {
+        self.openable.clone()
+    }
+
+    /// Files Find in Files reads: none that are ignored.
+    pub fn searchable(&self) -> Vec<PathBuf> {
+        self.folders.iter().flat_map(|s| s.searchable()).collect()
+    }
+
+    pub fn is_searchable(&self, path: &Path) -> bool {
+        self.snapshot_of(path).is_some_and(|s| s.is_searchable(path))
+    }
+
+    pub fn lists(&self, path: &Path) -> bool {
+        self.snapshot_of(path).is_some_and(|s| s.lists(path))
+    }
+}
+
 /// Folders never read: Git's own, dependencies, and macOS's litter.
 fn skipped(root: &Path, path: &Path) -> bool {
     path.strip_prefix(root).is_ok_and(|rel| rel.components().any(|c| matches!(c.as_os_str().to_str(), Some(".git" | "node_modules" | ".DS_Store"))))
@@ -284,5 +350,35 @@ mod tests {
         let gitignore = [root.join(".gitignore")];
         assert_eq!(snapshot.apply(gitignore.iter().map(PathBuf::as_path)), Applied::Rescan);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn several_folders_are_one_list() {
+        let base = std::env::temp_dir().join(format!("kuana-project-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (api, web) = (base.join("api"), base.join("web"));
+        for (dir, file) in [(&api, "main.rs"), (&web, "app.ts")] {
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+            std::fs::write(dir.join("src").join(file), "").unwrap();
+        }
+        let folders = vec![api.clone(), web.clone()];
+        let files = ProjectFiles::default().with(ProjectSnapshot::scan(&web), &folders);
+        assert!(!files.covers(&folders) && files.covers(std::slice::from_ref(&web)));
+        // Scanned in any order, listed in the project's.
+        let files = files.with(ProjectSnapshot::scan(&api), &folders);
+        assert!(files.covers(&folders));
+        assert_eq!(*files.openable(), [api.join("src/main.rs"), web.join("src/app.ts")]);
+        assert_eq!(files.searchable().len(), 2);
+        assert!(files.lists(&web.join("src/app.ts")) && files.is_searchable(&api.join("src/main.rs")));
+        assert!(!files.lists(&base.join("elsewhere.rs")));
+        assert_eq!(files.snapshot_of(&web.join("src/app.ts")).map(|s| s.root()), Some(web.as_path()));
+        // A folder rescanned replaces its own scan only.
+        std::fs::write(web.join("src/b.ts"), "").unwrap();
+        let files = files.with(ProjectSnapshot::scan(&web), &folders);
+        assert_eq!(files.openable().len(), 3);
+        // A folder removed from the project goes with its files.
+        let files = files.keeping(std::slice::from_ref(&api));
+        assert_eq!(*files.openable(), [api.join("src/main.rs")]);
+        std::fs::remove_dir_all(&base).ok();
     }
 }

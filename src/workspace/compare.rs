@@ -73,7 +73,7 @@ impl Workspace {
     /// Compare With…: Go to File's list picks the other file.
     pub(super) fn pick_file_to_compare(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let files = if self.folders.is_some() {
-            self.project.openable()
+            self.files.openable()
         } else {
             Arc::new(self.items(cx).iter().filter(|t| t.is_file()).filter_map(|t| t.path(cx)).collect())
         };

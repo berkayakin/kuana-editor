@@ -74,7 +74,7 @@ impl Workspace {
             return;
         }
         let files = if self.folders.is_some() {
-            self.project.openable()
+            self.files.openable()
         } else {
             Arc::new(self.items(cx).iter().filter(|t| t.is_file()).filter_map(|t| t.path(cx)).collect())
         };
@@ -335,16 +335,20 @@ impl Workspace {
         self.open_project_search_in(None, replace, window, cx);
     }
 
-    /// Find in Files, optionally limited to one folder.
+    /// Find in Files: the project's folders, or one folder (Find in Folder,
+    /// or without a project the current file's).
     pub(super) fn open_project_search_in(&mut self, scope: Option<PathBuf>, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let root = scope
-            .or_else(|| self.primary_dir())
-            .or_else(|| {
-                let path = self.active_editor(cx)?.read(cx).doc.read(cx).path.clone()?;
-                path.parent().map(Path::to_path_buf)
-            })
-            .or_else(|| std::env::current_dir().ok());
-        let Some(root) = root else { return };
+        let folders: Vec<PathBuf> = match (scope, &self.folders) {
+            (Some(dir), _) => vec![dir],
+            (None, Some(project)) => project.folders().to_vec(),
+            (None, None) => {
+                let dir = self.active_editor(cx).and_then(|e| e.read(cx).doc.read(cx).path.as_deref()?.parent().map(Path::to_path_buf));
+                dir.or_else(|| std::env::current_dir().ok()).into_iter().collect()
+            }
+        };
+        if folders.is_empty() {
+            return;
+        }
         let initial = self.active_editor(cx).and_then(|e| {
             let e = e.read(cx);
             let s = e.primary_selection();
@@ -352,10 +356,10 @@ impl Workspace {
             (!s.is_empty() && !text.contains('\n')).then_some(text)
         });
         let overrides = self.open_buffers(cx);
-        // The scanned project's files, if the search is in it.
-        let scanned = !self.project.root().as_os_str().is_empty() && root.starts_with(self.project.root());
-        let project = scanned.then(|| self.project.clone());
-        let search = cx.new(|cx| ProjectSearch::new(root, project, initial, replace, overrides, window, cx));
+        // The scanned project's files, if they hold what's searched.
+        let scanned = folders.iter().all(|f| self.in_project(f)) && self.folders.as_ref().is_some_and(|p| self.files.covers(p.folders()));
+        let places = crate::project_search::SearchPlaces { files: scanned.then(|| self.files.clone()), project: self.folders.clone(), folders };
+        let search = cx.new(|cx| ProjectSearch::new(places, initial, replace, overrides, window, cx));
         let subscription = cx.subscribe_in(&search, window, |ws, _, event: &ProjectSearchEvent, window, cx| match event {
             ProjectSearchEvent::Open { path, range } => {
                 let range = range.clone();
@@ -490,7 +494,7 @@ impl Workspace {
             return;
         }
         let asked = editor.read(cx).clangd_counterpart(cx);
-        let files = self.project.openable();
+        let files = self.files.openable();
         cx.spawn_in(window, async move |this, cx| {
             let from_clangd = match asked {
                 Some(task) => task.await,

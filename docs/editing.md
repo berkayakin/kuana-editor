@@ -309,10 +309,12 @@ Not on Windows yet.
 
 ## Windows and projects
 
-Each window holds one project folder, so several projects can be open side by side.
+Each window holds one project, so several projects can be open side by side. A project is one
+folder or several (see [Several folders in one window](#several-folders-in-one-window)).
 
-- **Open Folder…** (⌥⌘O / Ctrl+Alt+O) opens the folder in a new window. A window with no
-  project yet is reused instead.
+- **Open Folder…** (⌥⌘O / Ctrl+Alt+O) asks whether to open the folder in a new window, in this
+  window, or add it to the project (`open_folder_in` in Settings answers for you). A window with no
+  project yet is reused.
 - **Open Folder in This Window…** replaces the window's project. Its tabs, including unsaved
   edits, are kept for when you open it again.
 - **Recent Projects…** (also opened by clicking the project name in the title bar) lists recent
@@ -328,11 +330,33 @@ Each window holds one project folder, so several projects can be open side by si
   highlighted folder, and in a Git project Kuana offers to add them to Git. Kuana is listed in Finder's
   **Open With** for files and folders (the release app). **Install 'kuana' Shell Command** (Kuana menu
   or Find Action) adds `/usr/local/bin/kuana`, asking for an administrator password if needed:
-  `kuana .` or `kuana src/main.rs` opens them in the running Kuana.
+  `kuana .` or `kuana src/main.rs` opens them in the running Kuana; `kuana api web` opens one
+  project with both folders.
 - Quitting or closing a project window doesn't ask about unsaved edits: they're kept and come back
   with the project's tabs. Windows without a project folder still ask.
 
 These are all in the File menu and Find Action.
+
+### Several folders in one window
+
+A project can hold several folders, such as a front end and its API, or a library and the app
+using it:
+
+- **Add Folder to Project…** (File menu, Find Action, a folder row's right-click menu) adds
+  folders; so does dropping folders from Finder onto the file tree's empty space, or
+  `kuana api web` on the command line. **Remove Folder from Project** is on a folder row's menu.
+  The first folder is the project's own: it names the window and can't be removed.
+- The file tree shows each folder as a row of its own, closed and opened like a folder.
+- Go to File, Search Everywhere, Find in Files, TODO, the Test Explorer and Problems cover every
+  folder, and paths show with their folder's name in front (`web/src/app.ts`). Find in Files can
+  search all folders or one, with the folder chips at its top.
+- Each folder keeps its own language servers, project settings (`.kuana/settings.json`) and trust:
+  a folder that isn't trusted is asked about when it's added, and Restricted Mode shows until it is.
+- The project remembers its folders: reopening its first folder, from Recent Projects or at startup,
+  brings back all of them with the tabs. Recent Projects names it by all its folders (`api, web`).
+- Folders are all on one machine: a remote project's Add Folder… asks for a folder on that machine.
+- Not yet: Git shows the first folder's repository only; the other folders' repositories, and
+  Run and Debug per folder, come next.
 
 ## Remembered state
 

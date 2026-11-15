@@ -141,6 +141,10 @@ pub struct SessionState {
     /// Recently opened project folders, newest first (the welcome screen's list).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recent_projects: Vec<PathBuf>,
+    /// A recent project's other folders, by its primary one (projects of
+    /// one folder aren't listed): Recent Projects names them all.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub project_folders: std::collections::HashMap<PathBuf, Vec<PathBuf>>,
     /// Where trusted folders were kept before `trust.json`; `trust.rs` moves
     /// them over and clears this.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -189,6 +193,13 @@ pub struct WindowPlacement {
     pub height: f32,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub fullscreen: bool,
+}
+
+/// A recent project's name: its folder's, with its other folders' after it
+/// (`project_folders`, by its primary folder): "api, web".
+pub fn recent_project_name(primary: &Path, project_folders: &std::collections::HashMap<PathBuf, Vec<PathBuf>>) -> String {
+    let others = project_folders.get(primary).into_iter().flatten();
+    std::iter::once(primary).chain(others.map(PathBuf::as_path)).map(crate::project_folders::folder_name).collect::<Vec<_>>().join(", ")
 }
 
 impl SessionState {
@@ -338,7 +349,11 @@ impl StateFile {
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
 #[serde(default)]
 pub struct ProjectSession {
+    /// The project's primary folder, which the session file is named after.
     pub root: PathBuf,
+    /// Its other folders, in order (none for a project of one folder).
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "skip_bad")]
+    pub folders: Vec<PathBuf>,
     /// A tab another Kuana version wrote in a way this one can't read is
     /// skipped, never the others (they hold unsaved text).
     #[serde(deserialize_with = "skip_bad")]
@@ -630,6 +645,7 @@ mod tests {
     fn sessions_round_trip() {
         let session = ProjectSession {
             root: "/work/kuana".into(),
+            folders: vec!["/work/site".into()],
             tabs: vec![
                 TabSession { kind: TabKind::Editor, path: Some("/work/kuana/a.rs".into()), cursor: 12, top_line: Some(40), unsaved: None, pane: 0, pinned: true, folds: vec![[3, 9]], encoding: Some("windows-1254".into()) },
                 TabSession { kind: TabKind::Editor, path: None, cursor: 0, top_line: None, unsaved: Some("draft".into()), pane: 1, pinned: false, folds: Vec::new(), encoding: None },

@@ -97,13 +97,41 @@ impl Workspace {
             other.update(cx, |_, window, _| window.activate_window()).ok();
             return;
         }
+        let target = match target {
+            OpenIn::Auto if self.folders.is_none() => OpenIn::ThisWindow,
+            OpenIn::Auto => match Settings::get(cx).open_folder_in() {
+                OpenFolderIn::Ask => return self.ask_where_to_open(path, window, cx),
+                OpenFolderIn::NewWindow => OpenIn::NewWindow,
+                OpenFolderIn::ThisWindow => OpenIn::ThisWindow,
+                OpenFolderIn::AddToProject => OpenIn::AddToProject,
+            },
+            target => target,
+        };
         match target {
-            OpenIn::Auto if self.folders.is_none() => self.set_root(path, window, cx),
             OpenIn::ThisWindow => self.replace_project(path, window, cx),
+            OpenIn::AddToProject => self.add_folders(vec![path], window, cx),
             OpenIn::NewWindow | OpenIn::Auto => {
                 open_window(Some(window.bounds()), cx, move |ws, window, cx| ws.set_root(path, window, cx));
             }
         }
+    }
+
+    /// Open… with a project open (and `open_folder_in` left to ask): a new
+    /// window, this one, or added to the project.
+    fn ask_where_to_open(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let title = format!("Open {}", folder_name(&path));
+        let detail = "Set open_folder_in in Settings to stop asking.";
+        let answer = window.prompt(PromptLevel::Info, &title, Some(detail), &["New Window", "This Window", "Add to Project", "Cancel"], cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let target = match answer.await {
+                Ok(0) => OpenIn::NewWindow,
+                Ok(1) => OpenIn::ThisWindow,
+                Ok(2) => OpenIn::AddToProject,
+                _ => return,
+            };
+            this.update_in(cx, |ws, window, cx| ws.open_project(path, target, window, cx)).ok();
+        })
+        .detach();
     }
 
     /// Swaps this window's project for another one, closing its tabs once
@@ -157,10 +185,10 @@ impl Workspace {
         self.auto_save_tasks.clear();
         self.auto_save_warned.clear();
         self.recent.clear();
-        self.project = Arc::default();
+        self.files = ProjectFiles::default();
         self.project_task = None;
         self.project_changes.clear();
-        self.root_gone = false;
+        self.folders_gone.clear();
         self.watcher = None;
         self.watch_task = None;
         self.folders = None;
