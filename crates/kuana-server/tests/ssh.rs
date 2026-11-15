@@ -5,8 +5,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::{
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -29,16 +30,14 @@ fn temp(name: &str) -> PathBuf {
 fn fake_ssh(dir: &Path, home: &Path) -> PathBuf {
     let script = dir.join("ssh");
     let log = dir.join("commands.log");
-    std::fs::write(
+    common::write_script(
         &script,
-        format!(
+        &format!(
             "#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in -o) shift 2;; -T) shift;; *) break;; esac; done\nshift\nprintf '%s\\n' \"$*\" >> '{}'\nHOME='{}' exec /bin/sh -c \"$*\"\n",
             log.display(),
             home.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     script
 }
 
@@ -96,8 +95,7 @@ fn connects_installs_starts_and_mounts() {
 fn a_host_that_fails_says_why() {
     let dir = temp("fail");
     let script = dir.join("ssh");
-    std::fs::write(&script, "#!/bin/sh\necho 'ssh: Could not resolve hostname nowhere: nodename nor servname provided' >&2\nexit 255\n").unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::write_script(&script, "#!/bin/sh\necho 'ssh: Could not resolve hostname nowhere: nodename nor servname provided' >&2\nexit 255\n");
     let server = |_: &str, _: &str| Err("not needed".to_string());
     let options = Options { program: Some(script.display().to_string()), control_dir: dir.join("control"), askpass: Vec::new(), server_binary: &server, progress: &|_| {} };
     let err = connection::connect(&Transport::Ssh("nowhere".into()), &options).err().unwrap();

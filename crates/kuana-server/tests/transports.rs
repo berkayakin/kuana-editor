@@ -4,10 +4,9 @@
 
 #![cfg(unix)]
 
-use std::{
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
-};
+mod common;
+
+use std::path::{Path, PathBuf};
 
 use kuana_core::{
     fs,
@@ -29,17 +28,15 @@ fn stand_in(dir: &Path, home: &Path, stopped: bool) -> PathBuf {
     let log = dir.join("calls.log");
     let started = dir.join("started");
     let guard = if stopped { format!("[ -e '{}' ] || {{ echo 'Error response from daemon: container web is not running' >&2; exit 1; }}\n", started.display()) } else { String::new() };
-    std::fs::write(
+    common::write_script(
         &script,
-        format!(
+        &format!(
             "#!/bin/sh\nprintf '%s|' \"$@\" >> '{log}'; echo >> '{log}'\nif [ \"$1\" = start ]; then touch '{started}'; exit 0; fi\n{guard}while [ \"$1\" != -c ]; do shift; done\nHOME='{home}' exec /bin/sh -c \"$2\"\n",
             log = log.display(),
             started = started.display(),
             home = home.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     script
 }
 
