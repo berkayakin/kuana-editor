@@ -513,7 +513,11 @@ impl LspStore {
             let key = ServerKey { id: format!("custom:{}", command.join(" ")), root: root(spec) };
             return vec![(key, Some(command), spec)];
         }
-        servers::specs(language).into_iter().map(|spec| (ServerKey { id: spec.id.to_string(), root: root(spec) }, None, spec)).collect()
+        servers::specs(language)
+            .into_iter()
+            .filter(|spec| servers::wanted(spec, path))
+            .map(|spec| (ServerKey { id: spec.id.to_string(), root: root(spec) }, None, spec))
+            .collect()
     }
 
     fn start(
@@ -823,7 +827,14 @@ impl LspStore {
                     "workspace/configuration" => {
                         let settings = self.configs.get(key).map_or(Value::Null, |(_, _, c, _)| c.settings.clone());
                         let items = params.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
-                        let answers = items.iter().map(|item| servers::configuration(&settings, item.get("section").and_then(Value::as_str)));
+                        let answers = items.iter().map(|item| match key.id.as_str() {
+                            // ESLint's asks per file for the whole object, the project's folder in it.
+                            "eslint" => {
+                                let scope = item.get("scopeUri").and_then(Value::as_str).and_then(protocol::uri_to_path);
+                                servers::eslint_configuration(&settings, scope.as_deref(), &key.root)
+                            }
+                            _ => servers::configuration(&settings, item.get("section").and_then(Value::as_str)),
+                        });
                         client.respond(id, Value::Array(answers.collect()));
                     }
                     "workspace/workspaceFolders" => client.respond(id, workspace_folders(&key.root)),
@@ -889,6 +900,18 @@ impl LspStore {
                     // Progress shows through `$/progress` (Kuana says it does: `workDoneProgress`);
                     // a message's choices aren't offered, so none was picked.
                     "window/workDoneProgress/create" | "window/showMessageRequest" => client.respond(id, Value::Null),
+                    // ESLint's: a rule's documentation (its quick fix Show Documentation) opens in the browser.
+                    "eslint/openDoc" => {
+                        if let Some(url) = params.get("url").and_then(Value::as_str).filter(|u| u.starts_with("https://") || u.starts_with("http://")) {
+                            cx.open_url(url);
+                        }
+                        client.respond(id, json!({}));
+                    }
+                    // ESLint's: no library or config found, or it couldn't load; its
+                    // problems then just don't show (the file's other servers still work).
+                    "eslint/noLibrary" | "eslint/noConfig" | "eslint/probeFailed" => client.respond(id, json!({})),
+                    // ESLint's (older servers): may it run the project's ESLint? The project is trusted.
+                    "eslint/confirmESLintExecution" => client.respond(id, json!(4)),
                     // Its hints or lenses changed (it finished loading the
                     // project, another file changed): its documents' are due
                     // again, asked for by the editors that show them.
@@ -1404,6 +1427,27 @@ impl LspStore {
             return;
         };
         self.install_spec(spec, cx);
+    }
+
+    /// ESLint's server for `path`'s document, when the project uses ESLint
+    /// and the server isn't installed: whether it's being installed now.
+    /// (Missing servers beside the main one say nothing; this one's offered
+    /// where ESLint's status shows.) None on a remote machine, where Kuana
+    /// doesn't install.
+    pub fn eslint_missing(&self, path: &Path) -> Option<bool> {
+        let doc = self.documents.get(path)?;
+        let key = doc.servers.iter().map(|(key, _)| key).find(|key| key.id == servers::ESLINT.id)?;
+        if crate::fs::is_remote(&key.root) || !matches!(self.servers.get(key), Some(ServerState::Missing(_))) {
+            return None;
+        }
+        Some(install::for_spec(&servers::ESLINT).is_some_and(|i| install::installing(i.command)))
+    }
+
+    /// Installs ESLint's server (see `eslint_missing`).
+    pub fn install_eslint(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if self.eslint_missing(path) == Some(false) {
+            self.install_spec(&servers::ESLINT, cx);
+        }
     }
 
     /// Installs a missing server; when it's done, every window starts the

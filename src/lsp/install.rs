@@ -83,6 +83,7 @@ const INSTALLERS: &[Installer] = &[
     Installer { command: "vscode-css-language-server", source: Source::Npm { package: "vscode-langservers-extracted" } },
     Installer { command: "vscode-html-language-server", source: Source::Npm { package: "vscode-langservers-extracted" } },
     Installer { command: "vscode-json-language-server", source: Source::Npm { package: "vscode-langservers-extracted" } },
+    Installer { command: "vscode-eslint-language-server", source: Source::Npm { package: "vscode-langservers-extracted" } },
     Installer { command: "yaml-language-server", source: Source::Npm { package: "yaml-language-server" } },
     Installer { command: "bash-language-server", source: Source::Npm { package: "bash-language-server" } },
     Installer { command: "gopls", source: Source::Go { module: "golang.org/x/tools/gopls" } },
@@ -621,7 +622,7 @@ mod tests {
     fn every_built_in_server_with_an_installer_is_known() {
         // Each installer names a command some server list asks for.
         for installer in INSTALLERS {
-            let mut specs = crate::syntax::Language::ALL.iter().filter_map(|l| servers::spec(*l)).chain([&servers::COPILOT]);
+            let mut specs = crate::syntax::Language::ALL.iter().flat_map(|l| servers::specs(*l)).chain([&servers::COPILOT]);
             let wanted = specs.any(|s| s.candidates.iter().any(|(c, _)| *c == installer.command));
             assert!(wanted, "{} isn't a candidate of any built-in server", installer.command);
         }

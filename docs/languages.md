@@ -80,6 +80,19 @@ Tailwind beside TypeScript). All of them get the file; their problems show toget
 and code actions list all of theirs, and the rest (hover, Go to Declaration, rename, formatting)
 goes to the first that offers it. The status bar names the ones running.
 
+### ESLint
+
+In a project with ESLint installed (`node_modules/.bin/eslint`), ESLint's language server runs
+beside TypeScript's for JavaScript and TypeScript files: your config's problems show as you type,
+before you save, and Show Context Actions (⌥↩ / Alt+Enter) offers its fixes: this problem, every
+auto-fixable one, disabling the rule for the line or the file, and the rule's documentation. Flat
+configs (`eslint.config.*`) are found by themselves. The server is VS Code's, from the npm package
+`vscode-langservers-extracted` (the same as the CSS, HTML and JSON servers'): on your PATH, or
+installed by Kuana, with a click on the status bar's ESLint item, which also says when it's missing.
+Until then ESLint runs on open and save. Its settings are VS Code's ESLint extension's, under
+`lsp.eslint.settings` (`"run": "onSave"`, `"rulesCustomizations"`, `"workingDirectory"` and the
+rest).
+
 **Find Usages** (⌥F7 / Alt+F7 in the JetBrains keymap, ⇧F12 in VS Code's) lists a symbol's usages
 in the **Find** panel at the bottom, grouped by file, each with its line and the usage highlighted.
 ↑/↓ show each one in the editor while the panel keeps the keyboard, Enter (or a click) goes there,

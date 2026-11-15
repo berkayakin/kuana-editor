@@ -73,7 +73,7 @@ Updates are signed.
 | **Databases** | A [Database](docs/database.md) view for PostgreSQL, MySQL, MariaDB, SQLite and Oracle: browse tables, views, functions and procedures, edit and save routines with errors in place, run SQL with results in a grid; drivers built in |
 | **Terminal** | Your login shell in tabs and splits, full colors and mouse support, Find in scrollback, ⌘-click paths to open them |
 | **Remote** | Projects on [SSH hosts](docs/remote.md) from your `~/.ssh/config`, in WSL and in running containers or [dev containers](docs/remote.md#containers) (`devcontainer.json`), with the language servers, terminals, Run, debugger and Git of that machine; forwarded ports, reconnecting by itself |
-| **Linting** | Built-in rules for JavaScript/TypeScript (oxc), HTML and Markdown, syntax errors for the rest, plus your project's ESLint |
+| **Linting** | Built-in rules for JavaScript/TypeScript (oxc), HTML and Markdown, syntax errors for the rest, plus your project's ESLint as you type, with its quick fixes |
 | **Projects** | Multiple windows, hot exit (unsaved edits survive a quit), [Local History](docs/editing.md#local-history) of every file, shared [project settings](docs/settings.md#project-settings), live file watching, file operations you can undo, image preview, any text encoding |
 
 There's much more: see the [full feature list](docs/features.md).
@@ -148,7 +148,7 @@ says what's planned):
   no chat or agent panel; agents like Claude Code or Codex run in the terminal.
 - **Languages**: 13 have highlighting built in; others come from [extensions](docs/extensions.md),
   but there's none yet for C/C++, Kotlin or Swift.
-- **Editing**: no Emmet, no spell checking; ESLint runs on open and save, not as you type.
+- **Editing**: no Emmet, no spell checking.
 - **Git**: commits can be reworded, squashed and dropped, not reordered or split; the log shows
   the latest 3,000 commits.
 - **Debugger**: no hit counts or exception breakpoint options. **Vim mode**: no registers other

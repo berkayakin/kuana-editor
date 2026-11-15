@@ -20,8 +20,11 @@ Everything Kuana does, in one list. Each area has its own page with the details.
     fence languages, trailing spaces, duplicate headings, broken reference and relative links…)
     via [rumdl](https://rumdl.dev). A project's `.markdownlint.json`/`.yaml`, `.rumdl.toml` or
     `pyproject.toml` `[tool.rumdl]` is used when present; otherwise line length (MD013) is off
-  - **ESLint** — if the file's project has `node_modules/.bin/eslint`, it runs on open/save with the
-    project's own config (JavaScript and TypeScript); built-in rules then drop back to syntax errors only
+  - **ESLint** — if the file's project has `node_modules/.bin/eslint`, its own config checks the file
+    as you type through ESLint's language server, with its quick fixes (fix a problem, fix all, disable
+    a rule for a line or file, the rule's documentation); without the server, it runs on open and save,
+    and the status bar's ESLint item installs the server in a click. Built-in rules then drop back to
+    syntax errors only; see [ESLint](languages.md#eslint)
   - **CSS, Rust, Go, Python, PHP, shell, JSON, YAML, TOML** — syntax errors from the tree-sitter parser
     (unexpected and missing tokens); extension languages too when their `syntax_errors` setting is on
 - Language servers (LSP) for code intelligence: diagnostics, completion, hover documentation,

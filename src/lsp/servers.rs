@@ -194,9 +194,20 @@ fn builtin(language: Language) -> Option<&'static ServerSpec> {
     })
 }
 
+/// ESLint's language server (VS Code's, from `vscode-langservers-extracted`):
+/// the project's own ESLint and config, as you type, with its quick fixes.
+pub static ESLINT: ServerSpec = ServerSpec {
+    id: "eslint",
+    candidates: &[("vscode-eslint-language-server", &["--stdio"])],
+    install: "npm install -g vscode-langservers-extracted",
+    root_markers: &["package.json"],
+    ..SPEC
+};
+
 /// A server Kuana runs beside a language's own when it's installed (and
 /// says nothing when it isn't), as Zed does: Ruff's beside basedpyright, for
-/// its lint rules (pyflakes' and pycodestyle's errors, by default) and fixes.
+/// its lint rules (pyflakes' and pycodestyle's errors, by default) and fixes;
+/// ESLint's beside TypeScript's, in projects that use ESLint (`wanted`).
 fn beside(language: Language) -> Option<&'static ServerSpec> {
     static RUFF: ServerSpec = ServerSpec {
         id: "ruff",
@@ -207,8 +218,39 @@ fn beside(language: Language) -> Option<&'static ServerSpec> {
     };
     match language {
         Language::Python => Some(&RUFF),
+        Language::JavaScript | Language::TypeScript | Language::Tsx => Some(&ESLINT),
         _ => None,
     }
+}
+
+/// Whether a server is for `file` at all: ESLint's only where the project
+/// has ESLint installed (its server runs the project's own library, and
+/// elsewhere would only complain that there's none).
+pub fn wanted(spec: &ServerSpec, file: &Path) -> bool {
+    !std::ptr::eq(spec, &ESLINT) || crate::lint::external::find_for(file).is_some()
+}
+
+/// The settings ESLint's server asks for (`workspace/configuration` with
+/// the file as its scope), as VS Code's ESLint extension sends them: Kuana's
+/// defaults and the user's `lsp.eslint.settings` (`settings`), with the
+/// project folder and, unless set, whether the project uses a flat config
+/// (`eslint.config.*` from the file's folder up to `root`).
+pub fn eslint_configuration(settings: &Value, scope: Option<&Path>, root: &Path) -> Value {
+    let mut out = settings.clone();
+    if !out.is_object() {
+        out = json!({});
+    }
+    let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    out["workspaceFolder"] = json!({ "uri": crate::lsp::protocol::path_to_uri(root), "name": name });
+    let set = out.get("useFlatConfig").is_some_and(|v| !v.is_null()) || out.pointer("/experimental/useFlatConfig").is_some_and(|v| !v.is_null());
+    if !set {
+        const FLAT: [&str; 6] = ["eslint.config.js", "eslint.config.mjs", "eslint.config.cjs", "eslint.config.ts", "eslint.config.mts", "eslint.config.cts"];
+        let start = scope.and_then(Path::parent).unwrap_or(root);
+        let flat = start.ancestors().take_while(|d| d.starts_with(root)).any(|d| FLAT.iter().any(|f| d.join(f).is_file_on_host()));
+        out["useFlatConfig"] = json!(flat);
+        merge(&mut out, &json!({ "experimental": { "useFlatConfig": flat } }));
+    }
+    out
 }
 
 /// Whether a server program can run here: phpactor needs PHP (Kuana's copy
@@ -401,6 +443,30 @@ fn defaults(program: &str) -> (Value, Value) {
             schemas => (json!({ "provideFormatter": true }), json!({ "json": { "schemas": schemas } })),
         },
         "vscode-css-language-server" | "vscode-html-language-server" => (json!({ "provideFormatter": true }), Value::Null),
+        // What VS Code's ESLint extension sends, which the server expects
+        // every key of (`eslint_configuration` adds the project's).
+        "vscode-eslint-language-server" => (
+            Value::Null,
+            json!({
+                "validate": "on",
+                "run": "onType",
+                "packageManager": "npm",
+                "useESLintClass": false,
+                "codeActionOnSave": { "mode": "all" },
+                "format": false,
+                "quiet": false,
+                "onIgnoredFiles": "off",
+                "options": {},
+                "rulesCustomizations": [],
+                "problems": { "shortenToSingleLine": false },
+                "nodePath": null,
+                "workingDirectory": { "mode": "location" },
+                "codeAction": {
+                    "disableRuleComment": { "enable": true, "location": "separateLine", "commentStyle": "line" },
+                    "showDocumentation": { "enable": true },
+                },
+            }),
+        ),
         // Copilot wants to know the editor it serves.
         "copilot-language-server" => {
             let version = env!("CARGO_PKG_VERSION");
@@ -631,7 +697,8 @@ mod tests {
         // Ruff beside basedpyright for Python, nothing beside the others.
         let python: Vec<&str> = builtin(Language::Python).into_iter().chain(beside(Language::Python)).map(|s| s.id).collect();
         assert_eq!(python, ["python", "ruff"]);
-        assert!(beside(Language::TypeScript).is_none());
+        assert!(beside(Language::Go).is_none());
+        assert!(std::ptr::eq(beside(Language::Tsx).unwrap(), &ESLINT));
         // phpactor before intelephense, except on Windows; only phpactor needs PHP.
         let php = builtin(Language::Php).unwrap();
         let first = if cfg!(windows) { "intelephense" } else { "phpactor" };
@@ -648,6 +715,42 @@ mod tests {
         crate::lsp::install::make_executable(&venv.join("bin/ruff")).unwrap();
         let found = find(beside(Language::Python).unwrap(), &dir.join("a.py"), Some(&venv)).unwrap();
         assert_eq!((found.program, found.args), (venv.join("bin/ruff"), vec!["server".to_string()]));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn eslint_runs_where_the_project_has_it_with_the_settings_it_expects() {
+        use crate::settings::LspSettings;
+        let dir = std::env::temp_dir().join(format!("kuana-eslint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = dir.join("app");
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        // No ESLint in the project: no server for it (TypeScript's still).
+        assert!(!wanted(&ESLINT, &app.join("src/a.ts")));
+        assert!(wanted(builtin(Language::TypeScript).unwrap(), &app.join("src/a.ts")));
+        let bin = app.join("node_modules/.bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join(if cfg!(windows) { "eslint.cmd" } else { "eslint" }), "").unwrap();
+        assert!(wanted(&ESLINT, &app.join("src/a.ts")));
+
+        // VS Code's settings, the project's folder, and the config's kind found.
+        let none = HashMap::new();
+        let base = config(&ESLINT, Path::new("/bin/vscode-eslint-language-server"), &none, &FromCode::default()).settings;
+        let answer = eslint_configuration(&base, Some(&app.join("src/a.ts")), &app);
+        assert_eq!((answer["validate"].as_str(), answer["run"].as_str()), (Some("on"), Some("onType")));
+        assert_eq!(answer["workspaceFolder"]["name"], "app");
+        assert_eq!(answer["workspaceFolder"]["uri"], crate::lsp::protocol::path_to_uri(&app));
+        assert_eq!((answer["useFlatConfig"].as_bool(), answer["experimental"]["useFlatConfig"].as_bool()), (Some(false), Some(false)));
+        std::fs::write(app.join("eslint.config.mjs"), "export default [];\n").unwrap();
+        let answer = eslint_configuration(&base, Some(&app.join("src/a.ts")), &app);
+        assert_eq!(answer["useFlatConfig"], true);
+        // The user's `lsp.eslint.settings` win, flat config too.
+        let user: HashMap<String, LspSettings> =
+            serde_json::from_value(json!({ "eslint": { "settings": { "run": "onSave", "experimental.useFlatConfig": false } } })).unwrap();
+        let mine = config(&ESLINT, Path::new("/bin/vscode-eslint-language-server"), &user, &FromCode::default()).settings;
+        let answer = eslint_configuration(&mine, Some(&app.join("src/a.ts")), &app);
+        assert_eq!((answer["run"].as_str(), answer["experimental"]["useFlatConfig"].as_bool()), (Some("onSave"), Some(false)));
+        assert!(answer.get("useFlatConfig").is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
 
