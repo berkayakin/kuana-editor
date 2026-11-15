@@ -162,6 +162,37 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Toggle Tools in Title Bar: the tool buttons between the activity bar
+    /// and a title bar row of their own.
+    pub(super) fn toggle_tools_in_title_bar(&mut self, _: &ToggleToolsInTitleBar, window: &mut Window, cx: &mut Context<Self>) {
+        let location = match Settings::get(cx).tools_location() {
+            settings::ToolsLocation::ActivityBar => settings::ToolsLocation::TitleBar,
+            settings::ToolsLocation::TitleBar => settings::ToolsLocation::ActivityBar,
+        };
+        let saved = Settings::set_tools_location(location);
+        self.layout_setting_saved(saved, window, cx);
+    }
+
+    /// Toggle Compact Activity Bar: the bar's smaller or full size.
+    pub(super) fn toggle_compact_activity_bar(&mut self, _: &ToggleCompactActivityBar, window: &mut Window, cx: &mut Context<Self>) {
+        let saved = if Settings::get(cx).compact_activity_bar() {
+            Settings::remove("compact_activity_bar")
+        } else {
+            Settings::set("compact_activity_bar", true.into())
+        };
+        self.layout_setting_saved(saved, window, cx);
+    }
+
+    /// After a layout setting is written: a failure asks, then the settings apply.
+    fn layout_setting_saved(&mut self, saved: std::io::Result<()>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(err) = saved {
+            let _ = window.prompt(PromptLevel::Warning, "Couldn't save the layout", Some(&err.to_string()), &["OK"], cx);
+        }
+        let problems = settings::reload_now(cx);
+        self.report_config_problems(problems, cx);
+        cx.notify();
+    }
+
     /// The activity bar's right-click menu: move the sidebar to the other side.
     pub(super) fn open_sidebar_tab_menu(&mut self, position: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let label = if self.sidebar_on_right(cx) { "Move Sidebar to Left" } else { "Move Sidebar to Right" };
