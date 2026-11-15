@@ -6,7 +6,8 @@ Everything Kuana does, in one list. Each area has its own page with the details.
 - Tree-sitter syntax highlighting for JavaScript/JSX, TypeScript/TSX, HTML (including `<script>` blocks),
   CSS, Rust, Go, Python, PHP, shell scripts, JSON, YAML, TOML and Markdown; any other language
   through [extensions](extensions.md), which use Zed's format (Zed's language and theme extensions work);
-  popular ones install from **Settings → Extensions → Available**, and opening a file one of them covers
+  popular ones (C and C++, Java, Kotlin, Swift, C#, Ruby, Emmet and over 40 more) install from
+  **Settings → Extensions → Available**, and opening a file one of them covers
   (a `.sql` file, a `Makefile`) offers to install it
 - Linting off the main thread:
   - **JavaScript** — syntax errors plus `no-unused-vars`, `no-undef`, `no-const-assign`,
@@ -126,9 +127,13 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   folds are kept with the project
 - [Zen mode](editing.md#zen-mode): everything but the editor hidden, full screen, the text centered at a
   width you choose; the layout comes back as it was when you leave it
+- Layout your way: Modern islands or a Classic layout of square panels, the tool buttons on an
+  activity bar (full or compact) or in a title bar row, the sidebar on either side, any of its views
+  (Files, Commit, Database, an extension's) moved to a second sidebar beside the editor; see
+  `ui_style`, `tools_location`, `compact_activity_bar` and `sidebar_dock` in [Settings](settings.md)
 - Split panes (side by side or stacked, a file in both if you like) with draggable dividers; drag tabs to reorder them or
   move them between panes; pinned tabs; a tab menu with Close Others / All / to the Right
-- Debugger for Rust, Go, Python and JavaScript/TypeScript (lldb-dap, Delve, debugpy, js-debug):
+- Debugger for Rust, Go, Python, JavaScript/TypeScript and C/C++ (lldb-dap, Delve, debugpy, js-debug):
   breakpoints with conditions and logpoints, attaching to running processes, stepping, frames,
   variables, values inline after the lines that use them and on hover, watches and an evaluating console; see [Debugging](run-and-debug.md#debugging)
 - Restricted Mode for folders you haven't trusted (like VS Code's): no language servers,
@@ -136,7 +141,8 @@ Everything Kuana does, in one list. Each area has its own page with the details.
 - Python virtual environments detected per project and used by terminals, Run, the debugger,
   language servers and formatters; see [Python environments](languages.md#python-environments)
 - Run and test: ▶ in the gutter next to tests and `main` functions (Rust, Go, Python, JS/TS, and
-  languages whose extension adds them, such as Oxie and Lyth),
+  languages whose extension adds them, such as Oxie and Lyth; C and C++ programs are built with
+  CMake or the compiler first),
   project commands (cargo, npm scripts, go, make, pytest) and your own run configurations, each
   in its own terminal tab with a pass/fail icon; test runs (cargo, go, pytest, Jest, Vitest, node, `oxie test`, `lyth test`) show
   their results as a tree in the Find panel and ✓ / ✕ in the gutter, with Rerun Failed; the

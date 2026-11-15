@@ -40,6 +40,7 @@ A ▶ in the gutter marks what can run in the file; click it to run that one thi
 | Python | `test_…` functions, `Test…` classes and methods, `if __name__ == "__main__"` | `python3 -m pytest -v file::Class::test`, `python3 file` |
 | JavaScript, TypeScript | `test(…)`, `it(…)`, `describe(…)` | the project's vitest or jest, else `node --test` |
 | Oxie (its [extension](extensions.md)) | `test "…"` blocks, `fun main` | `oxie test file name`, `oxie run file` |
+| C, C++ (the C/C++ [extension](extensions.md)) | `main` | built first: in a CMake project, its target for the file (configuring `build/` with `compile_commands.json` the first time); otherwise the file alone with `cc` / `c++` and the flags in `compile_flags.txt` |
 | Lyth (its [extension](extensions.md)) | `Test…`, `Benchmark…`, `Fuzz…`, `Example…` functions, `func main` | `lyth test -v -run '^Name$' .`, `lyth run file` |
 
 Other languages' extensions add their own ▶ (their `runnables.scm` and `tasks.json`).
@@ -47,7 +48,7 @@ Other languages' extensions add their own ▶ (their `runnables.scm` and `tasks.
 **Run at caret** (⌃⇧R / Ctrl+Shift+F10) runs the innermost test or function around the caret.
 **Run…** (⌃⌥R / Alt+Shift+F10) lists the last run first, then your `run_configurations`, the
 project's commands (cargo run/test/build and binaries, `package.json` scripts with its package
-manager, go, Makefile targets, pytest; `oxie run`/`test`/`build`/`fmt` in an Oxie project; `lyth run`/`test`/`build`/`vet`
+manager, go, Makefile targets, pytest, `cmake --build build` in a CMake project; `oxie run`/`test`/`build`/`fmt` in an Oxie project; `lyth run`/`test`/`build`/`vet`
 in a Go module with `.lyth` files) and the
 current file's tests. **Run** (⌃R / Shift+F10)
 repeats the last one (run or debugged), **Stop** (⌘F2 / Ctrl+F2) interrupts it. The activity bar at the
@@ -112,7 +113,7 @@ reports nothing clears them.
 
 ## Debugging
 
-Rust, Go, Python, JavaScript and TypeScript tests and programs can run under a debugger, through
+Rust, Go, Python, JavaScript, TypeScript, C and C++ tests and programs can run under a debugger, through
 the [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) (the one VS Code
 and Zed use):
 
