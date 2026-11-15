@@ -555,8 +555,10 @@ mod tests {
     fn mount_paths_in_text_become_the_hosts() {
         let mount = mount_root("box");
         let path = |p: &str| local_path(&mount, p).to_string_lossy().into_owned();
-        let text = format!("cd '{}' && PATH={}:$PATH {} --init-file={} {}2/x", path("/home/me/my dir"), path("/opt/bin"), path("/usr/bin/zsh"), path("/tmp/rc"), mount.to_string_lossy());
-        assert_eq!(host_text(&mount, &text), format!("cd '/home/me/my dir' && PATH=/opt/bin:$PATH /usr/bin/zsh --init-file=/tmp/rc {}2/x", mount.to_string_lossy()));
+        // Another mount whose name starts the same stays as it is.
+        let other = local_path(&mount_root("box2"), "/x").to_string_lossy().into_owned();
+        let text = format!("cd '{}' && PATH={}:$PATH {} --init-file={} {other}", path("/home/me/my dir"), path("/opt/bin"), path("/usr/bin/zsh"), path("/tmp/rc"));
+        assert_eq!(host_text(&mount, &text), format!("cd '/home/me/my dir' && PATH=/opt/bin:$PATH /usr/bin/zsh --init-file=/tmp/rc {other}"));
         assert_eq!(host_text(&mount, &mount.to_string_lossy()), "/");
     }
 
