@@ -268,8 +268,11 @@ fn send(request: Request) {
 pub struct Caller {
     /// The workspace window (its entity id).
     pub window: u64,
-    /// Its project folder.
+    /// Its project's primary folder (`project-root`, where programs start
+    /// without a `cwd`, what relative project paths are in).
     pub root: Option<PathBuf>,
+    /// All the project's folders, the primary first: project files are in any of them.
+    pub folders: Vec<PathBuf>,
     /// The extension's `extensions.<id>` settings, as JSON.
     pub settings: String,
 }
@@ -692,22 +695,30 @@ impl HostState {
             }
             return Ok(inside);
         }
-        let root = self.caller.root.clone().ok_or_else(|| format!("{path} is outside the extension's folder"))?;
-        if !given.starts_with(&root) || given.components().any(|c| c == std::path::Component::ParentDir) {
+        if self.caller.root.is_none() {
+            return Err(format!("{path} is outside the extension's folder"));
+        }
+        if !self.in_project(given) || given.components().any(|c| c == std::path::Component::ParentDir) {
             return Err(format!("{path} is outside the extension's folder and the project"));
         }
         self.allow(permission)?;
         Ok(given.to_path_buf())
     }
 
-    /// A file in the open project, by a path relative to it or absolute in it.
+    /// A file in the open project, by a path relative to its primary folder
+    /// or absolute in any of its folders.
     fn project_path(&self, path: &str) -> Result<PathBuf, String> {
         let root = self.caller.root.clone().ok_or("no project is open")?;
         let full = if Path::new(path).is_absolute() { PathBuf::from(path) } else { root.join(path) };
-        if !full.starts_with(&root) || full.components().any(|c| c == std::path::Component::ParentDir) {
+        if !self.in_project(&full) || full.components().any(|c| c == std::path::Component::ParentDir) {
             return Err(format!("{path} is outside the project"));
         }
         Ok(full)
+    }
+
+    /// Whether `path` is in one of the project's folders.
+    fn in_project(&self, path: &Path) -> bool {
+        self.caller.folders.iter().any(|f| path.starts_with(f))
     }
 
     /// Asks the window the call is for, and waits for its answer (none when
@@ -867,7 +878,7 @@ impl v2::kuana::extension::host::Host for HostState {
         // The tab the user is in may hold any file: only one the code can
         // reach, and of one it can't, not even where it is.
         let shown = state.path.to_string_lossy().into_owned();
-        let reachable = state.path.starts_with(&self.work) || self.caller.root.as_ref().is_some_and(|root| state.path.starts_with(root));
+        let reachable = state.path.starts_with(&self.work) || self.in_project(&state.path);
         if !reachable {
             return Err("the file in this tab is outside the project and the extension's folder".into());
         }
@@ -901,8 +912,8 @@ impl v2::kuana::extension::host::Host for HostState {
         if content.len() as u64 > MAX_READ {
             return Err(format!("{path}: over {} MB", MAX_READ >> 20));
         }
-        // No link may lead out of the project: the nearest folder that exists is in it.
-        let root = self.caller.root.clone().ok_or("no project is open")?;
+        // No link may lead out of the project: the nearest folder that exists is in its folder.
+        let root = self.caller.folders.iter().find(|f| full.starts_with(f)).cloned().ok_or("no project is open")?;
         let real = |p: &Path| std::fs::canonicalize(p).map_err(|e| format!("{}: {e}", p.display()));
         let exists = full.ancestors().skip(1).find(|p| p.exists()).ok_or_else(|| format!("{path} is outside the project"))?;
         if !real(exists)?.starts_with(real(&root)?) || full.is_symlink() {
@@ -1034,11 +1045,10 @@ impl HostState {
     /// Programs run only for a trusted project (none open is fine: nothing
     /// of a project's can steer them then).
     fn trusted(&self) -> Result<(), String> {
-        match &self.caller.root {
-            Some(root) if !crate::trust::is_trusted(root) => {
-                Err(wasm::restricted_message(root))
-            }
-            _ => Ok(()),
+        // Every folder: a program may read any of them.
+        match self.caller.folders.iter().find(|f| !crate::trust::is_trusted(f)) {
+            Some(folder) => Err(wasm::restricted_message(folder)),
+            None => Ok(()),
         }
     }
 }

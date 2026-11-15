@@ -355,6 +355,7 @@ using it:
 - The project remembers its folders: reopening its first folder, from Recent Projects or at startup,
   brings back all of them with the tabs. Recent Projects names it by all its folders (`api, web`).
 - Folders are all on one machine: a remote project's Add Folder… asks for a folder on that machine.
+- Extensions see every folder: their project files are in any of them (`project-root` is the first).
 - Each folder's Git repository is its own: the Commit panel shows the current file's, and its
   repository button picks another (see [Several repositories](git.md)).
 - Run… and Debug… list each folder's commands and debug configurations, named after their folder
