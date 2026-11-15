@@ -207,8 +207,14 @@ impl Workspace {
 
     /// Open files may have a language now, or one with a grammar.
     /// The folder trust decides about: the project, else the active file's.
+    /// The folder trust is about: a project folder that isn't trusted (the
+    /// first), else the primary one; without a project, the file's folder.
     pub(super) fn trust_folder(&self, cx: &App) -> Option<PathBuf> {
-        self.primary_dir().or_else(|| self.active_editor(cx)?.read(cx).doc.read(cx).path.as_deref()?.parent().map(Path::to_path_buf))
+        if let Some(project) = &self.folders {
+            let untrusted = project.folders().iter().find(|f| !crate::trust::is_trusted(f));
+            return Some(untrusted.map_or_else(|| project.primary().to_path_buf(), Clone::clone));
+        }
+        self.active_editor(cx)?.read(cx).doc.read(cx).path.as_deref()?.parent().map(Path::to_path_buf)
     }
 
     pub(super) fn restricted(&self, cx: &App) -> bool {

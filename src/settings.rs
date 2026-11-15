@@ -93,6 +93,8 @@ pub struct Settings {
     pub reduce_visual_effects: Option<bool>,
     /// Which side of the editor the sidebar (Files, Commit) sits on.
     pub sidebar_dock: Option<SidebarDock>,
+    /// What Open… does with a folder while a project is open.
+    pub open_folder_in: Option<OpenFolderIn>,
     /// The window's layout: islands and browser-like tabs, or plain areas
     /// between separator lines (`UiStyle`).
     pub ui_style: Option<UiStyle>,
@@ -290,6 +292,31 @@ impl SidebarDock {
         match self {
             SidebarDock::Left => SidebarDock::Right,
             SidebarDock::Right => SidebarDock::Left,
+        }
+    }
+}
+
+/// What Open… does with a folder while the window has a project open.
+#[derive(Deserialize, JsonSchema, Default, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenFolderIn {
+    /// Asks: this window, a new one, or added to the project.
+    #[default]
+    Ask,
+    NewWindow,
+    ThisWindow,
+    AddToProject,
+}
+
+impl OpenFolderIn {
+    pub const ALL: [OpenFolderIn; 4] = [OpenFolderIn::Ask, OpenFolderIn::NewWindow, OpenFolderIn::ThisWindow, OpenFolderIn::AddToProject];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            OpenFolderIn::Ask => "ask",
+            OpenFolderIn::NewWindow => "new_window",
+            OpenFolderIn::ThisWindow => "this_window",
+            OpenFolderIn::AddToProject => "add_to_project",
         }
     }
 }
@@ -526,6 +553,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "visual_effects",
     "reduce_visual_effects",
     "sidebar_dock",
+    "open_folder_in",
     "ui_style",
     "project_avatar",
     "compact_activity_bar",
@@ -750,6 +778,20 @@ impl Settings {
         self.tools_location.unwrap_or_default()
     }
 
+    /// What Open… does with a folder while a project is open (ask unless set).
+    pub fn open_folder_in(&self) -> OpenFolderIn {
+        self.open_folder_in.unwrap_or_default()
+    }
+
+    /// Writes what Open… does; the default (ask) removes the key.
+    pub fn set_open_folder_in(choice: OpenFolderIn) -> std::io::Result<()> {
+        if choice == OpenFolderIn::default() {
+            Self::remove("open_folder_in")
+        } else {
+            Self::set("open_folder_in", choice.key().into())
+        }
+    }
+
     /// Writes where the tool buttons sit; the default (the activity bar) removes the key.
     pub fn set_tools_location(location: ToolsLocation) -> std::io::Result<()> {
         if location == ToolsLocation::default() {
@@ -866,6 +908,7 @@ impl Settings {
             "icon_theme" => self.icon_theme.is_some(),
             "visual_effects" => self.visual_effects.is_some() || self.reduce_visual_effects.is_some(),
             "sidebar_dock" => self.sidebar_dock.is_some(),
+            "open_folder_in" => self.open_folder_in.is_some(),
             "ui_style" => self.ui_style.is_some(),
             "project_avatar" => self.project_avatar.is_some(),
             "compact_activity_bar" => self.compact_activity_bar.is_some(),
@@ -1263,6 +1306,10 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // Which side of the editor the sidebar (Files, Commit) sits on: "left" or
   // "right".
   // "sidebar_dock": "left",
+  // What Open… does with a folder while a project is open: "ask" (this
+  // window, a new window, or add it to the project), "new_window",
+  // "this_window" or "add_to_project".
+  // "open_folder_in": "ask",
   // The window's layout: "modern" (rounded islands with gaps between them,
   // browser-like tabs) or "classic" (square areas separated by lines,
   // rectangular tabs).

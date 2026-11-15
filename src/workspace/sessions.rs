@@ -52,26 +52,31 @@ impl Workspace {
         }
         let mut pane_active = pane_active.into_iter();
         let pane_layout = (panes.len() > 1).then(|| self.center.save(&mut |_| pane_active.next().unwrap_or(0)));
+        // Paths in the primary folder are kept relative to it (as before
+        // several folders); the other folders' whole (`root.join` of a whole
+        // path is that path, so they read back the same way).
+        let saved = |path: &Path| -> Option<PathBuf> {
+            match path.strip_prefix(&root) {
+                Ok(rel) => Some(rel.to_path_buf()),
+                Err(_) => self.in_project(path).then(|| path.to_path_buf()),
+            }
+        };
         let mut expanded: Vec<PathBuf> =
-            self.tree.read(cx).expanded().iter().filter_map(|p| p.strip_prefix(&root).ok()).filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).collect();
+            self.tree.read(cx).expanded().iter().filter(|p| **p != root).filter_map(|p| saved(p)).collect();
         expanded.sort();
-        let mut breakpoints: Vec<FileBreakpoints> = self
-            .all_breakpoints(cx)
-            .into_iter()
-            .filter_map(|(path, breakpoints)| Some(FileBreakpoints { path: path.strip_prefix(&root).ok()?.to_path_buf(), breakpoints }))
-            .collect();
+        let mut breakpoints: Vec<FileBreakpoints> =
+            self.all_breakpoints(cx).into_iter().filter_map(|(path, breakpoints)| Some(FileBreakpoints { path: saved(&path)?, breakpoints })).collect();
         breakpoints.sort_by(|a, b| a.path.cmp(&b.path));
-        let mut bookmarks: Vec<FileBookmarks> = self
-            .all_bookmarks(cx)
-            .into_iter()
-            .filter_map(|(path, bookmarks)| Some(FileBookmarks { path: path.strip_prefix(&root).ok()?.to_path_buf(), bookmarks }))
-            .collect();
+        let mut bookmarks: Vec<FileBookmarks> =
+            self.all_bookmarks(cx).into_iter().filter_map(|(path, bookmarks)| Some(FileBookmarks { path: saved(&path)?, bookmarks })).collect();
         bookmarks.sort_by(|a, b| a.path.cmp(&b.path));
         let python_venv = crate::python::choice(&root).map(|c| c.to_saved());
         let terminals = Some(self.terminal_layout(cx));
         let last_run = self.last_run.clone();
+        let folders = self.folders.as_ref().map(|p| p.folders()[1..].to_vec()).unwrap_or_default();
         let session = ProjectSession {
             root,
+            folders,
             tabs,
             active,
             layout: None,
@@ -273,6 +278,33 @@ impl Workspace {
     /// Changes the recent projects list shared by all windows.
     pub(super) fn update_recent_projects(&mut self, f: impl FnOnce(&mut Vec<PathBuf>), cx: &mut App) {
         self.recent_projects = update_recent_projects(f, cx);
+    }
+
+    /// `project` was opened or its folders changed: it's the newest recent
+    /// project, listed by its primary folder, with its other folders noted
+    /// for Recent Projects to name.
+    pub(super) fn update_recent_projects_for(&mut self, project: &Project, cx: &mut App) {
+        let primary = project.primary().to_path_buf();
+        let others = project.folders()[1..].to_vec();
+        let first = primary.clone();
+        self.update_recent_projects(
+            move |list| {
+                list.retain(|p| p != &first);
+                list.insert(0, first);
+            },
+            cx,
+        );
+        SessionState::change_soon("project_folders", 0, move |state| {
+            if others.is_empty() {
+                state.project_folders.remove(&primary);
+            } else {
+                state.project_folders.insert(primary.clone(), others.clone());
+            }
+            // Only recent projects' folders are worth keeping.
+            let recent = state.recent_projects.clone();
+            state.project_folders.retain(|p, _| recent.contains(p));
+        });
+        crate::state::write_soon(cx).detach();
     }
 
     /// Remembers layout and the open folder for the next launch: at once

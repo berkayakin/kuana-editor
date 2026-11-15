@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     ops::Range,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -14,13 +14,14 @@ use std::{
 use gpui::{
     Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle,
     IntoElement, Render, ScrollStrategy, SharedString, StyledText, Subscription, Task,
-    UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    Hsla, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
 };
 
 use crate::{
     assets::Icon,
     editor::{Cancel, Editor, EditorEvent, Indent, MoveDown, MoveUp, Newline, Outdent, PageDown, PageUp, Submit},
-    project::ProjectSnapshot,
+    project::ProjectFiles,
+    project_folders::Project,
     search::{ProjectMatch, SearchOptions, SearchQuery, context_lines, project_files, search_project},
     theme::Theme,
     ui::{HoverFill, icon_el, input_box, kbd, modal_panel, text_button, toggle},
@@ -35,10 +36,20 @@ pub enum ProjectSearchEvent {
     Dismissed,
 }
 
+/// Where Find in Files looks: folders (a project's, or one asked for), the
+/// project's scanned files when they cover them, and the project for labels.
+pub struct SearchPlaces {
+    /// The folders it can search; with several, the user picks one or all.
+    pub folders: Vec<PathBuf>,
+    /// The project's files, when they're scanned and hold `folders`.
+    pub files: Option<ProjectFiles>,
+    pub project: Option<Project>,
+}
+
 pub struct ProjectSearch {
-    root: PathBuf,
-    /// The project's files, when they're scanned and `root` is in the project.
-    project: Option<Arc<ProjectSnapshot>>,
+    places: SearchPlaces,
+    /// The one of `places.folders` searched; all of them when None.
+    scope: Option<usize>,
     query: Entity<Editor>,
     replacement: Entity<Editor>,
     replace_mode: bool,
@@ -61,8 +72,7 @@ impl EventEmitter<ProjectSearchEvent> for ProjectSearch {}
 
 impl ProjectSearch {
     pub fn new(
-        root: PathBuf,
-        project: Option<Arc<ProjectSnapshot>>,
+        places: SearchPlaces,
         initial: Option<String>,
         replace_mode: bool,
         overrides: HashMap<PathBuf, Arc<str>>,
@@ -77,8 +87,8 @@ impl ProjectSearch {
         window.focus(&query.focus_handle(cx));
         let subscription = cx.subscribe(&query, |this, _, _: &EditorEvent, cx| this.search(cx));
         let mut this = Self {
-            root,
-            project,
+            places,
+            scope: None,
             query,
             replacement,
             replace_mode,
@@ -123,7 +133,8 @@ impl ProjectSearch {
         };
         self.error = None;
         self.searching = true;
-        let (root, project) = (self.root.clone(), self.project.clone());
+        let folders = self.searched().to_vec();
+        let (files, project) = (self.places.files.clone(), self.places.project.clone());
         let overrides = self.overrides.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel = cancel.clone();
@@ -134,12 +145,21 @@ impl ProjectSearch {
             // Matches stream in as they're found, in batches.
             let (found_tx, mut found) = futures::channel::mpsc::unbounded();
             let search = cx.background_executor().spawn(async move {
-                // The project's files under the folder searched, else a walk of it.
-                let files = match project {
-                    Some(project) => project.searchable().into_iter().filter(|p| p.starts_with(&root)).collect(),
-                    None => project_files(&root),
+                // The project's files in the folders searched, else a walk of each.
+                let files = match files {
+                    Some(files) => files.searchable().into_iter().filter(|p| folders.iter().any(|f| p.starts_with(f))).collect(),
+                    None => folders.iter().flat_map(|f| project_files(f)).collect(),
                 };
-                search_project(&root, files, &query, &overrides, &cancel, |batch, files| {
+                // As the project shows them (its folder's name in front with
+                // several), else relative to the folder searched.
+                let label = |path: &Path| match project.as_ref().and_then(|p| p.relative(path)) {
+                    Some(rel) => rel,
+                    None => match folders.iter().find(|f| path.starts_with(f)) {
+                        Some(folder) => path.strip_prefix(folder).unwrap_or(path).to_string_lossy().into_owned(),
+                        None => path.to_string_lossy().into_owned(),
+                    },
+                };
+                search_project(&label, files, &query, &overrides, &cancel, |batch, files| {
                     let _ = found_tx.unbounded_send((batch, files));
                 })
             });
@@ -228,6 +248,21 @@ impl ProjectSearch {
     pub fn refresh(&mut self, overrides: HashMap<PathBuf, Arc<str>>, cx: &mut Context<Self>) {
         self.overrides = overrides;
         self.search(cx);
+    }
+
+    /// The folders this search reads: the one picked, or all of them.
+    fn searched(&self) -> &[PathBuf] {
+        match self.scope {
+            Some(ix) => std::slice::from_ref(&self.places.folders[ix]),
+            None => &self.places.folders,
+        }
+    }
+
+    fn set_scope(&mut self, scope: Option<usize>, cx: &mut Context<Self>) {
+        if self.scope != scope {
+            self.scope = scope;
+            self.search(cx);
+        }
     }
 
     fn toggle_option(&mut self, f: impl FnOnce(&mut SearchOptions), cx: &mut Context<Self>) {
@@ -362,11 +397,49 @@ impl Render for ProjectSearch {
             )
         };
         let title = if self.replace_mode { "Replace in Files" } else { "Find in Files" };
-        let scope = self
-            .root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        // One folder: its name. Several: All and each, the one searched lit.
+        let names: Vec<String> = self.places.folders.iter().map(|f| crate::project_folders::folder_name(f)).collect();
+        let scope = div().flex().items_center().gap_1().min_w_0().children(match names.len() {
+            1 => vec![
+                div()
+                    .id(("ps-scope", 0usize))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_1p5()
+                    .rounded(px(5.))
+                    .bg(theme.hover)
+                    .text_size(px(12.))
+                    .text_color(theme.text_muted)
+                    .child(icon_el(Icon::Folder, px(12.), theme.text_muted.into()))
+                    .child(names[0].clone())
+                    .into_any_element(),
+            ],
+            _ => std::iter::once((None, "All Folders".to_string()))
+                .chain(names.iter().cloned().enumerate().map(|(ix, name)| (Some(ix), name)))
+                .enumerate()
+                .map(|(n, (scope, name))| {
+                    let on = self.scope == scope;
+                    let (text, rest) = if on { (theme.text, Hsla::from(theme.active)) } else { (theme.text_muted, Hsla::from(theme.hover).alpha(0.)) };
+                    div()
+                        .id(("ps-scope", n))
+                        .flex()
+                        .flex_shrink_0()
+                        .items_center()
+                        .gap_1()
+                        .px_1p5()
+                        .rounded(px(5.))
+                        .text_size(px(12.))
+                        .text_color(text)
+                        .cursor_pointer()
+                        .when(scope.is_some(), |el| el.child(icon_el(Icon::Folder, px(12.), text.into())))
+                        .child(name)
+                        .hover_fill(rest, theme.hover)
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_scope(scope, cx)))
+                        .into_any_element()
+                })
+                .collect(),
+        });
 
         let header = div()
             .flex()
@@ -377,19 +450,7 @@ impl Render for ProjectSearch {
             .pb_2()
             .child(icon_el(Icon::TextSearch, px(15.), theme.text_muted.into()))
             .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_1p5()
-                    .rounded(px(5.))
-                    .bg(theme.hover)
-                    .text_size(px(12.))
-                    .text_color(theme.text_muted)
-                    .child(icon_el(Icon::Folder, px(12.), theme.text_muted.into()))
-                    .child(scope),
-            )
+            .child(scope)
             .child(div().flex_1().text_size(px(12.)).text_color(if self.error.is_some() { theme.error } else { theme.text_dim }).child(summary))
             .child(toggle("ps-case", "Cc", opts.case_sensitive, "Match Case", cx).on_click(cx.listener(|this, _, _, cx| this.toggle_option(|o| o.case_sensitive = !o.case_sensitive, cx))))
             .child(toggle("ps-word", "W", opts.whole_word, "Words", cx).on_click(cx.listener(|this, _, _, cx| this.toggle_option(|o| o.whole_word = !o.whole_word, cx))))

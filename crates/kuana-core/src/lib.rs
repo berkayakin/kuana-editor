@@ -10,5 +10,6 @@ pub mod paths;
 pub mod process;
 pub mod remote;
 pub mod project;
+pub mod project_folders;
 pub mod search;
 pub mod watcher;

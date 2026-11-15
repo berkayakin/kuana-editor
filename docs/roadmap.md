@@ -38,6 +38,5 @@ Making what's there dependable on every platform before adding more.
 
 Bigger pieces that need a design first; feedback on which matter most is welcome.
 
-- Several folders in one window (multi-root workspaces).
 - Screen reader support, which depends on the GPUI framework.
 - Localization.

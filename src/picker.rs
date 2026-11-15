@@ -403,8 +403,12 @@ impl Picker {
     }
 
     /// A recent project, matched on its folder name and `~`-relative location.
-    fn project_item(&mut self, path: &Path, pattern: Option<&Pattern>) -> Option<(u32, Item)> {
-        let (score, name, dir, name_hl, dir_hl) = self.match_path(&display_path(path), pattern)?;
+    fn project_item(&mut self, path: &Path, folders: &std::collections::HashMap<PathBuf, Vec<PathBuf>>, pattern: Option<&Pattern>) -> Option<(u32, Item)> {
+        let (score, mut name, dir, name_hl, dir_hl) = self.match_path(&display_path(path), pattern)?;
+        // A project of several folders: all their names (the first's matched).
+        if folders.contains_key(path) {
+            name = crate::state::recent_project_name(path, folders).into();
+        }
         let bonus = if !name_hl.is_empty() { 20 } else { 0 };
         Some((score + bonus, Item::Project { path: path.to_path_buf(), name, dir, name_hl, dir_hl }))
     }
@@ -522,12 +526,13 @@ impl Picker {
 
         if self.mode == PickerMode::Projects {
             let mut scored: Vec<(u32, Item)> = Vec::new();
+            let folders = crate::state::SessionState::load().project_folders;
             for p in self.recent.clone() {
                 // The window's own project is already open.
                 if self.project.as_ref().map(Project::primary) == Some(p.as_path()) {
                     continue;
                 }
-                if let Some(item) = self.project_item(&p, pattern.as_ref()) {
+                if let Some(item) = self.project_item(&p, &folders, pattern.as_ref()) {
                     scored.push(item);
                 }
             }

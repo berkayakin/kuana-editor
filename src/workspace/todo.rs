@@ -79,7 +79,9 @@ impl Workspace {
 
     /// Reads every file of the project, in the background.
     fn scan_todos(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.primary_dir() else { return };
+        if self.folders.is_none() {
+            return;
+        }
         self.todo.cancel.store(true, Ordering::Relaxed);
         let cancel = Arc::new(AtomicBool::new(false));
         self.todo.cancel = cancel.clone();
@@ -92,9 +94,9 @@ impl Workspace {
             self.refresh_todo_tab(cx);
             return;
         };
-        let paths = self.project.searchable();
+        let paths = self.files.searchable();
         // The project's files aren't listed yet: read them when they are.
-        self.todo.waiting_for_files = paths.is_empty() && self.project.root() != root.as_path();
+        self.todo.waiting_for_files = !self.folders.as_ref().is_some_and(|p| self.files.covers(p.folders()));
         let overrides = self.open_buffers(cx);
         self.todo.scanning = true;
         self.todo.task = Some(cx.spawn(async move |this, cx| {
@@ -165,11 +167,12 @@ impl Workspace {
         }
         let Some(regex) = todo::regex(&self.todo.patterns) else { return };
         let pending = std::mem::take(&mut self.todo.pending);
+        let searched = self.searched_files();
         let Some(files) = self.todo.files.as_mut() else { return };
         // A folder that went (or came, renamed): what was listed under it
         // goes, and what the project has in it now is read.
         let mut wanted = Vec::new();
-        let openable = self.project.openable();
+        let openable = self.files.openable();
         for path in pending {
             files.retain(|p, _| p == &path || !p.starts_with(&path));
             if path.is_dir_on_host() {
@@ -179,14 +182,12 @@ impl Workspace {
             }
         }
         // Not files Find in Files skips (ignored ones), nor ones that went.
-        let (project, ignore) = (self.project.clone(), self.ignore.clone());
         wanted.retain(|path| {
-            let listed = project.is_searchable(path);
-            let unlisted = !project.lists(path) && path.is_file_on_host() && !ignore.as_ref().is_some_and(|i| i.matched_path_or_any_parents(path, false).is_ignore());
-            if !(listed || unlisted) {
+            let read = searched.reads(path);
+            if !read {
                 files.remove(path);
             }
-            listed || unlisted
+            read
         });
         if wanted.is_empty() {
             self.refresh_todo_tab(cx);

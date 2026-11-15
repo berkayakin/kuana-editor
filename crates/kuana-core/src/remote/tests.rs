@@ -168,7 +168,7 @@ fn watching_scanning_and_searching_happen_there() {
     assert_eq!(files, [project.join(".gitignore"), project.join("src/lib.rs")]);
     let query = crate::search::SearchQuery::new("needle", Default::default()).unwrap().unwrap();
     let mut found = Vec::new();
-    crate::search::search_project(&project, files, &query, &Default::default(), &AtomicBool::new(false), |m, _| found.extend(m));
+    crate::search::search_project(&crate::search::relative_to(&project), files, &query, &Default::default(), &AtomicBool::new(false), |m, _| found.extend(m));
     assert_eq!(found.iter().map(|m| m.path.clone()).collect::<Vec<_>>(), [project.join("src/lib.rs")]);
 
     // Changes made there come back with mount paths.

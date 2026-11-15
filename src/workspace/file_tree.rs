@@ -5,26 +5,35 @@ use super::*;
 impl Workspace {
     // ---- File tree --------------------------------------------------------------
 
+    /// Opens a project of one folder (and the other folders its session had).
     pub fn set_root(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_folders(vec![root], window, cx);
+    }
+
+    /// Opens a project: `folders`, the first its primary one, then the
+    /// other folders its session had that still exist.
+    pub fn open_folders(&mut self, folders: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = folders.first().cloned() else { return };
         // They belong to the project that was open.
         self.close_tool_windows(cx);
-        self.update_recent_projects(
-            |list| {
-                list.retain(|p| p != &root);
-                list.insert(0, root.clone());
-            },
-            cx,
-        );
         self.breakpoints.clear();
         self.bookmarks.clear();
         self.nav.clear();
         self.reset_todos();
         self.reset_tests();
+        let mut session = ProjectSession::load(&root);
+        let mut project = Project::new(root.clone());
+        let saved = session.iter().flat_map(|s| s.folders.iter().cloned());
+        for folder in folders[1..].iter().cloned().chain(saved) {
+            if folder.is_dir_on_host() {
+                // One that can't be added (nested, another machine, twice) is left out.
+                let _ = project.add(folder);
+            }
+        }
         self.problems.update(cx, |p, cx| {
             p.set_run(None, cx);
-            p.set_project(Some(crate::project_folders::Project::new(root.clone())), cx);
+            p.set_project(Some(project.clone()), cx);
         });
-        let mut session = ProjectSession::load(&root);
         let pending = self.pending_ports.take().filter(|(path, _)| *path == root).map(|(_, ports)| ports);
         let ports: Vec<u16> = session.iter().flat_map(|s| s.forwarded_ports.iter().copied()).chain(pending.into_iter().flatten()).collect();
         // The folders that were open last time, if they still exist.
@@ -50,7 +59,8 @@ impl Workspace {
         let venv = session.and_then(|s| s.python_venv).map(|saved| crate::python::Choice::from_saved(&saved));
         crate::python::set_choice(&root, venv);
         self.venv_shown.take();
-        self.folders = Some(Project::new(root.clone()));
+        self.update_recent_projects_for(&project, cx);
+        self.folders = Some(project);
         // A remote project: its connection is watched.
         self.watch_connection(window, cx);
         self.forward_ports(ports, cx);
@@ -58,12 +68,12 @@ impl Workspace {
         self.refresh_extension_views(cx);
         self.extension_callers_changed(cx);
         self.show_sidebar = SessionState::load().show_sidebar.unwrap_or(true);
-        self.tree.update(cx, |t, cx| t.set_root(Some(root), expanded, cx));
+        let folders = self.folders.as_ref().map(|p| p.folders().to_vec()).unwrap_or_default();
+        self.tree.update(cx, |t, cx| t.set_roots(folders, expanded, cx));
+        self.files = ProjectFiles::default();
         self.refresh_file_index(cx);
         self.start_watching(cx);
-        if let Some(root) = self.primary_dir() {
-            self.detect_repo(root, cx);
-        }
+        self.detect_repo(root, cx);
         self.save_state(cx);
         // Problems in the project's settings file show when it opens.
         if let Some(project) = &self.folders {
@@ -165,6 +175,15 @@ impl Workspace {
         if is_dir {
             add(MenuEntry::item("Find in Folder…", Icon::TextSearch), Some(TreeAction::FindInFolder(path.clone())));
             add(MenuEntry::item("Collapse All", Icon::ChevronsDownUp), Some(TreeAction::CollapseAll));
+        }
+        // A project folder's own row: the project's folders.
+        if is_root {
+            add(MenuEntry::Separator, None);
+            add(MenuEntry::item("Add Folder to Project…", Icon::FolderPlus), Some(TreeAction::AddFolder));
+            let primary = self.primary_folder() == Some(path.as_path());
+            if !primary {
+                add(MenuEntry::item("Remove Folder from Project", Icon::X), Some(TreeAction::RemoveFolder(path.clone())));
+            }
         }
 
         // Git actions for this file, or every changed file inside this folder.

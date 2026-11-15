@@ -132,7 +132,7 @@ impl Workspace {
                     }
                     Ok(connected) => match then {
                         Some((path, target)) => ws.open_project(path, target, window, cx),
-                        None => ws.ask_for_remote_folder(connected, window, cx),
+                        None => ws.ask_for_remote_folder(connected, OpenIn::Auto, window, cx),
                     },
                     // Tried again by itself after the connection went: the user may try once more.
                     Err(err) if ws.reconnecting.take().is_some() => {
@@ -147,11 +147,14 @@ impl Workspace {
     }
 
     /// Asks which folder on a connected host to open (`~/…` is the home's).
-    fn ask_for_remote_folder(&mut self, connected: connection::Connected, window: &mut Window, cx: &mut Context<Self>) {
+    /// Asks for a folder on a connected machine, then opens it (`target`)
+    /// or adds it to the project.
+    pub(super) fn ask_for_remote_folder(&mut self, connected: connection::Connected, target: OpenIn, window: &mut Window, cx: &mut Context<Self>) {
         self.close_modal(window, cx);
         let label = connected.transport.label();
         let hint = format!("A folder on {label}");
-        let dialog = cx.new(|cx| InputDialog::new(format!("Open Folder on {label}"), Icon::Folder, hint, "~/", None, window, cx));
+        let title = if target == OpenIn::AddToProject { format!("Add Folder on {label}") } else { format!("Open Folder on {label}") };
+        let dialog = cx.new(|cx| InputDialog::new(title, Icon::Folder, hint, "~/", None, window, cx));
         let subscription = cx.subscribe_in(&dialog, window, move |ws, dialog, event: &InputDialogEvent, window, cx| {
             let typed = match event {
                 InputDialogEvent::Confirm(text) => text.trim().to_string(),
@@ -172,7 +175,10 @@ impl Workspace {
                 return;
             }
             ws.close_modal(window, cx);
-            ws.open_project(path, OpenIn::Auto, window, cx);
+            match target {
+                OpenIn::AddToProject => ws.add_folders(vec![path], window, cx),
+                target => ws.open_project(path, target, window, cx),
+            }
         });
         self.modals.open(Modal::Input(dialog), subscription);
         cx.notify();

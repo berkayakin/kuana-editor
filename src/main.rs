@@ -2,7 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 // The GPUI-free core (`crates/kuana-core`), at the root as before.
-use kuana_core::{encoding, exec, fs, paths, process, project, search, watcher};
+use kuana_core::{encoding, exec, fs, paths, process, project, project_folders, search, watcher};
 mod about;
 #[cfg(test)]
 mod host_lint;
@@ -69,7 +69,6 @@ mod postfix;
 mod preview;
 mod problems_panel;
 mod project_settings;
-mod project_folders;
 mod project_tree;
 mod test_explorer;
 mod todo;
@@ -109,7 +108,7 @@ use crate::{
         CheckForUpdates, CloseTab, CloseWindow, DecreaseFontSize, FileStructure, Find, IncreaseFontSize, OpenSettings, OpenExtensions, ProjectTrust,
         ResetFontSize, Rerun, RunConfiguration, SplitDown, SplitRight, StopRun, ShowFileHistory, ToggleGitLog, ToggleTerminal, FindAction, FindInFiles, GitBranches, GitStash, ManageRemotes, GitClone, GitFetch,
         GitInit, GitPull, GitPush, GitSync, GitUndoCommit, GoToFile, GoToLine, MinimizeWindow, ZoomWindow, NewFile, NewWindow, NextTab, OpenFile,
-        OpenFolder, OpenFolderInThisWindow, ConnectToHost, ConnectToWsl, AttachToContainer, OpenInDevContainer, OpenRemote, PrevTab, Quit, RecentFiles, RecentProjects,
+        OpenFolder, OpenFolderInThisWindow, AddFolderToProject, ConnectToHost, ConnectToWsl, AttachToContainer, OpenInDevContainer, OpenRemote, PrevTab, Quit, RecentFiles, RecentProjects,
         Replace, ReplaceInFiles, Save, SaveAs, SearchEverywhere, SelectTheme, ShowCommit,
         ToggleProblems, ToggleResults, ToggleSidebar, ToggleSecondSidebar, ToggleZenMode, ImportSettings, WelcomeSetup, GoToSymbol, InstallShellCommand,
         DebugConfiguration, Resume, PauseProgram, StepOver, StepInto, StepOut, AttachToProcess, AddConditionalBreakpoint, AddLogpoint,
@@ -134,6 +133,7 @@ fn menus_for(mac: bool) -> Vec<Menu> {
         MenuItem::action("Open File…", OpenFile),
         MenuItem::action("Open Folder…", OpenFolder),
         MenuItem::action("Open Folder in This Window…", OpenFolderInThisWindow),
+        MenuItem::action("Add Folder to Project…", AddFolderToProject),
         MenuItem::action("Recent Projects…", RecentProjects),
         MenuItem::action("Connect to SSH Host…", ConnectToHost),
     ];
@@ -579,22 +579,20 @@ fn main() {
         // Kuanas from before they did too.
         workspace::update_recent_projects(|_| {}, cx);
 
-        // Each folder on the command line gets its own window;
-        // files open in the first one. Without paths, reopen the last project.
+        // The folders on the command line are one project (the first its
+        // primary folder); files open in it. Without paths, reopen the last project.
         let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) = args
             .into_iter()
             .map(|p| paths::canonicalize(&p).unwrap_or(p))
             .partition(|p| p.is_dir());
-        let mut dirs = dirs.into_iter();
-        let first_dir = dirs.next();
-        let restore = first_dir.is_none() && files.is_empty();
+        let restore = dirs.is_empty() && files.is_empty();
         let onboarding = state::SessionState::needs_onboarding();
-        let mut last = workspace::open_window(None, cx, move |workspace, window, cx| {
+        let first = workspace::open_window(None, cx, move |workspace, window, cx| {
             if restore {
                 workspace.restore_last_project(window, cx);
             }
-            if let Some(dir) = first_dir {
-                workspace.set_root(dir, window, cx);
+            if !dirs.is_empty() {
+                workspace.open_folders(dirs, window, cx);
             }
             for path in files {
                 workspace.open_path(path, window, cx);
@@ -603,11 +601,6 @@ fn main() {
                 workspace.show_onboarding(window, cx);
             }
         });
-        let first = last;
-        for dir in dirs {
-            let near = last.and_then(|w| w.update(cx, |_, window, _| window.bounds()).ok());
-            last = workspace::open_window(near, cx, move |workspace, window, cx| workspace.set_root(dir, window, cx)).or(last);
-        }
         cx.activate(true);
         match autopilot {
             Some(steps) => autopilot::run(steps, cx),

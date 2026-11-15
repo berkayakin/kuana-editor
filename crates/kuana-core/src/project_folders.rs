@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use kuana_core::remote::connection::host_of;
+use crate::remote::connection::host_of;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Project {
@@ -15,7 +15,6 @@ pub struct Project {
 
 /// Why a folder can't be added.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum AddError {
     /// It's in the project already.
     Duplicate,
@@ -78,7 +77,6 @@ impl Project {
     }
 
     /// Adds a folder after the others.
-    #[allow(dead_code)] // Add Folder to Project (phase 1)
     pub fn add(&mut self, folder: PathBuf) -> Result<(), AddError> {
         if self.is_folder(&folder) {
             return Err(AddError::Duplicate);
@@ -96,7 +94,6 @@ impl Project {
 
     /// Removes a folder; never the last one. False when it wasn't there or
     /// was the only one.
-    #[allow(dead_code)] // Remove Folder from Project (phase 1)
     pub fn remove(&mut self, folder: &Path) -> bool {
         if self.folders.len() == 1 {
             return false;

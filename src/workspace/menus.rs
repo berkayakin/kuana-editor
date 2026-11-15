@@ -338,6 +338,8 @@ impl Workspace {
             }
             TreeAction::Reveal(path) => cx.reveal_path(&path),
             TreeAction::FindInFolder(dir) => self.open_project_search_in(Some(dir), false, window, cx),
+            TreeAction::AddFolder => self.add_folder_to_project(&AddFolderToProject, window, cx),
+            TreeAction::RemoveFolder(folder) => self.remove_folder(&folder, window, cx),
             TreeAction::CollapseAll => {
                 self.tree.update(cx, |t, cx| t.collapse_all(cx));
                 self.schedule_session_save(cx);
@@ -835,7 +837,7 @@ impl Workspace {
         self.after_fs_change(&added, cx);
         self.schedule_session_save(cx);
         let Some(repo) = self.repo(cx).filter(|r| added.iter().all(|p| p.starts_with(r))) else { return };
-        let ignored: Vec<bool> = added.iter().map(|p| self.ignore.as_ref().is_some_and(|i| i.matched_path_or_any_parents(p, p.is_dir_on_host()).is_ignore())).collect();
+        let ignored: Vec<bool> = added.iter().map(|p| self.project_ignores(p, p.is_dir_on_host())).collect();
         let added: Vec<PathBuf> = added.into_iter().zip(ignored).filter(|(_, ignored)| !ignored).map(|(p, _)| p).collect();
         if added.is_empty() {
             return;
@@ -883,7 +885,23 @@ impl Workspace {
     /// Opens what another app asked Kuana to open (Finder, the `kuana` command).
     pub fn open_external(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         window.activate_window();
-        self.open_dropped(&paths, window, cx);
+        // Several folders at once (`kuana api web`) are one project of several
+        // folders: here without a project, else in a window of its own.
+        let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(|p| p.is_dir_on_host());
+        if dirs.len() > 1 {
+            let dirs: Vec<PathBuf> = dirs.into_iter().map(|d| crate::paths::canonicalize(&d).unwrap_or(d)).collect();
+            if self.folders.is_none() {
+                self.open_folders(dirs, window, cx);
+                self.open_dropped(&files, window, cx);
+            } else {
+                open_window(Some(window.bounds()), cx, move |ws, window, cx| {
+                    ws.open_folders(dirs, window, cx);
+                    ws.open_dropped(&files, window, cx);
+                });
+            }
+            return;
+        }
+        self.open_dropped(&dirs.into_iter().chain(files).collect::<Vec<_>>(), window, cx);
     }
 
     /// Installs the `kuana` command (it may ask for an administrator password).

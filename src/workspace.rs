@@ -53,7 +53,7 @@ use crate::{
         results::{QueryResults, QueryResultsEvent},
         view::{DatabaseEvent, DatabaseView},
     },
-    project::{Applied, ProjectSnapshot, project_ignore},
+    project::{Applied, ProjectFiles, ProjectSnapshot, project_ignore},
     project_tree::{ProjectTree, TreeEvent},
     find_bar::{FindBar, FindBarEvent},
     keymap,
@@ -70,7 +70,7 @@ use crate::{
         WindowPlacement,
     },
     syntax::Language,
-    settings::{self, AutoSave, Settings, StartupProblems},
+    settings::{self, AutoSave, OpenFolderIn, Settings, StartupProblems},
     run::{self, DebugSpec, RunTarget},
     terminal::{RunState, TerminalClear, TerminalCopy, TerminalEvent, TerminalFind, TerminalPaste, TerminalView},
     theme::{self, Theme},
@@ -92,6 +92,7 @@ mod bookmarks;
 mod commands;
 mod compare;
 mod file_tree;
+mod folders;
 mod git_ops;
 mod import;
 mod copilot;
@@ -160,6 +161,8 @@ actions!(
         OpenFile,
         OpenFolder,
         OpenFolderInThisWindow,
+        /// Adds folders to this window's project (several folders in one window).
+        AddFolderToProject,
         /// A project on another machine over SSH (`workspace/remote.rs`).
         ConnectToHost,
         /// A project in a WSL distribution (Windows).
@@ -333,12 +336,15 @@ actions!(
 const MAX_RECENT_PROJECTS: usize = 10;
 
 /// Where a folder opens.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum OpenIn {
     /// Replace this window's project (asking about unsaved edits first).
     ThisWindow,
     NewWindow,
-    /// This window if it has no project yet, otherwise a new one.
+    /// Add the folder to this window's project.
+    AddToProject,
+    /// This window if it has no project yet; otherwise as `open_folder_in`
+    /// says (asking, unless set).
     Auto,
 }
 
@@ -464,6 +470,10 @@ struct Resize {
 /// Something the file-tree context menu can do.
 #[derive(Clone)]
 enum TreeAction {
+    /// Add Folder to Project… (a project folder's row).
+    AddFolder,
+    /// A project folder's row: take it out of the project.
+    RemoveFolder(PathBuf),
     NewFile(PathBuf),
     NewFolder(PathBuf),
     Open(PathBuf),
@@ -867,16 +877,16 @@ pub struct Workspace {
     find_bar: Entity<FindBar>,
     show_find: bool,
     modals: ModalLayer,
-    /// All project files, refreshed in the background.
-    /// The project's files (see `crate::project`), kept up to date from the watcher.
-    project: Arc<ProjectSnapshot>,
-    /// Scanning the project, or catching up with changes (one at a time).
+    /// The project's files, a scan per folder (see `crate::project`), kept
+    /// up to date from the watcher.
+    files: ProjectFiles,
+    /// Scanning folders, or catching up with changes (one at a time).
     project_task: Option<Task<()>>,
     /// Changes waiting for the running update.
     project_changes: Vec<PathBuf>,
-    /// The project folder was deleted (or moved) while open: reported once,
-    /// its Git state dropped; detected again if it comes back.
-    root_gone: bool,
+    /// Project folders deleted (or moved) while open: reported once, the
+    /// primary's Git state dropped; detected again if they come back.
+    folders_gone: HashSet<PathBuf>,
     /// Most recently used files, newest first.
     recent: Vec<PathBuf>,
     /// Back / Forward (`workspace/nav_history.rs`).
@@ -990,8 +1000,9 @@ pub struct Workspace {
     /// Watches the project folder; `watch_task` applies what it reports.
     watcher: Option<Watcher>,
     watch_task: Option<Task<()>>,
-    /// The project's .gitignore, to skip Git refreshes for ignored churn.
-    ignore: Option<Arc<ignore::gitignore::Gitignore>>,
+    /// Each project folder's own .gitignore (folders without one left out),
+    /// to skip Git refreshes for ignored churn.
+    ignores: HashMap<PathBuf, Arc<ignore::gitignore::Gitignore>>,
     /// The running Go to Symbol request; replaced as the query changes.
     symbol_task: Option<Task<()>>,
     /// Welcome Setup, shown in place of everything below the title bar.
@@ -1099,6 +1110,11 @@ impl Workspace {
                 }
             }
             TreeEvent::Menu { path, is_dir, position } => ws.open_tree_menu(path.clone(), *is_dir, *position, window, cx),
+            TreeEvent::SpaceMenu { position } => ws.open_tree_space_menu(*position, window, cx),
+            TreeEvent::AddFolders(paths) => {
+                let folders: Vec<PathBuf> = paths.iter().filter(|p| p.is_dir_on_host()).cloned().collect();
+                ws.add_folders(folders, window, cx);
+            }
             TreeEvent::Move { from, into } => ws.move_entry(from.clone(), into.clone(), cx),
             TreeEvent::CopyIn { paths, into } => ws.drop_into_tree(paths.clone(), into.clone(), window, cx),
             TreeEvent::Create { dir, folder } => {
@@ -1374,10 +1390,10 @@ impl Workspace {
             find_bar,
             show_find: false,
             modals: ModalLayer::default(),
-            project: Arc::default(),
+            files: ProjectFiles::default(),
             project_task: None,
             project_changes: Vec::new(),
-            root_gone: false,
+            folders_gone: HashSet::new(),
             recent: Vec::new(),
             nav: Default::default(),
             connecting: None,
@@ -1441,7 +1457,7 @@ impl Workspace {
             trust_waits: false,
             watcher: None,
             watch_task: None,
-            ignore: None,
+            ignores: HashMap::new(),
             symbol_task: None,
             lsp,
             documents,

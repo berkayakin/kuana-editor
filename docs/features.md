@@ -109,6 +109,10 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   keys), in WSL and in containers, dev containers (`devcontainer.json`) included; files, search,
   Git, language servers, terminals, Run, tests and debugging work there through a small server
   Kuana installs, ports are forwarded to this computer, and a dropped connection comes back by itself
+- Several folders in one window: Add Folder to Project… (or `kuana api web`) puts each folder in
+  the file tree as a row of its own, with search, Go to File, TODO, tests and problems across all
+  of them and language servers, settings and trust per folder; the project remembers its folders.
+  See [Several folders in one window](editing.md#several-folders-in-one-window)
 - Multiple windows, one project each, with a Recent Projects picker; on macOS the
   Window menu and the Dock icon's menu list them. Recent projects are also in the Dock icon's
   menu (macOS) and the taskbar's jump list (Windows)
