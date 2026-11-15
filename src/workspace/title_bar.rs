@@ -178,7 +178,7 @@ impl Workspace {
             let width = window.text_system().shape_line(text.to_string().into(), size, &[run], None).width;
             Text { width: f32::from(width), chars: text.chars().count().max(1) }
         };
-        let project = self.root.as_deref().map(|root| measure(&folder_name(root), FontWeight::SEMIBOLD));
+        let project = self.folders.as_ref().map(|p| measure(&p.name(), FontWeight::SEMIBOLD));
         let branch = (self.has_repo(cx) && !icons).then(|| measure(&self.branch_label(cx), FontWeight::NORMAL));
         let restricted = (self.restricted(cx) && !icons).then(|| RESTRICTED_LABEL_CHROME + measure("Restricted Mode", FontWeight::NORMAL).width);
         // As icons, their room is kept aside and the project fitted to the rest.
@@ -206,7 +206,7 @@ impl Workspace {
         let project_chrome = if fit.monogram { PROJECT_CHROME } else { PROJECT_CHROME_PLAIN };
         let widths = [
             fit.project.map(|chars| match chars {
-                Some(chars) => project_chrome + self.root.as_deref().map_or(0., |root| name(folder_name(root), chars, FontWeight::SEMIBOLD)),
+                Some(chars) => project_chrome + self.folders.as_ref().map_or(0., |p| name(p.name(), chars, FontWeight::SEMIBOLD)),
                 None => PROJECT_MONOGRAM,
             }),
             fit.branch.map(|chars| chars.map_or(ICON_CHIP, |chars| BRANCH_CHROME + name(self.branch_label(cx), chars, FontWeight::NORMAL))),
@@ -312,7 +312,7 @@ impl Workspace {
     /// `avatar` shows (it's off in tight room and with `project_avatar` off).
     pub(super) fn render_project_chip(&self, chars: Option<usize>, avatar: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = crate::ui::chrome_theme(Theme::get(cx));
-        let name = self.root.as_deref().map(folder_name).unwrap_or_default();
+        let name = self.folders.as_ref().map(Project::name).unwrap_or_default();
         let initial = name.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().to_string()).unwrap_or_default();
         let tint = monogram_color(&name, &theme);
         div()
@@ -497,8 +497,8 @@ impl Workspace {
             Some(item) => format!("{}{}", item.tab_title(cx), if item.is_dirty(cx) { " •" } else { "" }),
             None => "Kuana".into(),
         };
-        if let Some(root) = self.root.as_deref() {
-            title.push_str(&format!(" — {}", folder_name(root)));
+        if let Some(project) = &self.folders {
+            title.push_str(&format!(" — {}", project.name()));
         }
         if title != self.window_title {
             window.set_window_title(&title);

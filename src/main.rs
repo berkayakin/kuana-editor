@@ -69,6 +69,7 @@ mod postfix;
 mod preview;
 mod problems_panel;
 mod project_settings;
+mod project_folders;
 mod project_tree;
 mod test_explorer;
 mod todo;

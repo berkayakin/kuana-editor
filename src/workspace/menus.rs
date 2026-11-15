@@ -128,7 +128,7 @@ impl Workspace {
         if let Some(path) = path {
             add(MenuEntry::Separator, None);
             add(MenuEntry::item("Copy Path", Icon::Clipboard), Some(MenuAction::Tree(TreeAction::CopyPath(path.clone()))));
-            if self.root.as_ref().is_some_and(|r| path.starts_with(r)) {
+            if self.in_project(&path) {
                 add(
                     MenuEntry::item("Copy Relative Path", Icon::Clipboard),
                     Some(MenuAction::Tree(TreeAction::CopyRelativePath(path.clone()))),
@@ -193,7 +193,7 @@ impl Workspace {
 
         add(MenuEntry::Separator, None);
         add(MenuEntry::item("Copy Path", Icon::Clipboard), Some(TreeAction::CopyPath(file.path.clone())));
-        if self.root.as_ref().is_some_and(|r| file.path.starts_with(r)) {
+        if self.in_project(&file.path) {
             add(MenuEntry::item("Copy Relative Path", Icon::Clipboard), Some(TreeAction::CopyRelativePath(file.path.clone())));
         }
         if !deleted {
@@ -329,7 +329,7 @@ impl Workspace {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
             }
             TreeAction::CopyRelativePath(path) => {
-                let base = self.root.clone().unwrap_or_default();
+                let base = self.folders.as_ref().and_then(|p| p.folder_of(&path)).map(Path::to_path_buf).unwrap_or_default();
                 let mut rel = path.strip_prefix(&base).unwrap_or(&path).to_string_lossy().into_owned();
                 if crate::fs::is_remote(&path) {
                     rel = rel.replace('\\', "/");
@@ -444,12 +444,12 @@ impl Workspace {
     }
 
     pub(super) fn display_rel(&self, path: &Path) -> String {
-        display_rel(self.root.as_deref(), path)
+        display_rel(self.folders.as_ref(), path)
     }
 
     /// A location's file for usage and symbol lists (`location_label`).
     pub(super) fn location_label(&self, path: &Path) -> String {
-        location_label(self.root.as_deref(), path)
+        location_label(self.folders.as_ref(), path)
     }
 
     pub(super) fn vim_command_line(&mut self, _: &VimCommandLine, window: &mut Window, cx: &mut Context<Self>) {
@@ -906,7 +906,7 @@ impl Workspace {
     /// Shows the active file in the tree: opens its folders and scrolls to it.
     pub(super) fn select_opened_file(&mut self, _: &SelectOpenedFile, _: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.active_item(cx).and_then(|t| t.path(cx)) else { return };
-        if !self.root.as_deref().is_some_and(|r| path.starts_with(r)) {
+        if !self.in_project(&path) {
             return;
         }
         self.set_view_shown(SidebarMode::Files, true);
@@ -1025,8 +1025,8 @@ impl Workspace {
             ToastButton::SaveBackground => !self.documents.read(cx).kept(cx).is_empty(),
             ToastButton::ShowTestResults => self.has_results && !self.shows(BottomPanel::Results),
             ToastButton::InstallExtension(_) => true,
-            ToastButton::Reconnect => self.connecting.is_none() && self.root.as_deref().and_then(kuana_core::remote::connection::host_of).is_some_and(|h| kuana_core::remote::connection::connected(&h).is_none()),
-            ToastButton::OpenInDevContainer => self.connecting.is_none() && self.root.as_deref().is_some_and(|r| !crate::fs::is_remote(r)),
+            ToastButton::Reconnect => self.connecting.is_none() && self.primary_folder().and_then(kuana_core::remote::connection::host_of).is_some_and(|h| kuana_core::remote::connection::connected(&h).is_none()),
+            ToastButton::OpenInDevContainer => self.connecting.is_none() && self.primary_folder().is_some_and(|r| !crate::fs::is_remote(r)),
         }
     }
 

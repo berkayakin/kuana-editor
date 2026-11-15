@@ -302,7 +302,7 @@ impl Workspace {
                 .detach();
             }
             Request::RunInTerminal { extension, title, command, .. } => {
-                let cwd = self.root.clone().unwrap_or_else(|| self.terminal_cwd(cx));
+                let cwd = self.primary_dir().unwrap_or_else(|| self.terminal_cwd(cx));
                 let name = contribution(&extension).map_or(extension, |c| c.name.clone());
                 let target = crate::run::RunTarget { name: format!("{name}: {title}"), command, cwd, row: None, rows: 0..0, debug: None, test: None };
                 self.run_target(target, window, cx);
@@ -412,7 +412,7 @@ impl Workspace {
                 (true, _) if name == "file-saved" || (c.api >= Api::V2 && c.hears(name)) => None,
                 (false, false) if c.api >= Api::V2 && c.hears(name) => None,
                 (false, true) if c.api >= Api::V2 && c.hears(name) => {
-                    let in_project = path.zip(self.root.as_ref()).is_some_and(|(p, root)| p.starts_with(root));
+                    let in_project = path.is_some_and(|p| self.in_project(p));
                     if !in_project || !c.permissions.contains(&Permission::WorkspaceFiles) {
                         continue;
                     }
@@ -623,7 +623,7 @@ impl Workspace {
     fn extension_when_holds(&self, when: &When, cx: &App) -> bool {
         match when {
             When::Always => true,
-            When::File(name) => self.root.as_ref().is_some_and(|r| r.join(name).exists()),
+            When::File(name) => self.folders.as_ref().is_some_and(|p| p.folders().iter().any(|r| r.join(name).exists())),
             When::Language(name) => self.editors.iter().any(|e| e.read(cx).doc.read(cx).language.name().eq_ignore_ascii_case(name)),
         }
     }
@@ -655,7 +655,7 @@ impl Workspace {
 
         // The project: each extension hears of the one that's open once, and
         // of its going (one installed later hears of the one already open).
-        let root = self.root.clone();
+        let root = self.folders.as_ref().map(|p| p.primary().to_path_buf());
         let mut events = Vec::new();
         runtime.told_project.retain(|(extension, _)| current(extension).is_some());
         for c in installed.iter().filter(|c| c.api >= Api::V2 && c.code.is_some()) {
@@ -741,7 +741,7 @@ impl Workspace {
             for view in &c.views {
                 let shown = match &view.when {
                     When::Always => true,
-                    When::File(name) => self.root.as_ref().is_some_and(|r| r.join(name).exists()),
+                    When::File(name) => self.folders.as_ref().is_some_and(|p| p.folders().iter().any(|r| r.join(name).exists())),
                     When::Language(name) => languages.iter().any(|l| l.eq_ignore_ascii_case(name)),
                 };
                 let slot = slot_of(&c.extension, view);
@@ -788,7 +788,7 @@ impl Workspace {
             Some(c) => c.settings_json(user),
             None => user.map(|v| v.to_string()).unwrap_or_default(),
         };
-        Caller { window: cx.entity_id().as_u64(), root: self.root.clone(), settings }
+        Caller { window: cx.entity_id().as_u64(), root: self.primary_dir(), settings }
     }
 
     /// The view entity for `slot`, made the first time it shows.

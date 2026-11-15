@@ -13,7 +13,7 @@ impl Workspace {
     /// The session to save, with unsaved texts as rope clones: making them
     /// strings, serializing and writing can happen off the UI thread.
     pub(super) fn session_snapshot(&self, cx: &App) -> Option<SessionSnapshot> {
-        let root = self.root.clone()?;
+        let root = self.primary_dir()?;
         let mut tabs = Vec::new();
         let mut unsaved = Vec::new();
         let mut active = 0;
@@ -96,7 +96,7 @@ impl Workspace {
     }
 
     pub(super) fn schedule_session_save(&mut self, cx: &mut Context<Self>) {
-        if self.root.is_none() {
+        if self.folders.is_none() {
             return;
         }
         self.session_task = Some(cx.spawn(async move |this, cx| {
@@ -110,7 +110,7 @@ impl Workspace {
 
     /// Reopens the tabs the project had last time, with their unsaved edits.
     pub(super) fn restore_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let session = self.root.as_deref().and_then(ProjectSession::load);
+        let session = self.primary_folder().and_then(ProjectSession::load);
         // A session or state file that didn't read was kept aside: say where.
         for problem in crate::state::take_problems() {
             self.toast(ToastKind::Error, "Couldn't read a saved session", Some(problem), cx);
@@ -280,7 +280,7 @@ impl Workspace {
     /// the background (panel toggles, pane changes and resizes come in
     /// bursts, and a write waits for the disk), and when Kuana quits.
     pub(super) fn save_state(&mut self, cx: &mut Context<Self>) {
-        let root = self.root.clone();
+        let root = self.primary_dir();
         let (sidebar_width, problems_height) = (f32::from(self.sidebar_width), f32::from(self.problems_height));
         // Zen mode's hiding isn't kept: the layout from before it is.
         let (show_sidebar, second_view, bottom) = self.layout_to_save();

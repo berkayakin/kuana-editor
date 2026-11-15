@@ -2,6 +2,7 @@
 //! status bar around the active editor.
 
 use crate::fs::PathExt as _;
+use crate::project_folders::{Project, folder_name};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -801,7 +802,8 @@ const TAB_COMPACT_MIN: f32 = 54.0;
 pub struct Workspace {
     focus_handle: FocusHandle,
     file_history: crate::file_history::FileHistory,
-    root: Option<PathBuf>,
+    /// The open project's folders (see `crate::project_folders`).
+    folders: Option<Project>,
     /// Every open text editor, in any pane (for saving, searching, language
     /// servers); panes hold them and the other kinds of tabs.
     editors: Vec<Entity<Editor>>,
@@ -1010,26 +1012,42 @@ pub struct Workspace {
 
 /// A location's file for usage, symbol and hierarchy lists: relative to the
 /// project, or, outside it (a library's sources), just its folder and name.
-fn location_label(root: Option<&Path>, path: &Path) -> String {
-    if let Some(rel) = root.and_then(|r| path.strip_prefix(r).ok()).filter(|r| !r.as_os_str().is_empty()) {
-        return rel.display().to_string();
+fn location_label(project: Option<&Project>, path: &Path) -> String {
+    if let Some(rel) = project.and_then(|p| p.relative(path)).filter(|r| !r.is_empty()) {
+        return rel;
     }
     let mut parts: Vec<_> = path.iter().rev().take(2).map(|p| p.to_string_lossy()).collect();
     parts.reverse();
     format!("…/{}", parts.join("/"))
 }
 
-/// A path as the UI shows it: relative to the project folder `root` (the
-/// folder's own name for the folder itself), else in full.
-fn display_rel(root: Option<&Path>, path: &Path) -> String {
-    match root.and_then(|r| path.strip_prefix(r).ok()) {
-        Some(rel) if rel.as_os_str().is_empty() => root.map(folder_name).unwrap_or_default(),
-        Some(rel) => rel.display().to_string(),
+/// A path as the UI shows it: relative to its project folder (the folder's
+/// own name for the folder itself), else in full.
+fn display_rel(project: Option<&Project>, path: &Path) -> String {
+    match project.and_then(|p| Some((p.folder_of(path)?, p.relative(path)?))) {
+        Some((folder, rel)) if rel.is_empty() => folder_name(folder),
+        Some((_, rel)) => rel,
         None => path.display().to_string(),
     }
 }
 
 impl Workspace {
+    /// The project's primary folder (`Project::primary`): its identity (the
+    /// session, the window's title, the connection) and where project-wide
+    /// things start when nothing narrower says.
+    fn primary_folder(&self) -> Option<&Path> {
+        self.folders.as_ref().map(Project::primary)
+    }
+
+    fn primary_dir(&self) -> Option<PathBuf> {
+        self.primary_folder().map(Path::to_path_buf)
+    }
+
+    /// Whether `path` is in one of the project's folders.
+    fn in_project(&self, path: &Path) -> bool {
+        self.folders.as_ref().is_some_and(|p| p.contains(path))
+    }
+
     fn shows(&self, panel: BottomPanel) -> bool {
         self.bottom == Some(panel)
     }
@@ -1311,7 +1329,7 @@ impl Workspace {
         let mut this = Self {
             focus_handle,
             file_history: Default::default(),
-            root: None,
+            folders: None,
             editors: Vec::new(),
             center: PaneTree::new(pane.clone()),
             active_pane: pane,
@@ -1708,7 +1726,7 @@ impl Workspace {
         self.lsp.update(cx, |s, cx| s.register(editor, cx));
         self.extension_file_event("file-opened", editor, cx);
         self.suggest_extension(editor, cx);
-        if !self.has_repo(cx) && self.root.is_none() {
+        if !self.has_repo(cx) && self.folders.is_none() {
             // A lone file: use the repository it lives in, if any.
             if let Some(dir) = editor.read(cx).doc.read(cx).path.as_deref().and_then(Path::parent) {
                 self.detect_repo(dir.to_path_buf(), cx);
@@ -1921,7 +1939,7 @@ impl Workspace {
                 zen: self.zen.is_some(),
                 hide_tabs: self.zen.is_some() && !Settings::get(cx).zen_tabs(),
                 find_bar: (active && self.show_find).then(|| self.find_bar.clone()),
-                root: self.root.clone(),
+                project: self.folders.clone(),
                 title_ends: if at_top { self.title_ends_now() } else { (0., f32::INFINITY) },
                 left: (at_top && self.center.at_left(pane)).then(|| self.editor_left(cx)),
                 menu_open: self.context_menu.is_some(),
@@ -1973,11 +1991,7 @@ fn with_keys(label: &str, keys: Option<&str>) -> String {
     }
 }
 
-fn folder_name(path: &Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
-}
+
 
 /// A small all-caps heading above a welcome-screen section.
 fn section_label(text: &'static str, theme: &Theme) -> impl IntoElement {

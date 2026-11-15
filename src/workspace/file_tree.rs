@@ -22,7 +22,7 @@ impl Workspace {
         self.reset_tests();
         self.problems.update(cx, |p, cx| {
             p.set_run(None, cx);
-            p.set_root(Some(root.clone()), cx);
+            p.set_project(Some(crate::project_folders::Project::new(root.clone())), cx);
         });
         let mut session = ProjectSession::load(&root);
         let pending = self.pending_ports.take().filter(|(path, _)| *path == root).map(|(_, ports)| ports);
@@ -50,7 +50,7 @@ impl Workspace {
         let venv = session.and_then(|s| s.python_venv).map(|saved| crate::python::Choice::from_saved(&saved));
         crate::python::set_choice(&root, venv);
         self.venv_shown.take();
-        self.root = Some(root.clone());
+        self.folders = Some(Project::new(root.clone()));
         // A remote project: its connection is watched.
         self.watch_connection(window, cx);
         self.forward_ports(ports, cx);
@@ -61,17 +61,19 @@ impl Workspace {
         self.tree.update(cx, |t, cx| t.set_root(Some(root), expanded, cx));
         self.refresh_file_index(cx);
         self.start_watching(cx);
-        if let Some(root) = self.root.clone() {
+        if let Some(root) = self.primary_dir() {
             self.detect_repo(root, cx);
         }
         self.save_state(cx);
         // Problems in the project's settings file show when it opens.
-        if let Some(root) = &self.root {
-            crate::project_settings::layers(root);
+        if let Some(project) = &self.folders {
+            for folder in project.folders() {
+                crate::project_settings::layers(folder);
+            }
             self.check_config(cx);
         }
-        let root = self.root.clone();
-        self.lsp.update(cx, |s, _| s.set_root(root));
+        let folders = self.folders.as_ref().map(|p| p.folders().to_vec()).unwrap_or_default();
+        self.lsp.update(cx, |s, _| s.set_folders(folders));
         if self.items(cx).is_empty() {
             self.restore_session(window, cx);
         }
@@ -114,7 +116,7 @@ impl Workspace {
             actions.push(action.map(MenuAction::Tree));
         };
         let dir = if is_dir { path.clone() } else { path.parent().map(Path::to_path_buf).unwrap_or_else(|| path.clone()) };
-        let is_root = self.root.as_deref() == Some(path.as_path());
+        let is_root = self.folders.as_ref().is_some_and(|p| p.is_folder(&path));
 
         let undo = self.file_history.undo_label().map(|l| format!("Undo {l}"));
         let redo = self.file_history.redo_label().map(|l| format!("Redo {l}"));

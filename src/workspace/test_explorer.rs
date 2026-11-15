@@ -73,7 +73,7 @@ impl Workspace {
 
     /// Reads every file of the project that may hold tests, in the background.
     fn scan_tests(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.root.clone() else { return };
+        let Some(root) = self.primary_dir() else { return };
         self.tests.cancel.store(true, Ordering::Relaxed);
         let cancel = Arc::new(AtomicBool::new(false));
         self.tests.cancel = cancel.clone();
@@ -112,8 +112,8 @@ impl Workspace {
         if !self.tests.active() {
             return;
         }
-        let Some(root) = self.root.clone() else { return };
-        self.tests.pending.extend(paths.into_iter().filter(|p| p.starts_with(&root)));
+        let Some(project) = self.folders.clone() else { return };
+        self.tests.pending.extend(paths.into_iter().filter(|p| project.contains(p)));
         if !self.tests.scanning && !self.tests.pending.is_empty() {
             self.schedule_tests_rescan(cx);
         }
@@ -220,7 +220,7 @@ impl Workspace {
         }
         let mut buttons = Vec::new();
         // What the project runs all its tests with (cargo test, go test ./..., pytest).
-        let all = self.root.as_deref().and_then(|root| crate::run::project_targets(root, None).into_iter().find(|t| Framework::of(&t.command).is_some()));
+        let all = self.primary_folder().and_then(|root| crate::run::project_targets(root, None).into_iter().find(|t| Framework::of(&t.command).is_some()));
         if let Some(all) = all {
             let this = this.clone();
             buttons.push(TabButton {

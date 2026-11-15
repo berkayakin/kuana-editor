@@ -54,7 +54,7 @@ impl Workspace {
     /// project yet, else ways to open a file. Files dropped on it open.
     fn render_lone_pane(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::get(cx).clone();
-        let content = if self.root.is_none() {
+        let content = if self.folders.is_none() {
             self.render_welcome(window, cx).into_any_element()
         } else {
             self.render_no_open_files(window, cx).into_any_element()

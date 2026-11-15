@@ -102,7 +102,7 @@ fn language_servers_run_on_the_host(cx: &mut TestAppContext) {
     let store = cx.new(|_| {
         let mut store = LspStore::new();
         store.test_specs = Some(vec![fake_server("uri", "")]);
-        store.set_root(Some(project.clone()));
+        store.set_folders(vec![project.clone()]);
         store
     });
     let editor: Entity<Editor> = cx.new(|cx| Editor::new(Document::open(&project.join("a.rs")).unwrap(), cx));
@@ -164,7 +164,7 @@ fn language_servers_start_again_after_a_reconnect(cx: &mut TestAppContext) {
     let store = cx.new(|_| {
         let mut store = LspStore::new();
         store.test_specs = Some(vec![fake_server("uri", "")]);
-        store.set_root(Some(project.clone()));
+        store.set_folders(vec![project.clone()]);
         store
     });
     let editor: Entity<Editor> = cx.new(|cx| Editor::new(Document::open(&project.join("a.rs")).unwrap(), cx));

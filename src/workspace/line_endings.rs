@@ -45,7 +45,7 @@ impl Workspace {
 
     pub(super) fn open_venv_menu(&mut self, position: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         use crate::python::{self, Choice};
-        let Some(root) = self.root.clone() else { return };
+        let Some(root) = self.primary_dir() else { return };
         let current = python::choice(&root);
         let check = |on: bool, label: String| if on { MenuEntry::item(label, Icon::Check) } else { MenuEntry::text(label) };
         let detected = self.active_editor(cx).and_then(|e| e.read(cx).doc.read(cx).path.as_deref()?.parent().and_then(python::detect));
@@ -79,7 +79,7 @@ impl Workspace {
     /// Saves the project's venv choice. New terminals and Run tabs use it;
     /// the active file's language server restarts with it.
     pub(super) fn set_venv(&mut self, choice: Option<crate::python::Choice>, cx: &mut Context<Self>) {
-        let Some(root) = self.root.clone() else { return };
+        let Some(root) = self.primary_dir() else { return };
         crate::python::set_choice(&root, choice);
         self.venv_shown.take();
         self.schedule_session_save(cx);

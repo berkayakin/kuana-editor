@@ -40,7 +40,7 @@ pub struct ProblemsPanel {
     /// `run_counts` for (document state, run generation): the status bar
     /// asks every frame.
     counts: std::cell::Cell<Option<((Option<(u64, u64, u64)>, u64), [usize; 4])>>,
-    root: Option<PathBuf>,
+    project: Option<crate::project_folders::Project>,
     scroll: gpui::UniformListScrollHandle,
 }
 
@@ -70,8 +70,8 @@ impl ProblemsPanel {
     }
 
     /// The project, for showing the Run's paths relative to it.
-    pub fn set_root(&mut self, root: Option<PathBuf>, cx: &mut Context<Self>) {
-        self.root = root;
+    pub fn set_project(&mut self, project: Option<crate::project_folders::Project>, cx: &mut Context<Self>) {
+        self.project = project;
         cx.notify();
     }
 
@@ -116,8 +116,8 @@ impl ProblemsPanel {
     }
 
     fn display_rel(&self, path: &Path) -> String {
-        match self.root.as_deref().and_then(|r| path.strip_prefix(r).ok()) {
-            Some(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
+        match self.project.as_ref().and_then(|p| p.relative(path)) {
+            Some(rel) if !rel.is_empty() => rel,
             _ => path.display().to_string(),
         }
     }

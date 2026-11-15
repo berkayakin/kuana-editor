@@ -125,7 +125,7 @@ struct Item {
 pub struct MultiBufferView {
     title: SharedString,
     /// The project folder, for the headers' folders.
-    root: Option<PathBuf>,
+    project: Option<crate::project_folders::Project>,
     items: Vec<Item>,
     list: ListState,
     /// The excerpt the keyboard was in last (where the tab gives it back).
@@ -139,10 +139,10 @@ impl EventEmitter<MultiBufferEvent> for MultiBufferView {}
 
 impl MultiBufferView {
     /// An empty view for `files` files about to be added.
-    pub fn new(title: impl Into<SharedString>, root: Option<PathBuf>, files: usize, cx: &mut Context<Self>) -> Self {
+    pub fn new(title: impl Into<SharedString>, project: Option<crate::project_folders::Project>, files: usize, cx: &mut Context<Self>) -> Self {
         Self {
             title: title.into(),
-            root,
+            project,
             items: Vec::new(),
             list: ListState::new(0, ListAlignment::Top, px(600.)),
             active: 0,
@@ -154,8 +154,8 @@ impl MultiBufferView {
     /// A second view of the same excerpts (a split): editors of the same
     /// documents and lines, with carets of their own.
     pub fn split_of(other: &Entity<Self>, cx: &mut Context<Self>) -> Self {
-        let (title, root) = (other.read(cx).title.clone(), other.read(cx).root.clone());
-        let mut this = Self::new(title, root, 0, cx);
+        let (title, project) = (other.read(cx).title.clone(), other.read(cx).project.clone());
+        let mut this = Self::new(title, project, 0, cx);
         let shown: Vec<(PathBuf, Entity<Document>, RangeInclusive<usize>)> = other
             .read(cx)
             .items
@@ -459,7 +459,7 @@ impl MultiBufferView {
         let doc = self.items[ix].editor.read(cx).doc.read(cx);
         let dirty = doc.is_dirty();
         let name = doc.file_name();
-        let folder = folder_of(&path, self.root.as_deref());
+        let folder = folder_of(&path, self.project.as_ref());
         let editor = self.items[ix].editor.clone();
         div()
             .id(("excerpt-header", ix))
@@ -588,14 +588,13 @@ impl Render for MultiBufferView {
 
 /// `path`'s folder as the header shows it: relative to the project (None
 /// for a file at its top), else the whole folder.
-fn folder_of(path: &Path, root: Option<&Path>) -> Option<String> {
+fn folder_of(path: &Path, project: Option<&crate::project_folders::Project>) -> Option<String> {
     let parent = path.parent()?;
-    let shown = match root.and_then(|r| parent.strip_prefix(r).ok()) {
-        Some(rel) if rel.as_os_str().is_empty() => return None,
-        Some(rel) => rel,
-        None => parent,
-    };
-    Some(shown.to_string_lossy().into_owned())
+    match project.and_then(|p| p.relative(parent)) {
+        Some(rel) if rel.is_empty() => None,
+        Some(rel) => Some(rel),
+        None => Some(parent.to_string_lossy().into_owned()),
+    }
 }
 
 #[cfg(test)]

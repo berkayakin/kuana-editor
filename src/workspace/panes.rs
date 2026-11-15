@@ -222,7 +222,7 @@ impl Workspace {
         );
         if let Some(path) = path {
             add(MenuEntry::Separator, None);
-            if self.root.as_deref().is_some_and(|r| path.starts_with(r)) {
+            if self.in_project(&path) {
                 add(
                     MenuEntry::item("Select in File Tree", Icon::FolderTree).shortcut(binding_label(&SelectOpenedFile, window)),
                     tab(TabAction::SelectInTree),

@@ -183,7 +183,7 @@ impl Workspace {
     /// fails, a toast and the status bar's menu offer Reconnect.
     pub(super) fn watch_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.connection_task = None;
-        let Some(host) = self.root.as_deref().and_then(connection::host_of) else { return };
+        let Some(host) = self.primary_folder().and_then(connection::host_of) else { return };
         self.connection_task = Some(cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(CHECK_EVERY).await;
@@ -204,7 +204,7 @@ impl Workspace {
     /// Connects the project's host again; once back, everything that was
     /// read from it is read again.
     pub(super) fn reconnect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = self.root.clone() else { return };
+        let Some(root) = self.primary_dir() else { return };
         let Some(host) = connection::host_of(&root) else { return };
         connection::disconnect(&host);
         // `connect_host` would ask for a folder: this one comes back instead.
@@ -216,7 +216,7 @@ impl Workspace {
     /// language servers again.
     pub(super) fn reconnected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.connection_lost = false;
-        if let Some(mount) = self.root.as_deref().and_then(crate::fs::mount_of) {
+        if let Some(mount) = self.primary_folder().and_then(crate::fs::mount_of) {
             self.lsp.update(cx, |s, cx| s.restart_under(&mount, cx));
         }
         // The old connection's forwards went with it.
@@ -307,7 +307,7 @@ impl Workspace {
     /// Open in Dev Container: brings up the project's dev container (made
     /// the first time), connects to it and opens the project there.
     pub(super) fn open_in_dev_container(&mut self, _: &OpenInDevContainer, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = self.root.clone().filter(|r| !crate::fs::is_remote(r)) else {
+        let Some(root) = self.primary_dir().filter(|r| !crate::fs::is_remote(r)) else {
             self.toast(ToastKind::Info, "Open a local folder with a dev container configuration first", None, cx);
             return;
         };
@@ -373,7 +373,7 @@ impl Workspace {
     /// A local project with a dev container configuration offers to open in
     /// it, once per project.
     pub(super) fn offer_dev_container(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.root.clone().filter(|r| !crate::fs::is_remote(r)) else { return };
+        let Some(root) = self.primary_dir().filter(|r| !crate::fs::is_remote(r)) else { return };
         if cfg!(test) || SessionState::load().devcontainer_offered.contains(&root) {
             return;
         }
@@ -384,7 +384,7 @@ impl Workspace {
                 return;
             }
             this.update(cx, |ws, cx| {
-                if ws.root.as_deref() != Some(root.as_path()) {
+                if ws.primary_folder() != Some(root.as_path()) {
                     return;
                 }
                 if let Err(err) = SessionState::change(|state| state.devcontainer_offered.push(root.clone())) {
@@ -416,7 +416,7 @@ pub(super) struct ForwardedPort {
 impl Workspace {
     /// The project's machine, while connected.
     fn project_host(&self) -> Option<(String, Arc<kuana_core::remote::RemoteHost>)> {
-        let name = self.root.as_deref().and_then(connection::host_of)?;
+        let name = self.primary_folder().and_then(connection::host_of)?;
         let connected = connection::connected(&name)?;
         Some((connected.transport.label(), connected.host))
     }
@@ -486,7 +486,7 @@ impl Workspace {
     /// The status bar's remote item: where the project is, the connection's
     /// state and the forwarded ports' count; a click opens its menu.
     pub(super) fn render_remote_status(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let name = self.root.as_deref().and_then(connection::host_of)?;
+        let name = self.primary_folder().and_then(connection::host_of)?;
         let label = Transport::from_name(&name).label();
         let (text, color, tip) = match () {
             _ if self.connecting.is_some() => (format!("{label} · connecting…"), Hsla::from(theme.text_muted), format!("Connecting to {label}")),
@@ -517,7 +517,7 @@ impl Workspace {
     }
 
     fn open_remote_menu(&mut self, position: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(name) = self.root.as_deref().and_then(connection::host_of) else { return };
+        let Some(name) = self.primary_folder().and_then(connection::host_of) else { return };
         let call = |f: fn(&mut Workspace, &mut Window, &mut Context<Workspace>)| Some(MenuAction::Call(std::rc::Rc::new(f)));
         let mut entries = vec![MenuEntry::Header(Transport::from_name(&name).label().into())];
         let mut actions = vec![None];

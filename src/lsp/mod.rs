@@ -219,7 +219,8 @@ pub enum LspEvent {
 impl EventEmitter<LspEvent> for LspStore {}
 
 pub struct LspStore {
-    workspace_root: Option<PathBuf>,
+    /// The project's folders: a file in one gets a server rooted there.
+    folders: Vec<PathBuf>,
     servers: HashMap<ServerKey, ServerState>,
     documents: HashMap<PathBuf, OpenDocument>,
     /// Latest diagnostics per file and server, open or not, so a file gets
@@ -323,7 +324,7 @@ impl LspStore {
         Self {
             watchers: HashMap::new(),
             shown_messages: HashMap::new(),
-            workspace_root: None,
+            folders: Vec::new(),
             servers: HashMap::new(),
             documents: HashMap::new(),
             diagnostics: HashMap::new(),
@@ -347,8 +348,9 @@ impl LspStore {
         }
     }
 
-    pub fn set_root(&mut self, root: Option<PathBuf>) {
-        self.workspace_root = root;
+    /// The project's folders (none without a project).
+    pub fn set_folders(&mut self, folders: Vec<PathBuf>) {
+        self.folders = folders;
     }
 
     /// Starts tracking an editor's document with its language's server.
@@ -479,18 +481,18 @@ impl LspStore {
 
     /// The root a server of `spec`'s kind gets for `path`.
     fn root_for(&self, spec: &servers::ServerSpec, path: &Path) -> PathBuf {
-        let workspace_root = self.workspace_root.as_deref();
+        let folder = self.folders.iter().find(|f| path.starts_with(f)).map(PathBuf::as_path);
         // A file outside the project (a dependency Go to Declaration
         // opened): a server of the same kind that's already running
-        // knows it, the project's first; starting another would index
-        // the dependency on its own.
-        if !workspace_root.is_some_and(|r| path.starts_with(r)) {
+        // knows it, one of the project's first; starting another would
+        // index the dependency on its own.
+        if folder.is_none() {
             let running = self.servers.keys().filter(|k| k.id == spec.id);
-            if let Some(key) = running.min_by_key(|k| Some(k.root.as_path()) != workspace_root) {
+            if let Some(key) = running.min_by_key(|k| !self.folders.contains(&k.root)) {
                 return key.root.clone();
             }
         }
-        servers::root_for(spec, path, workspace_root)
+        servers::root_for(spec, path, folder)
     }
 
     /// The language's own servers (`server_keys`). None when turned off in
@@ -2120,7 +2122,7 @@ mod tests {
         let spec = fake_server("outside", "");
         let mut store = LspStore::new();
         store.test_specs = Some(vec![spec]);
-        store.set_root(Some(PathBuf::from("/work/project")));
+        store.set_folders(vec![PathBuf::from("/work/project")]);
         let root_of = |store: &LspStore, path: &str, cx: &mut gpui::TestAppContext| {
             cx.update(|cx| store.server_keys(Language::Rust, Path::new(path), cx))[0].0.root.clone()
         };
@@ -2150,7 +2152,7 @@ mod tests {
         let store = cx.new(|_| {
             let mut store = LspStore::new();
             store.test_specs = Some(vec![fake_server("hints", "")]);
-            store.set_root(Some(dir.clone()));
+            store.set_folders(vec![dir.clone()]);
             store
         });
         let wait = |cx: &mut gpui::TestAppContext, what: &str, done: &dyn Fn(&mut gpui::TestAppContext) -> bool| {
@@ -2232,7 +2234,7 @@ mod tests {
         let store = cx.new(|_| {
             let mut store = LspStore::new();
             store.test_specs = Some(vec![fake_server("pull", "")]);
-            store.set_root(Some(dir.clone()));
+            store.set_folders(vec![dir.clone()]);
             store
         });
         let editor = cx.new(|cx| Editor::new(Document::open(&path).unwrap(), cx));
@@ -2284,7 +2286,7 @@ mod tests {
         let store = cx.new(|_| {
             let mut store = LspStore::new();
             store.test_specs = Some(vec![fake_server("renames", "")]);
-            store.set_root(Some(dir.clone()));
+            store.set_folders(vec![dir.clone()]);
             store
         });
         let editor = cx.new(|cx| Editor::new(Document::open(&old).unwrap(), cx));

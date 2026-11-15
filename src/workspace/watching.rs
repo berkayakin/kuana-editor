@@ -16,7 +16,7 @@ impl Workspace {
     pub(super) fn start_watching(&mut self, cx: &mut Context<Self>) {
         self.watcher = None;
         self.watch_task = None;
-        let Some(root) = self.root.clone() else { return };
+        let Some(root) = self.primary_dir() else { return };
         self.ignore = project_ignore(&root).map(Arc::new);
         let (watcher, mut changes) = match Watcher::new(&root) {
             Ok(watching) => watching,
@@ -46,7 +46,7 @@ impl Workspace {
 
     /// What sorting out a batch of changes goes by, as it is now.
     fn watch_state(&self, cx: &App) -> Option<WatchState> {
-        let root = self.root.clone()?;
+        let root = self.primary_dir()?;
         let mut open: HashSet<PathBuf> = self.shown_editors(cx).iter().filter_map(|e| e.read(cx).doc.read(cx).path.clone()).collect();
         open.extend(self.images(cx).iter().map(|i| i.read(cx).path().to_path_buf()));
         open.extend(self.diff_views(cx).iter().flat_map(|d| d.read(cx).disk_files().into_iter().map(Path::to_path_buf).collect::<Vec<_>>()));
@@ -64,7 +64,7 @@ impl Workspace {
     /// it out): the tree (in folders it has read), Go to File, Git status,
     /// language servers and open files.
     pub(super) fn disk_changed(&mut self, changed: Classified, cx: &mut Context<Self>) {
-        let Some(root) = self.root.clone() else { return };
+        let Some(root) = self.primary_dir() else { return };
         if root.is_dir_on_host() == self.root_gone {
             self.root_gone = !self.root_gone;
             if self.root_gone {
@@ -82,7 +82,7 @@ impl Workspace {
             self.refresh_file_index(cx);
             self.refresh_git(cx);
             self.reload_documents(|_| true, cx);
-            if let Some(root) = self.root.clone() {
+            if let Some(root) = self.primary_dir() {
                 self.tests_files_changed([root.clone()], cx);
                 self.todo_files_changed([root], cx);
             }
@@ -144,7 +144,7 @@ impl Workspace {
     /// Scans the project's files in the background (a new project, new
     /// ignore rules); changes waiting meanwhile are applied after.
     pub(super) fn refresh_file_index(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.root.clone() else {
+        let Some(root) = self.primary_dir() else {
             return;
         };
         self.project_changes.clear();

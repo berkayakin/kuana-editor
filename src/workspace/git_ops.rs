@@ -21,7 +21,7 @@ impl Workspace {
     }
 
     pub(super) fn detect_repo(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
-        let project = self.root.clone();
+        let project = self.primary_dir();
         self.git.update(cx, |g, cx| g.detect(dir, project, cx));
     }
 
@@ -50,7 +50,7 @@ impl Workspace {
             (git.repo().cloned(), git.root().cloned())
         };
         // A repository above the project folder: watch its .git too.
-        if let (Some(repo), Some(root), Some(watcher)) = (&repo, &self.root, self.watcher.as_mut())
+        if let (Some(repo), Some(root), Some(watcher)) = (&repo, self.folders.as_ref().map(Project::primary), self.watcher.as_mut())
             && !repo.starts_with(root)
             && let Err(err) = watcher.add(&repo.join(".git"))
         {
@@ -284,7 +284,7 @@ impl Workspace {
     /// the watcher only sees the project folder's (and `.git`), so one
     /// above the project folder is read again, as is one not watched.
     pub(super) fn refresh_commit_view(&mut self, cx: &mut Context<Self>) {
-        let outside = self.repo(cx).as_ref().zip(self.root.as_ref()).is_some_and(|(repo, root)| repo != root);
+        let outside = self.repo(cx).as_deref().zip(self.primary_folder()).is_some_and(|(repo, root)| repo != root);
         if outside || self.watcher.is_none() {
             self.refresh_git(cx);
         }
@@ -294,7 +294,7 @@ impl Workspace {
     /// reports them like any change, unless there's none for the project
     /// or they're outside it; those get their status read here.
     pub(super) fn files_written(&mut self, paths: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
-        let watched = |path: &Path| self.watcher.is_some() && self.root.as_ref().is_some_and(|root| path.starts_with(root));
+        let watched = |path: &Path| self.watcher.is_some() && self.in_project(path);
         let paths: Vec<PathBuf> = paths.into_iter().filter(|path| !watched(path)).collect();
         if !paths.is_empty() {
             self.read_status(StatusWork::paths(paths), cx);
@@ -888,7 +888,7 @@ impl Workspace {
             return;
         }
         self.close_modal(window, cx);
-        let parent = clone_dialog::default_parent(self.root.as_deref());
+        let parent = clone_dialog::default_parent(self.primary_folder());
         let dialog = cx.new(|cx| CloneDialog::new(parent, window, cx));
         let subscription = cx.subscribe_in(&dialog, window, |ws, _, event: &CloneDialogEvent, window, cx| match event {
             CloneDialogEvent::Cloned(path) => {
@@ -903,7 +903,7 @@ impl Workspace {
     }
 
     pub(super) fn git_init(&mut self, _: &GitInit, window: &mut Window, cx: &mut Context<Self>) {
-        match (&self.root, &self.repo(cx)) {
+        match (self.folders.as_ref(), &self.repo(cx)) {
             (None, _) => self.toast(ToastKind::Error, "Open a folder first", None, cx),
             (Some(_), Some(_)) => self.toast(ToastKind::Error, "This folder is already in a Git repository", None, cx),
             (Some(_), None) => self.run_git(GitOp::Init, window, cx),
@@ -1012,7 +1012,7 @@ impl Workspace {
         // A Local History version needs no repository: paths show from the project.
         let repo = match &source {
             DiffSource::History { path, .. } | DiffSource::Compare { path, with: crate::diff_view::Compared::Text { .. } | crate::diff_view::Compared::File(_) } => {
-                self.root.clone().or_else(|| path.parent().map(Path::to_path_buf))
+                self.primary_dir().or_else(|| path.parent().map(Path::to_path_buf))
             }
             _ => self.repo(cx),
         };
