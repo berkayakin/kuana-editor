@@ -221,11 +221,11 @@ impl Workspace {
                 );
             }
             if e.doc.read(cx).language == Language::Python
-                && self.root.is_some()
+                && self.folders.is_some()
                 && let Some(dir) = e.doc.read(cx).path.as_deref().and_then(Path::parent)
             {
                 let label = match self.shown_venv(dir) {
-                    Some(venv) => crate::python::label(&venv, self.root.as_deref()),
+                    Some(venv) => crate::python::label(&venv, self.primary_folder()),
                     None => "No venv".into(),
                 };
                 right.push(

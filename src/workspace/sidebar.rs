@@ -85,7 +85,7 @@ impl Workspace {
         } else if let SidebarMode::Extension(slot) = mode {
             // Its view is made when it first shows (`make_shown_extension_views`).
             self.render_extension_sidebar(slot).unwrap_or_else(|| div().flex_1().into_any_element())
-        } else if self.root.is_some() {
+        } else if self.folders.is_some() {
             div().flex_1().min_h_0().child(cached(&self.tree)).into_any_element()
         } else {
             div()

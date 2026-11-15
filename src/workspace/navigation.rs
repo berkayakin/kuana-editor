@@ -73,13 +73,13 @@ impl Workspace {
             self.close_modal(window, cx);
             return;
         }
-        let files = if self.root.is_some() {
+        let files = if self.folders.is_some() {
             self.project.openable()
         } else {
             Arc::new(self.items(cx).iter().filter(|t| t.is_file()).filter_map(|t| t.path(cx)).collect())
         };
         let recent = if mode == PickerMode::Projects { self.recent_projects.clone() } else { self.recent.clone() };
-        let (root, mut actions) = (self.root.clone(), self.actions.clone());
+        let (root, mut actions) = (self.folders.clone(), self.actions.clone());
         // Extensions' commands and views, as installed now.
         if mode == PickerMode::Actions {
             let extra = Self::extension_action_entries();
@@ -338,7 +338,7 @@ impl Workspace {
     /// Find in Files, optionally limited to one folder.
     pub(super) fn open_project_search_in(&mut self, scope: Option<PathBuf>, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
         let root = scope
-            .or_else(|| self.root.clone())
+            .or_else(|| self.primary_dir())
             .or_else(|| {
                 let path = self.active_editor(cx)?.read(cx).doc.read(cx).path.clone()?;
                 path.parent().map(Path::to_path_buf)

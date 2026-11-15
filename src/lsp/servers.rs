@@ -285,10 +285,10 @@ pub fn language_id(language: Language, path: &Path) -> &'static str {
     }
 }
 
-/// The project root a server should use for `file`: the open folder if the
-/// file is inside it, else the nearest folder with a root marker.
-pub fn root_for(spec: &ServerSpec, file: &Path, workspace_root: Option<&Path>) -> PathBuf {
-    if let Some(root) = workspace_root.filter(|r| file.starts_with(r)) {
+/// The project root a server should use for `file`: the project folder
+/// holding it, if any, else the nearest folder with a root marker.
+pub fn root_for(spec: &ServerSpec, file: &Path, folder: Option<&Path>) -> PathBuf {
+    if let Some(root) = folder.filter(|r| file.starts_with(r)) {
         return root.to_path_buf();
     }
     let dir = file.parent().unwrap_or(file);

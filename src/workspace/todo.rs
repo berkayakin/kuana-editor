@@ -79,7 +79,7 @@ impl Workspace {
 
     /// Reads every file of the project, in the background.
     fn scan_todos(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.root.clone() else { return };
+        let Some(root) = self.primary_dir() else { return };
         self.todo.cancel.store(true, Ordering::Relaxed);
         let cancel = Arc::new(AtomicBool::new(false));
         self.todo.cancel = cancel.clone();
@@ -125,8 +125,8 @@ impl Workspace {
         if !self.todo.active() {
             return;
         }
-        let Some(root) = self.root.clone() else { return };
-        self.todo.pending.extend(paths.into_iter().filter(|p| p.starts_with(&root)));
+        let Some(project) = self.folders.clone() else { return };
+        self.todo.pending.extend(paths.into_iter().filter(|p| project.contains(p)));
         if !self.todo.scanning && !self.todo.pending.is_empty() {
             self.schedule_todo_rescan(cx);
         }

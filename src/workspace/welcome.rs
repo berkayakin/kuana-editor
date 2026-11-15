@@ -194,7 +194,7 @@ impl Workspace {
             let list = self.recent_projects.iter().enumerate().map(|(ix, path)| {
                 let name = folder_name(path);
                 let parent = path.parent().map(clone_dialog::display_path).unwrap_or_default();
-                let current = self.root.as_deref() == Some(path.as_path());
+                let current = self.primary_folder() == Some(path.as_path());
                 let missing = !path.exists();
                 let group = SharedString::from(format!("recent-{ix}"));
                 let color = monogram_color(&name, &theme);
@@ -319,7 +319,7 @@ impl Workspace {
                         welcome_row("w-q-action", Icon::Command, "Find Action…", binding_label(&FindAction, window), &theme, cx)
                             .on_click(cx.listener(|ws, _, w, cx| ws.find_action(&FindAction, w, cx))),
                     )
-                    .when(self.root.is_some(), |el| {
+                    .when(self.folders.is_some(), |el| {
                         el.child(
                             welcome_row("w-q-file", Icon::FileText, "Go to File…", binding_label(&GoToFile, window), &theme, cx)
                                 .on_click(cx.listener(|ws, _, w, cx| ws.go_to_file(&GoToFile, w, cx))),
@@ -409,8 +409,8 @@ impl Workspace {
         let body_text = |text: String| div().text_size(px(12.)).text_color(theme.text_dim).child(text);
 
         if !self.has_repo(cx) {
-            let (title, detail) = match self.root.as_deref() {
-                Some(root) => ("Not a Git repository", format!("Start tracking changes in {} with Git.", folder_name(root))),
+            let (title, detail) = match self.folders.as_ref() {
+                Some(project) => ("Not a Git repository", format!("Start tracking changes in {} with Git.", project.name())),
                 None => ("No repository open", "Clone a repository, or open a folder that's already under version control.".to_string()),
             };
             return section.child(
@@ -436,7 +436,7 @@ impl Workspace {
                         div()
                             .flex()
                             .gap_2()
-                            .when(self.root.is_some(), |el| {
+                            .when(self.folders.is_some(), |el| {
                                 el.child(self.primary_button("w-git-init", Icon::Plus, "Initialize", cx, |ws, _, window, cx| {
                                     ws.git_init(&GitInit, window, cx)
                                 }))

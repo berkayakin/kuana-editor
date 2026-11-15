@@ -46,8 +46,8 @@ pub(super) struct PaneChrome {
     pub(super) at_top: bool,
     /// The find bar, shown above a text tab: Find is open and this is the current pane.
     pub(super) find_bar: Option<Entity<FindBar>>,
-    /// The project folder, where breadcrumbs start.
-    pub(super) root: Option<PathBuf>,
+    /// The project's folders, where breadcrumbs start.
+    pub(super) project: Option<Project>,
     /// Along the window's top, the title bar's ends sit in the tab row: the
     /// window x where its lead (traffic lights, project, branch) ends and its
     /// trail (run widget, window buttons) starts. A strip under either keeps
@@ -519,9 +519,9 @@ impl Pane {
         let path = item.path(cx).filter(|_| item.diff().is_none())?;
         let symbols = item.editor().map(|editor| editor.update(cx, |e, cx| e.breadcrumbs(cx)));
         let theme = Theme::get(cx).clone();
-        let root = self.chrome.root.as_deref();
-        let inside = root.is_some_and(|r| path.starts_with(r));
-        let rel = display_rel(root, &path);
+        let project = self.chrome.project.as_ref();
+        let inside = project.is_some_and(|p| p.contains(&path));
+        let rel = display_rel(project, &path);
         let mut parts: Vec<String> = rel.split(['/', '\\']).map(str::to_string).collect();
         let file = parts.pop().unwrap_or_default();
         // A file outside the project: its folder is enough context.

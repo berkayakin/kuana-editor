@@ -2889,7 +2889,7 @@ mod tests {
         std::fs::write(&path, "fn main() {\n    let set: HashSe\n}\n").unwrap();
         let store = cx.new(|_| {
             let mut store = LspStore::new();
-            store.set_root(Some(dir.clone()));
+            store.set_folders(vec![dir.clone()]);
             store
         });
         let editor: Entity<Editor> = cx.new(|cx| Editor::new(Document::open(&path).unwrap(), cx));

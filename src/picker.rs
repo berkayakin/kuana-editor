@@ -29,6 +29,7 @@ gpui::actions!(
     ]
 );
 
+use crate::project_folders::Project;
 use crate::{
     assets::Icon,
     clone_dialog::display_path,
@@ -178,7 +179,8 @@ enum Item {
 pub struct Picker {
     mode: PickerMode,
     query: Entity<Editor>,
-    root: Option<PathBuf>,
+    /// The project, for paths relative to their folder.
+    project: Option<Project>,
     files: Arc<Vec<PathBuf>>,
     recent: Vec<PathBuf>,
     actions: Arc<Vec<ActionEntry>>,
@@ -219,7 +221,7 @@ const PROJECT_ACTIONS: [&str; 3] = ["Open Folder…", "Open Folder in This Windo
 impl Picker {
     pub fn new(
         mode: PickerMode,
-        root: Option<PathBuf>,
+        project: Option<Project>,
         files: Arc<Vec<PathBuf>>,
         recent: Vec<PathBuf>,
         actions: Arc<Vec<ActionEntry>>,
@@ -256,7 +258,7 @@ impl Picker {
         let mut this = Self {
             mode,
             query,
-            root,
+            project,
             files,
             recent,
             actions,
@@ -389,12 +391,7 @@ impl Picker {
     }
 
     fn relative(&self, path: &Path) -> String {
-        self.root
-            .as_deref()
-            .and_then(|r| path.strip_prefix(r).ok())
-            .unwrap_or(path)
-            .to_string_lossy()
-            .into_owned()
+        self.project.as_ref().and_then(|p| p.relative(path)).unwrap_or_else(|| path.to_string_lossy().into_owned())
     }
 
     fn file_item(&mut self, path: &Path, pattern: Option<&Pattern>) -> Option<(u32, Item)> {
@@ -527,7 +524,7 @@ impl Picker {
             let mut scored: Vec<(u32, Item)> = Vec::new();
             for p in self.recent.clone() {
                 // The window's own project is already open.
-                if self.root.as_deref() == Some(p.as_path()) {
+                if self.project.as_ref().map(Project::primary) == Some(p.as_path()) {
                     continue;
                 }
                 if let Some(item) = self.project_item(&p, pattern.as_ref()) {
@@ -706,9 +703,9 @@ impl Picker {
             cancel.store(true, Ordering::Relaxed);
         }
         let cancel = Arc::new(AtomicBool::new(false));
-        let (files, root, query, stop) = (self.files.clone(), self.root.clone(), wanted.0.clone(), cancel.clone());
+        let (files, project, query, stop) = (self.files.clone(), self.project.clone(), wanted.0.clone(), cancel.clone());
         let task = cx.spawn(async move |this, cx| {
-            let found = cx.background_executor().spawn(async move { best_files(&files, root.as_deref(), &query, limit, &stop) }).await;
+            let found = cx.background_executor().spawn(async move { best_files(&files, project.as_ref(), &query, limit, &stop) }).await;
             this.update(cx, |picker, cx| {
                 let Some(found) = found else { return };
                 if let Some((_, task)) = picker.file_search.take() {
@@ -800,7 +797,7 @@ impl Focusable for Picker {
 /// The `limit` best matches of `query` among `files` (score, index), best
 /// first, ties in file order; a match in the file name scores higher. None
 /// when cancelled.
-fn best_files(files: &[PathBuf], root: Option<&Path>, query: &str, limit: usize, cancel: &AtomicBool) -> Option<Vec<(u32, usize)>> {
+fn best_files(files: &[PathBuf], project: Option<&Project>, query: &str, limit: usize, cancel: &AtomicBool) -> Option<Vec<(u32, usize)>> {
     let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
     let mut matcher = Matcher::new({
         let mut config = Config::DEFAULT;
@@ -813,7 +810,10 @@ fn best_files(files: &[PathBuf], root: Option<&Path>, query: &str, limit: usize,
         if ix % 2048 == 0 && cancel.load(Ordering::Relaxed) {
             return None;
         }
-        let rel = root.and_then(|r| path.strip_prefix(r).ok()).unwrap_or(path).to_string_lossy();
+        let rel = match project.and_then(|p| p.relative(path)) {
+            Some(rel) => std::borrow::Cow::Owned(rel),
+            None => path.to_string_lossy(),
+        };
         indices.clear();
         let Some(score) = pattern.indices(Utf32Str::new(&rel, &mut buf), &mut matcher, &mut indices) else { continue };
         let name_start = rel.rfind(['/', '\\']).map_or(0, |i| rel[..i + 1].chars().count()) as u32;
@@ -1239,13 +1239,14 @@ mod tests {
         let mut files: Vec<PathBuf> = (0..500).map(|i| root.join(format!("src/mod{i}/lib.rs"))).collect();
         files.push(root.join("docs/editor/notes.md"));
         files.push(root.join("src/editor.rs"));
-        let found = best_files(&files, Some(&root), "editor", 10, &AtomicBool::new(false)).unwrap();
+        let project = crate::project_folders::Project::new(root.clone());
+        let found = best_files(&files, Some(&project), "editor", 10, &AtomicBool::new(false)).unwrap();
         // Both match; the one whose file name matches comes first.
         assert_eq!(found.iter().map(|&(_, ix)| ix).collect::<Vec<_>>(), [501, 500]);
 
         // A query everything matches equally: the first ones, in order.
-        let found = best_files(&files, Some(&root), "lib", 3, &AtomicBool::new(false)).unwrap();
+        let found = best_files(&files, Some(&project), "lib", 3, &AtomicBool::new(false)).unwrap();
         assert_eq!(found.iter().map(|&(_, ix)| ix).collect::<Vec<_>>(), [0, 1, 2]);
-        assert!(best_files(&files, Some(&root), "lib", 3, &AtomicBool::new(true)).is_none(), "cancelled");
+        assert!(best_files(&files, Some(&project), "lib", 3, &AtomicBool::new(true)).is_none(), "cancelled");
     }
 }

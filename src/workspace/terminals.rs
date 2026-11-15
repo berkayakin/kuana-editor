@@ -153,8 +153,7 @@ impl Workspace {
 
     /// Where a new shell starts: the project folder (or the current file's).
     pub(super) fn terminal_cwd(&self, cx: &App) -> PathBuf {
-        self.root
-            .clone()
+        self.primary_dir()
             .or_else(|| self.active_editor(cx).and_then(|e| e.read(cx).doc.read(cx).path.as_deref()?.parent().map(Path::to_path_buf)))
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("/"))
@@ -209,7 +208,7 @@ impl Workspace {
     /// Open files may have a language now, or one with a grammar.
     /// The folder trust decides about: the project, else the active file's.
     pub(super) fn trust_folder(&self, cx: &App) -> Option<PathBuf> {
-        self.root.clone().or_else(|| self.active_editor(cx)?.read(cx).doc.read(cx).path.as_deref()?.parent().map(Path::to_path_buf))
+        self.primary_dir().or_else(|| self.active_editor(cx)?.read(cx).doc.read(cx).path.as_deref()?.parent().map(Path::to_path_buf))
     }
 
     pub(super) fn restricted(&self, cx: &App) -> bool {

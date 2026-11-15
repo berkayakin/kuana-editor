@@ -62,7 +62,7 @@ impl Workspace {
         let open = self.documents.read(cx).get(&other, cx).filter(|d| d.read(cx).is_dirty() && !d.read(cx).is_stand_in());
         let with = match open {
             Some(doc) => {
-                let label = self.root.as_ref().and_then(|r| other.strip_prefix(r).ok()).unwrap_or(&other).to_string_lossy().replace('\\', "/");
+                let label = self.folders.as_ref().and_then(|p| p.relative(&other)).unwrap_or_else(|| other.to_string_lossy().into_owned()).replace('\\', "/");
                 Compared::Text { label: format!("{label} (unsaved)"), text: doc.read(cx).rope().to_string().into() }
             }
             None => Compared::File(other),
@@ -72,14 +72,14 @@ impl Workspace {
 
     /// Compare With…: Go to File's list picks the other file.
     pub(super) fn pick_file_to_compare(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let files = if self.root.is_some() {
+        let files = if self.folders.is_some() {
             self.project.openable()
         } else {
             Arc::new(self.items(cx).iter().filter(|t| t.is_file()).filter_map(|t| t.path(cx)).collect())
         };
         let name = file_name(&path);
         let picker = cx.new(|cx| {
-            let mut picker = Picker::new(PickerMode::Files, self.root.clone(), files, self.recent.clone(), Arc::new(Vec::new()), window, cx);
+            let mut picker = Picker::new(PickerMode::Files, self.folders.clone(), files, self.recent.clone(), Arc::new(Vec::new()), window, cx);
             picker.set_title(format!("Compare {name} With").into(), cx);
             picker
         });

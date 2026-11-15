@@ -90,7 +90,7 @@ impl Workspace {
             cx.notify();
             return;
         }
-        if self.root.as_deref() == Some(path.as_path()) {
+        if self.primary_folder() == Some(path.as_path()) {
             return;
         }
         if let Some(other) = window_with_project(&path, cx) {
@@ -98,7 +98,7 @@ impl Workspace {
             return;
         }
         match target {
-            OpenIn::Auto if self.root.is_none() => self.set_root(path, window, cx),
+            OpenIn::Auto if self.folders.is_none() => self.set_root(path, window, cx),
             OpenIn::ThisWindow => self.replace_project(path, window, cx),
             OpenIn::NewWindow | OpenIn::Auto => {
                 open_window(Some(window.bounds()), cx, move |ws, window, cx| ws.set_root(path, window, cx));
@@ -110,7 +110,7 @@ impl Workspace {
     /// unsaved edits are saved or discarded. Without a project yet, lone
     /// files stay open.
     pub(super) fn replace_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if self.root.is_none() {
+        if self.folders.is_none() {
             self.set_root(path, window, cx);
         } else if self.prepare_to_close(CloseIntent::ReplaceProject(path.clone()), window, cx) {
             self.finish_close(CloseIntent::ReplaceProject(path), window, cx);
@@ -152,7 +152,7 @@ impl Workspace {
         self.test_statuses = Arc::default();
         self.lsp.update(cx, |s, _| {
             s.shutdown_all();
-            s.set_root(None);
+            s.set_folders(Vec::new());
         });
         self.auto_save_tasks.clear();
         self.auto_save_warned.clear();
@@ -163,7 +163,7 @@ impl Workspace {
         self.root_gone = false;
         self.watcher = None;
         self.watch_task = None;
-        self.root = None;
+        self.folders = None;
         // Extensions' views for the project go, and their code hears it closed.
         self.refresh_extension_views(cx);
         self.show_sidebar = false;

@@ -35,10 +35,9 @@ impl Workspace {
     /// it: the preview cuts long lines off.
     pub(super) fn run_snippet(&mut self, preview: &Entity<MarkdownPreview>, command: String, window: &mut Window, cx: &mut Context<Self>) {
         let path = preview.read(cx).path(cx);
-        let cwd = match (&self.root, path.as_deref().and_then(Path::parent)) {
-            (Some(root), Some(dir)) if dir.starts_with(root) => root.clone(),
-            (_, Some(dir)) => dir.to_path_buf(),
-            _ => self.terminal_cwd(cx),
+        let cwd = match path.as_deref().and_then(Path::parent) {
+            Some(dir) => self.folders.as_ref().and_then(|p| p.folder_of(dir)).unwrap_or(dir).to_path_buf(),
+            None => self.terminal_cwd(cx),
         };
         let first = command.lines().next().unwrap_or_default();
         let mut name: String = first.chars().take(40).collect();
@@ -417,13 +416,13 @@ impl Workspace {
     /// that's already running; the adapter depends on what it runs.
     pub(super) fn attach_to_process(&mut self, _: &AttachToProcess, window: &mut Window, cx: &mut Context<Self>) {
         // A remote project's processes are its host's, Linux or macOS.
-        if cfg!(windows) && !self.root.as_deref().is_some_and(crate::fs::is_remote) {
+        if cfg!(windows) && !self.primary_folder().is_some_and(crate::fs::is_remote) {
             self.toast(ToastKind::Info, "Attaching to a process isn't supported on Windows yet", None, cx);
             return;
         }
         self.close_modal(window, cx);
         self.open_picker(PickerMode::Attach, window, cx);
-        let cwd = self.root.clone().or_else(|| std::env::var_os("HOME").map(PathBuf::from)).unwrap_or_default();
+        let cwd = self.primary_dir().or_else(|| std::env::var_os("HOME").map(PathBuf::from)).unwrap_or_default();
         let task = cx.spawn(async move |ws, cx| {
             let dir = cwd.clone();
             let processes = cx.background_executor().spawn(async move { launch::processes(&dir) }).await;
@@ -459,8 +458,7 @@ impl Workspace {
     /// `.zed/debug.json`).
     pub(super) fn configurations(&mut self, last: Option<RunTarget>, debug: bool, cx: &mut Context<Self>) -> Option<Vec<RunTarget>> {
         let root = self
-            .root
-            .clone()
+            .primary_dir()
             .or_else(|| self.active_editor(cx).and_then(|e| e.read(cx).doc.read(cx).path.as_deref()?.parent().map(Path::to_path_buf)));
         let Some(root) = root else {
             self.toast(ToastKind::Info, "Open a folder or a file to run something", None, cx);

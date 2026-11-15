@@ -286,7 +286,7 @@ impl Workspace {
             return;
         }
         self.close_modal(window, cx);
-        let picker = cx.new(|cx| Picker::new(PickerMode::Bookmarks, self.root.clone(), Arc::default(), Vec::new(), Arc::default(), window, cx));
+        let picker = cx.new(|cx| Picker::new(PickerMode::Bookmarks, self.folders.clone(), Arc::default(), Vec::new(), Arc::default(), window, cx));
         let subscription = cx.subscribe_in(&picker, window, |ws, _, event: &PickerEvent, window, cx| match event {
             PickerEvent::OpenBookmark { path, row } => {
                 ws.close_modal(window, cx);

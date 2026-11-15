@@ -294,7 +294,7 @@ impl Workspace {
         }
         // A project keeps unsaved edits in its session and brings them back
         // next time ("hot exit"), so there's nothing to ask.
-        if self.root.is_some() {
+        if self.folders.is_some() {
             self.session_task = None;
             match self.save_session(cx) {
                 Ok(()) => return true,
@@ -380,7 +380,7 @@ impl Workspace {
             .as_deref()
             .and_then(Path::parent)
             .map(Path::to_path_buf)
-            .or_else(|| self.root.clone())
+            .or_else(|| self.primary_dir())
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
         let saving = item.read(cx).saving();

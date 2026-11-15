@@ -79,7 +79,7 @@ impl Workspace {
         if files.is_empty() {
             return;
         }
-        let view = cx.new(|cx| MultiBufferView::new(title, self.root.clone(), files.len(), cx));
+        let view = cx.new(|cx| MultiBufferView::new(title, self.folders.clone(), files.len(), cx));
         self.add_tab(PaneItem::Excerpts(view.clone()), window, cx);
         for (path, places_of) in files {
             // A restored tab not read yet: read now, its document is the file's.
@@ -127,7 +127,7 @@ impl Workspace {
             self.toast(ToastKind::Success, "No problems", Some("None in open files, the language servers' reports or the last Run".into()), cx);
             return;
         }
-        let view = cx.new(|cx| MultiBufferView::new("Problems", self.root.clone(), files.len(), cx));
+        let view = cx.new(|cx| MultiBufferView::new("Problems", self.folders.clone(), files.len(), cx));
         self.add_tab(PaneItem::Excerpts(view.clone()), window, cx);
         let task = cx.spawn_in(window, async move |ws, cx| {
             loop {

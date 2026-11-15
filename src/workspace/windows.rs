@@ -110,7 +110,7 @@ pub(super) fn window_with_project(root: &Path, cx: &App) -> Option<WindowHandle<
     cx.windows()
         .into_iter()
         .filter_map(|w| w.downcast::<Workspace>())
-        .find(|w| w.read(cx).is_ok_and(|ws| ws.root.as_deref() == Some(root)))
+        .find(|w| w.read(cx).is_ok_and(|ws| ws.primary_folder() == Some(root)))
 }
 
 
