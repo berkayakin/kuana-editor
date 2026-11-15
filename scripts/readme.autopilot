@@ -4,76 +4,76 @@ size 1400 875
 # The project opens, its tree and Git status read.
 wait 4000
 mark start
-wait 1000
+wait 900
 
 # Go to File, then find in it.
 action workspace::GoToFile
-pace 90
+pace 80
 type wrap.rs
-wait 700
+wait 600
 keys enter
-wait 1500
+wait 1300
 keys secondary-f
 type display_row
-wait 1500
+wait 1300
 keys escape
-wait 800
+wait 600
 
-# Themes preview live as you pick them (Welcome Setup's featured ones);
-# Escape keeps the one before.
+# Themes preview live as you pick them; Escape keeps the one before.
 action workspace::SelectTheme
 type sunset
-wait 1600
-keys secondary-a
-type lighthouse night
-wait 1600
+wait 1400
 keys secondary-a
 type one light
-wait 1600
+wait 1400
 keys escape
-wait 800
-
-# The Classic layout, through Find Action, with a quick look at the
-# terminal in it; then back to Modern.
-action workspace::FindAction
-type classic
 wait 700
-keys enter
+
+# Where the tool buttons go: the activity bar (as it opened), compact,
+# then a title bar row of their own, which the Classic layout keeps.
+action workspace::ToggleCompactActivityBar
 wait 1500
-action workspace::ToggleTerminal
-# Until the shell is ready, or it echoes the keys early.
-wait 1500
-type ls
-keys enter
-wait 1200
-action workspace::ToggleTerminal
+action workspace::ToggleCompactActivityBar
+action workspace::ToggleToolsInTitleBar
+wait 1700
+action workspace::ToggleClassicLayout
+wait 1700
+action workspace::ToggleClassicLayout
+action workspace::ToggleToolsInTitleBar
+wait 900
+
+# The Test Explorer: every test in the project, Run and Debug on each row.
+action workspace::ShowTestExplorer
+wait 2600
+keys down
 wait 500
-action workspace::FindAction
-type classic
-wait 500
-keys enter
-wait 1000
+keys down
+wait 900
+action workspace::ToggleResults
+wait 600
 
 # The Git log: the commit graph with branches and tags.
 action workspace::ToggleGitLog
-wait 1500
+wait 1300
 keys down
-wait 800
+wait 700
 keys down
-wait 800
-keys down
-wait 1400
+wait 1100
 action workspace::ToggleGitLog
-wait 600
+wait 500
 
-# Markdown with its preview beside it.
+# Markdown with its preview beside it, then Zen mode: just the text.
 action workspace::GoToFile
 type README.md
-wait 700
+wait 600
 keys enter
-wait 1000
+wait 900
 action editor::ToggleMarkdownPreview
-wait 3000
+wait 2200
+action workspace::ToggleZenMode
+wait 2400
+action workspace::ToggleZenMode
+wait 1000
 
 mark stop
 quit

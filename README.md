@@ -5,7 +5,8 @@
 # Kuana
 
 **A fast, beautiful code editor, written in Rust and drawn by your GPU.**
-JetBrains-style comfort, native speed and remote development built in. Works with Zed
+JetBrains-style comfort with native speed: language servers, a debugger, Git, a Test Explorer,
+databases and remote development over SSH, WSL and containers, all built in. Works with Zed
 extensions. Free and open source.
 
 [Download](https://github.com/berkayakin/kuana-editor/releases/latest) ·
@@ -13,7 +14,7 @@ extensions. Free and open source.
 [Documentation](docs/README.md) ·
 [Contributing](CONTRIBUTING.md)
 
-![Kuana: Go to File, find, live theme preview, the terminal and the Markdown preview](docs/screenshots/demo.webp)
+![Kuana: Go to File, find, live theme preview, the tool buttons on the activity bar, compact or in the title bar, the Test Explorer, the Git log, the Markdown preview and Zen mode](docs/screenshots/demo.webp)
 
 ## Why Kuana
 
@@ -30,8 +31,10 @@ tabs aren't read from disk until you look at them.
 **🎨 Beautiful out of the box.** A calm "islands" layout: the sidebar, editors and panels float
 as rounded cards. Tabs are browser-style, transitions are smooth and the chrome stays minimal.
 There are **50 built-in themes**, from Ember and Catppuccin to Tokyo Night and Rosé Pine,
-each previewed live as you pick it. Prefer something plainer? One setting tones down gradients,
-shadows and animations.
+each previewed live as you pick it. Arrange it your way: a Classic layout of square panels, the
+tool buttons on an activity bar (full or compact) or in a title bar, the sidebar on either side
+and a second sidebar beside the editor, and Zen mode when you only want the text. Prefer
+something plainer? One setting tones down gradients, shadows and animations.
 
 **🧩 Zed extensions.** Kuana reads [Zed's extension format](docs/extensions.md), so Zed's language,
 theme and icon-theme extensions work as they are. Install popular languages (Java, C#, Dart, Ruby,
@@ -58,6 +61,8 @@ Git, language servers, terminals, tests and the debugger all run on that machine
 tools. It uses your own `ssh`, config and keys, forwards ports to your browser and reconnects by
 itself when the connection drops.
 
+![A Rust project in a dev container: rust-analyzer's hints, Git blame and a bash terminal all running in the container, and a forwarded port in the status bar](docs/screenshots/remote.png)
+
 **🔒 Yours.** No account, no telemetry. Folders you haven't trusted open in
 [Restricted Mode](docs/settings.md#project-trust), so cloned code can't run on its own.
 Updates are signed.
@@ -66,12 +71,12 @@ Updates are signed.
 
 | | |
 | --- | --- |
-| **Code intelligence** | Completion, hover docs, Go to Declaration / Implementation, Find Usages and Call / Type Hierarchy in a Find panel, Rename, quick fixes, inlay hints and code lenses through [language servers](docs/languages.md), imports updated when you move files; tree-sitter highlighting for 13 languages built in, any other through extensions |
-| **Editing** | Multi-cursor, syntax-aware Extend Selection, column selection, folding, sticky scroll, breadcrumbs, snippets (VS Code format), [Vim mode](docs/editing.md#vim-mode), Markdown preview, [Zen mode](docs/editing.md#zen-mode), GitHub Copilot's suggestions as [ghost text](docs/editing.md#edit-predictions) (off until you turn them on) |
+| **Code intelligence** | Completion, hover docs, Go to Declaration / Implementation, Find Usages and Call / Type Hierarchy in a Find panel, Rename, quick fixes, inlay hints, code lenses and [semantic highlighting](docs/editing.md#semantic-highlighting) through [language servers](docs/languages.md), imports updated when you move files; tree-sitter highlighting for 13 languages built in, any other through extensions |
+| **Editing** | Multi-cursor, syntax-aware Extend Selection, column selection, folding, sticky scroll, breadcrumbs, [Back and Forward](docs/editing.md#back-and-forward), snippets (VS Code format) and [postfix completion](docs/editing.md#postfix-completion), [multibuffers](docs/editing.md#multibuffers) (search results and problems from many files, edited in one tab), [color swatches and a picker](docs/editing.md#colors), [linked editing](docs/editing.md#linked-editing) of tag names, [Vim mode](docs/editing.md#vim-mode), Markdown preview, [Zen mode](docs/editing.md#zen-mode), [compare anything](docs/editing.md#comparing-files) (the clipboard, another file, a branch), [scratch files](docs/editing.md#scratch-files), GitHub Copilot's suggestions as [ghost text](docs/editing.md#edit-predictions) (off until you turn them on) |
 | **Git** | Gutter changes with inline diffs, staging single changes, side-by-side diffs with word highlights, a commit graph with commit actions (cherry-pick, revert, reset, tag), inline blame, branches, stashes, remotes, merge conflicts resolved in the editor; see [Git](docs/git.md) |
-| **Run & debug** | ▶ next to every test and `main` (Rust, Go, Python, JS/TS), a [Test Explorer](docs/run-and-debug.md#test-explorer) with every test before it runs, [test results](docs/run-and-debug.md#test-results) as a tree with ✓ / ✕ in the gutter and Rerun Failed, a [debugger](docs/run-and-debug.md#debugging) with conditional breakpoints and logpoints, errors from a run's output in Problems |
+| **Run & debug** | ▶ next to every test and `main` (Rust, Go, Python, JS/TS), a [Test Explorer](docs/run-and-debug.md#test-explorer) with every test before it runs, [test results](docs/run-and-debug.md#test-results) as a tree with ✓ / ✕ in the gutter and Rerun Failed, a [debugger](docs/run-and-debug.md#debugging) with conditional breakpoints, logpoints, values inline in the code while paused and on hover, errors from a run's output in Problems |
 | **Databases** | A [Database](docs/database.md) view for PostgreSQL, MySQL, MariaDB, SQLite and Oracle: browse tables, views, functions and procedures, edit and save routines with errors in place, run SQL with results in a grid; drivers built in |
-| **Terminal** | Your login shell in tabs and splits, full colors and mouse support, Find in scrollback, ⌘-click paths to open them |
+| **Terminal** | Your login shell in tabs and splits, full colors and mouse support, Find in scrollback, ⌘-click paths to open them, [shell integration](docs/editing.md#terminal-shell-integration): each command marked, jump between them, copy one's output |
 | **Remote** | Projects on [SSH hosts](docs/remote.md) from your `~/.ssh/config`, in WSL and in running containers or [dev containers](docs/remote.md#containers) (`devcontainer.json`), with the language servers, terminals, Run, debugger and Git of that machine; forwarded ports, reconnecting by itself |
 | **Linting** | Built-in rules for JavaScript/TypeScript (oxc), HTML and Markdown, syntax errors for the rest, plus your project's ESLint as you type, with its quick fixes |
 | **Projects** | [Several folders in one window](docs/editing.md#several-folders-in-one-window), each with its own Git repository, language servers and settings; multiple windows, hot exit (unsaved edits survive a quit), [Local History](docs/editing.md#local-history) of every file, shared [project settings](docs/settings.md#project-settings), live file watching, file operations you can undo, image preview, any text encoding |
@@ -133,7 +138,7 @@ read what it [doesn't do yet](#known-limitations).
 
 ## Known limitations
 
-Kuana is at 0.1. What people most often expect that isn't there yet (the [roadmap](docs/roadmap.md)
+Kuana is young. What people most often expect that isn't there yet (the [roadmap](docs/roadmap.md)
 says what's planned):
 
 - **Builds aren't signed yet**: on macOS, a copy downloaded with a browser or Homebrew asks you to allow its

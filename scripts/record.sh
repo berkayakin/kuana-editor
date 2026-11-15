@@ -63,6 +63,8 @@ config="$root/target/record-config"
 rm -rf "$config"
 mkdir -p "$config/kuana"
 echo '{ "welcome_done": true }' >"$config/kuana/state.json"
+# Zen mode stays in the window: full screen would move it to a space of its own mid-recording.
+echo '{ "zen_full_screen": false }' >"$config/kuana/settings.json"
 python3 -c 'import json, sys; print(json.dumps({"folders": [sys.argv[1]]}))' "$folder" >"$config/kuana/trust.json"
 # Terminals get zsh with a plain prompt: no user or host name in the recording.
 mkdir -p "$config/zsh"
