@@ -95,6 +95,7 @@ mod transition;
 mod ui;
 mod updater;
 mod wasi_sdk;
+mod window_frame;
 mod workspace;
 mod wrap;
 

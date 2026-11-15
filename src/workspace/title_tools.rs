@@ -14,8 +14,6 @@ const BUTTON: f32 = 32.;
 const SEPARATOR: f32 = 13.;
 /// The row's free space kept for moving the window, at the least.
 const DRAG_ROOM: f32 = 80.;
-/// Off macOS, the window's buttons (`render_window_controls`).
-const CONTROLS: f32 = 3. * 46.;
 
 impl Workspace {
     /// Whether the window has the title bar row: the tools are in it, and
@@ -31,7 +29,8 @@ impl Workspace {
     pub(super) fn render_title_row(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let mac = cfg!(target_os = "macos");
         let lead = if mac && !window.is_fullscreen() { 82. } else { GAP + 4. };
-        let controls = if mac { GAP + 2. } else { CONTROLS };
+        let draws_controls = crate::window_frame::draws_controls(window);
+        let controls = if draws_controls { super::title_bar::window_controls_width() } else { GAP + 2. };
         let free = f32::from(self.viewport.width) - lead - controls - DRAG_ROOM;
         // The project and branch may take half the free room; the tools the rest.
         let chips_room = (free / 2.).max(0.);
@@ -54,9 +53,9 @@ impl Workspace {
             .children(self.render_title_chips(chips_room, false, window, cx))
             .child(window_drag_area("title-row-free").flex_1().min_w(px(GAP)))
             .child(self.render_title_tools(free - chips_width, cx))
-            .map(|el| match mac {
-                true => el.child(window_drag_area("title-row-end").flex_shrink_0().w(px(controls))),
-                false => el.child(div().w(px(GAP)).h_full().flex_shrink_0()).child(self.render_window_controls(window, cx)),
+            .map(|el| match draws_controls {
+                false => el.child(window_drag_area("title-row-end").flex_shrink_0().w(px(controls))),
+                true => el.child(div().w(px(GAP)).h_full().flex_shrink_0()).child(self.render_window_controls(window, cx)),
             })
     }
 

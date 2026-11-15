@@ -47,9 +47,11 @@ pub fn open(config: Option<ConnectionConfig>, ask_password: Option<String>, disp
         is_resizable: false,
         is_minimizable: false,
         app_id: Some("dev.kuana.editor".into()),
+        window_decorations: crate::window_frame::decorations(),
         ..Default::default()
     };
     let opened = cx.open_window(options, |window, cx| {
+        crate::window_frame::opened(window, cx);
         cx.new(|cx| {
             let dialog = cx.new(|cx| ConnectionDialog::new(config, ask_password, window, cx));
             let subscription = cx.subscribe_in(&dialog, window, move |_, _, event: &ConnectionDialogEvent, window, cx| {
@@ -633,7 +635,7 @@ impl Render for ConnectionDialog {
                     .text_color(theme.text_muted)
                     .child(title),
             )
-            .when(!cfg!(target_os = "macos"), |el| el.child(workspace::window_controls(window, cx)));
+            .when(crate::window_frame::draws_controls(window), |el| el.child(workspace::window_controls(window, cx)));
         div()
             .id("connection-window")
             .key_context("ConnectionDialog")
@@ -651,7 +653,7 @@ impl Render for ConnectionDialog {
             .font_family(theme.ui_font.clone())
             .text_size(px(theme.ui_font_size))
             .text_color(theme.text)
-            .child(title_bar)
+            .when(crate::window_frame::own_title_row(window), |el| el.child(title_bar))
             .child(
                 div()
                     .flex()

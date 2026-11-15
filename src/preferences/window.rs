@@ -48,7 +48,14 @@ pub fn open(page: Option<Page>, cx: &mut App) {
     let min = size(px(720.), px(480.));
     let (bounds, display) = match SessionState::load().preferences_window {
         Some(saved) => workspace::placement_bounds(&saved, min, cx),
-        None => (gpui::WindowBounds::Windowed(gpui::Bounds::centered(None, size(px(940.), px(640.)), cx)), None),
+        // Over the project window it's opened from, as the Push and Merge windows are.
+        None => {
+            let first = size(px(940.), px(640.));
+            match crate::window_frame::centered_over_active(first, cx) {
+                Some((bounds, display)) => (gpui::WindowBounds::Windowed(bounds), display),
+                None => (gpui::WindowBounds::Windowed(gpui::Bounds::centered(None, first, cx)), None),
+            }
+        }
     };
     let options = WindowOptions {
         window_bounds: Some(bounds),
@@ -60,9 +67,14 @@ pub fn open(page: Option<Page>, cx: &mut App) {
         }),
         window_min_size: Some(min),
         app_id: Some("dev.kuana.editor".into()),
+        window_decorations: crate::window_frame::decorations(),
         ..Default::default()
     };
-    if let Err(err) = cx.open_window(options, |window, cx| cx.new(|cx| PreferencesWindow::new(page, window, cx))) {
+    let opened = cx.open_window(options, |window, cx| {
+        crate::window_frame::opened(window, cx);
+        cx.new(|cx| PreferencesWindow::new(page, window, cx))
+    });
+    if let Err(err) = opened {
         eprintln!("couldn't open Preferences: {err}");
     }
 }
@@ -153,7 +165,6 @@ impl Focusable for PreferencesWindow {
 impl Render for PreferencesWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
-        let mac = cfg!(target_os = "macos");
         // A title bar of its own, like the project windows': the window
         // drags by it and (off macOS) has its buttons in it.
         let title_bar = div()
@@ -173,7 +184,7 @@ impl Render for PreferencesWindow {
                     .text_color(theme.text_muted)
                     .child("Settings"),
             )
-            .when(!mac, |el| el.child(workspace::window_controls(window, cx)));
+            .when(crate::window_frame::draws_controls(window), |el| el.child(workspace::window_controls(window, cx)));
         let problems = (!self.problems.is_empty()).then(|| {
             div().absolute().bottom(px(16.)).left_0().right_0().flex().justify_center().child(
                 popover(&theme)
@@ -219,8 +230,9 @@ impl Render for PreferencesWindow {
             .bg(chrome_bg(&theme, 0.6))
             .font_family(theme.ui_font.clone())
             .text_color(theme.text)
-            .child(title_bar)
+            .when(crate::window_frame::own_title_row(window), |el| el.child(title_bar))
             .child(div().flex_1().min_h_0().child(self.preferences.clone()))
             .children(problems)
+            .children(crate::window_frame::resize_edges(window))
     }
 }

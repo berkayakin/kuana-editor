@@ -39,7 +39,9 @@ pub(super) fn fit_tabs(naturals: &[f32], active: usize, available: f32) -> Vec<T
     let active_width = naturals[active].clamp(TAB_ICON_WIDTH, TAB_ACTIVE_MIN).min((available - menu).max(TAB_ICON_WIDTH)).floor();
     let others = (n - 1) as f32;
     let mut slots = vec![TabSlot::Hidden; n];
-    slots[active] = TabSlot::Fixed(active_width);
+    // Too narrow for a name beside the close button, it's its icon alone (it
+    // still closes with a middle click or its menu); they'd overlap otherwise.
+    slots[active] = if active_width < TAB_COMPACT_MIN { TabSlot::Icon(active_width) } else { TabSlot::Fixed(active_width) };
     // The others drop their close buttons and share what's left the same way,
     // keeping as much of their names as fits.
     let compact: Vec<f32> =

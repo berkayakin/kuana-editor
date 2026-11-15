@@ -584,6 +584,7 @@ impl Render for Workspace {
             .children(toasts)
             .children(self.render_context_menu(cx))
             .children(modal)
+            .children(crate::window_frame::resize_edges(window))
             .child({
                 // A Finder drag that leaves the window or is cancelled only sends
                 // FileDropEvent::Exited; listen for it to drop the highlights.
