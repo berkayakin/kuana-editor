@@ -3860,7 +3860,7 @@ dependencies = [
 
 [[package]]
 name = "kuana"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "alacritty_terminal",
  "base64 0.22.1",
@@ -3933,7 +3933,7 @@ dependencies = [
 
 [[package]]
 name = "kuana-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "alacritty_terminal",
  "base64 0.22.1",
@@ -3949,7 +3949,7 @@ dependencies = [
 
 [[package]]
 name = "kuana-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "kuana-core",
 ]
