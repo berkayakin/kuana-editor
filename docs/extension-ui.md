@@ -345,13 +345,13 @@ A **tree item**:
 | `ask-input(prompt, initial, secret)` | Asks for a line of text; `secret` makes it a password field. None when cancelled. | |
 | `confirm(message, detail, action)` | Asks to confirm; `action` names the button. | |
 | `settings()` | The extension's entry in settings.json, `"extensions": { "<id>": { … } }`, as JSON, with the defaults of `[kuana.settings]` for keys that aren't set (`{}` when there's neither). | |
-| `project-root()` | The open project's folder, if any. | |
+| `project-root()` | The open project's folder, if any; in a project of several folders, its first. | |
 | `secret-get(key)`, `secret-set(key, value)` | A value in the system keychain, under the extension's own name; `secret-set` with none removes it. | |
 | `set-diagnostics(path, list)` | Replaces the extension's problems for a file: underlined in the editor and listed in Problems. 1-based line and column. | |
 | `run-process(program, args, cwd)` | Runs a program and waits for it (up to 10 minutes): exit code, output, errors. | `process`, trusted project |
 | `run-in-terminal(title, command)` | Runs a shell command in a terminal tab the user sees. | `process`, trusted project |
 | `http-request(method, url, headers, body)` | An HTTP(S) request: status, headers, body. | `network` |
-| `read-project-file(path)` | Reads a file in the open project (up to 16 MB), by a path relative to the project or absolute in it. | `workspace-files` |
+| `read-project-file(path)` | Reads a file in the open project (up to 16 MB), by a path relative to the project's (first) folder or absolute in any of its folders. | `workspace-files` |
 
 Calls that wait for the user (`ask-input`, `confirm`, `pick`, a permission) block only the extension's own thread.
 

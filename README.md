@@ -74,7 +74,7 @@ Updates are signed.
 | **Terminal** | Your login shell in tabs and splits, full colors and mouse support, Find in scrollback, ⌘-click paths to open them |
 | **Remote** | Projects on [SSH hosts](docs/remote.md) from your `~/.ssh/config`, in WSL and in running containers or [dev containers](docs/remote.md#containers) (`devcontainer.json`), with the language servers, terminals, Run, debugger and Git of that machine; forwarded ports, reconnecting by itself |
 | **Linting** | Built-in rules for JavaScript/TypeScript (oxc), HTML and Markdown, syntax errors for the rest, plus your project's ESLint as you type, with its quick fixes |
-| **Projects** | Multiple windows, hot exit (unsaved edits survive a quit), [Local History](docs/editing.md#local-history) of every file, shared [project settings](docs/settings.md#project-settings), live file watching, file operations you can undo, image preview, any text encoding |
+| **Projects** | [Several folders in one window](docs/editing.md#several-folders-in-one-window), each with its own Git repository, language servers and settings; multiple windows, hot exit (unsaved edits survive a quit), [Local History](docs/editing.md#local-history) of every file, shared [project settings](docs/settings.md#project-settings), live file watching, file operations you can undo, image preview, any text encoding |
 
 There's much more: see the [full feature list](docs/features.md).
 

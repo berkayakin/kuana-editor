@@ -788,7 +788,8 @@ impl Workspace {
             Some(c) => c.settings_json(user),
             None => user.map(|v| v.to_string()).unwrap_or_default(),
         };
-        Caller { window: cx.entity_id().as_u64(), root: self.primary_dir(), settings }
+        let folders = self.folders.as_ref().map(|p| p.folders().to_vec()).unwrap_or_default();
+        Caller { window: cx.entity_id().as_u64(), root: self.primary_dir(), folders, settings }
     }
 
     /// The view entity for `slot`, made the first time it shows.
