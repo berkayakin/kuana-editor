@@ -78,7 +78,8 @@ anything runs: by file, then by module, class or `describe` block, found the way
 where it can be debugged, **Debug** at its right end (shown under the pointer and on the selected
 row): a test, a group, or a whole file (its module's tests for Rust, the file for pytest and the JS
 runners, its tests by name for Go). **Run All** runs the project's test command (cargo test,
-`go test ./...`, pytest) and **Refresh** reads everything again. Choosing a row opens the test.
+`go test ./...`, pytest; with several project folders, each folder's, which also get a row of their
+own) and **Refresh** reads everything again. Choosing a row opens the test.
 
 Every test run marks what it ran, ✓ or ✕, with each group showing its tests' worst. While the
 explorer is the panel's current tab, a run's results go to a tab beside it and the explorer stays in

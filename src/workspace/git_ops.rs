@@ -1085,7 +1085,7 @@ impl Workspace {
         // A Local History version needs no repository: paths show from the project.
         let repo = match &source {
             DiffSource::History { path, .. } | DiffSource::Compare { path, with: crate::diff_view::Compared::Text { .. } | crate::diff_view::Compared::File(_) } => {
-                self.primary_dir().or_else(|| path.parent().map(Path::to_path_buf))
+                self.folders.as_ref().and_then(|p| p.folder_of(path)).map(Path::to_path_buf).or_else(|| path.parent().map(Path::to_path_buf))
             }
             _ => self.repo(cx),
         };

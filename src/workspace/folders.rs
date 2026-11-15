@@ -128,6 +128,15 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The project folder of the current tab's file, else the primary one:
+    /// where something for "this part of the project" goes (a new terminal,
+    /// the Python venv).
+    pub(super) fn active_folder(&self, cx: &App) -> Option<PathBuf> {
+        let project = self.folders.as_ref()?;
+        let path = self.active_item(cx).and_then(|t| t.path(cx));
+        Some(path.as_deref().and_then(|p| project.folder_of(p)).unwrap_or(project.primary()).to_path_buf())
+    }
+
     /// The tree's empty space, right-clicked with several folders.
     pub(super) fn open_tree_space_menu(&mut self, position: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let entries = vec![

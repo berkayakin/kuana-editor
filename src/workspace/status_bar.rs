@@ -225,7 +225,7 @@ impl Workspace {
                 && let Some(dir) = e.doc.read(cx).path.as_deref().and_then(Path::parent)
             {
                 let label = match self.shown_venv(dir) {
-                    Some(venv) => crate::python::label(&venv, self.primary_folder()),
+                    Some(venv) => crate::python::label(&venv, self.folders.as_ref().and_then(|p| p.folder_of(dir))),
                     None => "No venv".into(),
                 };
                 right.push(

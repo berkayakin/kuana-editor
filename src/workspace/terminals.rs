@@ -151,9 +151,10 @@ impl Workspace {
         self.terminals.read(cx).position(terminal)
     }
 
-    /// Where a new shell starts: the project folder (or the current file's).
+    /// Where a new shell starts: the current file's project folder (else the
+    /// primary one; without a project, the file's own folder).
     pub(super) fn terminal_cwd(&self, cx: &App) -> PathBuf {
-        self.primary_dir()
+        self.active_folder(cx)
             .or_else(|| self.active_editor(cx).and_then(|e| e.read(cx).doc.read(cx).path.as_deref()?.parent().map(Path::to_path_buf)))
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("/"))

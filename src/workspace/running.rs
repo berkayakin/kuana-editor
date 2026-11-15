@@ -422,7 +422,7 @@ impl Workspace {
         }
         self.close_modal(window, cx);
         self.open_picker(PickerMode::Attach, window, cx);
-        let cwd = self.primary_dir().or_else(|| std::env::var_os("HOME").map(PathBuf::from)).unwrap_or_default();
+        let cwd = self.active_folder(cx).or_else(|| std::env::var_os("HOME").map(PathBuf::from)).unwrap_or_default();
         let task = cx.spawn(async move |ws, cx| {
             let dir = cwd.clone();
             let processes = cx.background_executor().spawn(async move { launch::processes(&dir) }).await;
@@ -457,17 +457,21 @@ impl Workspace {
     /// Debug the project's own debug configurations (`.vscode/launch.json`,
     /// `.zed/debug.json`).
     pub(super) fn configurations(&mut self, last: Option<RunTarget>, debug: bool, cx: &mut Context<Self>) -> Option<Vec<RunTarget>> {
-        let root = self
-            .primary_dir()
-            .or_else(|| self.active_editor(cx).and_then(|e| e.read(cx).doc.read(cx).path.as_deref()?.parent().map(Path::to_path_buf)));
-        let Some(root) = root else {
-            self.toast(ToastKind::Info, "Open a folder or a file to run something", None, cx);
-            return None;
-        };
         let current = self.active_editor(cx).and_then(|e| {
             let doc = e.read(cx).doc.read(cx);
             doc.path.clone().map(|p| (p, doc.language))
         });
+        // The current file's project folder (else the primary one; without a
+        // project, the file's own folder) has the settings' configurations.
+        let root = current
+            .as_ref()
+            .and_then(|(p, _)| self.folders.as_ref()?.folder_of(p).map(Path::to_path_buf))
+            .or_else(|| self.primary_dir())
+            .or_else(|| current.as_ref().and_then(|(p, _)| p.parent().map(Path::to_path_buf)));
+        let Some(root) = root else {
+            self.toast(ToastKind::Info, "Open a folder or a file to run something", None, cx);
+            return None;
+        };
         let mut targets: Vec<RunTarget> = Settings::get(cx)
             .at(&root)
             .run_configurations
@@ -482,10 +486,25 @@ impl Workspace {
                 test: None,
             })
             .collect();
-        if debug {
-            targets.extend(launch::project_configurations(&root, current.as_ref().map(|(p, _)| p.as_path())));
+        // Each folder's own debug configurations and commands; with several
+        // folders, named after their folder ("web: npm test").
+        let folders: Vec<PathBuf> = self.folders.as_ref().map_or_else(|| vec![root.clone()], |p| p.folders().to_vec());
+        let several = folders.len() > 1;
+        for folder in &folders {
+            let current = current.as_ref().filter(|(p, _)| p.starts_with(folder));
+            let mut found = Vec::new();
+            if debug {
+                found.extend(launch::project_configurations(folder, current.map(|(p, _)| p.as_path())));
+            }
+            found.extend(run::project_targets(folder, current.map(|(p, l)| (p.as_path(), *l))));
+            if several {
+                let name = crate::project_folders::folder_name(folder);
+                for target in &mut found {
+                    target.name = format!("{name}: {}", target.name);
+                }
+            }
+            targets.extend(found);
         }
-        targets.extend(run::project_targets(&root, current.as_ref().map(|(p, l)| (p.as_path(), *l))));
         // Then the current file's tests and mains, by name.
         if let Some(editor) = self.active_editor(cx) {
             let file = editor.update(cx, |e, cx| e.run_targets(cx));

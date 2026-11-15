@@ -71,6 +71,7 @@ impl Workspace {
             self.all_bookmarks(cx).into_iter().filter_map(|(path, bookmarks)| Some(FileBookmarks { path: saved(&path)?, bookmarks })).collect();
         bookmarks.sort_by(|a, b| a.path.cmp(&b.path));
         let python_venv = crate::python::choice(&root).map(|c| c.to_saved());
+        let folder_venvs = self.folders.iter().flat_map(|p| p.folders()[1..].iter()).filter_map(|f| Some((f.clone(), crate::python::choice(f)?.to_saved()))).collect();
         let terminals = Some(self.terminal_layout(cx));
         let last_run = self.last_run.clone();
         let folders = self.folders.as_ref().map(|p| p.folders()[1..].to_vec()).unwrap_or_default();
@@ -85,6 +86,7 @@ impl Workspace {
             breakpoints,
             bookmarks,
             python_venv,
+            folder_venvs,
             terminals,
             last_run,
             forwarded_ports: self.forwarded.iter().map(|f| f.remote).collect(),
