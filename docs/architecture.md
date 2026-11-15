@@ -44,6 +44,8 @@ bindings, colors, icons) are in the [contributing guide](../CONTRIBUTING.md).
 - `crates/kuana-core/src/remote/`, `crates/kuana-server` — remote development: the protocol, the
   server, connecting over SSH, WSL and Docker (`connection.rs`), dev containers (`container.rs`);
   `src/workspace/remote.rs` is the app's side (connecting, reconnecting, ports, the status item)
+- `crates/kuana-core/src/project_folders.rs`, `src/workspace/folders.rs`, `src/workspace/repos.rs` —
+  a window's project as several folders (the first one primary), and a Git repository per folder
 - `src/run.rs`, `src/editor/run.rs` — run and test targets and the gutter ▶
 - `src/test_run.rs` — test results read from a run's output (cargo, go, pytest, Jest, Vitest,
   node, `oxie test`, `lyth test`), their tree, the gutter's ✓ / ✕ and Rerun Failed

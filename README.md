@@ -37,8 +37,8 @@ and a second sidebar beside the editor, and Zen mode when you only want the text
 something plainer? One setting tones down gradients, shadows and animations.
 
 **🧩 Zed extensions.** Kuana reads [Zed's extension format](docs/extensions.md), so Zed's language,
-theme and icon-theme extensions work as they are. Install popular languages (Java, C#, Dart, Ruby,
-Zig, Vue and more) from **Settings → Extensions → Available**, built ready to use by
+theme and icon-theme extensions work as they are. Install popular languages (C and C++, Java, Kotlin, Swift, C#,
+Dart, Ruby, Zig, Vue and over 40 more) and Emmet from **Settings → Extensions → Available**, built ready to use by
 [Kuana's extension registry](https://github.com/berkayakin/kuana-extensions). An extension's
 grammars and its own code (which finds or downloads its language server) run sandboxed as
 WebAssembly.
@@ -150,9 +150,9 @@ says what's planned):
   Kuana's one-click install.
 - **AI**: GitHub Copilot's suggestions only ([Edit predictions](docs/editing.md#edit-predictions)),
   no chat or agent panel; agents like Claude Code or Codex run in the terminal.
-- **Languages**: 13 have highlighting built in; others come from [extensions](docs/extensions.md),
-  but there's none yet for C/C++, Kotlin or Swift.
-- **Editing**: no Emmet, no spell checking.
+- **Languages**: 13 are built in; the rest, C/C++, Kotlin and Swift included, are
+  [extensions](docs/extensions.md) from Kuana's registry, installed with one click.
+- **Editing**: no spell checking.
 - **Git**: commits can be reworded, squashed and dropped, not reordered or split; the log shows
   the latest 3,000 commits.
 - **Debugger**: no hit counts or exception breakpoint options. **Vim mode**: no registers other
@@ -169,8 +169,8 @@ support, features. Good places to start:
 - **Make a theme or an extension.** Neither needs any Rust: see [Themes](docs/themes.md) and
   [Extensions](docs/extensions.md).
 - **Pick an open [issue](https://github.com/berkayakin/kuana-editor/issues)**, or take something
-  from the [roadmap](docs/roadmap.md): reordering commits, Vim registers and macros, Emmet, a C/C++
-  extension.
+  from the [roadmap](docs/roadmap.md): reordering commits, Vim registers and macros, spell checking, Linux
+  packages.
 
 The [contributing guide](CONTRIBUTING.md) covers building, the checks a change has to pass and
 the conventions the code follows; [Architecture](docs/architecture.md) maps the code.

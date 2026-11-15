@@ -7,7 +7,7 @@ issue first so effort isn't doubled.
 
 What's already there is in [Features](features.md).
 
-## Now: a solid 0.2
+## Now: dependable everywhere
 
 Making what's there dependable on every platform before adding more.
 
@@ -19,12 +19,12 @@ Making what's there dependable on every platform before adding more.
   system-wide can't take Kuana's own updates.
 - **Crash reports**: after a crash, Kuana offers to open a GitHub issue filled in from its log
   (done); fixing what comes in comes first.
-- **More languages in the [registry](https://github.com/berkayakin/kuana-extensions)**: C/C++
-  (clangd) first, then Kotlin and Swift.
+- **More languages in the [registry](https://github.com/berkayakin/kuana-extensions)** as people
+  ask for them (it has over 50, C/C++, Kotlin and Swift among them).
 
 ## Next
 
-- **Editing**: Emmet, spell checking in comments, strings and Markdown.
+- **Editing**: spell checking in comments, strings and Markdown.
 - **Git**: reordering commits and splitting one (interactive rebase beyond reword, squash and drop), the whole log
   instead of the latest 3,000 commits.
 - **Debugger**: hit counts, exception breakpoint options, attaching to a debugpy or Node inspector

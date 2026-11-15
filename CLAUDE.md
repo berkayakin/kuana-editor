@@ -368,7 +368,7 @@ view is `Workspace`; every open file is an `Entity<Editor>` owning a `Document`.
   layout, since 0.9 could leave a text field at its minimum width at some window widths (Settings → Extensions, Windows).
   When a GPUI release uses a taffy that fixes this, switch to it and delete the copy and the patch (Cargo only warns
   "patch was not used" once GPUI moves past 0.9.0).
-- LSP: per-language server ordering/disabling by id isn't there yet (only `language_servers`). No Emmet.
+- LSP: per-language server ordering/disabling by id isn't there yet (only `language_servers`). Emmet only through its registry extension.
 - Git: the log loads the latest 3000 commits; history edits are reword / squash / drop (`git::edit_history`), no reordering or splitting.
 - The release binary (`--release`, unstripped) is ~61 MB, largely rumdl (pulls a second oxc, clap, allocators), grammars and
   wasmtime (Cranelift for grammars; components and WASI for extensions' code add ~5 MB stripped).
@@ -379,7 +379,6 @@ view is `Workspace`; every open file is an `Entity<Editor>` owning a `Document`.
   live Problems), the multibuffer's known gaps and larger items, with notes on the code each touches:
   `plans/next-features.md`.
 - Extensions: debug adapters and completion labels from extensions' code; older extension APIs
-  (0.1–0.5) and 0.8; our own extensions for C/C++ (none exists) and Kotlin/Swift (unclear licenses);
-  more languages in the registry.
+  (0.1–0.5) and 0.8; more languages in the registry (it has C/C++, our own, and Kotlin and Swift).
 - Debugger: hit counts, exception breakpoint options, attaching to a debugpy/inspector port.
 - Vim: registers other than the clipboard, macros, marks, `:s`, operators with `gu`/`gU`.
