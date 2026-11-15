@@ -129,7 +129,10 @@ mod tests {
         assert_eq!(project.add("/w/web".into()), Ok(()));
         assert_eq!(project.primary(), Path::new("/w/api"));
         assert!(project.contains(Path::new("/w/web/a.ts")));
-        assert_eq!(project.relative(Path::new("/w/web/src/a.ts")).as_deref(), Some("web/src/a.ts"));
+        // The folder's name joined with the platform's separator (`web\src/a.ts` on Windows,
+        // whose real paths have backslashes throughout).
+        let expected = Path::new("web").join("src/a.ts").display().to_string();
+        assert_eq!(project.relative(Path::new("/w/web/src/a.ts")), Some(expected));
         assert_eq!(project.relative(Path::new("/w/web")).as_deref(), Some("web"));
         assert_eq!(project.relative(Path::new("/elsewhere/a.ts")), None);
         assert_eq!(project.name(), "api, web");

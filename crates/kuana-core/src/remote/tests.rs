@@ -6,11 +6,14 @@
 use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicBool},
-    time::{Duration, Instant},
+    sync::Arc,
+    time::Duration,
 };
+#[cfg(unix)]
+use std::{sync::atomic::AtomicBool, time::Instant};
 
 use super::{RemoteHost, client, server};
+#[cfg(unix)]
 use crate::{
     exec::{Command, Stdio},
     fs::{self, PathExt},
@@ -36,11 +39,17 @@ fn temp(name: &str) -> PathBuf {
     std::fs::canonicalize(&dir).unwrap()
 }
 
-/// `real` (on the "remote" machine) as Kuana sees it, under the mount.
+/// `real` (on the "remote" machine) as Kuana sees it, under the mount. The
+/// remote side is always Linux or macOS (no `kuana-server` is built for
+/// Windows), so tests that serve this machine's folders are Unix-only: on
+/// Windows `C:\…` pushed onto the mount replaces it, and the "remote" files
+/// would quietly be local ones.
+#[cfg(unix)]
 fn mounted(root: &Path, real: &Path) -> PathBuf {
     fs::local_path(root, &real.to_string_lossy())
 }
 
+#[cfg(unix)]
 #[test]
 fn files_go_through_the_server() {
     let dir = temp("files");
@@ -102,11 +111,9 @@ fn files_go_through_the_server() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn programs_run_there_with_their_output_and_exit_code() {
-    if cfg!(windows) {
-        return;
-    }
     let dir = temp("exec");
     let (root, _host, _serving) = connect("exec-test", &temp("exec-trash"));
     let project = mounted(&root, &dir);
@@ -143,6 +150,7 @@ fn programs_run_there_with_their_output_and_exit_code() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn watching_scanning_and_searching_happen_there() {
     let dir = temp("watch");
@@ -190,6 +198,7 @@ fn watching_scanning_and_searching_happen_there() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_dropped_connection_fails_calls_instead_of_hanging() {
     let dir = temp("drop");
