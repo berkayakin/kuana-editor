@@ -650,6 +650,9 @@ pub struct Preferences {
     page: Page,
     search: Entity<Editor>,
     scroll: ScrollHandle,
+    /// The nav's page list, which scrolls when an open page's sections make
+    /// it taller than the window.
+    nav_scroll: ScrollHandle,
     /// Whether this frame's page scrolls in `body` (so `scroll` tracks it and
     /// gets a scrollbar); the Keymap page scrolls on its own.
     body_shown: Cell<bool>,
@@ -757,6 +760,7 @@ impl Preferences {
             page,
             search,
             scroll: ScrollHandle::new(),
+            nav_scroll: ScrollHandle::new(),
             body_shown: Cell::new(false),
             stacked: Cell::new(false),
             fonts_scroll: gpui::UniformListScrollHandle::new(),
@@ -1379,6 +1383,7 @@ impl Preferences {
                 .flex()
                 .items_center()
                 .gap_2()
+                .flex_shrink_0()
                 .h(px(30.))
                 .px_2p5()
                 .rounded(px(8.))
@@ -1400,6 +1405,7 @@ impl Preferences {
                             .id(("pref-section", ix))
                             .flex()
                             .items_center()
+                            .flex_shrink_0()
                             .h(px(24.))
                             .pl(px(34.))
                             .rounded(px(8.))
@@ -1425,7 +1431,28 @@ impl Preferences {
             .w(px(212.))
             .h_full()
             .child(div().flex().p_2().pt_3().child(input_box(&self.search, Some(Icon::Search), window, cx)))
-            .child(div().flex().flex_col().gap_0p5().px_2().pt_1().flex_1().children(items))
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        div()
+                            .id("pref-nav-list")
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .px_2()
+                            .pt_1()
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.nav_scroll)
+                            .children(items),
+                    )
+                    .child(crate::ui::scrollbar("pref-nav-scrollbar", &self.nav_scroll, cx)),
+            )
             .child(
                 div()
                     .flex()
