@@ -43,6 +43,7 @@ and theme colors.
 | `show_whitespace` | `"selection"` | mark spaces and tabs: `"selection"`, `"boundary"` (indentation and line ends), `"trailing"`, `"all"`, `"none"` |
 | `inlay_hints` | `true` | types and parameter names from the language server |
 | `linked_editing` | `true` | typing in a tag's name (HTML, JSX, and grammars like them) renames its closing or opening tag too |
+| `cursor_blink` | `true` | the caret blinks; 10 seconds after it last moved it stops, staying on, so an idle window doesn't redraw twice a second; `false` keeps it on |
 | `semantic_tokens` | `true` | the language server's semantic tokens over the syntax colors (types, parameters, macros; mutable variables underlined), for servers that send them |
 | `document_colors` | `true` | a swatch before each color in CSS and HTML (and colors language servers find); click it for a picker |
 | `inline_values` | `true` | paused in the debugger, variables' values after the lines of the function that name them |

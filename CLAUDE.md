@@ -172,7 +172,8 @@ view is `Workspace`; every open file is an `Entity<Editor>` owning a `Document`.
   to the visible range (`selections_touching`, diagnostics through `Reach`, search matches), document-wide data is
   cached by generation counters (`diagnostics_generation`, `code_lens_generation`, `WrapMap::generation`:
   `cached_blocks`, `row_problems`, `editor/markers.rs`), a long line is built only for its rows on screen
-  (`DisplayLine::window`, `display_part`), and the caret blink stops on blur and in an inactive window.
+  (`DisplayLine::window`, `display_part`), and the caret blink stops on blur, in an inactive window and `BLINK_FOR` (10 s) after the caret last moved
+  (`blink_resting`; `cursor_blink: false` never starts it), since each blink redraws the whole window.
   `editor::frame_tests` checks it with 10k carets, 200k matches and a 1.6 MB line;
   `cargo test bench_frames -- --ignored --nocapture` times it (a plain file ~100–170 µs a frame in the dev profile).
 - **Parsing:** an edit parses within `PARSE_BUDGET` (1 ms; `OPEN_PARSE_BUDGET` 10 ms on open/reload), then the
@@ -369,6 +370,11 @@ view is `Workspace`; every open file is an `Entity<Editor>` owning a `Document`.
   layout, since 0.9 could leave a text field at its minimum width at some window widths (Settings → Extensions, Windows).
   When a GPUI release uses a taffy that fixes this, switch to it and delete the copy and the patch (Cargo only warns
   "patch was not used" once GPUI moves past 0.9.0).
+- `vendor/gpui` is GPUI 0.2.2 patched in the same way, with Zed's later fix for idle GPU use backported
+  (zed-industries/zed#45369: 0.2.2 re-rendered the whole window every display refresh for a second after any input,
+  mouse moves included; now only after input that invalidated something, arriving at 60+ events a second). What
+  changed and how to drop it: `vendor/gpui/KUANA.md`. `ZED_MEASUREMENTS=1` prints a line per frame drawn, to count
+  redraws.
 - LSP: per-language server ordering/disabling by id isn't there yet (only `language_servers`). Emmet only through its registry extension.
 - Git: the log loads the latest 3000 commits; history edits are reword / squash / drop (`git::edit_history`), no reordering or splitting.
 - The release binary (`--release`, unstripped) is ~61 MB, largely rumdl (pulls a second oxc, clap, allocators), grammars and

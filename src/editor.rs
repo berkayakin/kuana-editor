@@ -85,6 +85,13 @@ const RUN_ICON: f32 = 11.0;
 /// How much of its color code a server marks as unused keeps (Zed's
 /// `unnecessary_code_fade` of 0.3).
 const UNNECESSARY_OPACITY: f32 = 0.7;
+/// How long the caret blinks for after it last moved (or the editor got the
+/// keyboard). Then it stays on: each blink redraws the whole window, and an
+/// editor someone is reading would otherwise do that twice a second forever.
+/// GTK stops after the same 10 seconds.
+const BLINK_FOR: Duration = Duration::from_secs(10);
+/// Half a blink: on for this long, then off for this long.
+const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
 actions!(
     editor,
@@ -442,6 +449,10 @@ pub struct Editor {
     cursor_visible: bool,
     blink_epoch: usize,
     blink_task: Option<Task<()>>,
+    /// The caret stopped blinking (`BLINK_FOR` passed, or `cursor_blink` is
+    /// off), so a frame doesn't start it again; moving the caret or the
+    /// keyboard leaving does.
+    blink_resting: bool,
     /// Closes popovers when focus leaves (see `focus_lost`); made on the
     /// first draw, the first time there's a window.
     blur_subscription: Option<gpui::Subscription>,
@@ -633,6 +644,7 @@ impl Editor {
             cursor_visible: true,
             blink_epoch: 0,
             blink_task: None,
+            blink_resting: false,
             blur_subscription: None,
             lint_task: None,
             linted_version: None,
@@ -1259,6 +1271,9 @@ impl Editor {
             return;
         }
         let relint = self.file_settings.syntax_errors != fs.syntax_errors;
+        if self.file_settings.cursor_blink != fs.cursor_blink {
+            self.wake_caret();
+        }
         self.applied_settings = Some(fs.clone());
         self.file_settings = fs.clone();
         if relint {
@@ -1463,9 +1478,7 @@ impl Editor {
         if self.excerpt.is_some() {
             cx.emit(ExcerptEvent::CaretMoved);
         }
-        self.cursor_visible = true;
-        self.blink_epoch += 1;
-        self.blink_task = None;
+        self.wake_caret();
         self.unfold_at_carets();
         self.schedule_symbol_highlights(cx);
         self.lsp_selection_changed(cx);
@@ -1750,25 +1763,49 @@ impl Editor {
         !self.lsp.active && self.lsp_servers(cx).is_empty() && self.file_settings.syntax_errors
     }
 
+    /// The caret is on and blinks again from the start: the next frame drawn
+    /// with the keyboard starts its timer (see `restart_blink`).
+    fn wake_caret(&mut self) {
+        self.cursor_visible = true;
+        self.blink_epoch += 1;
+        self.blink_task = None;
+        self.blink_resting = false;
+    }
+
     /// Blinks the caret while the editor has the keyboard in the active
-    /// window. Otherwise the caret stays on and the timer stops: a frame drawn
-    /// with focus starts it again (focus and activation draw), so editors in
-    /// other tabs and panes don't wake up twice a second.
+    /// window, for `BLINK_FOR`. Otherwise the caret stays on and the timer
+    /// stops: a frame drawn with focus starts it again (focus and activation
+    /// draw), so editors in other tabs and panes don't wake up twice a
+    /// second; once `BLINK_FOR` has passed, only moving the caret does
+    /// (`blink_resting`).
     fn restart_blink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.file_settings.cursor_blink {
+            self.cursor_visible = true;
+            self.blink_task = None;
+            self.blink_resting = true;
+            return;
+        }
+        self.blink_resting = false;
         let epoch = self.blink_epoch;
+        // The executor's clock, which tests move.
+        let started = cx.background_executor().now();
         self.blink_task = Some(cx.spawn_in(window, async move |this, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_millis(530)).await;
+                cx.background_executor().timer(BLINK_INTERVAL).await;
                 let keep_going = this
                     .update_in(cx, |editor, window, cx| {
                         if editor.blink_epoch != epoch {
                             return false;
                         }
-                        if editor.focus_handle.is_focused(window) && window.is_window_active() {
+                        let focused = editor.focus_handle.is_focused(window) && window.is_window_active();
+                        if focused && cx.background_executor().now().duration_since(started) < BLINK_FOR {
                             editor.cursor_visible = !editor.cursor_visible;
                             cx.notify();
                             return true;
                         }
+                        // Resting until the caret moves; without the keyboard,
+                        // until a frame drawn with it.
+                        editor.blink_resting = focused;
                         if !editor.cursor_visible {
                             editor.cursor_visible = true;
                             cx.notify();
@@ -4941,8 +4978,11 @@ impl Editor {
             frame.link_bounds = Some(Bounds::from_corners(point(start, y), point(end, y + line_height)).intersect(&frame.text_bounds));
         }
 
-        // Only the focused editor blinks (see `restart_blink`).
-        if self.blink_task.is_none() && focused {
+        // Only the focused editor blinks (see `restart_blink`), and only for a
+        // while: a resting caret starts again once the keyboard has left.
+        if !focused {
+            self.blink_resting = false;
+        } else if self.blink_task.is_none() && !self.blink_resting {
             self.restart_blink(window, cx);
         }
         frame
@@ -7583,6 +7623,43 @@ mod frame_tests {
         let back = frame(&host, cx);
         assert_eq!(back.numbers.len(), usual.numbers.len());
         assert!(back.minimap_bounds.is_some());
+    }
+
+    /// The caret blinks while the editor has the keyboard, for `BLINK_FOR`
+    /// after it last moved, then stays on with no timer left; moving it
+    /// starts the blink again. With `cursor_blink` off it never blinks.
+    #[gpui::test]
+    fn caret_blinks_for_a_while_after_it_moves(cx: &mut TestAppContext) {
+        let (editor, host, cx) = editor("fn main() {}\n".repeat(5), cx);
+        let state = |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| (e.cursor_visible, e.blink_task.is_some(), e.blink_resting));
+        frame(&host, cx);
+        assert_eq!(state(cx), (true, true, false));
+        cx.executor().advance_clock(BLINK_INTERVAL);
+        assert_eq!(state(cx), (false, true, false));
+        cx.executor().advance_clock(BLINK_INTERVAL);
+        assert_eq!(state(cx), (true, true, false));
+
+        // Past `BLINK_FOR`: on, resting, and a frame doesn't start it again.
+        cx.executor().advance_clock(BLINK_FOR + BLINK_INTERVAL);
+        assert_eq!(state(cx), (true, false, true));
+        frame(&host, cx);
+        cx.executor().advance_clock(BLINK_INTERVAL * 4);
+        assert_eq!(state(cx), (true, false, true));
+
+        // The caret moves: it blinks again.
+        editor.update(cx, |e, cx| e.set_selections(vec![Selection::cursor(3)], 0, cx));
+        frame(&host, cx);
+        cx.executor().advance_clock(BLINK_INTERVAL);
+        assert_eq!(state(cx), (false, true, false));
+
+        // Blinking off: on at once, no timer, even when the caret moves.
+        editor.update(cx, |e, cx| {
+            e.file_settings.cursor_blink = false;
+            e.set_selections(vec![Selection::cursor(5)], 0, cx);
+        });
+        frame(&host, cx);
+        cx.executor().advance_clock(BLINK_INTERVAL * 4);
+        assert_eq!(state(cx), (true, false, true));
     }
 
     /// A file of `lines` lines with a caret, a problem and a code lens on

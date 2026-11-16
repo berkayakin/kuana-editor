@@ -337,6 +337,11 @@ fn vscode_editor_setting(key: &str, value: &Value) -> Option<(&'static str, Valu
         "editor.minimap.enabled" => ("minimap", json!(value.as_bool()?), format!("Minimap: {}", on(value.as_bool()?))),
         "editor.codeLens" => ("code_lens", json!(value.as_bool()?), format!("Code lenses: {}", on(value.as_bool()?))),
         "editor.linkedEditing" => ("linked_editing", json!(value.as_bool()?), format!("Linked editing: {}", on(value.as_bool()?))),
+        // "blink", "smooth", "phase", "expand" or "solid": only the last doesn't blink.
+        "editor.cursorBlinking" => {
+            let blink = value.as_str()? != "solid";
+            ("cursor_blink", json!(blink), format!("Blinking caret: {}", on(blink)))
+        }
         "editor.colorDecorators" => ("document_colors", json!(value.as_bool()?), format!("Color swatches: {}", on(value.as_bool()?))),
         "editor.semanticHighlighting.enabled" => {
             ("semantic_tokens", json!(value.as_bool()?), format!("Semantic highlighting: {}", on(value.as_bool()?)))

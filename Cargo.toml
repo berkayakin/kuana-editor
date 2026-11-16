@@ -135,6 +135,12 @@ winresource = "0.1"
 # parent was being measured (text fields at their minimum width at some window widths).
 [patch.crates-io]
 taffy = { path = "vendor/taffy" }
+# GPUI 0.2.2 with Zed's later fix for idle GPU use (zed-industries/zed#45369):
+# it re-rendered the whole window every display refresh for a second after any
+# input, mouse moves included; now only after input that changed something,
+# arriving at 60 events a second or more (scrolling, dragging). See
+# vendor/gpui/KUANA.md.
+gpui = { path = "vendor/gpui" }
 
 # Debug builds: Kuana's own code compiles quickly, dependencies (tree-sitter, oxc, gpui) stay fast.
 [profile.dev]

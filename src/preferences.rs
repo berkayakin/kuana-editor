@@ -155,6 +155,7 @@ enum Setting {
     InlayHints,
     InlineValues,
     LinkedEditing,
+    CursorBlink,
     DocumentColors,
     SemanticTokens,
     CodeLens,
@@ -180,7 +181,7 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Setting; 48] = [
+    const ALL: [Setting; 49] = [
         Setting::Theme,
         Setting::IconTheme,
         Setting::VisualEffects,
@@ -200,6 +201,7 @@ impl Setting {
         Setting::TabSize,
         Setting::HardTabs,
         Setting::LinkedEditing,
+        Setting::CursorBlink,
         Setting::SoftWrap,
         Setting::Rulers,
         Setting::ShowWhitespace,
@@ -242,7 +244,7 @@ impl Setting {
             Setting::ZenFullScreen | Setting::ZenWidth | Setting::ZenLineNumbers | Setting::ZenTabs => Page::Appearance,
             Setting::BaseKeymap => Page::Keymap,
             Setting::FontFamily | Setting::FontSize | Setting::LineHeight => Page::Editor,
-            Setting::TabSize | Setting::HardTabs | Setting::LinkedEditing | Setting::SoftWrap => Page::Editor,
+            Setting::TabSize | Setting::HardTabs | Setting::LinkedEditing | Setting::CursorBlink | Setting::SoftWrap => Page::Editor,
             Setting::Rulers | Setting::ShowWhitespace | Setting::InlayHints | Setting::InlineValues | Setting::DocumentColors | Setting::SemanticTokens | Setting::CodeLens | Setting::VimMode | Setting::TodoPatterns | Setting::OpenFolderIn => Page::Editor,
             Setting::Minimap | Setting::MinimapWidth | Setting::EditPredictions => Page::Editor,
             Setting::AutoSave
@@ -267,7 +269,7 @@ impl Setting {
             Setting::BaseKeymap => "Keymap",
             Setting::FontFamily | Setting::FontSize | Setting::LineHeight => "Font",
             Setting::TabSize | Setting::HardTabs => "Indentation",
-            Setting::LinkedEditing => "Typing",
+            Setting::LinkedEditing | Setting::CursorBlink => "Typing",
             Setting::SoftWrap => "Wrapping",
             Setting::Rulers | Setting::ShowWhitespace => "Guides",
             Setting::InlayHints | Setting::InlineValues | Setting::DocumentColors | Setting::CodeLens => "Hints",
@@ -316,6 +318,7 @@ impl Setting {
             Setting::InlayHints => "Inlay hints",
             Setting::InlineValues => "Inline values while debugging",
             Setting::LinkedEditing => "Rename tag pairs together",
+            Setting::CursorBlink => "Blinking caret",
             Setting::DocumentColors => "Color swatches",
             Setting::SemanticTokens => "Semantic highlighting",
             Setting::CodeLens => "Code lens",
@@ -369,6 +372,7 @@ impl Setting {
             Setting::InlayHints => "Types and parameter names from the language server, shown in the code.",
             Setting::InlineValues => "Paused in the debugger, variables' values after the lines of the function that name them.",
             Setting::LinkedEditing => "Typing in a tag's name (HTML, JSX) changes its closing or opening tag too.",
+            Setting::CursorBlink => "The caret blinks until 10 seconds after it last moved, then stays on.",
             Setting::DocumentColors => "A swatch before each color in CSS and HTML (and colors language servers find); click it to pick another.",
             Setting::SemanticTokens => "The language server's colors over the syntax colors: types, parameters, macros; mutable variables underlined.",
             Setting::CodeLens => "The language server's links above lines: references, implementations, Run and Debug.",
@@ -425,6 +429,7 @@ impl Setting {
             Setting::InlayHints => "inlay hints types parameters names language server",
             Setting::InlineValues => "inline values debugger debug variables paused breakpoint",
             Setting::LinkedEditing => "linked editing rename tag closing html jsx xml auto rename",
+            Setting::CursorBlink => "cursor caret blink blinking solid",
             Setting::DocumentColors => "color swatch picker css hex rgb hsl decorators tailwind",
             Setting::SemanticTokens => "semantic tokens highlighting colors language server lsp mutable",
             Setting::CodeLens => "code lens references implementations run debug language server",
@@ -1717,6 +1722,7 @@ impl Preferences {
             Setting::InlayHints => self.switch_with_default("pref-inlay-hints", "inlay_hints", settings.editor.inlay_hints, true, cx),
             Setting::InlineValues => self.switch_with_default("pref-inline-values", "inline_values", settings.editor.inline_values, true, cx),
             Setting::LinkedEditing => self.switch_with_default("pref-linked-editing", "linked_editing", settings.editor.linked_editing, true, cx),
+            Setting::CursorBlink => self.switch_with_default("pref-cursor-blink", "cursor_blink", settings.editor.cursor_blink, true, cx),
             Setting::DocumentColors => self.switch_with_default("pref-document-colors", "document_colors", settings.editor.document_colors, true, cx),
             Setting::SemanticTokens => self.switch_with_default("pref-semantic-tokens", "semantic_tokens", settings.editor.semantic_tokens, true, cx),
             Setting::CodeLens => self.switch_with_default("pref-code-lens", "code_lens", settings.editor.code_lens, true, cx),
@@ -3045,6 +3051,7 @@ fn setting_key(setting: Setting) -> &'static str {
         Setting::InlayHints => "inlay_hints",
         Setting::InlineValues => "inline_values",
         Setting::LinkedEditing => "linked_editing",
+        Setting::CursorBlink => "cursor_blink",
         Setting::DocumentColors => "document_colors",
         Setting::SemanticTokens => "semantic_tokens",
         Setting::CodeLens => "code_lens",
