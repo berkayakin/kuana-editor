@@ -251,6 +251,8 @@ jobs:
         run: |
           mkdir -p dist pkg
           cp "target/${{ matrix.target }}/dist/kuana.exe" LICENSE-MIT LICENSE-APACHE pkg/
+          cp assets/fonts/OFL.txt pkg/Vidaloka-OFL.txt
+          cp assets/fonts/JetBrainsMono-OFL.txt pkg/
           (cd pkg && 7z a -tzip "../dist/kuana-$VERSION-windows-${{ matrix.arch }}.zip" .)
       - name: Installer
         shell: pwsh
@@ -304,6 +306,8 @@ jobs:
         run: |
           mkdir -p dist pkg
           cp target/dist/kuana target/dist/kuana-server LICENSE-MIT LICENSE-APACHE pkg/
+          cp assets/fonts/OFL.txt pkg/Vidaloka-OFL.txt
+          cp assets/fonts/JetBrainsMono-OFL.txt pkg/
           tar -czf "dist/kuana-$VERSION-linux-${{ matrix.arch }}.tar.gz" -C pkg .
       - run: gh release upload "$TAG" dist/* --clobber
       - uses: actions/upload-artifact@v4

@@ -108,8 +108,19 @@ static IMAGES: &[(&str, &[u8])] = &[(LOGO, include_bytes!("../assets/app-icon/lo
 /// Vidaloka (SIL Open Font License, see `assets/fonts/OFL.txt`), used for the app name.
 pub const TITLE_FONT: &str = "Vidaloka";
 
+/// JetBrains Mono (SIL Open Font License, see `assets/fonts/JetBrainsMono-OFL.txt`), the default code
+/// font everywhere, so the editor and terminal look the same on every machine (`theme::pick_fonts`).
+/// The four static styles rather than the variable font: bold and italic are picked by file.
+pub const CODE_FONT: &str = "JetBrains Mono";
+
 pub fn load_fonts(cx: &App) {
-    let fonts = vec![Cow::Borrowed(&include_bytes!("../assets/fonts/Vidaloka-Regular.ttf")[..])];
+    let fonts = vec![
+        Cow::Borrowed(&include_bytes!("../assets/fonts/Vidaloka-Regular.ttf")[..]),
+        Cow::Borrowed(&include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf")[..]),
+        Cow::Borrowed(&include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf")[..]),
+        Cow::Borrowed(&include_bytes!("../assets/fonts/JetBrainsMono-Italic.ttf")[..]),
+        Cow::Borrowed(&include_bytes!("../assets/fonts/JetBrainsMono-BoldItalic.ttf")[..]),
+    ];
     if let Err(e) = cx.text_system().add_fonts(fonts) {
         eprintln!("couldn't load bundled fonts: {e}");
     }

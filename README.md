@@ -191,7 +191,8 @@ dual licensed as above, without any additional terms or conditions.
 Bundled third-party assets keep their own licenses: file-type icons from
 [Charmed Icons](https://github.com/littensy/charmed-icons) by littensy and jmesrje (MIT,
 [`assets/file-icons/LICENSE`](assets/file-icons/LICENSE)), the Vidaloka font (SIL Open Font
-License, [`assets/fonts/OFL.txt`](assets/fonts/OFL.txt)) and the ported color themes (MIT, each
+License, [`assets/fonts/OFL.txt`](assets/fonts/OFL.txt)), the JetBrains Mono font (SIL Open Font
+License, [`assets/fonts/JetBrainsMono-OFL.txt`](assets/fonts/JetBrainsMono-OFL.txt)) and the ported color themes (MIT, each
 author credited in [`assets/themes/LICENSE`](assets/themes/LICENSE)).
 
 Zed, JetBrains, Visual Studio Code and Sublime Text are trademarks of their respective owners.
