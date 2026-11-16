@@ -945,12 +945,14 @@ pub fn default_fonts(cx: &App) -> (SharedString, SharedString) {
 fn pick_fonts(installed: &[String]) -> (SharedString, SharedString) {
     let has = |name: &str| installed.iter().any(|f| f == name);
 
+    // The bundled code font first (`assets::load_fonts` adds it before this runs); the system's only
+    // if it somehow didn't load.
     let mono_candidates: &[&str] = if cfg!(target_os = "macos") {
-        &["Lilex", "JetBrains Mono", "SF Mono", "Menlo"]
+        &[crate::assets::CODE_FONT, "SF Mono", "Menlo"]
     } else if cfg!(target_os = "windows") {
-        &["Lilex", "JetBrains Mono", "Cascadia Code", "Cascadia Mono", "Consolas"]
+        &[crate::assets::CODE_FONT, "Cascadia Code", "Cascadia Mono", "Consolas"]
     } else {
-        &["Lilex", "JetBrains Mono", "DejaVu Sans Mono", "monospace"]
+        &[crate::assets::CODE_FONT, "DejaVu Sans Mono", "monospace"]
     };
     let mono = mono_candidates
         .iter()

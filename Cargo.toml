@@ -20,6 +20,8 @@ identifier = "dev.kuana.editor"
 icon = ["assets/app-icon/macos/Kuana.icns", "assets/app-icon/linux/hicolor/*/apps/dev.kuana.editor.png"]
 category = "public.app-category.developer-tools"
 short_description = "A small, fast GPU-rendered code editor"
+# The bundled fonts' licenses (the fonts themselves are inside the binary).
+resources = ["assets/fonts/OFL.txt", "assets/fonts/JetBrainsMono-OFL.txt"]
 
 [package.metadata.bundle.osx]
 # Lets Finder offer Kuana in Open With for folders and files (Alternate: never the default app).

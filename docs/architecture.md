@@ -75,6 +75,6 @@ bindings, colors, icons) are in the [contributing guide](../CONTRIBUTING.md).
 - `src/autopilot.rs` — plays a script of keys and actions (`KUANA_AUTOPILOT=<file>`): the README
   recording (`scripts/record.sh`) and CI's smoke test (`scripts/smoke.sh`, `.github/workflows/smoke.yml`)
 - `src/ui.rs`, `src/context_menu.rs`, `src/input_dialog.rs` — shared widgets, menus and prompts
-- `src/assets.rs`, `assets/icons/` — UI icons ([Material Symbols](https://fonts.google.com/icons), Rounded, filled; Apache 2.0) and the title font embedded into the binary
+- `src/assets.rs`, `assets/icons/` — UI icons ([Material Symbols](https://fonts.google.com/icons), Rounded, filled; Apache 2.0) and the fonts (Vidaloka for the title, JetBrains Mono for code) embedded into the binary
 - `assets/file-icons/`, `src/file_icons.rs` — file-type icons ([Charmed Icons](https://github.com/jmesrje/zed-charmed-icons)) and their file-name associations
 - `assets/app-icon/` — the app logo (`logo.png`) and its per-platform icons

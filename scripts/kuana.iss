@@ -49,6 +49,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "{#Source}\kuana.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE-MIT"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE-APACHE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\assets\fonts\OFL.txt"; DestDir: "{app}"; DestName: "Vidaloka-OFL.txt"; Flags: ignoreversion
+Source: "..\assets\fonts\JetBrainsMono-OFL.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Kuana"; Filename: "{app}\kuana.exe"

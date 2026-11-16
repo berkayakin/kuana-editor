@@ -37,7 +37,7 @@ pub struct Settings {
     pub auto_save: Option<AutoSave>,
     /// Idle time in milliseconds before `after_delay` saves.
     pub auto_save_delay: Option<u64>,
-    /// A font installed on the system; falls back to the built-in choice.
+    /// A font installed on the system; falls back to the bundled JetBrains Mono.
     pub editor_font_family: Option<String>,
     pub editor_font_size: Option<f32>,
     /// Line height as a multiple of the font size.
