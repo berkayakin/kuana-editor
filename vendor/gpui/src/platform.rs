@@ -488,6 +488,11 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn toggle_fullscreen(&self);
     fn is_fullscreen(&self) -> bool;
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>);
+    /// Kuana: a function GPUI calls (on the main thread) whenever the window needs a
+    /// frame, for platforms that stop asking for frames while nothing changes.
+    fn frame_waker(&self) -> Option<std::rc::Rc<dyn Fn()>> {
+        None
+    }
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>);
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>);
     fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>);

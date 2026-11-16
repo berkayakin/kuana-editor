@@ -116,7 +116,9 @@ pub fn git_path(path: &Path) -> GitPath {
         // The .git folder itself (some platforms report the parent of a change).
         None => GitPath::Metadata,
         Some(name) if name.ends_with(".lock") => GitPath::Internal,
-        Some("HEAD" | "index" | "ORIG_HEAD" | "MERGE_HEAD" | "REBASE_HEAD" | "CHERRY_PICK_HEAD" | "FETCH_HEAD" | "packed-refs") => {
+        // Not FETCH_HEAD: every fetch rewrites it, background ones included, and what a fetch
+        // changes that status shows (a remote branch moving) comes as `refs/` or `packed-refs`.
+        Some("HEAD" | "index" | "ORIG_HEAD" | "MERGE_HEAD" | "REBASE_HEAD" | "CHERRY_PICK_HEAD" | "packed-refs") => {
             GitPath::Metadata
         }
         Some("refs" | "rebase-merge" | "rebase-apply") if !rest.last().is_some_and(|n| n.ends_with(".lock")) => GitPath::Metadata,
@@ -157,6 +159,7 @@ mod tests {
         assert_eq!(git_path(Path::new("/p/.git/refs/heads/main.lock")), GitPath::Internal);
         assert_eq!(git_path(Path::new("/p/.git/objects/ab/cdef")), GitPath::Internal);
         assert_eq!(git_path(Path::new("/p/.git/logs/HEAD")), GitPath::Internal);
+        assert_eq!(git_path(Path::new("/p/.git/FETCH_HEAD")), GitPath::Internal);
         let heavy = |path: &str| heavy_folder(Path::new("/p"), Path::new(path));
         assert_eq!(heavy("/p/target/debug/kuana"), Some(PathBuf::from("/p/target")));
         assert_eq!(heavy("/p/web/node_modules/x/node_modules/y.js"), Some(PathBuf::from("/p/web/node_modules")));

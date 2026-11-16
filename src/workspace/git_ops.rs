@@ -267,7 +267,14 @@ impl Workspace {
                 let Some((store, repo)) = due.min_by_key(|(_, repo)| last.get(repo).copied()) else { continue };
                 last.insert(repo.clone(), Instant::now());
                 let dir = repo.clone();
-                let fetched = cx.background_executor().spawn(async move { git::fetch(&dir).is_ok() }).await;
+                // Only a fetch that moved a remote branch changes what's shown (ahead/behind).
+                let fetched = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let before = git::remote_refs(&dir);
+                        git::fetch(&dir).is_ok() && git::remote_refs(&dir) != before
+                    })
+                    .await;
                 let alive = this.update(cx, |_, cx| {
                     if fetched {
                         store.update(cx, |g, cx| g.refresh(cx));

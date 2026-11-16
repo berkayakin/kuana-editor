@@ -372,7 +372,9 @@ view is `Workspace`; every open file is an `Entity<Editor>` owning a `Document`.
   "patch was not used" once GPUI moves past 0.9.0).
 - `vendor/gpui` is GPUI 0.2.2 patched in the same way, with Zed's later fix for idle GPU use backported
   (zed-industries/zed#45369: 0.2.2 re-rendered the whole window every display refresh for a second after any input,
-  mouse moves included; now only after input that invalidated something, arriving at 60+ events a second). What
+  mouse moves included; now only after input that invalidated something, arriving at 60+ events a second), and on
+  macOS a display link that pauses after 60 refreshes without a frame and wakes when the window gets dirty
+  (`PlatformWindow::frame_waker`), so a still window costs no CPU. What
   changed and how to drop it: `vendor/gpui/KUANA.md`. `ZED_MEASUREMENTS=1` prints a line per frame drawn, to count
   redraws.
 - LSP: per-language server ordering/disabling by id isn't there yet (only `language_servers`). Emmet only through its registry extension.

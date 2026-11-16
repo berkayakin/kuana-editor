@@ -1021,6 +1021,12 @@ pub fn fetch(root: &Path) -> Result<String, String> {
     run(root, &["fetch", "--all", "--prune"])
 }
 
+/// The remote branches and where they point, to tell whether a background fetch
+/// brought anything (most don't, and then there's nothing to read again).
+pub fn remote_refs(root: &Path) -> Option<String> {
+    run(root, &["for-each-ref", "--format=%(objectname) %(refname)", "refs/remotes"]).ok()
+}
+
 pub fn branches(root: &Path) -> Result<Vec<Branch>, String> {
     let out = run(
         root,
