@@ -458,6 +458,8 @@ pub struct EditorSettings {
     pub inline_values: Option<bool>,
     /// Typing in a tag's name renames its closing (or opening) tag too.
     pub linked_editing: Option<bool>,
+    /// The caret blinks (for `BLINK_FOR` after it last moved, then stays on).
+    pub cursor_blink: Option<bool>,
     /// A swatch before each color in CSS (and from language servers), opening a picker.
     pub document_colors: Option<bool>,
     /// The language server's semantic tokens over tree-sitter's colors.
@@ -490,6 +492,7 @@ impl EditorSettings {
             code_lens: self.code_lens.or(base.code_lens),
             inline_values: self.inline_values.or(base.inline_values),
             linked_editing: self.linked_editing.or(base.linked_editing),
+            cursor_blink: self.cursor_blink.or(base.cursor_blink),
             document_colors: self.document_colors.or(base.document_colors),
             semantic_tokens: self.semantic_tokens.or(base.semantic_tokens),
             minimap: self.minimap.or(base.minimap),
@@ -583,6 +586,7 @@ pub const EDITOR_KEYS: &[&str] = &[
     "code_lens",
     "inline_values",
     "linked_editing",
+    "cursor_blink",
     "document_colors",
     "semantic_tokens",
     "minimap",
@@ -607,6 +611,7 @@ pub struct FileSettings {
     pub code_lens: bool,
     pub inline_values: bool,
     pub linked_editing: bool,
+    pub cursor_blink: bool,
     pub document_colors: bool,
     pub semantic_tokens: bool,
     pub minimap: bool,
@@ -892,6 +897,7 @@ impl Settings {
             "code_lens" => self.editor.code_lens.is_some(),
             "inline_values" => self.editor.inline_values.is_some(),
             "linked_editing" => self.editor.linked_editing.is_some(),
+            "cursor_blink" => self.editor.cursor_blink.is_some(),
             "document_colors" => self.editor.document_colors.is_some(),
             "semantic_tokens" => self.editor.semantic_tokens.is_some(),
             "minimap" => self.editor.minimap.is_some(),
@@ -1038,6 +1044,7 @@ impl Settings {
             code_lens: None,
             inline_values: None,
             linked_editing: None,
+            cursor_blink: None,
             document_colors: None,
             semantic_tokens: None,
             minimap: None,
@@ -1060,6 +1067,7 @@ impl Settings {
             code_lens: s.code_lens.unwrap_or(true),
             inline_values: s.inline_values.unwrap_or(true),
             linked_editing: s.linked_editing.unwrap_or(true),
+            cursor_blink: s.cursor_blink.unwrap_or(true),
             document_colors: s.document_colors.unwrap_or(true),
             semantic_tokens: s.semantic_tokens.unwrap_or(true),
             minimap: s.minimap.unwrap_or(false),
@@ -1271,6 +1279,8 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // "inline_values": true,
   // Typing in a tag's name (HTML, JSX) renames its closing or opening tag too.
   // "linked_editing": true,
+  // The caret blinks; it stops, staying on, 10 seconds after it last moved.
+  // "cursor_blink": true,
   // A swatch before each color in CSS (and colors from language servers); click it to pick another.
   // "document_colors": true,
   // The language server's colors over the syntax colors (types, parameters, macros,
