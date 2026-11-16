@@ -6,7 +6,7 @@ license; the examples and tests aren't copied, and their tables are taken out of
 
 ## Changes
 
-All in `src/window.rs`, backported from Zed's GPUI:
+In `src/window.rs`, backported from Zed's GPUI:
 
 - **Presenting after input** (zed-industries/zed#45369, merged December 2025, after
   0.2.2 was published). GPUI kept re-rendering the last frame on every display
@@ -21,6 +21,26 @@ All in `src/window.rs`, backported from Zed's GPUI:
   `dispatch_event` (as Zed does now), so input still counts while a redraw is
   already pending.
 
+Kuana's own, in `src/platform/mac/window.rs`, `src/platform/mac/display_link.rs`,
+`src/platform.rs` and `src/window.rs`:
+
+- **A display link that rests** (macOS). GPUI's `CVDisplayLink` fires on every
+  display refresh while the window is visible and wakes the main thread to ask
+  whether anything needs drawing, even when nothing does: about 0.5–1 % CPU for a
+  still window at 120 Hz. Now `step` counts refreshes without a frame presented
+  (`MacWindowState::presented`, set in `draw`) and after `IDLE_TICKS_BEFORE_PAUSE`
+  (60) stops the link (`DisplayLink::start`/`stop` are idempotent now, tracked by
+  `running`, so dispatch suspends and resumes balance). The window wakes it again
+  through `PlatformWindow::frame_waker` (a default method, `None` elsewhere), which
+  `WindowInvalidator` calls whenever the window becomes dirty (`set_dirty(true)`,
+  `invalidate_view`) and `Window::on_next_frame` calls through `wake`. The waker
+  also sets `woken`, and a refresh in which it was called doesn't count as idle,
+  so a window marked dirty on the refresh that would have paused still draws.
+
+- **`TextSystem::has_font`** (`src/text_system.rs`): whether one family loads, by
+  name. `theme::apply_fonts` used `all_font_names`, which on macOS lists every
+  installed family and took ~100 ms of each start, before the window showed.
+
 And in `src/taffy.rs`, two float literals are typed (`0.0_f32`, `1.0_f32`): a path
 dependency's warnings aren't silenced as a registry crate's are, and Kuana's build
 stays warning-free.
@@ -30,4 +50,5 @@ stays warning-free.
 When Kuana moves to a GPUI release that has these changes (any published after
 December 2025), delete this folder and the `gpui` line under `[patch.crates-io]`.
 Until then, a new 0.2.x copy needs the same edits (search for `input_rate_tracker`
-and `update_count`).
+and `update_count`). Check whether a newer GPUI rests its display link before
+dropping the display link change; otherwise carry it over (search for `Kuana:`).

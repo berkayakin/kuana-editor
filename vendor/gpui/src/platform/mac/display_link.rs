@@ -14,6 +14,9 @@ use util::ResultExt;
 pub struct DisplayLink {
     display_link: Option<sys::DisplayLink>,
     frame_requests: dispatch_source_t,
+    // Kuana: whether it's started, so `start` and `stop` can pause and resume it
+    // any number of times (dispatch suspends and resumes must balance).
+    running: bool,
 }
 
 impl DisplayLink {
@@ -61,11 +64,16 @@ impl DisplayLink {
             Ok(Self {
                 display_link: Some(display_link),
                 frame_requests,
+                running: false,
             })
         }
     }
 
     pub fn start(&mut self) -> Result<()> {
+        if self.running {
+            return Ok(());
+        }
+        self.running = true;
         unsafe {
             dispatch_resume(crate::dispatch_sys::dispatch_object_t {
                 _ds: self.frame_requests,
@@ -76,6 +84,10 @@ impl DisplayLink {
     }
 
     pub fn stop(&mut self) -> Result<()> {
+        if !self.running {
+            return Ok(());
+        }
+        self.running = false;
         unsafe {
             dispatch_suspend(crate::dispatch_sys::dispatch_object_t {
                 _ds: self.frame_requests,

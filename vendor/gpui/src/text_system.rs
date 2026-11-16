@@ -100,6 +100,12 @@ impl TextSystem {
         names
     }
 
+    /// Kuana: whether a font family loads, found by name without listing every
+    /// installed family as `all_font_names` does (slow: ~100 ms on macOS).
+    pub fn has_font(&self, family: &str) -> bool {
+        self.font_id(&font(family.to_string())).is_ok()
+    }
+
     /// Add a font's data to the text system.
     pub fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         self.platform_text_system.add_fonts(fonts)

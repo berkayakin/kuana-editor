@@ -573,7 +573,6 @@ fn main() {
         cx.on_action(|_: &NewWindow, cx| {
             workspace::open_window(None, cx, |_, _, _| {});
         });
-        cx.set_menus(menus());
         // Menu items show their shortcuts; another keymap changes them.
         cx.observe_global::<keymap::Installed>(|cx| cx.set_menus(menus())).detach();
         // The Dock menu and jump list list recent projects, ones opened by
@@ -602,6 +601,19 @@ fn main() {
                 workspace.show_onboarding(window, cx);
             }
         });
+        // The menu bar comes once the window has drawn: setting it makes AppKit load its
+        // Writing Tools (~100 ms), which held the first frame back. A frame's callbacks run
+        // before it draws, so the second frame's, after the first is on screen.
+        match first {
+            Some(window) => {
+                window
+                    .update(cx, |_, window, _| {
+                        window.on_next_frame(|window, _| window.on_next_frame(|_, cx| cx.set_menus(menus())))
+                    })
+                    .ok();
+            }
+            None => cx.set_menus(menus()),
+        }
         cx.activate(true);
         match autopilot {
             Some(steps) => autopilot::run(steps, cx),

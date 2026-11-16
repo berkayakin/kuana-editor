@@ -47,12 +47,20 @@ use std::{
     path::PathBuf,
     ptr::{self, NonNull},
     rc::Rc,
-    sync::{Arc, Weak},
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use util::ResultExt;
 
 const WINDOW_STATE_IVAR: &str = "windowState";
+
+/// Kuana: display refreshes in a row without a frame presented after which the
+/// display link pauses (half a second at 120 Hz). A paused link costs nothing; a
+/// running one wakes the main thread on every refresh even when nothing changes.
+const IDLE_TICKS_BEFORE_PAUSE: u32 = 60;
 
 static mut WINDOW_CLASS: *const Class = ptr::null();
 static mut PANEL_CLASS: *const Class = ptr::null();
@@ -419,6 +427,13 @@ struct MacWindowState {
     select_previous_tab_callback: Option<Box<dyn FnMut()>>,
     toggle_tab_bar_callback: Option<Box<dyn FnMut()>>,
     activated_least_once: bool,
+    // Kuana: pausing the display link while nothing is drawn.
+    presented: bool,
+    idle_ticks: u32,
+    paused: Arc<AtomicBool>,
+    // Set by the waker on every call, so a refresh in which the window was marked
+    // dirty (even without presenting yet) doesn't count as idle.
+    woken: Arc<AtomicBool>,
 }
 
 impl MacWindowState {
@@ -491,10 +506,22 @@ impl MacWindowState {
             display_link.start().log_err();
             self.display_link = Some(display_link);
         }
+        self.idle_ticks = 0;
+        self.paused.store(false, Ordering::Release);
     }
 
     fn stop_display_link(&mut self) {
         self.display_link = None;
+    }
+
+    /// Kuana: starts a paused display link again (not one stopped because the
+    /// window is hidden: that one is gone until the window shows).
+    fn resume_display_link(&mut self) {
+        self.idle_ticks = 0;
+        self.paused.store(false, Ordering::Release);
+        if let Some(display_link) = self.display_link.as_mut() {
+            display_link.start().log_err();
+        }
     }
 
     fn is_maximized(&self) -> bool {
@@ -725,6 +752,10 @@ impl MacWindow {
                 select_previous_tab_callback: None,
                 toggle_tab_bar_callback: None,
                 activated_least_once: false,
+                presented: false,
+                idle_ticks: 0,
+                paused: Arc::new(AtomicBool::new(false)),
+                woken: Arc::new(AtomicBool::new(false)),
             })));
 
             (*native_window).set_ivar(
@@ -1380,6 +1411,30 @@ impl PlatformWindow for MacWindow {
         self.0.as_ref().lock().request_frame_callback = Some(callback);
     }
 
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let state = Arc::downgrade(&self.0);
+        let (paused, woken, executor) = {
+            let lock = self.0.lock();
+            (lock.paused.clone(), lock.woken.clone(), lock.executor.clone())
+        };
+        Some(Rc::new(move || {
+            woken.store(true, Ordering::Release);
+            if !paused.swap(false, Ordering::AcqRel) {
+                return;
+            }
+            let Some(state) = state.upgrade() else { return };
+            // Called on the main thread, from GPUI code that doesn't hold the
+            // state's lock; should some caller hold it, resume from the queue.
+            if let Some(mut lock) = state.try_lock() {
+                lock.resume_display_link();
+                return;
+            }
+            executor
+                .spawn(async move { state.lock().resume_display_link() })
+                .detach();
+        }))
+    }
+
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> crate::DispatchEventResult>) {
         self.0.as_ref().lock().event_callback = Some(callback);
     }
@@ -1472,6 +1527,7 @@ impl PlatformWindow for MacWindow {
     fn draw(&self, scene: &crate::Scene) {
         let mut this = self.0.lock();
         this.renderer.draw(scene);
+        this.presented = true;
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
@@ -2159,7 +2215,22 @@ unsafe extern "C" fn step(view: *mut c_void) {
     if let Some(mut callback) = lock.request_frame_callback.take() {
         drop(lock);
         callback(Default::default());
-        window_state.lock().request_frame_callback = Some(callback);
+        let mut lock = window_state.lock();
+        lock.request_frame_callback = Some(callback);
+        // Kuana: pause the display link once refreshes keep passing without a
+        // frame; `frame_waker` starts it again when the window has something to draw.
+        let woken = lock.woken.swap(false, Ordering::AcqRel);
+        if mem::take(&mut lock.presented) || woken {
+            lock.idle_ticks = 0;
+        } else {
+            lock.idle_ticks += 1;
+            if lock.idle_ticks >= IDLE_TICKS_BEFORE_PAUSE {
+                if let Some(display_link) = lock.display_link.as_mut() {
+                    display_link.stop().log_err();
+                    lock.paused.store(true, Ordering::Release);
+                }
+            }
+        }
     }
 }
 

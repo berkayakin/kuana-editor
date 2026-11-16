@@ -22,11 +22,26 @@ extensions. Free and open source.
 drawn on the GPU with [GPUI](https://www.gpui.rs), the framework behind Zed: Metal on macOS,
 DirectX on Windows. Text uses the system's own font rendering. The editor shapes and paints only
 the lines on screen. Parsing, linting, Git, search and language servers all run off the main
-thread, so typing never waits for them.
+thread, so typing never waits for them. A window that isn't changing draws nothing and wakes nothing,
+so an idle Kuana leaves your battery alone.
 
-**🪶 Light on memory.** With this repository open (540 files) and a 4,900-line Rust file
-showing, Kuana uses about **130 MB**. Language servers run as their own processes, and restored
-tabs aren't read from disk until you look at them.
+**🏁 Faster and lighter than Zed.** Side by side with Zed, which is built on the same GPU framework,
+Kuana opens sooner and uses less memory, fewer threads and less CPU at rest:
+
+| With this repository open and an 8,000-line Rust file showing | Kuana | Zed 1.28 |
+| --- | --- | --- |
+| Launch to window on screen (median of 15) | **327 ms** | 403 ms |
+| Memory (as Activity Monitor counts it) | **144 MB** | 159 MB |
+| Resident memory | **168 MB** | 228 MB |
+| Threads | **10** | 26 |
+| CPU while idle | **0.1–0.2 %** | 0.2–0.3 % |
+
+<sup>Measured in November 2026 on a MacBook Pro (M1 Pro, 16 GB), macOS 27. Each editor had a fresh configuration
+with its language servers off, and the two launched alternately. Memory was read 10 seconds after the window
+appeared; idle CPU is the average over 2½ minutes, after a minute's rest.</sup>
+
+**🪶 Light on memory.** Language servers run as their own processes, and restored tabs aren't read
+from disk until you look at them.
 
 **🎨 Beautiful out of the box.** A calm "islands" layout: the sidebar, editors and panels float
 as rounded cards. Tabs are browser-style, transitions are smooth and the chrome stays minimal.

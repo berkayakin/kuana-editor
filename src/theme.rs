@@ -926,8 +926,19 @@ pub fn caption_font(cx: &App) -> &'static str {
 
 const FLUENT_ICONS: &str = "Segoe Fluent Icons";
 
-fn pick_caption_font(installed: &[String]) -> &'static str {
-    if installed.iter().any(|f| f == FLUENT_ICONS) { FLUENT_ICONS } else { "Segoe MDL2 Assets" }
+fn pick_caption_font(has: &dyn Fn(&str) -> bool) -> &'static str {
+    if has(FLUENT_ICONS) { FLUENT_ICONS } else { "Segoe MDL2 Assets" }
+}
+
+/// Whether a font family is installed. On macOS each family is looked up by name: listing them
+/// all took ~100 ms of every start, before the window showed. Elsewhere the list is read, since
+/// a platform's lookup may hand back a fallback for a family it lacks.
+fn font_lookup(cx: &App) -> impl Fn(&str) -> bool + '_ {
+    let listed = (!cfg!(target_os = "macos")).then(|| cx.text_system().all_font_names());
+    move |name: &str| match &listed {
+        Some(names) => names.iter().any(|f| f == name),
+        None => cx.text_system().has_font(name),
+    }
 }
 
 impl Global for DefaultFonts {}
@@ -936,15 +947,13 @@ impl Global for DefaultFonts {}
 pub fn default_fonts(cx: &App) -> (SharedString, SharedString) {
     match cx.try_global::<DefaultFonts>() {
         Some(fonts) => (fonts.0.clone(), fonts.1.clone()),
-        None => pick_fonts(&cx.text_system().all_font_names()),
+        None => pick_fonts(&font_lookup(cx)),
     }
 }
 
 /// Picks the first installed font from a preference list. Keeps the editor
 /// looking native on each platform without bundling fonts.
-fn pick_fonts(installed: &[String]) -> (SharedString, SharedString) {
-    let has = |name: &str| installed.iter().any(|f| f == name);
-
+fn pick_fonts(has: &dyn Fn(&str) -> bool) -> (SharedString, SharedString) {
     // The bundled code font first (`assets::load_fonts` adds it before this runs); the system's only
     // if it somehow didn't load.
     let mono_candidates: &[&str] = if cfg!(target_os = "macos") {
@@ -994,14 +1003,16 @@ const DEFAULT_LINE_HEIGHT: f32 = 22.0 / 14.0;
 
 /// Sets the fonts from the settings and the remembered zoom.
 pub fn apply_fonts(cx: &mut App) {
-    let installed = cx.text_system().all_font_names();
-    let (ui_font, mono_font) = pick_fonts(&installed);
-    cx.set_global(DefaultFonts(ui_font.clone(), mono_font.clone(), pick_caption_font(&installed)));
+    let has = font_lookup(cx);
+    let (ui_font, mono_font) = pick_fonts(&has);
+    let caption_font = pick_caption_font(&has);
     let settings = Settings::get(cx).clone();
     let mono_font = match settings.editor_font_family.as_deref() {
-        Some(family) if installed.iter().any(|f| f == family) => family.to_string().into(),
+        Some(family) if has(family) => family.to_string().into(),
         _ => mono_font,
     };
+    drop(has);
+    cx.set_global(DefaultFonts(ui_font.clone(), mono_font.clone(), caption_font));
     let zoom = SessionState::load().font_zoom.unwrap_or(0.);
     let size = (settings.editor_font_size.unwrap_or(DEFAULT_EDITOR_FONT_SIZE) + zoom).clamp(6., 72.);
     let line_height = settings.editor_line_height.unwrap_or(DEFAULT_LINE_HEIGHT).clamp(1., 3.);
@@ -1067,7 +1078,7 @@ mod tests {
 
     #[test]
     fn caption_buttons_use_the_icon_font_windows_has() {
-        let installed = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let installed = |names: &'static [&'static str]| move |name: &str| names.contains(&name);
         // Windows 10.
         assert_eq!(pick_caption_font(&installed(&["Segoe UI", "Segoe MDL2 Assets"])), "Segoe MDL2 Assets");
         // Windows 11 has both.
