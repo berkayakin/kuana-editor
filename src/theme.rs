@@ -70,6 +70,10 @@ pub struct Theme {
     pub ui_font_size: f32,
     pub editor_font_size: f32,
     pub editor_line_height: f32,
+    /// From `terminal_font_family` / `terminal_font_size`, else the editor's
+    /// font a point smaller (`apply_fonts`).
+    pub terminal_font: SharedString,
+    pub terminal_font_size: f32,
 
     pub background: Rgba,
     pub panel: Rgba,
@@ -261,6 +265,8 @@ impl Theme {
             ui_font_size: 13.0,
             editor_font_size: DEFAULT_EDITOR_FONT_SIZE,
             editor_line_height: 20.0,
+            terminal_font: "Menlo".into(),
+            terminal_font_size: DEFAULT_EDITOR_FONT_SIZE - 1.,
             background: bg,
             panel: bg,
             elevated: bg,
@@ -369,6 +375,8 @@ impl Theme {
         self.ui_font_size = from.ui_font_size;
         self.editor_font_size = from.editor_font_size;
         self.editor_line_height = from.editor_line_height;
+        self.terminal_font = from.terminal_font.clone();
+        self.terminal_font_size = from.terminal_font_size;
         self
     }
 }
@@ -1011,6 +1019,10 @@ pub fn apply_fonts(cx: &mut App) {
         Some(family) if has(family) => family.to_string().into(),
         _ => mono_font,
     };
+    let terminal_font = match settings.terminal_font_family.as_deref() {
+        Some(family) if has(family) => family.to_string().into(),
+        _ => mono_font.clone(),
+    };
     drop(has);
     cx.set_global(DefaultFonts(ui_font.clone(), mono_font.clone(), caption_font));
     let zoom = SessionState::load().font_zoom.unwrap_or(0.);
@@ -1021,6 +1033,10 @@ pub fn apply_fonts(cx: &mut App) {
     theme.mono_font = mono_font;
     theme.editor_font_size = size;
     theme.editor_line_height = (size * line_height).round();
+    // Zoom moves the terminal too, as it did when the terminal simply
+    // followed the editor's size.
+    theme.terminal_font = terminal_font;
+    theme.terminal_font_size = settings.terminal_font_size.map_or(size - 1., |s| s + zoom).clamp(6., 72.);
     let effects = settings.visual_effects();
     theme.gradients = effects.gradients();
     theme.reduce_effects = effects.minimal();

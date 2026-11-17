@@ -1952,9 +1952,10 @@ fn glyph_per_char(line: &ShapedLine) -> bool {
     line.runs.iter().flat_map(|run| &run.glyphs).map(|glyph| glyph.index).eq(line.text.char_indices().map(|(i, _)| i))
 }
 
-/// The terminal's font and size: the editor's font, a point smaller.
+/// The terminal's font and size (`terminal_font_family` / `terminal_font_size`,
+/// else the editor's font, a point smaller).
 fn terminal_font(theme: &Theme) -> (Font, Pixels) {
-    (font(theme.mono_font.clone()), px(theme.editor_font_size - 1.))
+    (font(theme.terminal_font.clone()), px(theme.terminal_font_size))
 }
 
 /// Composed text's runs: underlined, the part being converted thicker.
