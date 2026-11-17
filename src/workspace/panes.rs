@@ -229,6 +229,12 @@ impl Workspace {
                 );
             }
             add(MenuEntry::item("Copy Path", Icon::Clipboard), Some(MenuAction::Tree(TreeAction::CopyPath(path.clone()))));
+            if self.in_project(&path) {
+                add(
+                    MenuEntry::item("Copy Relative Path", Icon::Clipboard),
+                    Some(MenuAction::Tree(TreeAction::CopyRelativePath(path.clone()))),
+                );
+            }
             // A remote file isn't on this computer to show.
             if !crate::fs::is_remote(&path) {
                 add(MenuEntry::item(reveal_label(), Icon::FolderOpen), Some(MenuAction::Tree(TreeAction::Reveal(path.clone()))));
