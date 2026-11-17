@@ -30,7 +30,7 @@ and theme colors.
 | `base_keymap` | `"JetBrains"` | `"JetBrains"`, `"VSCode"`, `"SublimeText"` or `"Zed"`; see [Key bindings](keybindings.md) |
 | `auto_save` | `"after_delay"` | `"off"`, `"after_delay"`, `"on_focus_change"`, `"on_window_change"` |
 | `auto_save_delay` | `1000` | milliseconds |
-| `editor_font_family` | `"JetBrains Mono"` (bundled) | any installed font; the terminal uses it too |
+| `editor_font_family` | `"JetBrains Mono"` (bundled) | any installed font; the terminal uses it too unless `terminal_font_family` is set |
 | `editor_font_size` | `13` | the zoom actions adjust it on top (remembered between launches) |
 | `editor_line_height` | `1.57` | multiple of the font size |
 | `tab_size` | `4` (2 for HTML, JSON, YAML) | columns per indent and per tab |
@@ -71,6 +71,8 @@ and theme colors.
 | `language_servers` | | per language: `false` turns its server off, `["cmd", "args"]` replaces it |
 | `extensions` | | per extension, by id: settings its code reads (see [Writing view extensions](extension-ui.md#settings)), as the extension documents them |
 | `lsp` | | per server, by id (Kuana's, e.g. `typescript`, or Zed's, e.g. `vtsls`, `basedpyright`): `settings` (what it asks for through `workspace/configuration`; a change is sent to it), `initialization_options` (applied when it restarts) and `binary` (`{ "path", "arguments" }`) |
+| `terminal_font_family` | the editor's font | any installed font for the terminal, e.g. a Nerd Font for your prompt's icons; Settings → Terminal |
+| `terminal_font_size` | the editor's size − 1 | the terminal's font size; the zoom actions adjust it on top |
 | `terminal_shell` | login shell | the terminal's shell and arguments, e.g. `["/opt/homebrew/bin/fish", "--login"]` |
 | `terminal_option_as_meta` | `false` | macOS: Option acts as Meta in the terminal, sending Escape and the key (Option+B is the shell's word back) instead of typing a character like `∫`; Settings → Terminal. Alt always does on Windows and Linux |
 | `terminal_shell_integration` | `true` | zsh, bash and fish mark each command: how it ended at the terminal's edge, jumping between commands, copying one's output, links relative to the shell's folder; Settings → Terminal. New terminals only |

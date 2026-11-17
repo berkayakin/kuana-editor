@@ -168,6 +168,8 @@ enum Setting {
     FormatOnSave,
     TrimWhitespace,
     FinalNewline,
+    TerminalFontFamily,
+    TerminalFontSize,
     Shell,
     OptionAsMeta,
     ShellIntegration,
@@ -181,7 +183,7 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Setting; 49] = [
+    const ALL: [Setting; 51] = [
         Setting::Theme,
         Setting::IconTheme,
         Setting::VisualEffects,
@@ -221,6 +223,8 @@ impl Setting {
         Setting::FormatOnSave,
         Setting::TrimWhitespace,
         Setting::FinalNewline,
+        Setting::TerminalFontFamily,
+        Setting::TerminalFontSize,
         Setting::Shell,
         Setting::OptionAsMeta,
         Setting::ShellIntegration,
@@ -252,7 +256,12 @@ impl Setting {
             | Setting::FormatOnSave
             | Setting::TrimWhitespace
             | Setting::FinalNewline => Page::Saving,
-            Setting::Shell | Setting::OptionAsMeta | Setting::ShellIntegration | Setting::RunConfigurations => Page::Terminal,
+            Setting::TerminalFontFamily
+            | Setting::TerminalFontSize
+            | Setting::Shell
+            | Setting::OptionAsMeta
+            | Setting::ShellIntegration
+            | Setting::RunConfigurations => Page::Terminal,
             Setting::TrustAll | Setting::NativeGrammars => Page::Trust,
             Setting::AutoUpdate => Page::Updates,
             Setting::PullStrategy | Setting::AutoFetch | Setting::AutoResolveConflicts => Page::Git,
@@ -281,6 +290,7 @@ impl Setting {
             Setting::OpenFolderIn => "Projects",
             Setting::AutoSave | Setting::AutoSaveDelay => "Auto-save",
             Setting::FormatOnSave | Setting::TrimWhitespace | Setting::FinalNewline => "On save",
+            Setting::TerminalFontFamily | Setting::TerminalFontSize => "Font",
             Setting::Shell | Setting::OptionAsMeta | Setting::ShellIntegration => "Terminal",
             Setting::RunConfigurations => "Run configurations",
             Setting::TrustAll | Setting::NativeGrammars => "Restricted Mode",
@@ -331,6 +341,8 @@ impl Setting {
             Setting::FormatOnSave => "Reformat on save",
             Setting::TrimWhitespace => "Trim trailing whitespace",
             Setting::FinalNewline => "Insert final newline",
+            Setting::TerminalFontFamily => "Family",
+            Setting::TerminalFontSize => "Size",
             Setting::Shell => "Shell",
             Setting::OptionAsMeta => "Use Option as Meta key",
             Setting::ShellIntegration => "Shell integration",
@@ -387,6 +399,8 @@ impl Setting {
             Setting::FormatOnSave => "Reformat Code when you Save; auto-save never reformats while you type.",
             Setting::TrimWhitespace => "Remove spaces at the ends of lines, except on lines with a caret.",
             Setting::FinalNewline => "End every file with a line break.",
+            Setting::TerminalFontFamily => "The editor's font unless you pick one. A Nerd Font shows your prompt's icons.",
+            Setting::TerminalFontSize => "A point under the editor's size unless you set one. Zoom adds to it too.",
             Setting::Shell => "Program and arguments for new terminals. Empty uses your login shell.",
             Setting::OptionAsMeta => "Option+key sends Escape and the key, for the shell's word moves and Emacs keys, instead of typing a character like ∫.",
             Setting::ShellIntegration => "zsh, bash and fish mark each command: how it ended at the terminal's edge, jumping between commands, copying one's output. New terminals.",
@@ -442,6 +456,8 @@ impl Setting {
             Setting::FormatOnSave => "format prettier formatter",
             Setting::TrimWhitespace => "spaces trailing whitespace",
             Setting::FinalNewline => "newline end of file eof",
+            Setting::TerminalFontFamily => "terminal font typeface family monospace nerd font powerline prompt icons",
+            Setting::TerminalFontSize => "terminal font size zoom text",
             Setting::Shell => "terminal bash zsh fish powershell",
             Setting::OptionAsMeta => "terminal option alt meta escape key emacs readline word",
             Setting::ShellIntegration => "terminal shell integration osc 133 command marks exit code prompt zsh bash fish",
@@ -477,6 +493,7 @@ enum Menu {
     ShowWhitespace,
     BaseKeymap,
     FontFamily,
+    TerminalFontFamily,
     VisualEffects,
     UiStyle,
     OpenFolderIn,
@@ -1158,7 +1175,7 @@ impl Preferences {
             self.menu = None;
         } else {
             self.menu = Some(menu);
-            if menu == Menu::FontFamily {
+            if matches!(menu, Menu::FontFamily | Menu::TerminalFontFamily) {
                 self.font_filter.update(cx, |e, cx| e.set_text("", cx));
                 window.focus(&self.font_filter.focus_handle(cx));
                 self.load_fonts(cx);
@@ -1182,11 +1199,11 @@ impl Preferences {
         }));
     }
 
-    fn choose_font(&mut self, family: Option<SharedString>, window: &mut Window, cx: &mut Context<Self>) {
+    fn choose_font(&mut self, key: &'static str, family: Option<SharedString>, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
         let result = match family {
-            Some(family) => Settings::set("editor_font_family", family.as_ref().into()),
-            None => Settings::remove("editor_font_family"),
+            Some(family) => Settings::set(key, family.as_ref().into()),
+            None => Settings::remove(key),
         };
         self.write(result, cx);
         window.focus(&self.search.focus_handle(cx));
@@ -1675,8 +1692,8 @@ impl Preferences {
         let control: AnyElement = match setting {
             Setting::Theme => return self.render_themes(cx).into_any_element(),
             Setting::RunConfigurations => return self.render_runs(window, cx).into_any_element(),
-            Setting::FontFamily => {
-                let (trigger, list) = self.render_font_menu(window, cx);
+            Setting::FontFamily | Setting::TerminalFontFamily => {
+                let (trigger, list) = self.render_font_menu(setting == Setting::TerminalFontFamily, window, cx);
                 let row = setting_row(setting.label(), Some(setting.description().into()), trigger, reset, self.stacked.get(), &theme);
                 return div().flex().flex_col().child(row).children(list).into_any_element();
             }
@@ -1687,6 +1704,18 @@ impl Preferences {
                     let size = (size.round() + step as f32).clamp(6., 72.);
                     this.set_or_default("editor_font_size", json!(size), json!(theme::DEFAULT_EDITOR_FONT_SIZE), cx);
                     // What's picked here is what shows, without an old zoom on top.
+                    theme::zoom(None, cx);
+                })
+            }
+            Setting::TerminalFontSize => {
+                // Unset, it follows the editor's size (zoom aside).
+                let follows = |settings: &Settings| settings.editor_font_size.unwrap_or(theme::DEFAULT_EDITOR_FONT_SIZE) - 1.;
+                let size = settings.terminal_font_size.unwrap_or_else(|| follows(&settings));
+                self.stepper("pref-terminal-font-size", format!("{size}"), size > 6., size < 72., cx, move |this, step, cx| {
+                    let settings = Settings::get(cx);
+                    let size = settings.terminal_font_size.unwrap_or_else(|| follows(settings));
+                    let size = (size.round() + step as f32).clamp(6., 72.);
+                    this.write(Settings::set("terminal_font_size", json!(size)), cx);
                     theme::zoom(None, cx);
                 })
             }
@@ -2096,16 +2125,27 @@ impl Preferences {
     /// The font button, and while it's open, the list that unfolds under its
     /// row. (Not a floating menu: GPUI can't defer the filter field's
     /// editor inside another deferred element.)
-    fn render_font_menu(&self, window: &mut Window, cx: &mut Context<Self>) -> (AnyElement, Option<AnyElement>) {
+    /// The editor's font picker, or the terminal's (whose default is the
+    /// editor's font).
+    fn render_font_menu(&self, terminal: bool, window: &mut Window, cx: &mut Context<Self>) -> (AnyElement, Option<AnyElement>) {
         let theme = Theme::get(cx).clone();
-        let configured = Settings::get(cx).editor_font_family.clone();
-        let default_font = theme::default_fonts(cx).1;
-        let label: SharedString = match &configured {
-            Some(family) if *family != theme.mono_font.as_ref() => format!("{family} (not installed)").into(),
-            Some(family) => family.clone().into(),
-            None => format!("Default ({default_font})").into(),
+        let settings = Settings::get(cx);
+        let (key, menu, configured, shown, id_prefix) = if terminal {
+            ("terminal_font_family", Menu::TerminalFontFamily, settings.terminal_font_family.clone(), &theme.terminal_font, "pref-terminal-font")
+        } else {
+            ("editor_font_family", Menu::FontFamily, settings.editor_font_family.clone(), &theme.mono_font, "pref-font")
         };
-        let open = self.menu == Some(Menu::FontFamily);
+        let default_label: SharedString = if terminal {
+            format!("Editor's font ({})", theme.mono_font).into()
+        } else {
+            format!("Default ({})", theme::default_fonts(cx).1).into()
+        };
+        let label: SharedString = match &configured {
+            Some(family) if *family != shown.as_ref() => format!("{family} (not installed)").into(),
+            Some(family) => family.clone().into(),
+            None => default_label.clone(),
+        };
+        let open = self.menu == Some(menu);
         let width = px(240.);
         let list = open.then(|| {
             let filter = self.font_filter.read(cx).text(cx).to_lowercase();
@@ -2119,10 +2159,10 @@ impl Preferences {
             let rows = Arc::new(rows);
             let count = rows.len();
             let loading = self.fonts.is_none();
-            let list = uniform_list("pref-fonts", count, {
+            let list = uniform_list(SharedString::from(format!("{id_prefix}s")), count, {
                 let rows = rows.clone();
                 let configured = configured.clone();
-                let default_font = default_font.clone();
+                let default_label = default_label.clone();
                 cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
                     let theme = Theme::get(cx).clone();
                     range
@@ -2131,11 +2171,11 @@ impl Preferences {
                             let selected = family.as_ref().map(|f| f.to_string()) == configured;
                             let text: SharedString = match &family {
                                 Some(f) => f.clone(),
-                                None => format!("Default ({default_font})").into(),
+                                None => default_label.clone(),
                             };
                             div().w_full().child(
                                 div()
-                                    .id(("pref-font", ix))
+                                    .id((id_prefix, ix))
                                     .w_full()
                                     .flex()
                                     .items_center()
@@ -2147,7 +2187,7 @@ impl Preferences {
                                     .text_color(theme.text)
                                     .row_hover(theme.hover)
                                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                        this.choose_font(family.clone(), window, cx)
+                                        this.choose_font(key, family.clone(), window, cx)
                                     }))
                                     .child(div().flex_1().min_w_0().truncate().child(text))
                                     // A sample in the font itself; the name stays readable
@@ -2186,8 +2226,8 @@ impl Preferences {
                 })
                 .into_any_element()
         });
-        let trigger = dropdown_trigger("pref-font-menu", label, width, open, &theme)
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_menu(Menu::FontFamily, window, cx)))
+        let trigger = dropdown_trigger(SharedString::from(format!("{id_prefix}-menu")), label, width, open, &theme)
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.toggle_menu(menu, window, cx)))
             .into_any_element();
         (trigger, list)
     }
@@ -3091,6 +3131,8 @@ fn setting_key(setting: Setting) -> &'static str {
         Setting::FormatOnSave => "format_on_save",
         Setting::TrimWhitespace => "trim_trailing_whitespace",
         Setting::FinalNewline => "insert_final_newline",
+        Setting::TerminalFontFamily => "terminal_font_family",
+        Setting::TerminalFontSize => "terminal_font_size",
         Setting::Shell => "terminal_shell",
         Setting::OptionAsMeta => "terminal_option_as_meta",
         Setting::ShellIntegration => "terminal_shell_integration",

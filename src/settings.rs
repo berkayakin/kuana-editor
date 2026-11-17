@@ -59,6 +59,10 @@ pub struct Settings {
     /// Per extension, by id: settings its code reads (`settings()` in Kuana's
     /// extension interface), as the extension documents them.
     pub extensions: Option<HashMap<String, serde_json::Value>>,
+    /// The terminal's font, an installed one; the editor's font by default.
+    pub terminal_font_family: Option<String>,
+    /// The terminal's font size; a point under the editor's by default.
+    pub terminal_font_size: Option<f32>,
     /// The terminal's shell and arguments; the login shell by default.
     pub terminal_shell: Option<Vec<String>>,
     /// macOS: Option sends Escape + the key to the terminal (Meta), as Alt
@@ -543,6 +547,8 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "lsp",
     "extensions",
     "formatters",
+    "terminal_font_family",
+    "terminal_font_size",
     "terminal_shell",
     "terminal_option_as_meta",
     "terminal_shell_integration",
@@ -919,6 +925,8 @@ impl Settings {
             "project_avatar" => self.project_avatar.is_some(),
             "compact_activity_bar" => self.compact_activity_bar.is_some(),
             "tools_location" => self.tools_location.is_some(),
+            "terminal_font_family" => self.terminal_font_family.is_some(),
+            "terminal_font_size" => self.terminal_font_size.is_some(),
             "terminal_shell" => self.terminal_shell.is_some(),
             "terminal_option_as_meta" => self.terminal_option_as_meta.is_some(),
             "terminal_shell_integration" => self.terminal_shell_integration.is_some(),
@@ -1377,6 +1385,11 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   //   "Python": ["black", "--quiet", "-"],
   //   "TypeScript": "language_server"
   // },
+
+  // The terminal's font and size; the editor's font, a point smaller, by
+  // default. A Nerd Font here shows prompts' icons (Starship, Powerlevel10k).
+  // "terminal_font_family": "JetBrainsMono Nerd Font",
+  // "terminal_font_size": 12,
 
   // The terminal's shell; your login shell by default.
   // "terminal_shell": ["/opt/homebrew/bin/fish", "--login"],
