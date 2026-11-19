@@ -709,7 +709,19 @@ pub fn window_controls(window: &Window, cx: &App) -> impl IntoElement + use<> {
     if !cfg!(windows) {
         return linux_window_controls(window, maximized, theme).into_any_element();
     }
-    let font = crate::theme::caption_font(cx);
+    windows_window_controls(maximized, theme, crate::theme::caption_font(cx)).into_any_element()
+}
+
+/// Windows' buttons, each a `WindowControlArea` the system acts on: GPUI
+/// sends it the press first and records the button only when no listener
+/// handled it. Each button occludes what's behind it, so a press there
+/// can't reach a listener under it, such as the workspace root's
+/// focus-on-click (focusing prevents the default, which counts as handled):
+/// then the press was lost and minimize, maximize and close did nothing
+/// wherever the buttons sat in a row that wasn't occluded itself (the title
+/// bar row of `tools_location: "title_bar"`). Built on every platform for
+/// `windows_buttons_reach_the_system`.
+fn windows_window_controls(maximized: bool, theme: &Theme, font: &'static str) -> impl IntoElement + use<> {
     let button = |id: &'static str, glyph: &'static str, area: WindowControlArea, hover: Hsla| {
         div()
             .id(id)
@@ -723,6 +735,7 @@ pub fn window_controls(window: &Window, cx: &App) -> impl IntoElement + use<> {
             .font_family(font)
             .hover(move |s| s.bg(hover))
             .window_control_area(area)
+            .occlude()
             .child(glyph)
     };
     // Maximized, the middle one restores (and shows it).
@@ -733,7 +746,6 @@ pub fn window_controls(window: &Window, cx: &App) -> impl IntoElement + use<> {
         .child(button("min", "\u{E921}", WindowControlArea::Min, theme.hover.into()))
         .child(button("max", max, WindowControlArea::Max, theme.hover.into()))
         .child(button("close", "\u{E8BB}", WindowControlArea::Close, rgb(0xc42b1c).into()))
-        .into_any_element()
 }
 
 /// One of Linux's window buttons: `LINUX_CONTROL` wide.
@@ -830,5 +842,55 @@ mod tests {
         let fit = fit_chips(ChipNeeds { restricted: Some(140.), ..needs(220.) });
         assert_eq!(fit.restricted, Some(false));
         assert!(fit.project.is_some());
+    }
+
+    /// Windows minimizes, maximizes or closes only when no GPUI listener
+    /// handled the press on its button (`windows_window_controls`). Here the
+    /// buttons sit in a row that doesn't occlude, over a root that focuses on
+    /// click, as in the title bar row (`tools_location: "title_bar"`): a press
+    /// on a button must not reach the root, whose focusing would count as
+    /// handling it. A press beside them does, so the setup can tell.
+    #[gpui::test]
+    fn windows_buttons_reach_the_system(cx: &mut gpui::TestAppContext) {
+        use gpui::prelude::*;
+        use gpui::{Modifiers, MouseButton, div, point, px};
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct Root {
+            focus: gpui::FocusHandle,
+            reached: Rc<Cell<bool>>,
+        }
+        impl gpui::Render for Root {
+            fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+                let reached = self.reached.clone();
+                div()
+                    .id("root")
+                    .track_focus(&self.focus)
+                    .size_full()
+                    .on_mouse_down(MouseButton::Left, move |_, _, _| reached.set(true))
+                    .child(div().id("row").flex().h(px(32.)).child(super::windows_window_controls(false, Theme::get(cx), "Segoe Fluent Icons")))
+            }
+        }
+
+        cx.update(|cx| cx.set_global(Theme::blank_for_tests()));
+        let reached = Rc::new(Cell::new(false));
+        let (root, cx) = cx.add_window_view({
+            let reached = reached.clone();
+            move |_, cx| Root { focus: cx.focus_handle(), reached }
+        });
+        let press = |x: f32, cx: &mut gpui::VisualTestContext| {
+            let position = point(px(x), px(16.));
+            cx.simulate_mouse_move(position, None, Modifiers::none());
+            cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+        };
+        let focused = |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| root.read(cx).focus.is_focused(window));
+        // Minimize, maximize and close, 46pt each from the left.
+        for x in [23., 69., 115.] {
+            press(x, cx);
+            assert!(!reached.get() && !focused(cx), "a press on the button at {x} reached the root behind it");
+        }
+        press(300., cx);
+        assert!(reached.get() && focused(cx), "a press beside the buttons should reach the root");
     }
 }

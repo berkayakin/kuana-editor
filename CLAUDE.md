@@ -247,6 +247,12 @@ view is `Workspace`; every open file is an `Entity<Editor>` owning a `Document`.
   for inset highlights) or hover/click only covers the text. Inside auto-sized containers
   (popovers via `anchored()`, menus) `w_full()` collapses to the content width; there, rely on
   a flex column's default stretch instead (see `context_menu.rs`).
+- **Window buttons on Windows** (min/max/close, `WindowControlArea`): GPUI hands the press to its listeners first and the
+  system acts only when none handled it. Any listener under the pointer counts, and the workspace root's focus-on-click
+  (`track_focus`, which prevents the default) is under everything, so a `window_control_area` element must `occlude()`
+  itself, never rely on a parent to. Missing that, the buttons silently did nothing in the title bar row of
+  `tools_location: "title_bar"` (its row isn't occluded, unlike the trail). Draw them only through
+  `title_bar::window_controls`; `windows_buttons_reach_the_system` tests it on every platform.
 - **Git** always goes through `git::run` (no terminal prompts: `GIT_TERMINAL_PROMPT=0`; SSH
   `BatchMode` unless asking: inside `git::asking`, which `perform_git` and the clone dialog use,
   commands get `askpass::env` so Git and SSH ask through Kuana's dialog). Destructive operations (rollback, delete) always ask for confirmation first;
@@ -365,7 +371,7 @@ view is `Workspace`; every open file is an `Entity<Editor>` owning a `Document`.
 
 ## Known gaps
 
-- Windows/Linux builds are barely tested (DirectWrite, keymap). Linux: checked under Xvfb with openbox and on headless sway (`window_frame.rs`); not on GNOME/KDE, a real GPU or input methods. Windows title bar: GPUI asks the app for `WindowControlArea`s on `WM_NCHITTEST` and lets the system drag/maximize only when no GPUI listener handled the mouse down, so the title bar's lead lies on an occluded `Drag` area of its own size (the root's focus-on-click would count) with its buttons occluded in front of it, the trail is `occlude`d, and the top panes' strips make their top padding and ends `Drag` (the first area in paint order that's under the pointer wins, so a `Drag` parent of unoccluded buttons would swallow them). The installer is Inno Setup (`scripts/kuana.iss`), built in the release workflow.
+- Windows/Linux builds are barely tested (DirectWrite, keymap). Linux: checked under Xvfb with openbox and on headless sway (`window_frame.rs`); not on GNOME/KDE, a real GPU or input methods. Windows title bar: GPUI asks the app for `WindowControlArea`s on `WM_NCHITTEST` and lets the system drag/maximize only when no GPUI listener handled the mouse down, so the title bar's lead lies on an occluded `Drag` area of its own size (the root's focus-on-click would count) with its buttons occluded in front of it, the trail is `occlude`d, the min/max/close buttons occlude themselves (see Conventions), and the top panes' strips make their top padding and ends `Drag` (the first area in paint order that's under the pointer wins, so a `Drag` parent of unoccluded buttons would swallow them). The installer is Inno Setup (`scripts/kuana.iss`), built in the release workflow.
 - `vendor/taffy` is taffy 0.9.0 (GPUI 0.2.2 pins it) patched in via `[patch.crates-io]`: its cache never reuses a final
   layout, since 0.9 could leave a text field at its minimum width at some window widths (Settings → Extensions, Windows).
   When a GPUI release uses a taffy that fixes this, switch to it and delete the copy and the patch (Cargo only warns
