@@ -37,6 +37,10 @@ pub struct Settings {
     pub auto_save: Option<AutoSave>,
     /// Idle time in milliseconds before `after_delay` saves.
     pub auto_save_delay: Option<u64>,
+    /// The size of the window's own text (tabs, menus, panels), 13 by
+    /// default; the file tree's names are a point larger. Things drawn around
+    /// the text follow it (`theme.ui_font_size`).
+    pub ui_font_size: Option<f32>,
     /// A font installed on the system; falls back to the bundled JetBrains Mono.
     pub editor_font_family: Option<String>,
     pub editor_font_size: Option<f32>,
@@ -539,6 +543,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "base_keymap",
     "auto_save",
     "auto_save_delay",
+    "ui_font_size",
     "editor_font_family",
     "editor_font_size",
     "editor_line_height",
@@ -888,6 +893,7 @@ impl Settings {
             "base_keymap" => self.base_keymap.is_some(),
             "auto_save" => self.auto_save.is_some(),
             "auto_save_delay" => self.auto_save_delay.is_some(),
+            "ui_font_size" => self.ui_font_size.is_some(),
             "editor_font_family" => self.editor_font_family.is_some(),
             "editor_font_size" => self.editor_font_size.is_some(),
             "editor_line_height" => self.editor_line_height.is_some(),
@@ -1259,8 +1265,12 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // "auto_save": "after_delay",
   // "auto_save_delay": 1000,
 
+  // The size of the window's own text: tabs, menus and panels (10 to 18).
+  // The file tree's names are a point larger.
+  // "ui_font_size": 13,
+
   // "editor_font_family": "JetBrains Mono",
-  // "editor_font_size": 13,
+  // "editor_font_size": 14,
   // Line height as a multiple of the font size.
   // "editor_line_height": 1.6,
 

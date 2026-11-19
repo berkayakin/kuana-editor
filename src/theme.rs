@@ -262,7 +262,7 @@ impl Theme {
             classic: false,
             ui_font: ".SystemUIFont".into(),
             mono_font: "Menlo".into(),
-            ui_font_size: 13.0,
+            ui_font_size: DEFAULT_UI_FONT_SIZE,
             editor_font_size: DEFAULT_EDITOR_FONT_SIZE,
             editor_line_height: 20.0,
             terminal_font: "Menlo".into(),
@@ -1003,10 +1003,15 @@ pub fn init(cx: &mut App) {
     apply_fonts(cx);
 }
 
+/// Default size of the window's own text (`ui_font_size`).
+pub const DEFAULT_UI_FONT_SIZE: f32 = 13.0;
+/// The range `ui_font_size` is held to: past it, fixed-height chrome (tab
+/// strips, the status bar, menu rows) would crop the text.
+pub const UI_FONT_SIZES: std::ops::RangeInclusive<f32> = 10.0..=18.0;
+
 /// Default editor size; zoom and `editor_font_size` move away from it.
-pub const DEFAULT_EDITOR_FONT_SIZE: f32 = 13.0;
-/// The spacing Kuana has always used: 22px lines at 14px (20px at the
-/// default 13px).
+pub const DEFAULT_EDITOR_FONT_SIZE: f32 = 14.0;
+/// The spacing Kuana has always used: 22px lines at the default 14px.
 const DEFAULT_LINE_HEIGHT: f32 = 22.0 / 14.0;
 
 /// Sets the fonts from the settings and the remembered zoom.
@@ -1030,6 +1035,7 @@ pub fn apply_fonts(cx: &mut App) {
     let line_height = settings.editor_line_height.unwrap_or(DEFAULT_LINE_HEIGHT).clamp(1., 3.);
     let mut theme = Theme::get(cx).clone();
     theme.ui_font = ui_font;
+    theme.ui_font_size = settings.ui_font_size.unwrap_or(DEFAULT_UI_FONT_SIZE).clamp(*UI_FONT_SIZES.start(), *UI_FONT_SIZES.end());
     theme.mono_font = mono_font;
     theme.editor_font_size = size;
     theme.editor_line_height = (size * line_height).round();
