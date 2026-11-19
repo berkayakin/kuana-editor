@@ -132,6 +132,7 @@ enum Setting {
     OpenFolderIn,
     Theme,
     IconTheme,
+    UiFontSize,
     VisualEffects,
     UiStyle,
     SidebarDock,
@@ -183,9 +184,10 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Setting; 51] = [
+    const ALL: [Setting; 52] = [
         Setting::Theme,
         Setting::IconTheme,
+        Setting::UiFontSize,
         Setting::VisualEffects,
         Setting::UiStyle,
         Setting::SidebarDock,
@@ -244,7 +246,7 @@ impl Setting {
 
     fn page(self) -> Page {
         match self {
-            Setting::Theme | Setting::IconTheme | Setting::VisualEffects | Setting::UiStyle | Setting::SidebarDock | Setting::ToolsLocation | Setting::ProjectAvatar | Setting::CompactActivityBar => Page::Appearance,
+            Setting::Theme | Setting::IconTheme | Setting::UiFontSize | Setting::VisualEffects | Setting::UiStyle | Setting::SidebarDock | Setting::ToolsLocation | Setting::ProjectAvatar | Setting::CompactActivityBar => Page::Appearance,
             Setting::ZenFullScreen | Setting::ZenWidth | Setting::ZenLineNumbers | Setting::ZenTabs => Page::Appearance,
             Setting::BaseKeymap => Page::Keymap,
             Setting::FontFamily | Setting::FontSize | Setting::LineHeight => Page::Editor,
@@ -272,6 +274,7 @@ impl Setting {
         match self {
             Setting::Theme => "Theme",
             Setting::IconTheme => "File icons",
+            Setting::UiFontSize => "Text",
             Setting::VisualEffects => "Effects",
             Setting::UiStyle | Setting::SidebarDock | Setting::ToolsLocation | Setting::ProjectAvatar | Setting::CompactActivityBar => "Layout",
             Setting::ZenFullScreen | Setting::ZenWidth | Setting::ZenLineNumbers | Setting::ZenTabs => "Zen mode",
@@ -310,6 +313,7 @@ impl Setting {
             Setting::ToolsLocation => "Tool buttons",
             Setting::ProjectAvatar => "Project avatar",
             Setting::CompactActivityBar => "Compact activity bar",
+            Setting::UiFontSize => "Size",
             Setting::ZenFullScreen => "Full screen",
             Setting::ZenWidth => "Text width",
             Setting::ZenLineNumbers => "Line numbers",
@@ -365,6 +369,7 @@ impl Setting {
             Setting::SidebarDock => "Which side of the editor the Files and Commit views sit on.",
             Setting::ToolsLocation => "Run, the panels' toggles, Search and Settings: on a bar beside the sidebar, or in a title bar of their own above the tabs, the sidebar's views then tabs like the editor's.",
             Setting::ProjectAvatar => "The round initial before the project's name in the title bar.",
+            Setting::UiFontSize => "Menus, panels and the window's chrome. The file tree's names are a point larger.",
             Setting::CompactActivityBar => "A narrower bar beside the sidebar, with smaller buttons and icons, for more room.",
             Setting::ZenFullScreen => "Toggle Zen Mode also makes the window full screen.",
             Setting::ZenWidth => "The centered text column, in characters.",
@@ -424,6 +429,7 @@ impl Setting {
             Setting::SidebarDock => "sidebar side dock left right position move layout file tree project panel git commit",
             Setting::ToolsLocation => "tool buttons activity bar title bar header toolbar icons run debug search settings extensions panel toggles location top",
             Setting::ProjectAvatar => "project avatar monogram initial letter circle badge icon title bar header name chip hide show",
+            Setting::UiFontSize => "ui interface font size text file tree sidebar menus panels zoom bigger smaller",
             Setting::CompactActivityBar => "compact activity bar icons size large small big narrow buttons left panel sidebar tools space room",
             Setting::ZenFullScreen => "zen mode distraction free focus full screen fullscreen window",
             Setting::ZenWidth => "zen mode distraction free focus centered center width text column characters wide narrow",
@@ -1705,6 +1711,15 @@ impl Preferences {
                     this.set_or_default("editor_font_size", json!(size), json!(theme::DEFAULT_EDITOR_FONT_SIZE), cx);
                     // What's picked here is what shows, without an old zoom on top.
                     theme::zoom(None, cx);
+                })
+            }
+            Setting::UiFontSize => {
+                let (min, max) = (*theme::UI_FONT_SIZES.start(), *theme::UI_FONT_SIZES.end());
+                let size = settings.ui_font_size.unwrap_or(theme::DEFAULT_UI_FONT_SIZE).clamp(min, max);
+                self.stepper("pref-ui-font-size", format!("{size}"), size > min, size < max, cx, move |this, step, cx| {
+                    let size = Settings::get(cx).ui_font_size.unwrap_or(theme::DEFAULT_UI_FONT_SIZE);
+                    let size = (size.round() + step as f32).clamp(min, max);
+                    this.set_or_default("ui_font_size", json!(size), json!(theme::DEFAULT_UI_FONT_SIZE), cx);
                 })
             }
             Setting::TerminalFontSize => {
@@ -3106,6 +3121,7 @@ fn setting_key(setting: Setting) -> &'static str {
         Setting::ToolsLocation => "tools_location",
         Setting::ProjectAvatar => "project_avatar",
         Setting::CompactActivityBar => "compact_activity_bar",
+        Setting::UiFontSize => "ui_font_size",
         Setting::ZenFullScreen => "zen_full_screen",
         Setting::ZenWidth => "zen_width",
         Setting::ZenLineNumbers => "zen_line_numbers",

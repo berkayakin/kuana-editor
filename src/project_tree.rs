@@ -45,7 +45,17 @@ use crate::{
     workspace::{Find, RedoFileChange, UndoFileChange},
 };
 
-const ROW_HEIGHT: f32 = 26.0;
+/// The tree's names are a point above the window's text (`ui_font_size`),
+/// 14 by default, as in Zed's project panel; the rows, icons and Git letters
+/// follow them.
+fn name_size(theme: &Theme) -> f32 {
+    theme.ui_font_size + 1.
+}
+
+/// 26px rows at the default 14px names.
+fn row_height(theme: &Theme) -> f32 {
+    (name_size(theme) * 26. / 14.).round()
+}
 
 #[derive(Clone)]
 struct TreeEntry {
@@ -970,6 +980,7 @@ impl Render for ProjectTree {
             self.entries.len(),
             cx.processor(move |tree, range: std::ops::Range<usize>, _window, cx| {
                 let theme = Theme::get(cx);
+                let (name_size, row_height) = (name_size(theme), row_height(theme));
                 range
                     .map(|ix| {
                         let e = &tree.entries[ix];
@@ -986,7 +997,7 @@ impl Render for ProjectTree {
                         // A search's match: the part of its name that matches.
                         let marks = tree.search.as_ref().and_then(|s| s.marks.get(&e.path));
                         let is_open = e.is_dir && tree.expanded.contains(&e.path);
-                        let icon = if e.is_dir { folder_icon(is_open, px(16.), theme) } else { file_icon(&e.path, px(16.), theme) };
+                        let icon = if e.is_dir { folder_icon(is_open, px(name_size + 2.), theme) } else { file_icon(&e.path, px(name_size + 2.), theme) };
                         // Dropping on a file moves into the folder it's in.
                         let drop_dir = if e.is_dir { e.path.clone() } else { e.path.parent().map(Path::to_path_buf).unwrap_or_default() };
                         let dragged = DraggedEntry { path: e.path.clone(), name: e.name.clone() };
@@ -998,7 +1009,8 @@ impl Render for ProjectTree {
                                 .w_full()
                                 .flex()
                                 .items_center()
-                                .h(px(ROW_HEIGHT))
+                                .h(px(row_height))
+                                .text_size(px(name_size))
                                 .pl(px(8. + e.depth as f32 * 14.))
                                 .pr_2()
                                 .gap_1p5()
@@ -1054,7 +1066,7 @@ impl Render for ProjectTree {
                                     })
                                 })
                                 .child(div().w(px(14.)).flex_shrink_0().when(e.is_dir, |el| {
-                                    el.child(icon_el(if is_open { Icon::ChevronDown } else { Icon::ChevronRight }, px(13.), theme.text_dim.into()))
+                                    el.child(icon_el(if is_open { Icon::ChevronDown } else { Icon::ChevronRight }, px(name_size - 1.), theme.text_dim.into()))
                                 }))
                                 .child(icon)
                                 .child(div().flex_1().min_w_0().truncate().text_color(name_color).when(e.root, |el| el.font_weight(gpui::FontWeight::SEMIBOLD)).map(|el| match marks {
@@ -1081,7 +1093,7 @@ impl Render for ProjectTree {
                                     el.child(
                                         div()
                                             .flex_shrink_0()
-                                            .text_size(px(11.))
+                                            .text_size(px(name_size - 3.))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(change_color(theme, c))
                                             .child(c.letter()),
@@ -1124,7 +1136,7 @@ impl Render for ProjectTree {
                 )
                 .child(icon_el(Icon::Search, px(14.), theme.text_dim.into()))
                 .child(div().flex_1().min_w_0().overflow_hidden().child(search.input.clone()))
-                .child(div().flex_shrink_0().text_size(px(12.)).text_color(theme.text_dim).child(count))
+                .child(div().flex_shrink_0().text_size(px(theme.ui_font_size - 1.)).text_color(theme.text_dim).child(count))
         });
         div()
             .relative()
