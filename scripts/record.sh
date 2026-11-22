@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Records Kuana playing an autopilot script (see src/autopilot.rs) as an animated WebP (macOS).
+# Records Kuana playing an autopilot script (see src/autopilot.rs) as an animated WebP, or as an
+# MP4 video for sites that take no WebP (LinkedIn, X…) (macOS).
 #
 #   scripts/record.sh [options] [<script> [<folder> [<file>…]]]
 #
@@ -11,36 +12,50 @@
 # script, not from macOS, so nothing types into other apps and the window may be covered; only
 # that window is captured, without the pointer, then framed like a screenshot (rounded corners, a
 # margin and a soft shadow on transparency, which is why it's WebP: GIF has no soft transparency).
+# An output ending in .mp4 or .mov is an H.264 video instead (AVFoundation, nothing to install):
+# 30 frames a second, the window centered on a background of the given size: by default a
+# mid-tone gradient in the icon's colors, which both dark and light themes stand out from.
 #
 # Options:
-#   -o FILE   output (default docs/screenshots/demo.webp)
-#   -r FPS    frames per second at most (default 14)
-#   -w PX     the window's width in the output, in pixels (default 1280)
+#   -o FILE   output (default docs/screenshots/demo.webp; .mp4/.mov for a video)
+#   -r FPS    frames captured per second at most (default 14; 30 for a video)
+#   -w PX     WebP: the window's width in the output, in pixels (default 1280)
 #   -q N      WebP quality, 1–100 (default 80)
+#   -s WxH    video: its size in pixels (default 1920x1080)
+#   -b COLORS video: the background, #rrggbb, or several comma-separated for a diagonal
+#             gradient (default #6b4fc8,#3a78d0,#2aa6a8)
 #   -k        keep the PNG frames (in target/record-frames)
 #
-# The terminal needs Screen Recording access. Needs img2webp (`brew install webp`).
+# The terminal needs Screen Recording access. A WebP needs img2webp (`brew install webp`).
 
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 out="$root/docs/screenshots/demo.webp"
-fps=14
+fps=""
 width=1280
 quality=80
+size=1920x1080
+background="#6b4fc8,#3a78d0,#2aa6a8"
 keep=0
 
-while getopts "o:r:w:q:kh" opt; do
+while getopts "o:r:w:q:s:b:kh" opt; do
     case $opt in
         o) out=$OPTARG ;;
         r) fps=$OPTARG ;;
         w) width=$OPTARG ;;
         q) quality=$OPTARG ;;
+        s) size=$OPTARG ;;
+        b) background=$OPTARG ;;
         k) keep=1 ;;
-        *) sed -n '2,24s/^# \{0,1\}//p' "$0"; exit 0 ;;
+        *) sed -n '2,31s/^# \{0,1\}//p' "$0"; exit 0 ;;
     esac
 done
 shift $((OPTIND - 1))
+case $out in
+    *.mp4 | *.MP4 | *.mov | *.MOV) as_video=1; fps=${fps:-30} ;;
+    *) as_video=0; fps=${fps:-14} ;;
+esac
 
 script="${1:-$root/scripts/readme.autopilot}"
 script="$(cd "$(dirname "$script")" && pwd)/$(basename "$script")"
@@ -48,7 +63,7 @@ script="$(cd "$(dirname "$script")" && pwd)/$(basename "$script")"
 (( $# > 0 )) || set -- "$root"
 folder="$(cd "$1" && pwd)"
 
-command -v img2webp >/dev/null || { echo "Needs img2webp: brew install webp" >&2; exit 1; }
+[[ $as_video == 1 ]] || command -v img2webp >/dev/null || { echo "Needs img2webp: brew install webp" >&2; exit 1; }
 kuana="$root/target/release/kuana"
 [[ -x $kuana ]] || { echo "No $kuana; run cargo build --release first" >&2; exit 1; }
 
@@ -116,7 +131,16 @@ wait "$pid" || true
 
 count=$(find "$frames" -name 'frame-*.png' | wc -l | tr -d ' ')
 (( count > 0 )) || { echo "No frames were recorded" >&2; exit 1; }
-echo "$count frames ($(( $(tail -1 "$frames/times.txt") / 1000 )) s); framing them…"
+echo "$count frames ($(( $(tail -1 "$frames/times.txt") / 1000 )) s)"
+mkdir -p "$(dirname "$out")"
+if [[ $as_video == 1 ]]; then
+    echo "Making the video…"
+    "$helper" video "$frames" "$out" "$size" 30 "$background"
+    [[ $keep == 1 ]] || rm -rf "$frames"
+    echo "Saved ${out#"$root"/} ($(du -h "$out" | cut -f1 | tr -d ' '))"
+    exit 0
+fi
+echo "Framing them…"
 framed="$frames/framed"
 mkdir -p "$framed"
 "$helper" compose "$frames" "$framed" "$width"
@@ -134,7 +158,6 @@ for (( i = 0; i < ${#stamps[@]}; i++ )); do
     fi
     args+=(-d "$duration" "$framed/$(printf 'frame-%05d.png' $((i + 1)))")
 done
-mkdir -p "$(dirname "$out")"
 img2webp -loop 0 -lossy -q "$quality" -m 6 "${args[@]}" -o "$out" >/dev/null
 [[ $keep == 1 ]] || rm -rf "$frames"
 echo "Saved ${out#"$root"/} ($(du -h "$out" | cut -f1 | tr -d ' '))"

@@ -8,9 +8,12 @@
 //                                           write the window's frames as PNGs until a line on stdin
 //   screenshot-helper compose <frames> <out> <width>
 //                                           frame them with a margin and a drop shadow
+//   screenshot-helper video <frames> <out.mp4> <width>x<height> <fps> <#rrggbb[,#rrggbb…]>
+//                                           encode them as H.264 on a solid or gradient background
 
 import AppKit
 import ApplicationServices
+import AVFoundation
 import CoreImage
 @preconcurrency import ScreenCaptureKit
 
@@ -145,6 +148,124 @@ func compose(_ input: URL, into output: URL, width: CGFloat) {
     }
 }
 
+/// Encodes the frames `record` wrote as an H.264 video (MP4, or MOV by the extension) of `size`
+/// pixels at a constant `fps`, the way social sites want it: each frame shown from its time in
+/// `times.txt` until the next one's, the last held two seconds, the window scaled to fit with a
+/// margin and a drop shadow on an opaque background (video has no transparency): one color, or
+/// several as a gradient from the top left corner to the bottom right.
+func video(_ folder: URL, to output: URL, size: CGSize, fps: Int32, background: [CGColor]) {
+    let names = ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [])
+        .filter { $0.hasPrefix("frame-") && $0.hasSuffix(".png") }
+        .sorted()
+    guard let text = try? String(contentsOf: folder.appendingPathComponent("times.txt"), encoding: .utf8) else {
+        fail("no times.txt in \(folder.path)")
+    }
+    let times = text.split(separator: "\n").compactMap { Int($0) }
+    guard !names.isEmpty, times.count == names.count else { fail("\(names.count) frames but \(times.count) times") }
+    let width = Int(size.width), height = Int(size.height)
+
+    try? FileManager.default.removeItem(at: output)
+    let writer: AVAssetWriter
+    do {
+        writer = try AVAssetWriter(outputURL: output, fileType: output.pathExtension.lowercased() == "mov" ? .mov : .mp4)
+    } catch { fail("can't write \(output.path): \(error.localizedDescription)") }
+    // Screen content: sharp text needs more bits than camera footage of the same size.
+    let bitrate = Int(Double(width * height) * Double(fps) * 0.15)
+    let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+        AVVideoCodecKey: AVVideoCodecType.h264,
+        AVVideoWidthKey: width,
+        AVVideoHeightKey: height,
+        AVVideoCompressionPropertiesKey: [
+            AVVideoAverageBitRateKey: bitrate,
+            AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+            AVVideoExpectedSourceFrameRateKey: fps,
+            AVVideoMaxKeyFrameIntervalKey: fps * 2,
+        ],
+        AVVideoColorPropertiesKey: [
+            AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+            AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+            AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
+        ],
+    ])
+    input.expectsMediaDataInRealTime = false
+    let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+        kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+        kCVPixelBufferWidthKey as String: width,
+        kCVPixelBufferHeightKey as String: height,
+    ])
+    writer.add(input)
+    guard writer.startWriting() else { fail("can't start writing: \(writer.error?.localizedDescription ?? "")") }
+    writer.startSession(atSourceTime: .zero)
+
+    let space = CGColorSpace(name: CGColorSpace.sRGB)!
+    let gradient = background.count > 1
+        ? CGGradient(colorsSpace: space, colors: background as CFArray,
+                     locations: background.indices.map { CGFloat($0) / CGFloat(background.count - 1) })
+        : nil
+    func render(_ index: Int) -> CVPixelBuffer {
+        guard let pool = adaptor.pixelBufferPool else { fail("no pixel buffer pool") }
+        var made: CVPixelBuffer?
+        CVPixelBufferPoolCreatePixelBuffer(nil, pool, &made)
+        guard let buffer = made,
+              let source = CGImageSourceCreateWithURL(folder.appendingPathComponent(names[index]) as CFURL, nil),
+              let frame = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        else { fail("can't read \(names[index])") }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let context = CGContext(
+            data: CVPixelBufferGetBaseAddress(buffer), width: width, height: height, bitsPerComponent: 8,
+            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer), space: space,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        else { fail("can't draw a frame") }
+        if let gradient {
+            // Core Graphics' origin is the bottom left.
+            context.drawLinearGradient(gradient, start: CGPoint(x: 0, y: size.height), end: CGPoint(x: size.width, y: 0), options: [])
+        } else {
+            context.setFillColor(background[0])
+            context.fill(CGRect(origin: .zero, size: size))
+        }
+        let margin = (min(size.width, size.height) * 0.06).rounded()
+        let scale = min((size.width - 2 * margin) / CGFloat(frame.width), (size.height - 2 * margin) / CGFloat(frame.height))
+        let window = CGSize(width: (CGFloat(frame.width) * scale).rounded(), height: (CGFloat(frame.height) * scale).rounded())
+        let origin = CGPoint(x: ((size.width - window.width) / 2).rounded(), y: ((size.height - window.height) / 2).rounded())
+        context.interpolationQuality = .high
+        context.setShadow(offset: CGSize(width: 0, height: -margin * 0.25), blur: margin * 0.7,
+                          color: CGColor(gray: 0, alpha: 0.5))
+        context.draw(frame, in: CGRect(origin: origin, size: window))
+        return buffer
+    }
+    let total = times.last! + 2000
+    let ticks = total * Int(fps) / 1000
+    var shown = -1
+    var buffer: CVPixelBuffer?
+    var next = 0
+    for tick in 0..<ticks {
+        let ms = tick * 1000 / Int(fps)
+        while next + 1 < times.count && times[next + 1] <= ms { next += 1 }
+        if next != shown {
+            buffer = render(next)
+            shown = next
+        }
+        while !input.isReadyForMoreMediaData { usleep(2000) }
+        guard adaptor.append(buffer!, withPresentationTime: CMTime(value: CMTimeValue(tick), timescale: fps)) else {
+            fail("can't add a frame: \(writer.error?.localizedDescription ?? "")")
+        }
+    }
+    input.markAsFinished()
+    let done = DispatchSemaphore(value: 0)
+    writer.finishWriting { done.signal() }
+    done.wait()
+    if writer.status != .completed { fail("can't finish the video: \(writer.error?.localizedDescription ?? "")") }
+}
+
+/// `#rrggbb` as a color.
+func hexColor(_ text: String) -> CGColor? {
+    let digits = text.hasPrefix("#") ? String(text.dropFirst()) : text
+    guard digits.count == 6, let value = UInt32(digits, radix: 16) else { return nil }
+    return CGColor(srgbRed: CGFloat((value >> 16) & 0xff) / 255, green: CGFloat((value >> 8) & 0xff) / 255,
+                   blue: CGFloat(value & 0xff) / 255, alpha: 1)
+}
+
 let args = CommandLine.arguments
 func pidArg() -> pid_t {
     guard args.count > 2, let pid = pid_t(args[2]) else { fail("expected a pid") }
@@ -166,6 +287,18 @@ case "record":
 case "compose":
     guard args.count == 5, let width = Double(args[4]) else { fail("usage: compose <frames folder> <output folder> <width>") }
     compose(URL(fileURLWithPath: args[2]), into: URL(fileURLWithPath: args[3]), width: CGFloat(width))
+case "video":
+    let usage = "usage: video <frames folder> <out.mp4> <width>x<height> <fps> <#rrggbb[,#rrggbb…]>"
+    guard args.count == 7, let fps = Int32(args[5]), fps > 0 else { fail(usage) }
+    let background = args[6].split(separator: ",").map { hexColor(String($0)) }
+    guard !background.isEmpty, !background.contains(where: { $0 == nil }) else { fail(usage) }
+    let dims = args[4].split(separator: "x").compactMap { Int($0) }
+    // H.264 wants even dimensions.
+    guard dims.count == 2, dims[0] > 0, dims[1] > 0, dims[0] % 2 == 0, dims[1] % 2 == 0 else {
+        fail("the size must be <even width>x<even height>")
+    }
+    video(URL(fileURLWithPath: args[2]), to: URL(fileURLWithPath: args[3]),
+          size: CGSize(width: dims[0], height: dims[1]), fps: fps, background: background.compactMap { $0 })
 case "activate":
     let pid = pidArg()
     // Since macOS 14, NSRunningApplication.activate is only a request that the frontmost app
