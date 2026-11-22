@@ -11,7 +11,7 @@ What's already there is in [Features](features.md).
 
 Making what's there dependable on every platform before adding more.
 
-- **Windows and Linux out of beta**: daily use on both, fixes for what it finds. Every release is
+- **Linux out of beta**: daily use on it, fixes for what it finds. Every release is
   already started and driven through its main areas on all three platforms by CI (`smoke.yml`).
 - **Signed builds**: a Developer ID-signed and notarized macOS app, a signed Windows installer.
 - **Linux packages** beside the `.tar.gz` (x64 and Arm64 builds exist for Windows and Linux): an

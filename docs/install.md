@@ -42,8 +42,8 @@ Get the latest build from [GitHub Releases](https://github.com/berkayakin/kuana-
   SignPath Foundation (see [Code signing policy](#code-signing-policy)).
 - **Linux** (x64 or Arm64): the `.tar.gz`
 
-macOS is where Kuana is used every day. Windows and Linux builds work but have had much less
-testing, so [bug reports](https://github.com/berkayakin/kuana-editor/issues) are very welcome.
+macOS is where Kuana is used every day, and Windows is tested and stable. Linux builds work but
+have had much less testing, so [bug reports](https://github.com/berkayakin/kuana-editor/issues) are very welcome.
 
 ## Building from source
 

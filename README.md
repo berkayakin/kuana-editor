@@ -119,8 +119,8 @@ updates itself from then on.
 | Platform | Status |
 | --- | --- |
 | **macOS** (Apple silicon, Intel) | Used every day; the most complete |
-| **Windows** (x64, Arm64) | **Beta**: works, but has had little daily use so far |
-| **Linux** (x64, Arm64) | **Beta**: as Windows; a `.tar.gz` only, no packages yet |
+| **Windows** (x64, Arm64) | Stable: tested across its main areas |
+| **Linux** (x64, Arm64) | **Beta**: works, but has had little testing so far; a `.tar.gz` only, no packages yet |
 
 **Or build it** (Rust 1.94+ and `cmake`):
 
@@ -159,7 +159,7 @@ says what's planned):
 - **Builds aren't signed yet**: on macOS, a copy downloaded with a browser or Homebrew asks you to allow its
   first launch ([how](docs/install.md#first-launch-on-macos); the install script above doesn't),
   and Windows SmartScreen warns. Updates are signed.
-- **Windows and Linux are in beta**, see above. No Linux packages (AppImage, `.deb`, Flatpak) yet.
+- **Linux is in beta**, see above. No Linux packages (AppImage, `.deb`, Flatpak) yet.
 - **Remote development is new**: the other machine must run Linux or macOS (a Windows PC is
   reached through WSL), and language servers it lacks are installed there by hand, not with
   Kuana's one-click install.
@@ -180,7 +180,7 @@ says what's planned):
 Kuana is young, and contributions of every size are welcome: bug reports, themes, docs, language
 support, features. Good places to start:
 
-- **Try it and report what breaks**, especially on Windows and Linux.
+- **Try it and report what breaks**, especially on Linux.
 - **Make a theme or an extension.** Neither needs any Rust: see [Themes](docs/themes.md) and
   [Extensions](docs/extensions.md).
 - **Pick an open [issue](https://github.com/berkayakin/kuana-editor/issues)**, or take something
