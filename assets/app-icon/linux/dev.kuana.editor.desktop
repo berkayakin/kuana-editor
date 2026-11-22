@@ -7,5 +7,8 @@ Exec=kuana %F
 Icon=dev.kuana.editor
 Terminal=false
 Categories=Development;TextEditor;IDE;
-MimeType=text/plain;
+# File managers offer Kuana in Open With for these types (text/plain's subtypes as well, but as
+# recommended apps only for the types named). No inode/directory: with no default set, some
+# desktops would then open folders in Kuana instead of the file manager.
+MimeType=text/plain;text/markdown;text/x-markdown;text/x-log;text/x-readme;text/x-tex;text/x-rst;text/csv;text/tab-separated-values;text/x-patch;text/x-diff;application/json;application/x-ndjson;application/yaml;application/x-yaml;text/x-yaml;application/toml;application/x-toml;text/x-toml;application/xml;text/xml;text/html;application/xhtml+xml;text/css;text/x-scss;text/x-sass;text/x-less;text/javascript;application/javascript;application/x-javascript;text/x-typescript;application/x-typescript;text/rust;text/x-rust;text/x-go;text/x-python;text/x-python3;application/x-ruby;text/x-ruby;application/x-php;text/x-php;text/x-csrc;text/x-chdr;text/x-c++src;text/x-c++hdr;text/x-objcsrc;text/x-csharp;text/x-java;text/x-kotlin;text/x-scala;text/x-groovy;text/x-swift;text/x-dart;text/x-lua;text/x-haskell;text/x-erlang;text/x-elixir;text/x-ocaml;text/x-emacs-lisp;text/x-shellscript;application/x-shellscript;text/x-makefile;text/x-cmake;text/x-sql;application/sql;text/x-ini;application/x-zerosize;
 StartupWMClass=dev.kuana.editor

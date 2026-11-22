@@ -13,7 +13,9 @@ release's `latest.json` and installs it:
   doesn't quarantine what `curl` downloads, so the first launch doesn't need
   [Open Anyway](#first-launch-on-macos).
 - **Linux:** the `kuana` binary in `~/.local/bin`, plus a desktop entry and icons in
-  `~/.local/share`, so app launchers list it.
+  `~/.local/share`, so app launchers list it and file managers offer it in **Open With** for text,
+  docs and code files. Run it again to get a newer desktop entry: Kuana's own updates replace only
+  the binary.
 
 It then opens Kuana. Run it again to reinstall. `KUANA_INSTALL_DIR=<folder>` installs somewhere
 else; `KUANA_NO_LAUNCH=1` doesn't open it.
@@ -38,7 +40,8 @@ Get the latest build from [GitHub Releases](https://github.com/berkayakin/kuana-
 
 - **macOS** (Apple silicon and Intel): `Kuana-<version>-macos.dmg`, or the `.zip`
 - **Windows** (x64 or Arm64: `x86_64` or `aarch64` in the file name): the `-setup.exe` installer
-  (per user, no admin rights needed), or the `.zip`. Windows builds are signed through the
+  (per user, no admin rights needed; it lists Kuana in Explorer's **Open with** for text, docs and
+  code files, and can add **Open with Kuana** to folders' context menu), or the `.zip`. Windows builds are signed through the
   SignPath Foundation (see [Code signing policy](#code-signing-policy)).
 - **Linux** (x64 or Arm64): the `.tar.gz`
 

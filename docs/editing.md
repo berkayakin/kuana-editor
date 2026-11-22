@@ -328,7 +328,11 @@ folder or several (see [Several folders in one window](#several-folders-in-one-w
 - Files and folders dragged from Finder go where you drop them: onto the editor area they open
   (a "Drop to open" frame shows while dragging); onto the file tree they're copied into the
   highlighted folder, and in a Git project Kuana offers to add them to Git. Kuana is listed in Finder's
-  **Open With** for files and folders (the release app). **Install 'kuana' Shell Command** (Kuana menu
+  **Open With** for files and folders (the release app), in Explorer's **Open with** for text, docs
+  and code files (the Windows installer; its optional **Open with Kuana** task adds folders' context
+  menu too), and in Linux file managers' **Open With** for them (the desktop entry
+  [`install.sh`](install.md#install-script-macos-linux) writes). It's offered there, never made the
+  default app. **Install 'kuana' Shell Command** (Kuana menu
   or Find Action) adds `/usr/local/bin/kuana`, asking for an administrator password if needed:
   `kuana .` or `kuana src/main.rs` opens them in the running Kuana; `kuana api web` opens one
   project with both folders.
