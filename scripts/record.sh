@@ -13,8 +13,7 @@
 # that window is captured, without the pointer, then framed like a screenshot (rounded corners, a
 # margin and a soft shadow on transparency, which is why it's WebP: GIF has no soft transparency).
 # An output ending in .mp4 or .mov is an H.264 video instead (AVFoundation, nothing to install):
-# 30 frames a second, the window centered on a background of the given size: by default a
-# mid-tone gradient in the icon's colors, which both dark and light themes stand out from.
+# 30 frames a second, the window centered on a background of the given size (white by default).
 #
 # Options:
 #   -o FILE   output (default docs/screenshots/demo.webp; .mp4/.mov for a video)
@@ -23,7 +22,7 @@
 #   -q N      WebP quality, 1–100 (default 80)
 #   -s WxH    video: its size in pixels (default 1920x1080)
 #   -b COLORS video: the background, #rrggbb, or several comma-separated for a diagonal
-#             gradient (default #6b4fc8,#3a78d0,#2aa6a8)
+#             gradient (default #ffffff)
 #   -k        keep the PNG frames (in target/record-frames)
 #
 # The terminal needs Screen Recording access. A WebP needs img2webp (`brew install webp`).
@@ -36,7 +35,7 @@ fps=""
 width=1280
 quality=80
 size=1920x1080
-background="#6b4fc8,#3a78d0,#2aa6a8"
+background="#ffffff"
 keep=0
 
 while getopts "o:r:w:q:s:b:kh" opt; do
@@ -48,7 +47,7 @@ while getopts "o:r:w:q:s:b:kh" opt; do
         s) size=$OPTARG ;;
         b) background=$OPTARG ;;
         k) keep=1 ;;
-        *) sed -n '2,31s/^# \{0,1\}//p' "$0"; exit 0 ;;
+        *) sed -n '2,30s/^# \{0,1\}//p' "$0"; exit 0 ;;
     esac
 done
 shift $((OPTIND - 1))
