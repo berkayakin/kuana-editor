@@ -114,7 +114,7 @@ fn language_servers_run_on_the_host(cx: &mut TestAppContext) {
         if let Some(message) = found {
             break message;
         }
-        assert!(started.elapsed() < std::time::Duration::from_secs(20), "no diagnostics came");
+        assert!(started.elapsed() < crate::lsp::FAKE_SERVER_WAIT, "no diagnostics came");
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
     // The server read `file://<the host's path>`, not the mount's.
@@ -176,7 +176,7 @@ fn language_servers_start_again_after_a_reconnect(cx: &mut TestAppContext) {
             if editor.read_with(cx, |e, cx| !e.doc.read(cx).diagnostics.is_empty()) {
                 return;
             }
-            assert!(started.elapsed() < std::time::Duration::from_secs(20), "no diagnostics came");
+            assert!(started.elapsed() < crate::lsp::FAKE_SERVER_WAIT, "no diagnostics came");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     };

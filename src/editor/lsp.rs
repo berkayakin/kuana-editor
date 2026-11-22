@@ -2202,7 +2202,7 @@ mod tests {
     use super::*;
     use crate::{
         document::Document,
-        lsp::{LspStatus, fake_server},
+        lsp::{FAKE_SERVER_WAIT, LspStatus, fake_server},
     };
 
     /// Runs the app until `done` holds; servers answer from other threads.
@@ -2213,7 +2213,7 @@ mod tests {
             if done(cx) {
                 return;
             }
-            assert!(started.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
+            assert!(started.elapsed() < FAKE_SERVER_WAIT, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(20));
         }
     }
@@ -2568,7 +2568,7 @@ mod tests {
             if rows(cx).contains(&500) {
                 break;
             }
-            assert!(started.elapsed() < Duration::from_secs(10), "timed out waiting for the hints in view: {:?}", rows(cx));
+            assert!(started.elapsed() < FAKE_SERVER_WAIT, "timed out waiting for the hints in view: {:?}", rows(cx));
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(rows(cx).iter().all(|row| (400..600).contains(row)), "{:?}", rows(cx));

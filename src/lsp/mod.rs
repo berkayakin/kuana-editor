@@ -2113,6 +2113,13 @@ pub(crate) fn fake_server(name: &str, triggers: &str) -> &'static servers::Serve
     Box::leak(Box::new(servers::ServerSpec { id: leak(format!("fake-{name}")), candidates, ..servers::SPEC }))
 }
 
+/// How long a test waits for a [`FAKE_SERVER`] to answer. Only a failing test
+/// waits it out, so it's generous: on a fresh Windows runner the first Pythons,
+/// started together while the other tests run, took over 10 s to answer
+/// `initialize`.
+#[cfg(test)]
+pub(crate) const FAKE_SERVER_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2158,7 +2165,7 @@ mod tests {
         let wait = |cx: &mut gpui::TestAppContext, what: &str, done: &dyn Fn(&mut gpui::TestAppContext) -> bool| {
             let started = std::time::Instant::now();
             while !done(cx) {
-                assert!(started.elapsed() < std::time::Duration::from_secs(10), "timed out waiting for {what}");
+                assert!(started.elapsed() < FAKE_SERVER_WAIT, "timed out waiting for {what}");
                 std::thread::sleep(std::time::Duration::from_millis(20));
                 cx.run_until_parked();
             }
@@ -2243,7 +2250,7 @@ mod tests {
         let wait = |cx: &mut gpui::TestAppContext, want: &str| {
             let started = std::time::Instant::now();
             while message(cx).as_deref() != Some(want) {
-                assert!(started.elapsed() < std::time::Duration::from_secs(10), "waited for {want:?}, have {:?}", message(cx));
+                assert!(started.elapsed() < FAKE_SERVER_WAIT, "waited for {want:?}, have {:?}", message(cx));
                 std::thread::sleep(std::time::Duration::from_millis(20));
                 cx.executor().advance_clock(PULL_DELAY);
                 cx.run_until_parked();
@@ -2293,7 +2300,7 @@ mod tests {
         store.update(cx, |s, cx| s.register(&editor, cx));
         let started = std::time::Instant::now();
         while !store.read_with(cx, |s, _| s.running_servers().len() == 1) {
-            assert!(started.elapsed() < std::time::Duration::from_secs(10), "the server didn't start");
+            assert!(started.elapsed() < FAKE_SERVER_WAIT, "the server didn't start");
             std::thread::sleep(std::time::Duration::from_millis(20));
             cx.run_until_parked();
         }
@@ -2306,7 +2313,7 @@ mod tests {
         cx.spawn(async move |_| *slot.borrow_mut() = Some(asking.await)).detach();
         let started = std::time::Instant::now();
         while answer.borrow().is_none() {
-            assert!(started.elapsed() < std::time::Duration::from_secs(10), "no answer");
+            assert!(started.elapsed() < FAKE_SERVER_WAIT, "no answer");
             std::thread::sleep(std::time::Duration::from_millis(20));
             cx.run_until_parked();
         }
@@ -2318,7 +2325,7 @@ mod tests {
         store.read_with(cx, |s, _| s.did_rename(&renames(&old, &new)));
         let started = std::time::Instant::now();
         while !editor.read_with(cx, |e, cx| e.doc.read(cx).diagnostics.iter().any(|d| &*d.message == "renames heard b.rs")) {
-            assert!(started.elapsed() < std::time::Duration::from_secs(10), "didRenameFiles not heard");
+            assert!(started.elapsed() < FAKE_SERVER_WAIT, "didRenameFiles not heard");
             std::thread::sleep(std::time::Duration::from_millis(20));
             cx.run_until_parked();
         }
@@ -2350,7 +2357,7 @@ mod tests {
         store.update(cx, |s, cx| s.register(&editor, cx));
         let started = std::time::Instant::now();
         while !editor.read_with(cx, |e, cx| !e.doc.read(cx).diagnostics.is_empty()) {
-            assert!(started.elapsed() < std::time::Duration::from_secs(10), "timed out waiting for the server");
+            assert!(started.elapsed() < FAKE_SERVER_WAIT, "timed out waiting for the server");
             std::thread::sleep(std::time::Duration::from_millis(20));
             cx.run_until_parked();
         }
@@ -2359,7 +2366,7 @@ mod tests {
         let note = dir.join("a.rs.shutdown");
         let started = std::time::Instant::now();
         while !note.exists() {
-            assert!(started.elapsed() < std::time::Duration::from_secs(10), "the server wasn't told to shut down");
+            assert!(started.elapsed() < FAKE_SERVER_WAIT, "the server wasn't told to shut down");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         std::fs::remove_dir_all(&dir).ok();
@@ -2390,7 +2397,7 @@ mod tests {
         store.update(cx, |s, cx| s.register(&editor, cx));
         let started = std::time::Instant::now();
         while !editor.read_with(cx, |e, cx| !e.doc.read(cx).diagnostics.is_empty()) {
-            assert!(started.elapsed() < std::time::Duration::from_secs(10), "timed out waiting for the server");
+            assert!(started.elapsed() < FAKE_SERVER_WAIT, "timed out waiting for the server");
             std::thread::sleep(std::time::Duration::from_millis(20));
             cx.run_until_parked();
         }
@@ -2572,7 +2579,7 @@ mod tests {
         let wait = |cx: &mut gpui::TestAppContext, what: &str| {
             let started = std::time::Instant::now();
             while registrations(cx) == 0 {
-                assert!(started.elapsed() < std::time::Duration::from_secs(10), "timed out waiting for {what}");
+                assert!(started.elapsed() < FAKE_SERVER_WAIT, "timed out waiting for {what}");
                 std::thread::sleep(std::time::Duration::from_millis(20));
                 cx.run_until_parked();
             }
