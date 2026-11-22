@@ -102,8 +102,25 @@ impl TextSystem {
 
     /// Kuana: whether a font family loads, found by name without listing every
     /// installed family as `all_font_names` does (slow: ~100 ms on macOS).
+    ///
+    /// A miss isn't kept: `font_id` would remember it for good, and a font installed
+    /// while the app runs would never be found. One kept from drawing goes too, so the
+    /// next `font_id` asks the platform again.
     pub fn has_font(&self, family: &str) -> bool {
-        self.font_id(&font(family.to_string())).is_ok()
+        let font = font(family.to_string());
+        if let Some(Ok(_)) = self.font_ids_by_font.read().get(&font) {
+            return true;
+        }
+        match self.platform_text_system.font_id(&font) {
+            Ok(id) => {
+                self.font_ids_by_font.write().insert(font, Ok(id));
+                true
+            }
+            Err(_) => {
+                self.font_ids_by_font.write().remove(&font);
+                false
+            }
+        }
     }
 
     /// Add a font's data to the text system.

@@ -40,6 +40,8 @@ Kuana's own, in `src/platform/mac/window.rs`, `src/platform/mac/display_link.rs`
 - **`TextSystem::has_font`** (`src/text_system.rs`): whether one family loads, by
   name. `theme::apply_fonts` used `all_font_names`, which on macOS lists every
   installed family and took ~100 ms of each start, before the window showed.
+  Unlike `font_id`, it keeps no misses (and drops one already kept), so a font
+  installed while Kuana runs is found on the next settings change.
 
 And in `src/taffy.rs`, two float literals are typed (`0.0_f32`, `1.0_f32`): a path
 dependency's warnings aren't silenced as a registry crate's are, and Kuana's build
