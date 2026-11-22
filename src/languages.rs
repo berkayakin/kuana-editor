@@ -363,9 +363,11 @@ mod tests {
 
     #[test]
     fn the_file_list_matches_the_folder() {
+        // Hidden files are the system's (Finder's .DS_Store), not languages'.
+        let visible = |entry: &std::fs::DirEntry| !entry.file_name().to_string_lossy().starts_with('.');
         let mut on_disk: Vec<String> = Vec::new();
-        for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/languages")).unwrap().flatten() {
-            for file in std::fs::read_dir(entry.path()).unwrap().flatten() {
+        for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/languages")).unwrap().flatten().filter(visible) {
+            for file in std::fs::read_dir(entry.path()).unwrap().flatten().filter(visible) {
                 on_disk.push(format!("{}/{}", entry.file_name().to_string_lossy(), file.file_name().to_string_lossy()));
             }
         }
