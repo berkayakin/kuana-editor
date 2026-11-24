@@ -148,30 +148,31 @@ impl Workspace {
 
     fn claude_open_editors(&self, cx: &App) -> Value {
         let active = self.active_editor(cx).map(|e| e.entity_id());
-        let mut seen = HashSet::new();
-        let tabs: Vec<Value> = self
-            .editors
-            .iter()
-            .filter_map(|editor| {
-                let doc = editor.read(cx).doc.read(cx);
-                let path = doc.path.as_ref()?;
-                // A file split in two is one editor to Claude.
-                if !seen.insert(path.clone()) && Some(editor.entity_id()) != active {
-                    return None;
+        // A file split in two is one editor to Claude, active when either is.
+        let mut tabs: Vec<(PathBuf, Value)> = Vec::new();
+        for editor in &self.editors {
+            let doc = editor.read(cx).doc.read(cx);
+            let Some(path) = doc.path.as_ref() else { continue };
+            let is_active = Some(editor.entity_id()) == active;
+            if let Some((_, tab)) = tabs.iter_mut().find(|(p, _)| p == path) {
+                if is_active {
+                    tab["isActive"] = json!(true);
                 }
-                Some(json!({
-                    "uri": ide::file_url(path),
-                    "isActive": Some(editor.entity_id()) == active,
-                    "label": path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-                    "languageId": crate::lsp::servers::language_id(doc.language, path),
-                    "isDirty": doc.is_dirty(),
-                    "fileName": path,
-                    "isUntitled": false,
-                    "lineCount": doc.line_count(),
-                }))
-            })
-            .collect();
-        json!({ "tabs": tabs })
+                continue;
+            }
+            let tab = json!({
+                "uri": ide::file_url(path),
+                "isActive": is_active,
+                "label": path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                "languageId": crate::lsp::servers::language_id(doc.language, path),
+                "isDirty": doc.is_dirty(),
+                "fileName": path,
+                "isUntitled": false,
+                "lineCount": doc.line_count(),
+            });
+            tabs.push((path.clone(), tab));
+        }
+        json!({ "tabs": tabs.into_iter().map(|(_, tab)| tab).collect::<Vec<_>>() })
     }
 
     /// The problems Kuana shows: open files' (built-in lint, linters and
@@ -294,36 +295,44 @@ impl Workspace {
             }
             return;
         }
-        let applied = self.apply_claude_change(&path, &text, new_file, window, cx);
-        if let Err(err) = &applied {
-            self.toast(ToastKind::Error, "Couldn't apply Claude Code's change", Some(err.clone()), cx);
-        }
-        if let Some(proposal) = proposal {
-            proposal.call.answer(applied.map(|()| vec!["FILE_SAVED".to_string(), text.to_string()]));
-        }
+        // Claude hears "saved" only once the file is: a failed save is
+        // its error (the save's own prompt tells the user).
+        let applying = self.apply_claude_change(&path, &text, new_file, window, cx);
+        cx.spawn(async move |_, _| {
+            let applied = applying.await;
+            if let Some(proposal) = proposal {
+                proposal.call.answer(applied.map(|()| vec!["FILE_SAVED".to_string(), text.to_string()]));
+            }
+        })
+        .detach();
     }
 
     /// Puts a proposed text in its file: a new file is written; an existing
     /// one's document gets it as one undoable edit and is saved (without
-    /// format on save, which would change what Claude then writes).
-    fn apply_claude_change(&mut self, path: &Path, text: &Arc<str>, new_file: bool, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+    /// format on save, which would change what Claude then writes). The
+    /// task ends when the file is written.
+    fn apply_claude_change(&mut self, path: &Path, text: &Arc<str>, new_file: bool, window: &mut Window, cx: &mut Context<Self>) -> Task<Result<(), String>> {
         if new_file && !path.is_file_on_host() {
-            if let Some(parent) = path.parent() {
-                crate::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            let written = path.parent().map_or(Ok(()), crate::fs::create_dir_all).and_then(|()| crate::fs::write(path, text.as_bytes()));
+            if let Err(err) = written {
+                self.toast(ToastKind::Error, "Couldn't create the file Claude Code proposed", Some(err.to_string()), cx);
+                return Task::ready(Err(err.to_string()));
             }
-            crate::fs::write(path, text.as_bytes()).map_err(|e| e.to_string())?;
             self.files_written([path.to_path_buf()], cx);
             self.open_path(path.to_path_buf(), window, cx);
-            return Ok(());
+            return Task::ready(Ok(()));
         }
         self.open_path(path.to_path_buf(), window, cx);
-        let Some(editor) = self.tab_for(path, cx) else { return Err(format!("Couldn't open {}", path.display())) };
+        let Some(editor) = self.tab_for(path, cx) else {
+            let message = format!("Couldn't open {}", path.display());
+            self.toast(ToastKind::Error, "Couldn't apply Claude Code's change", Some(message.clone()), cx);
+            return Task::ready(Err(message));
+        };
         let current = editor.read(cx).doc.read(cx).rope().clone();
         let kept = path.to_path_buf();
         cx.background_executor().spawn(async move { crate::local_history::record_rope(&kept, &current, crate::local_history::Kind::BeforeAgent) }).detach();
         editor.update(cx, |e, cx| e.replace_text(text, cx));
-        self.save_editor(&editor, window, cx);
-        Ok(())
+        self.save_editor_task(&editor, window, cx)
     }
 
     /// Closes proposed changes' tabs whose names `which` takes, rejecting
@@ -379,16 +388,8 @@ impl Workspace {
             n => format!("{n} Claude Code sessions are connected"),
         };
         Some(
-            div()
-                .id("claude-status")
-                .flex()
-                .items_center()
+            super::status_bar::status_button("claude-status", theme)
                 .gap_1p5()
-                .h(px(24.))
-                .px_2()
-                .rounded(px(9.))
-                .cursor_pointer()
-                .hover_bg(theme.hover)
                 .hover(|s| s.text_color(theme.text_muted))
                 .child(div().size(px(6.)).rounded_full().bg(light).shadow(crate::ui::glow(theme, light.alpha(0.6), 4., 0.)))
                 .child("Claude")

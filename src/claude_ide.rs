@@ -55,9 +55,8 @@ const ENABLE_VARIABLE: &str = "ENABLE_IDE_INTEGRATION";
 const IDE_NAME: &str = "Kuana";
 /// How long a connection may take to say who it is.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-/// How often a connection looks for something to send while waiting for
-/// Claude: answers from the window and notifications wait at most this.
-const TICK: Duration = Duration::from_millis(50);
+/// How long a write may wait for a client that stopped reading.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Where Claude Code looks for IDEs' lock files.
 pub fn lock_dir() -> Option<PathBuf> {
@@ -123,9 +122,17 @@ struct Shared {
     token: String,
     lock_path: PathBuf,
     state: Mutex<protocol::State>,
-    clients: Mutex<Vec<(u64, std_mpsc::Sender<String>)>>,
+    clients: Mutex<Vec<Client>>,
     requests: mpsc::UnboundedSender<Request>,
     stopped: AtomicBool,
+}
+
+/// A connected client: where its messages go, and its socket, to end it
+/// when the server stops.
+struct Client {
+    id: u64,
+    outgoing: std_mpsc::Sender<Option<String>>,
+    socket: TcpStream,
 }
 
 impl Server {
@@ -203,8 +210,8 @@ impl Server {
     /// Sends a notification to every connected client.
     pub fn broadcast(&self, method: &str, params: Value) {
         let text = protocol::notification(method, params).to_string();
-        for (_, client) in self.shared.clients.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-            let _ = client.send(text.clone());
+        for client in self.shared.clients.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            let _ = client.outgoing.send(Some(text.clone()));
         }
     }
 }
@@ -215,13 +222,22 @@ impl Drop for Server {
         shared.stopped.store(true, Ordering::Relaxed);
         let _ = fs::remove_file(&shared.lock_path);
         SERVERS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(port, _)| *port != shared.port);
-        // Wakes the accepting thread, which then sees it's stopped; clients
-        // see it on their next tick.
+        // Wakes the accepting thread, which then sees it's stopped, and ends
+        // the clients' connections.
         let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, shared.port));
+        shared.end_clients();
     }
 }
 
 impl Shared {
+    /// Closes every client's socket: its reader's wait ends, and with it
+    /// the writer.
+    fn end_clients(&self) {
+        for client in self.clients.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            let _ = client.socket.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
     fn folders(&self) -> Vec<PathBuf> {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).folders.clone()
     }
@@ -305,9 +321,23 @@ fn alive(pid: u32) -> bool {
     found || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-#[cfg(not(unix))]
-fn alive(_: u32) -> bool {
-    true
+#[cfg(windows)]
+fn alive(pid: u32) -> bool {
+    let tasklist = std::env::var_os("SystemRoot").map(|root| Path::new(&root).join("System32").join("tasklist.exe")).filter(|p| p.is_file());
+    let output = crate::process::command(tasklist.as_deref().unwrap_or("tasklist".as_ref()))
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .stdin(std::process::Stdio::null())
+        .output();
+    // Can't tell: its lock file stays.
+    output.map_or(true, |out| tasklist_lists(&String::from_utf8_lossy(&out.stdout), pid))
+}
+
+/// Whether `tasklist /FO CSV /NH` printed a row for `pid` (`"name","pid",…`);
+/// without one it prints a message in the system's language.
+#[cfg(any(windows, test))]
+fn tasklist_lists(output: &str, pid: u32) -> bool {
+    let column = format!("\",\"{pid}\",\"");
+    output.lines().any(|line| line.contains(&column))
 }
 
 /// Lets a WebSocket upgrade through only with the token, and echoes the
@@ -336,76 +366,110 @@ fn same_token(given: &str, token: &str) -> bool {
     given.len() == token.len() && given.bytes().zip(token.bytes()).fold(0u8, |diff, (a, b)| diff | (a ^ b)) == 0
 }
 
-/// One client, from its handshake until it goes or the server stops.
+/// A client's socket as its two threads use it: reads go straight to the
+/// stream (only the reader reads), and each write goes out whole under one
+/// lock, so a message the writer sends and a pong the reader answers never
+/// interleave. tungstenite hands a write all the frames it has, whole.
+struct Duplex {
+    read: TcpStream,
+    write: Arc<Mutex<TcpStream>>,
+}
+
+impl io::Read for Duplex {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.read.read(buf)
+    }
+}
+
+impl io::Write for Duplex {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.write.lock().unwrap_or_else(|e| e.into_inner()).write_all(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.write.lock().unwrap_or_else(|e| e.into_inner()).flush()
+    }
+}
+
+/// One client, from its handshake until it goes or the server stops: this
+/// thread waits for what Claude sends, a writer thread for what's queued
+/// for Claude (answers, notifications), so neither wakes for nothing.
 #[allow(clippy::result_large_err)]
 fn serve(stream: TcpStream, shared: &Arc<Shared>) {
     if shared.stopped.load(Ordering::Relaxed) {
         return;
     }
     let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT));
-    let Ok(mut socket) = tungstenite::accept_hdr(stream, |request: &Handshake, response| authorize(request, response, &shared.token)) else {
+    let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
+    let (Ok(write), Ok(writer_read), Ok(control)) = (stream.try_clone(), stream.try_clone(), stream.try_clone()) else { return };
+    let write = Arc::new(Mutex::new(write));
+    let duplex = Duplex { read: stream, write: write.clone() };
+    let Ok(mut socket) = tungstenite::accept_hdr(duplex, |request: &Handshake, response| authorize(request, response, &shared.token)) else {
         return;
     };
-    // From now on reads time out every tick, to send what's waiting.
-    let _ = socket.get_ref().set_read_timeout(Some(TICK));
-    let (outgoing, waiting) = std_mpsc::channel::<String>();
+    // Reads now wait for Claude as long as it takes (the socket's clones
+    // share the setting).
+    let _ = control.set_read_timeout(None);
+    // `None` ends the writer, once this thread is done.
+    let (outgoing, waiting) = std_mpsc::channel::<Option<String>>();
+    let mut writer = tungstenite::WebSocket::from_raw_socket(Duplex { read: writer_read, write }, tungstenite::protocol::Role::Server, None);
+    let writing = std::thread::Builder::new().name("claude ide writer".into()).spawn(move || {
+        while let Ok(Some(text)) = waiting.recv() {
+            if writer.send(Message::text(text)).is_err() {
+                break;
+            }
+        }
+    });
+    if writing.is_err() {
+        return;
+    }
     let id = NEXT_CLIENT.fetch_add(1, Ordering::Relaxed);
     let selection = shared.state.lock().unwrap_or_else(|e| e.into_inner()).selection.clone();
     if let Some(selection) = selection {
-        let _ = outgoing.send(protocol::notification("selection_changed", selection).to_string());
+        let _ = outgoing.send(Some(protocol::notification("selection_changed", selection).to_string()));
     }
-    shared.clients.lock().unwrap_or_else(|e| e.into_inner()).push((id, outgoing.clone()));
+    shared.clients.lock().unwrap_or_else(|e| e.into_inner()).push(Client { id, outgoing: outgoing.clone(), socket: control });
     let _ = shared.requests.unbounded_send(Request::Connected);
-    'connection: loop {
-        if shared.stopped.load(Ordering::Relaxed) {
-            let _ = socket.close(None);
-            let _ = socket.flush();
-            break;
-        }
-        let mut wrote = false;
-        while let Ok(text) = waiting.try_recv() {
-            if socket.write(Message::text(text)).is_err() {
-                break 'connection;
-            }
-            wrote = true;
-        }
-        if wrote && socket.flush().is_err() {
-            break;
-        }
+    // Stopped while this one connected: `Drop for Server` may have ended the
+    // clients before it was one of them.
+    if shared.stopped.load(Ordering::Relaxed) {
+        shared.end_clients();
+    }
+    loop {
         match socket.read() {
             Ok(Message::Text(text)) => {
                 let state = shared.state.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 match protocol::handle(text.as_str(), &state) {
                     protocol::Incoming::Reply(reply) => {
-                        let _ = outgoing.send(reply.to_string());
+                        let _ = outgoing.send(Some(reply.to_string()));
                     }
                     protocol::Incoming::Tool { id, name, arguments } => ask_window(shared, outgoing.clone(), id, name, arguments),
                     protocol::Incoming::Nothing => {}
                 }
             }
-            // Pings are answered by tungstenite; a close is answered on the
-            // next read, which then fails.
+            // A ping's pong goes out at the next read; a close is answered
+            // there too, and the read after it fails.
             Ok(_) => {}
-            Err(tungstenite::Error::Io(err)) if matches!(err.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
             Err(_) => break,
         }
     }
-    shared.clients.lock().unwrap_or_else(|e| e.into_inner()).retain(|(client, _)| *client != id);
+    shared.clients.lock().unwrap_or_else(|e| e.into_inner()).retain(|client| client.id != id);
+    let _ = outgoing.send(None);
     let _ = shared.requests.unbounded_send(Request::Disconnected);
 }
 
 /// Hands a tool call to the window and sends back its answer, waiting on a
 /// thread of its own.
-fn ask_window(shared: &Shared, outgoing: std_mpsc::Sender<String>, id: Value, name: String, arguments: Value) {
+fn ask_window(shared: &Shared, outgoing: std_mpsc::Sender<Option<String>>, id: Value, name: String, arguments: Value) {
     let (answer, answered) = oneshot::channel();
     if shared.requests.unbounded_send(Request::Tool(ToolCall { name, arguments, answer })).is_err() {
-        let _ = outgoing.send(protocol::tool_result(id, Err("Kuana's window is closed".into())).to_string());
+        let _ = outgoing.send(Some(protocol::tool_result(id, Err("Kuana's window is closed".into())).to_string()));
         return;
     }
     let _ = std::thread::Builder::new().name("claude ide tool".into()).spawn(move || {
         let answer = futures::executor::block_on(answered).unwrap_or_else(|_| Err("Kuana couldn't answer".into()));
-        let _ = outgoing.send(protocol::tool_result(id, answer).to_string());
+        let _ = outgoing.send(Some(protocol::tool_result(id, answer).to_string()));
     });
 }
 
@@ -637,6 +701,14 @@ mod tests {
     }
 
     #[test]
+    fn reads_tasklists_rows() {
+        let listed = "\"kuana.exe\",\"4242\",\"Console\",\"1\",\"123,456 K\"\r\n";
+        assert!(tasklist_lists(listed, 4242));
+        assert!(!tasklist_lists(listed, 42));
+        assert!(!tasklist_lists("INFO: No tasks are running which match the specified criteria.\r\n", 4242));
+    }
+
+    #[test]
     fn terminals_reach_the_window_holding_their_folder() {
         let dir = temp_lock_dir("env");
         let (outer, _a) = Server::start(vec![PathBuf::from("/kuana-env-test/app")], &dir).unwrap();
@@ -683,6 +755,17 @@ mod tests {
         let answer = receive(&mut client);
         assert_eq!(answer["id"], 2);
         assert_eq!(answer["result"]["content"][0]["text"], json!({ "isDirty": true }).to_string());
+
+        // A ping is answered while the writer may be writing too.
+        client.send(Message::Ping(vec![1, 2].into())).unwrap();
+        let pong = loop {
+            match client.read().unwrap() {
+                Message::Pong(data) => break data,
+                Message::Text(_) => continue,
+                other => panic!("expected a pong, got {other:?}"),
+            }
+        };
+        assert_eq!(&pong[..], &[1, 2]);
 
         // A new selection is pushed; the same one again isn't.
         server.set_selection(json!({ "text": "fn main" }));

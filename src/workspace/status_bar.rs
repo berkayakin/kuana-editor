@@ -176,16 +176,7 @@ impl Workspace {
                 right.push(item(e.indent_label().into_any_element()).into_any_element());
             }
             let menu_item = |id: &'static str, label: String, tip: &'static str| {
-                div()
-                    .id(id)
-                    .flex()
-                    .items_center()
-                    // Same size and rounding as the docks and the problem counts.
-                    .h(px(24.))
-                    .px_2()
-                    .rounded(px(9.))
-                    .cursor_pointer()
-                    .hover_bg(theme.hover)
+                status_button(id, &theme)
                     .hover(|s| s.text_color(theme.text))
                     .tooltip(move |_, cx| tooltip_view(tip, cx))
                     .child(label)
@@ -268,17 +259,8 @@ impl Workspace {
             // Where a remote project is, first, as VS Code shows it.
             .children(remote_item)
             .child(
-                div()
-                    .id("diagnostic-counts")
-                    .flex()
-                    .items_center()
+                status_button("diagnostic-counts", &theme)
                     .gap_2()
-                    // Same size and rounding as the menus on the right.
-                    .h(px(24.))
-                    .px_2()
-                    .rounded(px(9.))
-                    .cursor_pointer()
-                    .hover_bg(theme.hover)
                     .hover(|s| s.text_color(theme.text_muted))
                     .on_click(cx.listener(|ws, _, window, cx| ws.toggle_problems(&ToggleProblems, window, cx)))
                     .child(counter(Icon::CircleX, errors, theme.error.into()))
@@ -323,6 +305,12 @@ impl Workspace {
             // middle, rather than past the window's edge.
             .child(div().flex().flex_shrink().min_w_0().overflow_hidden().justify_end().children(right))
     }
+}
+
+/// A status bar item that opens something (the problem counts, the menus,
+/// Claude Code's item): one size and rounding, filled under the pointer.
+pub(super) fn status_button(id: impl Into<gpui::ElementId>, theme: &Theme) -> crate::ui::Button {
+    div().id(id).flex().items_center().h(px(24.)).px_2().rounded(px(9.)).cursor_pointer().hover_bg(theme.hover)
 }
 
 /// What the status bar shows at the window's width: the less used items go

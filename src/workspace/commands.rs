@@ -276,10 +276,17 @@ impl Workspace {
     /// Saves a tab, in the background: its text is taken now and written
     /// off the UI thread (see `Editor::save_in_background`).
     pub(super) fn save_editor(&mut self, editor: &Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_editor_task(editor, window, cx).detach();
+    }
+
+    /// `save_editor`, for a caller that waits for the file to be written:
+    /// the task ends with the save's outcome (a failure is shown either way).
+    pub(super) fn save_editor_task(&mut self, editor: &Entity<Editor>, window: &mut Window, cx: &mut Context<Self>) -> Task<Result<(), String>> {
         let (id, path) = (editor.entity_id(), editor.read(cx).doc.read(cx).path.clone());
         let saving = editor.update(cx, |e, cx| e.save_in_background(cx));
         cx.spawn_in(window, async move |ws, cx| {
             let saved = saving.await;
+            let outcome = saved.as_ref().map(|_| ()).map_err(|err| err.to_string());
             ws.update_in(cx, |ws, window, cx| {
                 match saved {
                     Ok(()) => {
@@ -300,8 +307,8 @@ impl Workspace {
                 ws.files_written(path, cx);
             })
             .ok();
+            outcome
         })
-        .detach();
     }
 }
 

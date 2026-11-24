@@ -154,7 +154,8 @@ fn tool_definitions() -> Vec<Value> {
             "Opens a file in the editor, optionally selecting lines or the text between two patterns.",
             json!({
                 "filePath": { "type": "string", "description": "The file to open" },
-                "preview": { "type": "boolean", "description": "Open it as a preview tab", "default": false },
+                // Claude's plugins take it; Kuana has no preview tabs, so a file opens as any other.
+                "preview": { "type": "boolean", "description": "Ignored: Kuana has no preview tabs", "default": false },
                 "startLine": { "type": "integer", "description": "First line to select (1-based)" },
                 "endLine": { "type": "integer", "description": "Last line to select (1-based)" },
                 "startText": { "type": "string", "description": "Text where the selection starts" },
