@@ -50,10 +50,12 @@ pub enum Kind {
     Reloaded,
     BeforeRollback,
     BeforeRestore,
+    /// Before an edit Claude Code proposed was accepted (`workspace/claude_ide.rs`).
+    BeforeAgent,
 }
 
 impl Kind {
-    const ALL: [Kind; 6] = [Kind::Original, Kind::Saved, Kind::BeforeReload, Kind::Reloaded, Kind::BeforeRollback, Kind::BeforeRestore];
+    const ALL: [Kind; 7] = [Kind::Original, Kind::Saved, Kind::BeforeReload, Kind::Reloaded, Kind::BeforeRollback, Kind::BeforeRestore, Kind::BeforeAgent];
 
     fn tag(self) -> &'static str {
         match self {
@@ -63,6 +65,7 @@ impl Kind {
             Kind::Reloaded => "reloaded",
             Kind::BeforeRollback => "before-rollback",
             Kind::BeforeRestore => "before-restore",
+            Kind::BeforeAgent => "before-agent",
         }
     }
 
@@ -74,6 +77,7 @@ impl Kind {
             Kind::Reloaded => "Changed on disk",
             Kind::BeforeRollback => "Before Rollback",
             Kind::BeforeRestore => "Before Restore",
+            Kind::BeforeAgent => "Before Claude Code's edit",
         }
     }
 }

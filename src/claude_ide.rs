@@ -1,6 +1,7 @@
 //! Claude Code's editor integration (its `/ide` command), as its VS Code and
 //! JetBrains plugins offer it: Claude Code running in a terminal sees the
-//! selection in Kuana, opens files here and reads the problems Kuana shows.
+//! selection in Kuana, opens files here, reads the problems Kuana shows and
+//! proposes edits as diffs to accept or reject here.
 //! See `plans/claude-code-bridge.md`.
 //!
 //! Each project window runs a [`Server`]: a WebSocket server on a loopback

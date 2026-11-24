@@ -3,9 +3,17 @@
 //! on and Claude Code is installed; it's told the project's folders and the
 //! active editor's selection, and the window answers its tool calls: open
 //! editors, problems, opening files, unsaved changes and saving.
+//!
+//! Edits Claude proposes (`openDiff`) open as diff tabs
+//! (`DiffSource::Proposed`) whose call waits in `ClaudeBridge::proposals`
+//! until the user decides. Accept puts the text in the file's document as
+//! one undoable edit (its text before kept in Local History) and saves it,
+//! then answers `FILE_SAVED` with the text, which Claude writes too (the same
+//! bytes); Reject, or closing the tab, answers `DIFF_REJECTED`.
 
 use super::*;
-use crate::claude_ide::{self as ide, OpenSelection, Request, Server};
+use crate::claude_ide::{self as ide, OpenSelection, Request, Server, ToolCall};
+use crate::diff_view::DiffSource;
 use futures::StreamExt as _;
 use serde_json::{Value, json};
 
@@ -25,6 +33,21 @@ pub(super) struct ClaudeBridge {
     /// selections' generation.
     sent: Option<(EntityId, u64, u64)>,
     sending: Option<Task<()>>,
+    /// Proposed changes waiting for the user, by their diff tab.
+    proposals: HashMap<EntityId, Proposal>,
+}
+
+/// An `openDiff` call waiting for Accept or Reject.
+struct Proposal {
+    call: ToolCall,
+    tab_name: String,
+}
+
+impl Proposal {
+    fn reject(self) {
+        let answer = vec!["DIFF_REJECTED".to_string(), self.tab_name];
+        self.call.answer(Ok(answer));
+    }
 }
 
 impl Workspace {
@@ -74,6 +97,7 @@ impl Workspace {
                 self.claude.sent = None;
                 self.watch_claude_editor(cx);
             }
+            Request::Tool(call) if call.name == "openDiff" => self.claude_open_diff(call, window, cx),
             Request::Tool(call) => {
                 let answer = match call.name.as_str() {
                     "getOpenEditors" => Ok(vec![self.claude_open_editors(cx).to_string()]),
@@ -86,6 +110,15 @@ impl Workspace {
                         let given = call.arguments.get("filePath").and_then(Value::as_str).unwrap_or_default().to_string();
                         let save = call.name == "saveDocument";
                         Ok(vec![self.claude_document(&given, save, window, cx).to_string()])
+                    }
+                    "close_tab" => {
+                        let name = call.arguments.get("tab_name").and_then(Value::as_str).unwrap_or_default().to_string();
+                        self.close_claude_diffs(|tab| tab == name, window, cx);
+                        Ok(vec!["TAB_CLOSED".to_string()])
+                    }
+                    "closeAllDiffTabs" => {
+                        let closed = self.close_claude_diffs(|_| true, window, cx);
+                        Ok(vec![format!("CLOSED_{closed}_DIFF_TABS")])
                     }
                     other => Err(format!("Unknown tool: {other}")),
                 };
@@ -211,6 +244,100 @@ impl Workspace {
         }
         let message = if dirty { "Document saved" } else { "Document had no unsaved changes" };
         json!({ "success": true, "filePath": given, "saved": true, "message": message })
+    }
+
+    /// Shows a proposed change in a diff tab; the call is answered when the
+    /// user decides. A proposal under the name of one shown replaces it
+    /// (that one is rejected).
+    fn claude_open_diff(&mut self, call: ToolCall, window: &mut Window, cx: &mut Context<Self>) {
+        let arguments = &call.arguments;
+        let string = |key: &str| arguments.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+        let path = self.claude_path(&string("new_file_path"));
+        let tab_name = string("tab_name");
+        let source = DiffSource::Proposed {
+            new_file: !path.is_file_on_host(),
+            path,
+            tab_name: tab_name.clone(),
+            text: string("new_file_contents").into(),
+        };
+        let replaced: Vec<EntityId> = self.claude.proposals.iter().filter(|(_, p)| p.tab_name == tab_name).map(|(id, _)| *id).collect();
+        for id in replaced {
+            if let Some(old) = self.claude.proposals.remove(&id) {
+                old.reject();
+            }
+        }
+        match self.show_diff(source, window, cx) {
+            Some(diff) => {
+                self.claude.proposals.insert(diff.entity_id(), Proposal { call, tab_name });
+            }
+            None => call.answer(Err("Kuana couldn't show the change".into())),
+        }
+    }
+
+    /// Accept or Reject in a proposed change's tab. Accept applies it even
+    /// when nobody waits any more (Claude ended meanwhile).
+    pub(super) fn claude_proposal_decided(&mut self, diff: &Entity<DiffView>, accepted: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let proposal = self.claude.proposals.remove(&diff.entity_id());
+        let DiffSource::Proposed { path, text, new_file, .. } = diff.read(cx).source().clone() else { return };
+        self.remove_item(&PaneItem::Diff(diff.clone()), window, cx);
+        if !accepted {
+            if let Some(proposal) = proposal {
+                proposal.reject();
+            }
+            return;
+        }
+        let applied = self.apply_claude_change(&path, &text, new_file, window, cx);
+        if let Err(err) = &applied {
+            self.toast(ToastKind::Error, "Couldn't apply Claude Code's change", Some(err.clone()), cx);
+        }
+        if let Some(proposal) = proposal {
+            proposal.call.answer(applied.map(|()| vec!["FILE_SAVED".to_string(), text.to_string()]));
+        }
+    }
+
+    /// Puts a proposed text in its file: a new file is written; an existing
+    /// one's document gets it as one undoable edit and is saved (without
+    /// format on save, which would change what Claude then writes).
+    fn apply_claude_change(&mut self, path: &Path, text: &Arc<str>, new_file: bool, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        if new_file && !path.is_file_on_host() {
+            if let Some(parent) = path.parent() {
+                crate::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            crate::fs::write(path, text.as_bytes()).map_err(|e| e.to_string())?;
+            self.files_written([path.to_path_buf()], cx);
+            self.open_path(path.to_path_buf(), window, cx);
+            return Ok(());
+        }
+        self.open_path(path.to_path_buf(), window, cx);
+        let Some(editor) = self.tab_for(path, cx) else { return Err(format!("Couldn't open {}", path.display())) };
+        let current = editor.read(cx).doc.read(cx).rope().clone();
+        let kept = path.to_path_buf();
+        cx.background_executor().spawn(async move { crate::local_history::record_rope(&kept, &current, crate::local_history::Kind::BeforeAgent) }).detach();
+        editor.update(cx, |e, cx| e.replace_text(text, cx));
+        self.save_editor(&editor, window, cx);
+        Ok(())
+    }
+
+    /// Closes proposed changes' tabs whose names `which` takes, rejecting
+    /// them; how many.
+    fn close_claude_diffs(&mut self, which: impl Fn(&str) -> bool, window: &mut Window, cx: &mut Context<Self>) -> usize {
+        let ids: Vec<EntityId> = self.claude.proposals.iter().filter(|(_, p)| which(&p.tab_name)).map(|(id, _)| *id).collect();
+        for id in &ids {
+            if let Some(proposal) = self.claude.proposals.remove(id) {
+                proposal.reject();
+            }
+            if let Some(diff) = self.diff_views(cx).into_iter().find(|d| d.entity_id() == *id) {
+                self.remove_item(&PaneItem::Diff(diff), window, cx);
+            }
+        }
+        ids.len()
+    }
+
+    /// A tab closed: a proposed change in it is rejected.
+    pub(super) fn claude_tab_removed(&mut self, id: EntityId) {
+        if let Some(proposal) = self.claude.proposals.remove(&id) {
+            proposal.reject();
+        }
     }
 
     /// Called each render: when another tab became active, its editor's

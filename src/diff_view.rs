@@ -66,6 +66,8 @@ pub enum DiffViewEvent {
     Run(GitOp),
     /// Put this text (a Local History version) back in the file.
     Restore { path: PathBuf, text: Arc<str> },
+    /// The user accepted or rejected the proposed change (`DiffSource::Proposed`).
+    Proposal { accepted: bool },
     /// The user switched between side by side and unified.
     Layout { side_by_side: bool },
 }
@@ -84,6 +86,11 @@ pub enum DiffSource {
     /// Something else → the file as it is (the open document's text): the
     /// clipboard, another file, the file at a branch or revision.
     Compare { path: PathBuf, with: Compared },
+    /// The file as it is (the open document's text) → a change Claude Code
+    /// proposed (`workspace/claude_ide.rs`), kept or dropped with Accept /
+    /// Reject. `tab_name` is Claude's name for it; `new_file`: the file
+    /// doesn't exist yet.
+    Proposed { path: PathBuf, tab_name: String, text: Arc<str>, new_file: bool },
 }
 
 /// What a file is compared with (`DiffSource::Compare`), the "before" side.
@@ -137,16 +144,18 @@ impl DiffSource {
             (DiffSource::Commit { sha: a, file: f, .. }, DiffSource::Commit { sha: b, file: g, .. }) => a == b && f.rel == g.rel,
             (DiffSource::History { path: a, .. }, DiffSource::History { path: b, .. }) => a == b,
             (DiffSource::Compare { path: a, with: x }, DiffSource::Compare { path: b, with: y }) => a == b && x.same(y),
+            (DiffSource::Proposed { tab_name: a, .. }, DiffSource::Proposed { tab_name: b, .. }) => a == b,
             _ => false,
         }
     }
 
-    /// The file whose open document is the "after" side: the working tree
-    /// file of an unstaged change or a Local History version.
+    /// The file whose open document is one side, followed as it's edited:
+    /// the "after" side of an unstaged change or a Local History version, the
+    /// "before" side of a proposed change.
     pub fn live_file(&self) -> Option<&Path> {
         match self {
             DiffSource::Working { file, staged: false } => Some(&file.path),
-            DiffSource::History { path, .. } | DiffSource::Compare { path, .. } => Some(path),
+            DiffSource::History { path, .. } | DiffSource::Compare { path, .. } | DiffSource::Proposed { path, .. } => Some(path),
             _ => None,
         }
     }
@@ -318,6 +327,10 @@ impl DiffView {
                             let read = || crate::fs::read(path).ok().map(|b| String::from_utf8_lossy(&b).into_owned());
                             (with.text(&repo), buffer.clone().or_else(read).unwrap_or_default(), path.clone())
                         }
+                        DiffSource::Proposed { path, text, .. } => {
+                            let read = || crate::fs::read(path).ok().map(|b| String::from_utf8_lossy(&b).into_owned());
+                            (buffer.clone().or_else(read).unwrap_or_default(), text.to_string(), path.clone())
+                        }
                     };
                     if git::is_binary(&base) || git::is_binary(&current) {
                         return Loaded {
@@ -374,7 +387,7 @@ impl DiffView {
         match &self.source {
             DiffSource::Working { file, staged: false, .. } => vec![&file.path],
             DiffSource::Compare { path, with: Compared::File(other) } => vec![path, other],
-            DiffSource::Compare { path, .. } => vec![path],
+            DiffSource::Compare { path, .. } | DiffSource::Proposed { path, .. } => vec![path],
             _ => Vec::new(),
         }
     }
@@ -394,6 +407,10 @@ impl DiffView {
             DiffSource::History { path, .. } | DiffSource::Compare { path, .. } => {
                 let rel = path.strip_prefix(&self.repo).unwrap_or(path).to_string_lossy().replace('\\', "/");
                 (path.clone(), rel, Change::Modified)
+            }
+            DiffSource::Proposed { path, new_file, .. } => {
+                let rel = path.strip_prefix(&self.repo).unwrap_or(path).to_string_lossy().replace('\\', "/");
+                (path.clone(), rel, if *new_file { Change::Added } else { Change::Modified })
             }
         }
     }
@@ -473,7 +490,7 @@ fn load_images(repo: &Path, source: &DiffSource) -> Option<ImageSides> {
             (file.path.clone(), before, crate::fs::read(&file.path).ok())
         }
         // Kept as text: no pictures.
-        DiffSource::History { .. } | DiffSource::Compare { .. } => return None,
+        DiffSource::History { .. } | DiffSource::Compare { .. } | DiffSource::Proposed { .. } => return None,
         DiffSource::Commit { sha, file, .. } => {
             let old_rel = file.old_rel.as_deref().unwrap_or(&file.rel);
             let before = (file.change != Change::Added).then(|| git::blob_bytes(repo, &format!("{sha}^:{old_rel}"))).flatten();
@@ -633,6 +650,7 @@ impl Render for DiffView {
             DiffSource::Commit { sha, summary, .. } => format!("{} · {}", &sha[..sha.len().min(8)], summary),
             DiffSource::History { label, .. } => format!("Local History · {label}"),
             DiffSource::Compare { with, .. } => format!("Compared with {}", with.label(&self.repo)),
+            DiffSource::Proposed { .. } => "Proposed by Claude Code".to_string(),
         };
         // Side by side / Unified switch.
         let segment = |id: &'static str, label: &'static str, on: bool| {
@@ -687,7 +705,7 @@ impl Render for DiffView {
             .when_some(
                 match &self.source {
                     DiffSource::Working { file, staged, .. } => Some((file.clone(), *staged)),
-                    DiffSource::Commit { .. } | DiffSource::History { .. } | DiffSource::Compare { .. } => None,
+                    DiffSource::Commit { .. } | DiffSource::History { .. } | DiffSource::Compare { .. } | DiffSource::Proposed { .. } => None,
                 },
                 |el, (file, staged)| {
                     let rel = file.rel.clone();
@@ -716,6 +734,16 @@ impl Render for DiffView {
                     })))
                 },
             )
+            .when(matches!(self.source, DiffSource::Proposed { .. }), |el| {
+                el.child(
+                    text_button("diff-reject", "Reject", false, cx)
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(DiffViewEvent::Proposal { accepted: false }))),
+                )
+                .child(
+                    text_button("diff-accept", "Accept", true, cx)
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(DiffViewEvent::Proposal { accepted: true }))),
+                )
+            })
             .when(!deleted, |el| {
                 let path = path.clone();
                 el.child(icon_button("diff-open", Icon::File, "Open File").on_click(cx.listener(move |_, _, _, cx| cx.emit(DiffViewEvent::OpenFile(path.clone())))))

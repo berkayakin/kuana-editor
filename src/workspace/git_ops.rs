@@ -1091,7 +1091,9 @@ impl Workspace {
     pub(super) fn show_diff(&mut self, source: DiffSource, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<DiffView>> {
         // A Local History version needs no repository: paths show from the project.
         let repo = match &source {
-            DiffSource::History { path, .. } | DiffSource::Compare { path, with: crate::diff_view::Compared::Text { .. } | crate::diff_view::Compared::File(_) } => {
+            DiffSource::History { path, .. }
+            | DiffSource::Proposed { path, .. }
+            | DiffSource::Compare { path, with: crate::diff_view::Compared::Text { .. } | crate::diff_view::Compared::File(_) } => {
                 self.folders.as_ref().and_then(|p| p.folder_of(path)).map(Path::to_path_buf).or_else(|| path.parent().map(Path::to_path_buf))
             }
             _ => self.repo(cx),
@@ -1119,6 +1121,7 @@ impl Workspace {
         let subscription = cx.subscribe_in(diff, window, |ws, diff, event: &DiffViewEvent, window, cx| match event {
             DiffViewEvent::Close => ws.close_diff(diff, window, cx),
             DiffViewEvent::OpenFile(path) => ws.open_path(path.clone(), window, cx),
+            DiffViewEvent::Proposal { accepted } => ws.claude_proposal_decided(diff, *accepted, window, cx),
             DiffViewEvent::Restore { path, text } => {
                 // The version becomes the file: nothing left to compare.
                 ws.remove_item(&PaneItem::Diff(diff.clone()), window, cx);

@@ -40,6 +40,12 @@ const WINDOW_TOOLS: &[(&str, &[&str])] = &[
     ("getDiagnostics", &[]),
     ("checkDocumentDirty", &["filePath"]),
     ("saveDocument", &["filePath"]),
+    // Answered once the user accepts or rejects the change.
+    ("openDiff", &["old_file_path", "new_file_path", "new_file_contents", "tab_name"]),
+    // Claude closes a diff it opened (answered in the terminal instead),
+    // and all of them at the start of each turn.
+    ("close_tab", &["tab_name"]),
+    ("closeAllDiffTabs", &[]),
 ];
 
 /// Answers one text frame.
@@ -113,9 +119,6 @@ fn call(id: Value, params: &Value, state: &State) -> Incoming {
         "getCurrentSelection" | "getLatestSelection" => Ok(vec![
             state.selection.clone().unwrap_or_else(|| json!({ "success": false, "message": "No active editor found" })).to_string(),
         ]),
-        // Claude calls it at the start of each turn, unadvertised. Without
-        // `openDiff` there are never any to close.
-        "closeAllDiffTabs" => Ok(vec!["CLOSED_0_DIFF_TABS".to_string()]),
         _ => match WINDOW_TOOLS.iter().find(|(tool, _)| *tool == name) {
             Some((_, required)) => match required.iter().find(|arg| arguments.get(**arg).and_then(Value::as_str).is_none()) {
                 Some(missing) => Err(format!("Missing argument: {missing}")),
@@ -142,8 +145,7 @@ fn error(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
-/// What `tools/list` advertises. Proposing edits as diffs (`openDiff`) isn't
-/// offered yet, so Claude writes its edits itself.
+/// What `tools/list` advertises (`close_tab` is Claude's own, unlisted).
 fn tool_definitions() -> Vec<Value> {
     let path = |about: &str| json!({ "filePath": { "type": "string", "description": about } });
     vec![
@@ -174,6 +176,18 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool("checkDocumentDirty", "Whether an open file has unsaved changes.", path("The file to check"), &["filePath"]),
         tool("saveDocument", "Saves an open file's unsaved changes.", path("The file to save"), &["filePath"]),
+        tool(
+            "openDiff",
+            "Shows a proposed change to a file as a diff in the editor and waits until the user accepts or rejects it.",
+            json!({
+                "old_file_path": { "type": "string", "description": "The file as it is" },
+                "new_file_path": { "type": "string", "description": "The file the change is for" },
+                "new_file_contents": { "type": "string", "description": "The file's whole text with the change" },
+                "tab_name": { "type": "string", "description": "A name for the diff's tab" },
+            }),
+            &["old_file_path", "new_file_path", "new_file_contents", "tab_name"],
+        ),
+        tool("closeAllDiffTabs", "Closes every diff tab opened with openDiff.", json!({}), &[]),
     ]
 }
 
@@ -214,11 +228,11 @@ mod tests {
     fn lists_the_tools_it_answers() {
         let answer = reply(handle(&request("tools/list", json!({})), &State::default()));
         let names: Vec<&str> = answer["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        for (tool, _) in WINDOW_TOOLS {
+        for (tool, _) in WINDOW_TOOLS.iter().filter(|(t, _)| *t != "close_tab") {
             assert!(names.contains(tool), "{tool} isn't listed");
         }
         assert!(names.contains(&"getWorkspaceFolders"));
-        assert!(!names.contains(&"openDiff"));
+        assert!(!names.contains(&"close_tab"));
     }
 
     #[test]
@@ -257,8 +271,6 @@ mod tests {
         let none: Value = serde_json::from_str(answer["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(none["success"], false);
 
-        let answer = reply(handle(&request("tools/call", json!({ "name": "closeAllDiffTabs" })), &state));
-        assert_eq!(answer["result"]["content"][0]["text"], "CLOSED_0_DIFF_TABS");
     }
 
     #[test]
@@ -275,6 +287,8 @@ mod tests {
         let answer = reply(handle(&missing, &State::default()));
         assert_eq!(answer["result"]["isError"], true);
         assert_eq!(answer["result"]["content"][0]["text"], "Missing argument: filePath");
+        let diff = request("tools/call", json!({ "name": "openDiff", "arguments": { "old_file_path": "/a.rs", "new_file_path": "/a.rs", "new_file_contents": "", "tab_name": "a" } }));
+        assert!(matches!(handle(&diff, &State::default()), Incoming::Tool { .. }), "empty contents are contents");
         // Without arguments at all, a tool that needs none still goes.
         let diagnostics = request("tools/call", json!({ "name": "getDiagnostics" }));
         assert!(matches!(handle(&diagnostics, &State::default()), Incoming::Tool { .. }));
