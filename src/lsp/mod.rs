@@ -1079,6 +1079,24 @@ impl LspStore {
         out
     }
 
+    /// What running servers last published for files other than `skip`
+    /// (raw LSP diagnostics, with the server's name), for Claude Code's
+    /// `getDiagnostics` (`workspace/claude_ide.rs`).
+    pub fn published_elsewhere(&self, skip: &HashSet<PathBuf>) -> Vec<(PathBuf, String, Vec<Value>)> {
+        let mut out = Vec::new();
+        for ((path, key), params) in &self.diagnostics {
+            if skip.contains(path) {
+                continue;
+            }
+            let Some(ServerState::Running(server)) = self.servers.get(key) else { continue };
+            let list = params.get("diagnostics").and_then(Value::as_array).cloned().unwrap_or_default();
+            if !list.is_empty() {
+                out.push((path.clone(), server.name.clone(), list));
+            }
+        }
+        out
+    }
+
     /// What server `id` last published for `path` (raw LSP diagnostics),
     /// for code action requests: a server gets its own back.
     pub fn published(&self, path: &Path, id: &str) -> Vec<Value> {

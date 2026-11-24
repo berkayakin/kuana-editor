@@ -105,6 +105,8 @@ unicode-normalization = "0.1.25"
 # depends on it).
 unicode-width = "0.2.2"
 url = "2.5.8"
+# Claude Code's `/ide` connection (`claude_ide.rs`): a WebSocket server on plain threads.
+tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 # Zed extensions' own code (`extension.wasm`, a WebAssembly component) for their
 # language servers: the wasmtime tree-sitter already brings, with components and WASI,
 # compiling on several threads (with the rayon Kuana already has).

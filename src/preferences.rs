@@ -163,6 +163,7 @@ enum Setting {
     Minimap,
     MinimapWidth,
     EditPredictions,
+    ClaudeCode,
     VimMode,
     AutoSave,
     AutoSaveDelay,
@@ -184,7 +185,7 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Setting; 52] = [
+    const ALL: [Setting; 53] = [
         Setting::Theme,
         Setting::IconTheme,
         Setting::UiFontSize,
@@ -217,6 +218,7 @@ impl Setting {
         Setting::Minimap,
         Setting::MinimapWidth,
         Setting::EditPredictions,
+        Setting::ClaudeCode,
         Setting::VimMode,
         Setting::TodoPatterns,
         Setting::OpenFolderIn,
@@ -252,7 +254,7 @@ impl Setting {
             Setting::FontFamily | Setting::FontSize | Setting::LineHeight => Page::Editor,
             Setting::TabSize | Setting::HardTabs | Setting::LinkedEditing | Setting::CursorBlink | Setting::SoftWrap => Page::Editor,
             Setting::Rulers | Setting::ShowWhitespace | Setting::InlayHints | Setting::InlineValues | Setting::DocumentColors | Setting::SemanticTokens | Setting::CodeLens | Setting::VimMode | Setting::TodoPatterns | Setting::OpenFolderIn => Page::Editor,
-            Setting::Minimap | Setting::MinimapWidth | Setting::EditPredictions => Page::Editor,
+            Setting::Minimap | Setting::MinimapWidth | Setting::EditPredictions | Setting::ClaudeCode => Page::Editor,
             Setting::AutoSave
             | Setting::AutoSaveDelay
             | Setting::FormatOnSave
@@ -288,6 +290,7 @@ impl Setting {
             Setting::SemanticTokens => "Colors",
             Setting::Minimap | Setting::MinimapWidth => "Minimap",
             Setting::EditPredictions => "Edit predictions",
+            Setting::ClaudeCode => "Claude Code",
             Setting::VimMode => "Vim",
             Setting::TodoPatterns => "TODO",
             Setting::OpenFolderIn => "Projects",
@@ -339,6 +342,7 @@ impl Setting {
             Setting::Minimap => "Show minimap",
             Setting::MinimapWidth => "Width",
             Setting::EditPredictions => "Suggestions from",
+            Setting::ClaudeCode => "Connect to Claude Code",
             Setting::VimMode => "Vim mode",
             Setting::AutoSave => "Auto-save",
             Setting::AutoSaveDelay => "Delay",
@@ -398,6 +402,9 @@ impl Setting {
             Setting::EditPredictions => {
                 "Code suggested after the caret as you type, accepted with Tab. Your code goes to the service only when one is chosen; sign in from the status bar."
             }
+            Setting::ClaudeCode => {
+                "Claude Code running in a terminal (its /ide command) sees your selection, opens files here and reads the problems Kuana shows. Nothing leaves your machine through Kuana."
+            }
             Setting::VimMode => "Vim's Normal, Insert and Visual modes. The status bar shows the mode.",
             Setting::AutoSave => "Every mode but Off also saves when Kuana quits or a tab closes.",
             Setting::AutoSaveDelay => "How long after you stop typing.",
@@ -456,6 +463,7 @@ impl Setting {
             Setting::Minimap => "minimap overview scrollbar outline map document preview scroll",
             Setting::MinimapWidth => "minimap width size pixels",
             Setting::EditPredictions => "ai copilot github edit predictions inline suggestions ghost text completion autocomplete llm",
+            Setting::ClaudeCode => "ai claude code anthropic agent ide integration terminal selection diagnostics",
             Setting::VimMode => "vim vi modal normal insert visual keys",
             Setting::AutoSave => "autosave save automatically",
             Setting::AutoSaveDelay => "autosave milliseconds idle",
@@ -1899,6 +1907,7 @@ impl Preferences {
                 })
             }
             Setting::AutoFetch => self.switch_with_default("pref-auto-fetch", "auto_fetch", settings.auto_fetch, true, cx),
+            Setting::ClaudeCode => self.switch_with_default("pref-claude-code", "claude_code_integration", settings.claude_code_integration, true, cx),
             Setting::ShellIntegration => {
                 self.switch_with_default("pref-shell-integration", "terminal_shell_integration", settings.terminal_shell_integration, true, cx)
             }
@@ -3141,6 +3150,7 @@ fn setting_key(setting: Setting) -> &'static str {
         Setting::Minimap => "minimap",
         Setting::MinimapWidth => "minimap_width",
         Setting::EditPredictions => "edit_prediction_provider",
+        Setting::ClaudeCode => "claude_code_integration",
         Setting::VimMode => "vim_mode",
         Setting::AutoSave => "auto_save",
         Setting::AutoSaveDelay => "auto_save_delay",

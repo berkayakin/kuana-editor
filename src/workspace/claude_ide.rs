@@ -1,0 +1,268 @@
+//! Claude Code's `/ide` connection for this window (`crate::claude_ide`):
+//! the window's server runs while a local project is open, the setting is
+//! on and Claude Code is installed; it's told the project's folders and the
+//! active editor's selection, and the window answers its tool calls: open
+//! editors, problems, opening files, unsaved changes and saving.
+
+use super::*;
+use crate::claude_ide::{self as ide, OpenSelection, Request, Server};
+use futures::StreamExt as _;
+use serde_json::{Value, json};
+
+/// How long the selection stays put before Claude hears of it.
+const SELECTION_DELAY: Duration = Duration::from_millis(100);
+
+#[derive(Default)]
+pub(super) struct ClaudeBridge {
+    server: Option<Server>,
+    /// Takes the server's requests while it runs.
+    requests: Option<Task<()>>,
+    /// The pane item last seen active (`note_claude_editor`), and the
+    /// observation of its editor.
+    seen_item: Option<EntityId>,
+    watching: Option<Subscription>,
+    /// What was last sent: the editor, its document's version, its
+    /// selections' generation.
+    sent: Option<(EntityId, u64, u64)>,
+    sending: Option<Task<()>>,
+}
+
+impl Workspace {
+    /// Starts, updates or stops the window's server (after the project or
+    /// its folders change, and when settings do).
+    pub(super) fn sync_claude_ide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted = !cfg!(test) && Settings::get(cx).claude_code_integration.unwrap_or(true) && ide::claude_installed();
+        // A remote project's paths exist only through its connection: a
+        // `claude` here couldn't read them, one there can't reach this port.
+        let folders = self
+            .folders
+            .as_ref()
+            .filter(|p| wanted && kuana_core::remote::connection::host_of(p.primary()).is_none())
+            .map(|p| p.folders().to_vec());
+        let Some(folders) = folders else {
+            self.claude = ClaudeBridge::default();
+            return;
+        };
+        if let Some(server) = &self.claude.server {
+            server.set_folders(folders);
+            return;
+        }
+        let Some(dir) = ide::lock_dir() else { return };
+        match Server::start(folders, &dir) {
+            Ok((server, mut requests)) => {
+                self.claude.server = Some(server);
+                self.claude.requests = Some(cx.spawn_in(window, async move |ws, cx| {
+                    while let Some(request) = requests.next().await {
+                        if ws.update_in(cx, |ws, window, cx| ws.claude_request(request, window, cx)).is_err() {
+                            break;
+                        }
+                    }
+                }));
+            }
+            Err(err) => eprintln!("couldn't start Claude Code's IDE server: {err}"),
+        }
+    }
+
+    /// Stops the window's server (the project closed).
+    pub(super) fn stop_claude_ide(&mut self) {
+        self.claude = ClaudeBridge::default();
+    }
+
+    fn claude_request(&mut self, request: Request, window: &mut Window, cx: &mut Context<Self>) {
+        match request {
+            Request::Connected => {
+                self.claude.sent = None;
+                self.watch_claude_editor(cx);
+            }
+            Request::Tool(call) => {
+                let answer = match call.name.as_str() {
+                    "getOpenEditors" => Ok(vec![self.claude_open_editors(cx).to_string()]),
+                    "getDiagnostics" => {
+                        let only = call.arguments.get("uri").and_then(Value::as_str).map(|uri| self.claude_path(uri));
+                        Ok(vec![self.claude_diagnostics(only, cx).to_string()])
+                    }
+                    "openFile" => self.claude_open_file(&call.arguments, window, cx),
+                    "checkDocumentDirty" | "saveDocument" => {
+                        let given = call.arguments.get("filePath").and_then(Value::as_str).unwrap_or_default().to_string();
+                        let save = call.name == "saveDocument";
+                        Ok(vec![self.claude_document(&given, save, window, cx).to_string()])
+                    }
+                    other => Err(format!("Unknown tool: {other}")),
+                };
+                call.answer(answer);
+            }
+        }
+    }
+
+    /// A path Claude names (a `file://` URL or a path, relative to the
+    /// project's first folder), as the tabs have it.
+    fn claude_path(&self, given: &str) -> PathBuf {
+        let path = ide::path_of(given);
+        let path = match &self.folders {
+            Some(project) if path.is_relative() => project.primary().join(path),
+            _ => path,
+        };
+        crate::paths::canonicalize(&path).unwrap_or(path)
+    }
+
+    fn claude_open_editors(&self, cx: &App) -> Value {
+        let active = self.active_editor(cx).map(|e| e.entity_id());
+        let mut seen = HashSet::new();
+        let tabs: Vec<Value> = self
+            .editors
+            .iter()
+            .filter_map(|editor| {
+                let doc = editor.read(cx).doc.read(cx);
+                let path = doc.path.as_ref()?;
+                // A file split in two is one editor to Claude.
+                if !seen.insert(path.clone()) && Some(editor.entity_id()) != active {
+                    return None;
+                }
+                Some(json!({
+                    "uri": ide::file_url(path),
+                    "isActive": Some(editor.entity_id()) == active,
+                    "label": path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                    "languageId": crate::lsp::servers::language_id(doc.language, path),
+                    "isDirty": doc.is_dirty(),
+                    "fileName": path,
+                    "isUntitled": false,
+                    "lineCount": doc.line_count(),
+                }))
+            })
+            .collect();
+        json!({ "tabs": tabs })
+    }
+
+    /// The problems Kuana shows: open files' (built-in lint, linters and
+    /// language servers, moved by edits since) and what servers published
+    /// for files that aren't open. `only` one file, listed even without any.
+    fn claude_diagnostics(&self, only: Option<PathBuf>, cx: &App) -> Value {
+        let mut files = Vec::new();
+        let mut open = HashSet::new();
+        for editor in &self.editors {
+            let editor = editor.read(cx);
+            let doc = editor.doc.read(cx);
+            // A restored tab not read yet has no problems of its own: the
+            // servers' are listed for it below.
+            let Some(path) = doc.path.clone().filter(|_| editor.is_loaded()) else { continue };
+            if !open.insert(path.clone()) || only.as_ref().is_some_and(|o| *o != path) {
+                continue;
+            }
+            let list: Vec<Value> = doc.diagnostics.iter().map(|d| ide::diagnostic_json(doc.rope(), d)).collect();
+            if only.is_some() || !list.is_empty() {
+                files.push(json!({ "uri": ide::file_url(&path), "diagnostics": list }));
+            }
+        }
+        let mut elsewhere: HashMap<PathBuf, Vec<Value>> = HashMap::new();
+        for (path, server, list) in self.lsp.read(cx).published_elsewhere(&open) {
+            if only.as_ref().is_none_or(|o| *o == path) {
+                elsewhere.entry(path).or_default().extend(list.iter().map(|d| ide::lsp_diagnostic_json(d, &server)));
+            }
+        }
+        let mut elsewhere: Vec<_> = elsewhere.into_iter().collect();
+        elsewhere.sort_by(|a, b| a.0.cmp(&b.0));
+        files.extend(elsewhere.into_iter().map(|(path, list)| json!({ "uri": ide::file_url(&path), "diagnostics": list })));
+        if files.is_empty()
+            && let Some(path) = only
+        {
+            files.push(json!({ "uri": ide::file_url(&path), "diagnostics": [] }));
+        }
+        Value::Array(files)
+    }
+
+    fn claude_open_file(&mut self, arguments: &Value, window: &mut Window, cx: &mut Context<Self>) -> Result<Vec<String>, String> {
+        let given = arguments.get("filePath").and_then(Value::as_str).unwrap_or_default();
+        let path = self.claude_path(given);
+        if !path.is_file_on_host() {
+            return Err(format!("File not found: {given}"));
+        }
+        let select = OpenSelection::read(arguments);
+        let focus = arguments.get("makeFrontmost").and_then(Value::as_bool).unwrap_or(true);
+        self.navigate(window, cx, |ws, window, cx| {
+            ws.open_path(path.clone(), window, cx);
+            let Some(editor) = ws.tab_for(&path, cx) else { return };
+            editor.update(cx, |e, cx| {
+                let range = select.range(e.doc.read(cx).rope());
+                if let Some(range) = range {
+                    e.select_range(range, cx);
+                }
+            });
+            if focus {
+                window.focus(&editor.focus_handle(cx));
+            }
+        });
+        Ok(vec![format!("Opened file: {}", path.display())])
+    }
+
+    /// `checkDocumentDirty`, or with `save`, `saveDocument`: an open file's
+    /// unsaved changes, saved as Save would (format on save, the question
+    /// for a file changed on disk).
+    fn claude_document(&mut self, given: &str, save: bool, window: &mut Window, cx: &mut Context<Self>) -> Value {
+        let path = self.claude_path(given);
+        let Some(editor) = self.tab_for(&path, cx) else {
+            return json!({ "success": false, "message": format!("Document not open: {given}") });
+        };
+        let dirty = editor.read(cx).doc.read(cx).is_dirty();
+        if !save {
+            return json!({ "success": true, "filePath": given, "isDirty": dirty, "isUntitled": false });
+        }
+        if dirty {
+            self.save_one(editor, window, cx);
+        }
+        let message = if dirty { "Document saved" } else { "Document had no unsaved changes" };
+        json!({ "success": true, "filePath": given, "saved": true, "message": message })
+    }
+
+    /// Called each render: when another tab became active, its editor's
+    /// selection is watched (read after the frame: the root view mustn't
+    /// come to depend on editors, which notify as one types).
+    pub(super) fn note_claude_editor(&mut self, cx: &mut Context<Self>) {
+        if self.claude.server.is_none() {
+            return;
+        }
+        let item = self.active_item(cx).map(|item| item.entity_id());
+        if item == self.claude.seen_item {
+            return;
+        }
+        self.claude.seen_item = item;
+        cx.spawn(async move |ws, cx| ws.update(cx, |ws, cx| ws.watch_claude_editor(cx)).ok()).detach();
+    }
+
+    fn watch_claude_editor(&mut self, cx: &mut Context<Self>) {
+        let editor = self.active_editor(cx);
+        self.claude.watching = editor.as_ref().map(|editor| cx.observe(editor, |ws, editor, cx| ws.claude_editor_changed(&editor, cx)));
+        if let Some(editor) = editor {
+            self.claude_editor_changed(&editor, cx);
+        }
+    }
+
+    /// The watched editor redrew: when its selection or text changed and
+    /// Claude is connected, the selection goes once it's been still a moment.
+    fn claude_editor_changed(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
+        if !self.claude.server.as_ref().is_some_and(Server::has_clients) {
+            return;
+        }
+        let e = editor.read(cx);
+        if !e.is_loaded() || e.doc.read(cx).path.is_none() {
+            return;
+        }
+        let key = (editor.entity_id(), e.doc.read(cx).version(), e.selections_generation());
+        if self.claude.sent == Some(key) {
+            return;
+        }
+        self.claude.sent = Some(key);
+        let editor = editor.downgrade();
+        self.claude.sending = Some(cx.spawn(async move |ws, cx| {
+            cx.background_executor().timer(SELECTION_DELAY).await;
+            ws.update(cx, |ws, cx| {
+                let (Some(editor), Some(server)) = (editor.upgrade(), ws.claude.server.as_ref()) else { return };
+                let e = editor.read(cx);
+                let doc = e.doc.read(cx);
+                if let Some(path) = &doc.path {
+                    server.set_selection(ide::selection_payload(path, doc.rope(), e.primary_selection().range()));
+                }
+            })
+            .ok();
+        }));
+    }
+}

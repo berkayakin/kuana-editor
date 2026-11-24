@@ -140,6 +140,9 @@ pub struct Settings {
     /// Where ghost-text suggestions come from (none unless chosen): only the
     /// user's settings pick a service that's sent code, never a project's.
     pub edit_prediction_provider: Option<EditPredictionProvider>,
+    /// Claude Code in a terminal connects to the window (`claude_ide.rs`):
+    /// `true` unless set.
+    pub claude_code_integration: Option<bool>,
     /// Words that make a comment a TODO item (the TODO list, the editor's
     /// highlight), in any case; `todo_patterns()` has the defaults.
     pub todo_patterns: Option<Vec<String>>,
@@ -581,6 +584,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "zen_line_numbers",
     "zen_tabs",
     "edit_prediction_provider",
+    "claude_code_integration",
     "todo_patterns",
 ];
 
@@ -916,6 +920,7 @@ impl Settings {
             "syntax_errors" => self.editor.syntax_errors.is_some(),
             "edit_predictions" => self.editor.edit_predictions.is_some(),
             "edit_prediction_provider" => self.edit_prediction_provider.is_some(),
+            "claude_code_integration" => self.claude_code_integration.is_some(),
             "minimap_width" => self.minimap_width.is_some(),
             "zen_full_screen" => self.zen_full_screen.is_some(),
             "zen_width" => self.zen_width.is_some(),
@@ -1324,6 +1329,9 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // them off per language or project.
   // "edit_prediction_provider": "none",
   // "edit_predictions": true,
+  // Claude Code running in a terminal sees the selection here, opens files
+  // and reads the problems Kuana shows (its /ide command).
+  // "claude_code_integration": true,
 
   // File icons from an extension's icon theme (Zed's format), by name.
   // "icon_theme": "Soft Charmed Icons",

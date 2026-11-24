@@ -11,6 +11,7 @@ mod host_lint;
 #[cfg(all(test, unix))]
 mod remote_tests;
 mod askpass;
+mod claude_ide;
 mod autopilot;
 mod python;
 mod assets;

@@ -1034,6 +1034,11 @@ impl Editor {
         &self.selections
     }
 
+    /// Changes whenever the selections do.
+    pub fn selections_generation(&self) -> u64 {
+        self.selections_generation
+    }
+
     /// The selections touching bytes `range` (an end on either of its ends
     /// too), by binary search: they're sorted and apart, and there can be
     /// thousands.

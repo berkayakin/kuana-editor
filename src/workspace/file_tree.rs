@@ -64,6 +64,7 @@ impl Workspace {
         self.venv_shown.take();
         self.update_recent_projects_for(&project, cx);
         self.folders = Some(project);
+        self.sync_claude_ide(window, cx);
         // A remote project: its connection is watched.
         self.watch_connection(window, cx);
         self.forward_ports(ports, cx);
