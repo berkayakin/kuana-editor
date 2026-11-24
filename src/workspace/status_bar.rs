@@ -297,6 +297,7 @@ impl Workspace {
                 )
             })
             .when_some(self.render_background_documents(&theme, cx), |el, item| el.child(item))
+            .when_some(self.render_claude_status(&theme, cx), |el, item| el.child(item))
             .child(super::title_bar::window_drag_area("statusbar-free").flex_1().min_w_0())
             .when_some(self.render_downloads(&theme), |el, downloads| el.child(downloads))
             .when_some(updater::pending_version(cx).map(|v| format!("Kuana {v} is downloaded")), |el, tip| {

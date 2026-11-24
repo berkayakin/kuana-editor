@@ -366,6 +366,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_tools_in_title_bar))
             .on_action(cx.listener(Self::toggle_compact_activity_bar))
             .on_action(cx.listener(Self::toggle_zen_mode))
+            .on_action(cx.listener(Self::add_to_claude_context))
             .on_action(cx.listener(Self::import_settings))
             .on_action(cx.listener(Self::toggle_problems))
             .on_action(cx.listener(Self::toggle_results))

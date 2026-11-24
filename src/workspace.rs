@@ -201,6 +201,9 @@ actions!(
         ToggleCompactActivityBar,
         /// Everything but the editor hidden, its text centered (`workspace/zen.rs`).
         ToggleZenMode,
+        /// The active file, or its selected lines, into Claude Code's prompt
+        /// (`workspace/claude_ide.rs`).
+        AddToClaudeContext,
         /// Another editor's settings, shortcuts and snippets (`workspace/import.rs`).
         ImportSettings,
         ToggleProblems,

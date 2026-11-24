@@ -35,6 +35,8 @@ pub(super) struct ClaudeBridge {
     sending: Option<Task<()>>,
     /// Proposed changes waiting for the user, by their diff tab.
     proposals: HashMap<EntityId, Proposal>,
+    /// How many Claude Code sessions are connected (the status bar's item).
+    clients: usize,
 }
 
 /// An `openDiff` call waiting for Accept or Reject.
@@ -94,8 +96,14 @@ impl Workspace {
     fn claude_request(&mut self, request: Request, window: &mut Window, cx: &mut Context<Self>) {
         match request {
             Request::Connected => {
+                self.claude.clients += 1;
                 self.claude.sent = None;
                 self.watch_claude_editor(cx);
+                cx.notify();
+            }
+            Request::Disconnected => {
+                self.claude.clients = self.claude.clients.saturating_sub(1);
+                cx.notify();
             }
             Request::Tool(call) if call.name == "openDiff" => self.claude_open_diff(call, window, cx),
             Request::Tool(call) => {
@@ -338,6 +346,70 @@ impl Workspace {
         if let Some(proposal) = self.claude.proposals.remove(&id) {
             proposal.reject();
         }
+    }
+
+    /// Whether Claude Code is connected to this window.
+    pub(super) fn claude_connected(&self) -> bool {
+        self.claude.server.is_some() && self.claude.clients > 0
+    }
+
+    /// Add to Claude Context: the active file, or its selected lines, goes
+    /// into Claude's prompt as an @-mention.
+    pub(super) fn add_to_claude_context(&mut self, _: &AddToClaudeContext, _: &mut Window, cx: &mut Context<Self>) {
+        let (Some(server), true) = (self.claude.server.as_ref(), self.claude.clients > 0) else {
+            let detail = "Run claude in a terminal in this project, or /ide in one that's running.";
+            self.toast(ToastKind::Info, "Claude Code isn't connected", Some(detail.into()), cx);
+            return;
+        };
+        let Some(editor) = self.active_editor(cx) else { return };
+        let e = editor.read(cx);
+        let doc = e.doc.read(cx);
+        let Some(path) = &doc.path else { return };
+        server.broadcast("at_mentioned", ide::mention(path, doc.rope(), e.primary_selection().range()));
+    }
+
+    /// The status bar's Claude Code item, while it's connected.
+    pub(super) fn render_claude_status(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.claude_connected() {
+            return None;
+        }
+        let light: Hsla = theme.success.into();
+        let tip = match self.claude.clients {
+            1 => "Claude Code is connected".to_string(),
+            n => format!("{n} Claude Code sessions are connected"),
+        };
+        Some(
+            div()
+                .id("claude-status")
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .h(px(24.))
+                .px_2()
+                .rounded(px(9.))
+                .cursor_pointer()
+                .hover_bg(theme.hover)
+                .hover(|s| s.text_color(theme.text_muted))
+                .child(div().size(px(6.)).rounded_full().bg(light).shadow(crate::ui::glow(theme, light.alpha(0.6), 4., 0.)))
+                .child("Claude")
+                .tooltip(move |_, cx| tooltip_view(tip.clone(), cx))
+                .on_click(cx.listener(|ws, event: &ClickEvent, window, cx| ws.open_claude_menu(event.position(), window, cx)))
+                .into_any_element(),
+        )
+    }
+
+    fn open_claude_menu(&mut self, position: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let mut entries = vec![MenuEntry::Header("Claude Code".into())];
+        let mut actions = vec![None];
+        if self.active_editor(cx).is_some_and(|e| e.read(cx).doc.read(cx).path.is_some()) {
+            entries.push(MenuEntry::text("Add to Claude Context").shortcut(binding_label(&AddToClaudeContext, window)));
+            actions.push(Some(MenuAction::Run(Box::new(AddToClaudeContext))));
+        }
+        entries.push(MenuEntry::item("Settings…", Icon::Settings));
+        actions.push(Some(MenuAction::Call(std::rc::Rc::new(|_, _, cx: &mut Context<Workspace>| {
+            cx.defer(|cx| crate::preferences::open(Some(crate::preferences::Page::Editor), cx));
+        }))));
+        self.show_context_menu(entries, actions, position, None, window, cx);
     }
 
     /// Called each render: when another tab became active, its editor's

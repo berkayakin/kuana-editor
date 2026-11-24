@@ -1329,8 +1329,8 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // them off per language or project.
   // "edit_prediction_provider": "none",
   // "edit_predictions": true,
-  // Claude Code running in a terminal sees the selection here, opens files
-  // and reads the problems Kuana shows (its /ide command).
+  // Claude Code running in a terminal sees the selection here, reads the
+  // problems Kuana shows and proposes edits as diffs (its /ide command).
   // "claude_code_integration": true,
 
   // File icons from an extension's icon theme (Zed's format), by name.

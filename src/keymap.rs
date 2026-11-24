@@ -29,7 +29,7 @@ use crate::{
         DebugConfiguration, Resume, PauseProgram, StepOver, StepInto, StepOut, ToggleDebugPanel, AttachToProcess, AddConditionalBreakpoint,
         AddLogpoint, OpenExtensions, ReloadExtensions, ProjectTrust, UndoFileChange, RedoFileChange, OpenProjectSettings,
         ToggleResults, NextResult, PreviousResult, RerunFailedTests, ShowLocalHistory,
-        ToggleAutoSave, ToggleSidebar, ToggleSidebarPosition, ToggleSecondSidebar, ToggleClassicLayout, ToggleToolsInTitleBar, ToggleCompactActivityBar, ToggleZenMode, ImportSettings, CheckForUpdates, WelcomeSetup, GoToSymbol, SplitTerminal, RenameTerminal, SelectOpenedFile, InstallShellCommand,
+        ToggleAutoSave, ToggleSidebar, ToggleSidebarPosition, ToggleSecondSidebar, ToggleClassicLayout, ToggleToolsInTitleBar, ToggleCompactActivityBar, ToggleZenMode, AddToClaudeContext, ImportSettings, CheckForUpdates, WelcomeSetup, GoToSymbol, SplitTerminal, RenameTerminal, SelectOpenedFile, InstallShellCommand,
         ToggleDatabase, NewDatabaseConnection, ToggleDatabaseResults, RunSqlStatement, RunSqlScript, NewSqlScript,
         ToggleBookmark, ToggleBookmarkWithMnemonic, EditBookmarkDescription, ShowBookmarks, NextBookmark, PreviousBookmark, GoToBookmark, ShowTodo, ShowTestExplorer,
         OpenResultsInEditor, ProblemsInEditor, CompareWithClipboard, CompareWithFile, CompareWithBranch, NewScratchFile, ShowScratches,
@@ -318,6 +318,8 @@ fn jetbrains(mac: bool) -> Vec<KeyBinding> {
     ];
     if mac {
         b.extend([
+            // As Claude Code's own VS Code and JetBrains plugins.
+            KeyBinding::new("cmd-alt-k", AddToClaudeContext, e),
             // Bookmarks; Find Next is ⌘G.
             KeyBinding::new("f3", ToggleBookmark, None),
             KeyBinding::new("alt-f3", ToggleBookmarkWithMnemonic, None),
@@ -362,6 +364,7 @@ fn jetbrains(mac: bool) -> Vec<KeyBinding> {
         ]);
     } else {
         b.extend([
+            KeyBinding::new("ctrl-alt-k", AddToClaudeContext, e),
             KeyBinding::new("ctrl-alt-shift-insert", NewScratchFile, None),
             KeyBinding::new("f3", FindNext, None),
             KeyBinding::new("f11", ToggleBookmark, None),
@@ -595,6 +598,8 @@ fn sublime_text(mac: bool) -> Vec<KeyBinding> {
     ];
     if mac {
         b.extend([
+            // As Claude Code's own VS Code and JetBrains plugins.
+            KeyBinding::new("cmd-alt-k", AddToClaudeContext, e),
             KeyBinding::new("cmd-t", GoToFile, None),
             KeyBinding::new("cmd-alt-f", Replace, None),
             KeyBinding::new("cmd-alt-right", NextTab, None),
@@ -617,6 +622,7 @@ fn sublime_text(mac: bool) -> Vec<KeyBinding> {
         ]);
     } else {
         b.extend([
+            KeyBinding::new("ctrl-alt-k", AddToClaudeContext, e),
             KeyBinding::new("ctrl-h", Replace, None),
             KeyBinding::new("ctrl-w", CloseTab, None),
             KeyBinding::new("ctrl-pagedown", NextTab, None),
@@ -914,6 +920,7 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Toggle Tools in Title Bar", ToggleToolsInTitleBar),
         a("Toggle Compact Activity Bar", ToggleCompactActivityBar),
         a("Toggle Zen Mode", ToggleZenMode),
+        a("Add to Claude Context", AddToClaudeContext),
         a("Import Settings from VS Code or JetBrains…", ImportSettings),
         a("Toggle Problems", ToggleProblems),
         a("Toggle Find Panel", ToggleResults),

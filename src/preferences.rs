@@ -403,7 +403,7 @@ impl Setting {
                 "Code suggested after the caret as you type, accepted with Tab. Your code goes to the service only when one is chosen; sign in from the status bar."
             }
             Setting::ClaudeCode => {
-                "Claude Code running in a terminal (its /ide command) sees your selection, opens files here and reads the problems Kuana shows. Nothing leaves your machine through Kuana."
+                "Claude Code running in a terminal (its /ide command) sees your selection, reads the problems Kuana shows and proposes its edits as diffs to accept or reject here. Nothing leaves your machine through Kuana."
             }
             Setting::VimMode => "Vim's Normal, Insert and Visual modes. The status bar shows the mode.",
             Setting::AutoSave => "Every mode but Off also saves when Kuana quits or a tab closes.",

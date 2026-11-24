@@ -17,6 +17,7 @@ impl Workspace {
         let change_staged = e.change_at_cursor_staged(cx);
         let in_conflict = e.has_conflict_at_cursor(cx);
         let soft_wrap = e.soft_wrap();
+        let claude = path.is_some() && self.claude_connected();
         let mut entries: Vec<MenuEntry> = Vec::new();
         let mut actions: Vec<Option<MenuAction>> = Vec::new();
         let mut add = |entry: MenuEntry, action: Option<MenuAction>| {
@@ -64,6 +65,11 @@ impl Workspace {
             ("Extend Selection", Box::new(editor::ExtendSelection)),
         ] {
             let (entry, action) = run(MenuEntry::text(label), action);
+            add(entry, action);
+        }
+        if claude {
+            add(MenuEntry::Separator, None);
+            let (entry, action) = run(MenuEntry::text("Add to Claude Context"), Box::new(AddToClaudeContext));
             add(entry, action);
         }
 

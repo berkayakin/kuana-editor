@@ -125,7 +125,34 @@ that soft wrap breaks, nothing shows until the caret is on a line that fits.
 
 For chat and agents, use the tools you already have: Claude Code, Codex or Gemini CLI run in
 Kuana's terminal, and Kuana picks up the files they change (the Git gutter and the Commit view show
-what they did, Local History undoes it).
+what they did, Local History undoes it). Claude Code goes further: it connects to Kuana, as below.
+
+## Claude Code
+
+[Claude Code](https://claude.com/claude-code) running in a terminal connects to Kuana the way it
+connects to VS Code and JetBrains IDEs (its `/ide` command), so it works with what you see:
+
+- **It sees your selection.** Claude knows which file you're in and what you've selected, so
+  "this function" means the one you're looking at. **Add to Claude Context** (⌥⌘K / Ctrl+Alt+K in the JetBrains and Sublime
+  Text keymaps; the editor's right-click menu; Find Action) puts the file, or its selected lines, in
+  Claude's prompt.
+- **It reads the problems Kuana shows**: language servers', linters' and Kuana's own, open files
+  and the rest.
+- **Its edits come as diffs.** When Claude asks to change a file (not in its auto-accept mode), the
+  change opens in a **Proposed by Claude Code** tab beside the file: the file as it is, unsaved
+  edits included, against Claude's version. **Accept** applies it as one edit you can undo and saves
+  the file (Local History keeps what it was, "Before Claude Code's edit"); **Reject**, or closing
+  the tab, turns it down. Answering in the terminal instead closes the tab.
+
+Run `claude` in Kuana's terminal and it connects by itself. Started in another terminal, in the
+project's folder, type `/ide` and pick Kuana (or start it with `claude --ide`). While it's
+connected the status bar shows **Claude** with a green light. One Kuana window per project: each
+window offers its own folders.
+
+Nothing goes anywhere through Kuana: the connection is on your machine (a local port, with a lock
+file in `~/.claude/ide` holding its key). It's on once Claude Code has run on your machine, for
+local projects (not [remote ones](remote.md)); Settings → Editor → Claude Code
+(`"claude_code_integration": false`) turns it off.
 
 ## Multibuffers
 

@@ -77,6 +77,8 @@ pub fn claude_installed() -> bool {
 pub enum Request {
     /// A client connected: it should hear the current selection.
     Connected,
+    /// A client went (Claude Code ended or ran `/ide` to leave).
+    Disconnected,
     Tool(ToolCall),
 }
 
@@ -390,6 +392,7 @@ fn serve(stream: TcpStream, shared: &Arc<Shared>) {
         }
     }
     shared.clients.lock().unwrap_or_else(|e| e.into_inner()).retain(|(client, _)| *client != id);
+    let _ = shared.requests.unbounded_send(Request::Disconnected);
 }
 
 /// Hands a tool call to the window and sends back its answer, waiting on a
@@ -422,6 +425,24 @@ pub fn selection_payload(path: &Path, rope: &Rope, range: std::ops::Range<usize>
             "isEmpty": range.is_empty(),
         },
     })
+}
+
+/// `at_mentioned`'s params, which add a file to Claude's prompt: with a
+/// selection (`range`, bytes), its zero-based lines, the line it ends at the
+/// start of left out.
+pub fn mention(path: &Path, rope: &Rope, range: std::ops::Range<usize>) -> Value {
+    let mut params = json!({ "filePath": path });
+    if !range.is_empty() {
+        let (start, end) = (range.start.min(rope.len_bytes()), range.end.min(rope.len_bytes()));
+        let first = rope.byte_to_line(start);
+        let mut last = rope.byte_to_line(end);
+        if last > first && rope.line_to_byte(last) == end {
+            last -= 1;
+        }
+        params["lineStart"] = json!(first);
+        params["lineEnd"] = json!(last);
+    }
+    params
 }
 
 /// What `openFile` asks to select, as Claude's own plugins read it.
@@ -669,9 +690,10 @@ mod tests {
         assert_eq!(receive(&mut client)["params"]["text"], "let x");
 
         drop(server);
-        // The server closes the connection.
+        // The server closes the connection, and the window hears the client went.
         let closed = (0..100).any(|_| matches!(client.read(), Err(_) | Ok(Message::Close(_))));
         assert!(closed);
+        assert!(matches!(futures::executor::block_on(requests.next()), Some(Request::Disconnected)));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -686,6 +708,17 @@ mod tests {
         assert_eq!(payload["selection"]["end"], json!({ "line": 1, "character": 12 }));
         assert_eq!(payload["selection"]["isEmpty"], false);
         assert_eq!(selection_payload(Path::new("/work/a.rs"), &rope, 3..3)["selection"]["isEmpty"], true);
+    }
+
+    #[test]
+    fn mentions_name_the_selected_lines() {
+        let rope = Rope::from_str("one\ntwo\nthree\n");
+        let path = Path::new("/work/a.txt");
+        assert_eq!(mention(path, &rope, 2..2), json!({ "filePath": "/work/a.txt" }));
+        assert_eq!(mention(path, &rope, 4..6), json!({ "filePath": "/work/a.txt", "lineStart": 1, "lineEnd": 1 }));
+        // Whole lines, the selection ending at the next line's start.
+        assert_eq!(mention(path, &rope, 0..8), json!({ "filePath": "/work/a.txt", "lineStart": 0, "lineEnd": 1 }));
+        assert_eq!(mention(path, &rope, 2..10)["lineEnd"], 2);
     }
 
     #[test]
