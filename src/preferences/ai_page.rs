@@ -22,12 +22,14 @@ impl Preferences {
         Settings::get(cx).ai.clone().unwrap_or_default()
     }
 
-    /// Changes the `ai` object; an empty one goes.
-    /// Changes the `ai` setting. What's typed in the URL and model fields is
+    /// Changes the `ai` object (an empty one goes), from one of the page's
+    /// dropdowns, which closes. What's typed in the URL and model fields is
     /// saved first, and afterwards they show the new settings, so a later
     /// save of those fields can't write the old values over a new provider
     /// or model.
     fn write_ai(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut serde_json::Map<String, Value>)) {
+        // A pick in one of the page's dropdowns: it closes, as the others do.
+        self.menu = None;
         let typed = self.commit_ai_fields(cx);
         if !typed.is_empty() {
             self.applied(typed, cx);
