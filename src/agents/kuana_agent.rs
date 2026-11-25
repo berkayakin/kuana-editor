@@ -21,6 +21,12 @@
 //! included) is kept in `<config>/agents/kuana/<session>.json` after every
 //! turn, so `session/load` continues it after Kuana restarts. Kuana keeps the
 //! transcript itself, so nothing is replayed.
+//!
+//! It can go back in the conversation, which ACP has no word for, through two
+//! extension methods: `_kuana/rewind { turn }` forgets the user's `turn`-th
+//! prompt and everything after (an edited message is sent next), and
+//! `_kuana/retry { turn }` forgets what came after that prompt and answers it
+//! again. Where each prompt starts is kept (`Session::prompts`).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -101,6 +107,10 @@ struct Session {
     /// first prompt starts them).
     mcp_settings: Vec<(String, mcp::ServerSettings)>,
     mcp: Option<Vec<Arc<mcp::Client>>>,
+    /// Where each of the user's prompts is in `messages`: the message, its
+    /// first part and how many parts (a prompt after tool results joins
+    /// their message).
+    prompts: Vec<(usize, usize, usize)>,
 }
 
 type Sessions = Arc<Mutex<HashMap<String, Session>>>;
@@ -113,6 +123,10 @@ struct Kept {
     mode: Mode,
     #[serde(default)]
     model: Option<String>,
+    /// `Session::prompts` (none in a conversation kept before it existed,
+    /// which then can't go back).
+    #[serde(default)]
+    prompts: Vec<(usize, usize, usize)>,
 }
 
 fn kept_file(id: &str) -> Option<PathBuf> {
@@ -130,7 +144,7 @@ fn keep(id: &str, session: &Session) {
         return;
     }
     let Some(path) = kept_file(id) else { return };
-    let kept = Kept { cwd: session.cwd.clone(), messages: session.messages.clone(), mode: session.mode, model: session.model.clone() };
+    let kept = Kept { cwd: session.cwd.clone(), messages: session.messages.clone(), mode: session.mode, model: session.model.clone(), prompts: session.prompts.clone() };
     let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| crate::state::write_atomic(&path, &serde_json::to_vec(&kept).unwrap_or_default()));
     if let Err(err) = written {
         eprintln!("couldn't keep the Kuana Agent session: {err}");
@@ -207,6 +221,7 @@ fn handle(conn: &Connection, sessions: &Sessions, choose: &Chooser, method: &str
                 cancelled: Arc::default(),
                 mcp_settings: mcp::from_acp(&params["mcpServers"]),
                 mcp: None,
+                prompts: Vec::new(),
             };
             let options = config_options(&session, &choice.model);
             sessions.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), session);
@@ -228,6 +243,7 @@ fn handle(conn: &Connection, sessions: &Sessions, choose: &Chooser, method: &str
                 cancelled: Arc::default(),
                 mcp_settings: mcp::from_acp(&params["mcpServers"]),
                 mcp: None,
+                prompts: kept.prompts,
             };
             let (mode, options) = (session.mode, config_options(&session, &choice.model));
             sessions.lock().unwrap_or_else(|e| e.into_inner()).insert(session_id, session);
@@ -259,26 +275,76 @@ fn handle(conn: &Connection, sessions: &Sessions, choose: &Chooser, method: &str
                 let session = sessions.get_mut(&session_id).ok_or_else(not_found)?;
                 session.cancelled.store(false, Ordering::Relaxed);
                 let parts = prompt_parts(&blocks);
+                let count = parts.len();
                 // Consecutive user messages (after a turn that ended on
                 // tool results) join into one.
                 match session.messages.last_mut() {
-                    Some(last) if last.role == Role::User => last.content.extend(parts),
-                    _ => session.messages.push(Message { role: Role::User, content: parts }),
+                    Some(last) if last.role == Role::User => {
+                        let start = last.content.len();
+                        last.content.extend(parts);
+                        session.prompts.push((session.messages.len() - 1, start, count));
+                    }
+                    _ => {
+                        session.messages.push(Message { role: Role::User, content: parts });
+                        session.prompts.push((session.messages.len() - 1, 0, count));
+                    }
                 }
                 (session.cancelled.clone(), session.model.clone())
             };
-            let mut choice = choose().map_err(RpcError::internal)?;
-            if let Some(model) = model {
-                choice.model = model;
-            }
-            let stop = run_turn(conn, sessions, &session_id, &choice, &cancelled);
-            if let Some(session) = sessions.lock().unwrap_or_else(|e| e.into_inner()).get(&session_id) {
+            answer_turn(conn, sessions, choose, &session_id, cancelled, model)
+        }
+        "_kuana/rewind" | "_kuana/retry" => {
+            let turn = params["turn"].as_u64().unwrap_or(0) as usize;
+            let retry = method == "_kuana/retry";
+            let (cancelled, model) = {
+                let mut sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
+                let session = sessions.get_mut(&session_id).ok_or_else(not_found)?;
+                if !rewind(&mut session.messages, &mut session.prompts, turn, retry) {
+                    return Err(RpcError::new(RpcError::NOT_FOUND, "This conversation can't go back to that message"));
+                }
+                session.cancelled.store(false, Ordering::Relaxed);
                 keep(&session_id, session);
+                (session.cancelled.clone(), session.model.clone())
+            };
+            if !retry {
+                return Ok(json!({}));
             }
-            Ok(json!({ "stopReason": stop? }))
+            answer_turn(conn, sessions, choose, &session_id, cancelled, model)
         }
         _ => Err(RpcError::new(RpcError::METHOD_NOT_FOUND, format!("Kuana's agent doesn't serve {method}"))),
     }
+}
+
+/// Runs a turn on the prompt just added (or kept), then keeps the
+/// conversation; `session/prompt`'s answer.
+fn answer_turn(conn: &Connection, sessions: &Sessions, choose: &Chooser, session_id: &str, cancelled: Arc<AtomicBool>, model: Option<String>) -> Result<Value, RpcError> {
+    let mut choice = choose().map_err(RpcError::internal)?;
+    if let Some(model) = model {
+        choice.model = model;
+    }
+    let stop = run_turn(conn, sessions, session_id, &choice, &cancelled);
+    if let Some(session) = sessions.lock().unwrap_or_else(|e| e.into_inner()).get(session_id) {
+        keep(session_id, session);
+    }
+    Ok(json!({ "stopReason": stop? }))
+}
+
+/// Goes back to the user's `turn`-th prompt (1-based): keeps it when
+/// `keep_prompt` (to answer it again), else forgets it too; everything after
+/// goes. False when there's no such prompt to go back to.
+fn rewind(messages: &mut Vec<Message>, prompts: &mut Vec<(usize, usize, usize)>, turn: usize, keep_prompt: bool) -> bool {
+    let Some(&(at, start, count)) = turn.checked_sub(1).and_then(|i| prompts.get(i)) else { return false };
+    let keep = if keep_prompt { start + count } else { start };
+    if at >= messages.len() || keep > messages[at].content.len() {
+        return false;
+    }
+    messages.truncate(at + 1);
+    messages[at].content.truncate(keep);
+    if messages[at].content.is_empty() {
+        messages.pop();
+    }
+    prompts.truncate(if keep_prompt { turn } else { turn - 1 });
+    true
 }
 
 fn not_found() -> RpcError {
@@ -1014,6 +1080,39 @@ mod tests {
         assert!(replace("abc", "x", "y", false).unwrap_err().contains("wasn't found"));
         assert_eq!(replace("one\r\ntwo\r\n", "one\ntwo", "1\n2", false).unwrap(), "1\r\n2\r\n");
         assert!(replace("abc", "", "y", false).is_err());
+    }
+
+    #[test]
+    fn conversations_go_back_to_a_prompt() {
+        let text = |t: &str| Part::text(t);
+        let user = |parts: Vec<Part>| Message { role: Role::User, content: parts };
+        let assistant = |t: &str| Message { role: Role::Assistant, content: vec![text(t)] };
+        let result = Part::ToolResult { id: "t".into(), content: "ok".into(), is_error: false };
+        // Prompt 1; an answer with a tool; the result and prompt 2 joined; an answer.
+        let conversation = vec![user(vec![text("one")]), assistant("calls"), user(vec![result.clone(), text("two")]), assistant("done")];
+        let prompts = vec![(0, 0, 1), (2, 1, 1)];
+
+        // Edit prompt 2: its tool result stays (it answers "calls").
+        let (mut m, mut p) = (conversation.clone(), prompts.clone());
+        assert!(rewind(&mut m, &mut p, 2, false));
+        assert_eq!(m, vec![user(vec![text("one")]), assistant("calls"), user(vec![result.clone()])]);
+        assert_eq!(p, vec![(0, 0, 1)]);
+
+        // Retry prompt 2: it stays, its answer goes.
+        let (mut m, mut p) = (conversation.clone(), prompts.clone());
+        assert!(rewind(&mut m, &mut p, 2, true));
+        assert_eq!(m.last(), Some(&user(vec![result, text("two")])));
+        assert_eq!(p, prompts);
+
+        // Edit prompt 1: nothing's left.
+        let (mut m, mut p) = (conversation.clone(), prompts.clone());
+        assert!(rewind(&mut m, &mut p, 1, false));
+        assert!(m.is_empty() && p.is_empty());
+
+        // No such prompt, or a conversation kept before prompts were noted.
+        let (mut m, mut p) = (conversation.clone(), prompts.clone());
+        assert!(!rewind(&mut m, &mut p, 3, false) && !rewind(&mut m, &mut Vec::new(), 1, false));
+        assert_eq!(m, conversation);
     }
 
     #[test]

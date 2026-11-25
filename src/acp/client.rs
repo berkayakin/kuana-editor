@@ -177,6 +177,12 @@ impl Agent {
         typed(self.rpc.request("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": mcp_servers })))
     }
 
+    /// An extension request (`_<name>/…`) an agent serves beyond ACP, its
+    /// answer typed.
+    pub fn ext<T: DeserializeOwned>(&self, method: &str, params: Value) -> impl Future<Output = Result<T, RpcError>> + use<T> {
+        typed(self.rpc.request(method, params))
+    }
+
     /// Sends a prompt; the future ends with the turn.
     pub fn prompt(&self, session: &str, prompt: Vec<Value>) -> impl Future<Output = Result<schema::PromptResponse, RpcError>> + use<> {
         typed(self.rpc.request("session/prompt", json!({ "sessionId": session, "prompt": prompt })))

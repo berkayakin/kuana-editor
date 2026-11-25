@@ -196,6 +196,8 @@ pub struct Session {
     /// A prompt sent before the agent was ready: made into content blocks
     /// once it's connected, when it's known whether it takes embedded files.
     pending_prompt: Option<(String, Vec<ContextItem>)>,
+    /// The turn an edited message goes back to, until its prompt is sent.
+    pending_rewind: Option<usize>,
     /// The MCP servers the agent was given (ACP's `mcpServers`).
     mcp_servers: Vec<Value>,
     permissions: HashMap<String, Responder>,
@@ -265,6 +267,7 @@ impl Session {
             turn: user_messages,
             pending_prompt: None,
             mcp_servers: Vec::new(),
+            pending_rewind: None,
             permissions: HashMap::new(),
             requests: HashMap::new(),
             next_request: 0,
@@ -322,6 +325,7 @@ impl Session {
         self.connecting = None;
         self.turn_task = None;
         self.pending_prompt = None;
+        self.pending_rewind = None;
         self.queued.clear();
         // Dropped unanswered, they answer the agent with an error.
         self.permissions.clear();
@@ -438,7 +442,8 @@ impl Session {
                         s.state = State::Idle;
                         if let Some((text, context)) = s.pending_prompt.take() {
                             let blocks = s.blocks(&text, &context);
-                            s.run_prompt(blocks, cx);
+                            let rewind = s.pending_rewind.take();
+                            s.run_prompt(rewind, blocks, cx);
                         }
                     }
                     Err(e) if e.code == RpcError::AUTH_REQUIRED => {
@@ -459,6 +464,7 @@ impl Session {
     fn fail(&mut self, error: String, cx: &mut Context<Self>) {
         self.state = State::Failed(error.clone());
         self.pending_prompt = None;
+        self.pending_rewind = None;
         self.transcript.notice(Level::Error, error);
         self.drop_queued();
         self.agent = None;
@@ -540,7 +546,7 @@ impl Session {
     }
 
     /// After a terminal sign-in: tries the session again.
-    pub fn retry(&mut self, cx: &mut Context<Self>) {
+    pub fn signed_in(&mut self, cx: &mut Context<Self>) {
         match &self.agent {
             Some(_) => {
                 let cwd = self.cwd.clone();
@@ -589,7 +595,8 @@ impl Session {
         self.save(cx);
         if self.is_connected() && self.acp_session.is_some() {
             let blocks = self.blocks(&text, &context);
-            self.run_prompt(blocks, cx);
+            let rewind = self.pending_rewind.take();
+            self.run_prompt(rewind, blocks, cx);
         } else {
             self.pending_prompt = Some((text, context));
             if !matches!(self.state, State::NeedsAuth) {
@@ -607,11 +614,74 @@ impl Session {
         blocks
     }
 
-    fn run_prompt(&mut self, blocks: Vec<Value>, cx: &mut Context<Self>) {
+    /// Sends a prompt; after the agent went back to before turn `rewind`
+    /// when there's one (an edited message). If it can't go back, the prompt
+    /// goes on the conversation as it is, and the transcript says so.
+    fn run_prompt(&mut self, rewind: Option<usize>, blocks: Vec<Value>, cx: &mut Context<Self>) {
         let (Some(agent), Some(id)) = (self.agent.clone(), self.acp_session.clone()) else { return };
         self.state = State::Running;
         self.turn_task = Some(cx.spawn(async move |this, cx| {
+            if let Some(turn) = rewind
+                && let Err(error) = agent.ext::<Value>("_kuana/rewind", json!({ "sessionId": id, "turn": turn })).await
+            {
+                this.update(cx, |s, cx| {
+                    s.transcript.notice(Level::Warning, format!("{} couldn't go back to that message ({}); it continues the conversation as it was.", s.agent_name, error.message));
+                    cx.notify();
+                })
+                .ok();
+            }
             let result = agent.prompt(&id, blocks).await;
+            this.update(cx, |s, cx| s.turn_ended(result, cx)).ok();
+        }));
+        cx.notify();
+    }
+
+    /// Whether the agent can go back in the conversation: Kuana's own (the
+    /// others have no way to in ACP).
+    pub fn can_rewind(&self) -> bool {
+        matches!(self.launcher, Launcher::Kuana(_))
+    }
+
+    /// The transcript's index of the user's `turn`-th message (1-based).
+    fn user_entry(&self, turn: usize) -> Option<usize> {
+        self.transcript.entries.iter().enumerate().filter(|(_, e)| matches!(e, Entry::User { .. })).nth(turn.checked_sub(1)?).map(|(ix, _)| ix)
+    }
+
+    /// An earlier message, edited: the conversation goes back to before it
+    /// (the transcript at once, the agent with the prompt) and the new text
+    /// is sent in its place. `files_put_back`: the files the agent changed
+    /// since were put back (else they stay as they are, and count as the
+    /// turn before's).
+    pub fn edit_and_send(&mut self, turn: usize, text: String, context: Vec<ContextItem>, files_put_back: bool, cx: &mut Context<Self>) {
+        if self.state.busy() || !self.can_rewind() {
+            return;
+        }
+        let Some(at) = self.user_entry(turn) else { return };
+        self.transcript.truncate(at);
+        if files_put_back {
+            self.checkpoints.forget_from(turn);
+        } else {
+            self.checkpoints.fold_from(turn);
+        }
+        self.turn = turn - 1;
+        self.pending_rewind = Some(turn);
+        self.send(text, context, cx);
+    }
+
+    /// Retry: the last answer goes and the agent answers the last message
+    /// again.
+    pub fn retry_answer(&mut self, cx: &mut Context<Self>) {
+        let (Some(agent), Some(id)) = (self.agent.clone(), self.acp_session.clone()) else { return };
+        if self.state.busy() || !self.can_rewind() || !self.is_connected() {
+            return;
+        }
+        let turn = self.turn;
+        let Some(at) = self.user_entry(turn) else { return };
+        self.transcript.truncate(at + 1);
+        self.state = State::Running;
+        self.updated = history::now();
+        self.turn_task = Some(cx.spawn(async move |this, cx| {
+            let result = agent.ext::<schema::PromptResponse>("_kuana/retry", json!({ "sessionId": id, "turn": turn })).await;
             this.update(cx, |s, cx| s.turn_ended(result, cx)).ok();
         }));
         cx.notify();
@@ -678,6 +748,7 @@ impl Session {
             // over on the next prompt.
             self.connecting = None;
             self.pending_prompt = None;
+            self.pending_rewind = None;
             self.agent = None;
             self.pump = None;
             self.replaying = false;
@@ -1251,6 +1322,84 @@ read l"#;
         assert!(second.to_string().contains("sunny"), "{second}");
         drop(requests);
         session.update(cx, |s, _| s.shut_down(true));
+    }
+
+    /// Retry answers the last message again, and an edited earlier message
+    /// replaces it and what came after, for the agent too: the model never
+    /// sees what was taken back.
+    #[gpui::test]
+    fn retry_and_edit_go_back_in_the_conversation(cx: &mut gpui::TestAppContext) {
+        use crate::ai::stream::test_server;
+        use gpui::AppContext as _;
+
+        let answer = |text: &str| {
+            [
+                ("content_block_start", json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } })),
+                ("content_block_delta", json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": text } })),
+                ("message_delta", json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" } })),
+            ]
+            .iter()
+            .map(|(n, d)| format!("event: {n}\ndata: {d}\n\n"))
+            .collect::<String>()
+        };
+        let server = test_server::start(vec![
+            (200, "application/json", json!({ "data": [] }).to_string()),
+            (200, "text/event-stream", answer("A")),
+            (200, "text/event-stream", answer("B")),
+            (200, "text/event-stream", answer("C")),
+            (200, "text/event-stream", answer("D")),
+        ]);
+        let url = server.url.clone();
+        let choose: crate::agents::kuana_agent::Chooser = Arc::new(move || {
+            let endpoint = crate::ai::Endpoint { provider: crate::ai::providers::info("anthropic").unwrap(), url: url.clone(), key: Some("k".into()) };
+            Ok(crate::ai::Choice { endpoint, model: "claude-opus-5-5".into(), effort: None })
+        });
+        let session = cx.new(|_| Session::new("kuana".into(), "Kuana Agent".into(), std::env::temp_dir(), Launcher::Kuana(choose)));
+        let settle = |session: &gpui::Entity<Session>, answers: usize, cx: &mut gpui::TestAppContext| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                cx.run_until_parked();
+                let done = session.read_with(cx, |s, _| s.state == State::Idle && s.transcript.entries.iter().filter(|e| matches!(e, Entry::Assistant { .. })).count() == answers);
+                if done {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "no answer");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let said = |session: &gpui::Entity<Session>, cx: &mut gpui::TestAppContext| -> Vec<String> {
+            session.read_with(cx, |s, _| {
+                s.transcript
+                    .entries
+                    .iter()
+                    .filter_map(|e| match e {
+                        Entry::User { text, .. } | Entry::Assistant { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+        };
+        let sent = |server: &test_server::Server, n: usize| -> Vec<String> {
+            let body: Value = serde_json::from_str(&server.requests.lock().unwrap()[n].1).unwrap();
+            body["messages"].as_array().unwrap().iter().flat_map(|m| m["content"].as_array().cloned().unwrap_or_default()).filter_map(|p| p["text"].as_str().map(str::to_string)).collect()
+        };
+
+        session.update(cx, |s, cx| s.send("first".into(), Vec::new(), cx));
+        settle(&session, 1, cx);
+        session.update(cx, |s, cx| s.send("second".into(), Vec::new(), cx));
+        settle(&session, 2, cx);
+        assert_eq!(said(&session, cx), ["first", "A", "second", "B"]);
+
+        session.update(cx, |s, cx| s.retry_answer(cx));
+        settle(&session, 2, cx);
+        assert_eq!(said(&session, cx), ["first", "A", "second", "C"]);
+        assert_eq!(sent(&server, 3), ["first", "A", "second"], "B isn't sent back");
+
+        session.update(cx, |s, cx| s.edit_and_send(2, "changed".into(), Vec::new(), false, cx));
+        settle(&session, 2, cx);
+        assert_eq!(said(&session, cx), ["first", "A", "changed", "D"]);
+        assert_eq!(sent(&server, 4), ["first", "A", "changed"], "neither the old message nor its answer");
+        session.update(cx, |s, _| s.shut_down(false));
     }
 
     #[test]

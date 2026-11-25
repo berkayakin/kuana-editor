@@ -130,6 +130,14 @@ impl Transcript {
         self.generation += 1;
     }
 
+    /// Forgets the entries from `len` on (the conversation went back).
+    pub fn truncate(&mut self, len: usize) {
+        if len < self.entries.len() {
+            self.entries.truncate(len);
+            self.generation += 1;
+        }
+    }
+
     pub fn notice(&mut self, level: Level, text: impl Into<String>) {
         self.push(Entry::Notice { level, text: text.into() });
     }

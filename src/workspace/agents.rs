@@ -291,6 +291,7 @@ impl Workspace {
             }),
             SessionViewEvent::RejectAll => self.reject_agent_changes(&session, window, cx),
             SessionViewEvent::RestoreTo(turn) => self.restore_agent_files(&session, *turn, window, cx),
+            SessionViewEvent::Resend { turn, text, context } => self.resend_agent_message(view, &session, *turn, text.clone(), context.clone(), window, cx),
             SessionViewEvent::RunCommand(command) => {
                 let cwd = session.read(cx).cwd.clone();
                 let first: String = command.lines().next().unwrap_or_default().chars().take(40).collect();
@@ -583,18 +584,7 @@ impl Workspace {
                 return;
             }
             this.update_in(cx, |ws, window, cx| {
-                let mut failed = Vec::new();
-                for (path, before) in &files {
-                    if let Ok(now) = ws.agent_before(path, cx)
-                        && let Some(text) = now.text()
-                    {
-                        crate::local_history::record(path, &text, crate::local_history::Kind::BeforeRestore);
-                    }
-                    if let Err(e) = ws.put_back(path, before, window, cx) {
-                        failed.push(format!("{}: {e}", ws.display_rel(path)));
-                    }
-                    ws.files_written([path.clone()], cx);
-                }
+                let failed = ws.put_back_files(&files, window, cx);
                 session.update(cx, |s, cx| {
                     s.checkpoints.forget_from(turn);
                     if turn > 0 {
@@ -611,6 +601,57 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// An earlier message, edited and sent: the conversation goes back to
+    /// before it. When the agent changed files since, the user chooses
+    /// whether they go back too (Cancel keeps editing).
+    #[allow(clippy::too_many_arguments)]
+    fn resend_agent_message(&mut self, view: &Entity<SessionView>, session: &Entity<Session>, turn: usize, text: String, context: Vec<ContextItem>, window: &mut Window, cx: &mut Context<Self>) {
+        let files = session.read(cx).checkpoints.restore_to(turn);
+        if files.is_empty() {
+            session.update(cx, |s, cx| s.edit_and_send(turn, text, context, false, cx));
+            return;
+        }
+        let detail = files.iter().map(|(path, _)| format!("• {}", self.display_rel(path))).collect::<Vec<_>>().join("\n");
+        let count = format!("{} file{}", files.len(), if files.len() == 1 { "" } else { "s" });
+        let message = format!("The agent changed {count} after that message. Put them back as they were?");
+        let answer = window.prompt(gpui::PromptLevel::Info, &message, Some(&detail), &["Put Back and Send", "Keep Files and Send", "Cancel"], cx);
+        let (view, session) = (view.clone(), session.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let choice = answer.await.ok();
+            this.update_in(cx, |ws, window, cx| match choice {
+                Some(0) => {
+                    let failed = ws.put_back_files(&files, window, cx);
+                    if !failed.is_empty() {
+                        ws.toast(ToastKind::Error, "Some files couldn't be put back", Some(failed.join("\n")), cx);
+                    }
+                    session.update(cx, |s, cx| s.edit_and_send(turn, text, context, true, cx));
+                }
+                Some(1) => session.update(cx, |s, cx| s.edit_and_send(turn, text, context, false, cx)),
+                _ => view.update(cx, |v, cx| v.resume_editing(turn, &text, context, cx)),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Files back as they were (Local History keeps what they are now); the
+    /// ones that couldn't be, with why.
+    fn put_back_files(&mut self, files: &[(PathBuf, Before)], window: &mut Window, cx: &mut Context<Self>) -> Vec<String> {
+        let mut failed = Vec::new();
+        for (path, before) in files {
+            if let Ok(now) = self.agent_before(path, cx)
+                && let Some(text) = now.text()
+            {
+                crate::local_history::record(path, &text, crate::local_history::Kind::BeforeRestore);
+            }
+            if let Err(e) = self.put_back(path, before, window, cx) {
+                failed.push(format!("{}: {e}", self.display_rel(path)));
+            }
+            self.files_written([path.clone()], cx);
+        }
+        failed
     }
 
     /// One file back as it was: through its tab when it has one (one undo

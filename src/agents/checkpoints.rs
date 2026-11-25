@@ -84,6 +84,21 @@ impl Checkpoints {
         self.writes.retain(|w| w.turn < turn);
     }
 
+    /// The turns from `turn` on are forgotten but their files stay as the
+    /// agent left them: their writes count as the turn before's (where that
+    /// turn wrote a file too, its own, earlier one stays).
+    pub fn fold_from(&mut self, turn: usize) {
+        let into = turn.saturating_sub(1);
+        let (mut kept, mut later): (Vec<Write>, Vec<Write>) = std::mem::take(&mut self.writes).into_iter().partition(|w| w.turn < turn);
+        later.sort_by_key(|w| w.turn);
+        for write in later {
+            if !kept.iter().any(|k| k.turn == into && k.path == write.path) {
+                kept.push(Write { turn: into, ..write });
+            }
+        }
+        self.writes = kept;
+    }
+
     pub fn clear(&mut self) {
         self.writes.clear();
     }
@@ -112,6 +127,16 @@ mod tests {
         assert_eq!(c.restore_to(1), vec![(a.to_path_buf(), text("a0"))]);
         c.clear();
         assert!(!c.changed_since(0) && c.is_empty());
+        // Turns forgotten with their files kept: their writes join the turn
+        // before, which keeps its own earlier one.
+        let mut c = Checkpoints::default();
+        c.note(1, a, text("a0"));
+        c.note(2, a, text("a1"));
+        c.note(2, b, Before::Missing);
+        c.note(3, b, text("b1"));
+        c.fold_from(2);
+        assert_eq!(c.restore_to(1), vec![(a.to_path_buf(), text("a0")), (b.to_path_buf(), Before::Missing)]);
+        assert!(!c.changed_since(2));
         // Bytes read back as the editor would decode them.
         assert_eq!(Before::Bytes(Arc::from(&b"caf\xe9"[..])).text().as_deref(), Some("café"));
     }

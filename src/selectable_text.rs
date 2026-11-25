@@ -39,11 +39,15 @@ pub struct TextSelection {
     inner: RefCell<Inner>,
     /// Redraws the view that shows the pieces (a cached view must be told).
     redraw: Box<dyn Fn(&mut App)>,
+    /// Opens a link that isn't a web address (a file, say).
+    open: Box<dyn Fn(&str, &mut App)>,
 }
 
 impl TextSelection {
-    pub fn new(redraw: impl Fn(&mut App) + 'static) -> Rc<TextSelection> {
-        Rc::new(TextSelection { inner: RefCell::default(), redraw: Box::new(redraw) })
+    /// A selection whose pieces are drawn by a view `redraw` redraws; `open`
+    /// opens links that aren't web addresses.
+    pub fn with_links(redraw: impl Fn(&mut App) + 'static, open: impl Fn(&str, &mut App) + 'static) -> Rc<TextSelection> {
+        Rc::new(TextSelection { inner: RefCell::default(), redraw: Box::new(redraw), open: Box::new(open) })
     }
 
     /// The ends in order, when something's selected.
@@ -87,6 +91,12 @@ impl TextSelection {
     fn range_of(&self, key: Key, len: usize) -> Option<Range<usize>> {
         let (start, end) = self.span()?;
         selected_in(start, end, key, len)
+    }
+
+    /// Forgets the pieces of messages from `message` on (the conversation
+    /// went back, so new ones may come under those keys).
+    pub fn forget_from(&self, message: usize) {
+        self.inner.borrow_mut().texts.split_off(&(message, 0));
     }
 
     fn note_text(&self, key: Key, text: &SharedString) {
@@ -296,9 +306,12 @@ impl Element for SelectableText {
             if let Some((_, ix)) = clicked
                 && bounds.contains(&event.position)
                 && let Some((_, url)) = links.iter().find(|(range, _)| range.contains(&ix))
-                && (url.starts_with("http://") || url.starts_with("https://") || url.starts_with("mailto:"))
             {
-                cx.open_url(url);
+                if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("mailto:") {
+                    cx.open_url(url);
+                } else {
+                    (selection.open)(url, cx);
+                }
             }
         });
     }
@@ -310,7 +323,7 @@ mod tests {
 
     #[test]
     fn selections_span_pieces_in_order() {
-        let selection = TextSelection::new(|_| {});
+        let selection = TextSelection::with_links(|_| {}, |_, _| {});
         for (key, text) in [((0, 0), "hello world"), ((0, 1), "second line"), ((2, 0), "next message")] {
             selection.note_text(key, &SharedString::from(text));
         }

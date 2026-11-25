@@ -19,7 +19,7 @@ use super::transcript::{Entry, Group, Kind, Level, Status, Tool, ToolContent};
 use crate::{
     assets::Icon,
     editor::Editor,
-    markdown_preview::{self, Block, CodeAction, Draw},
+    markdown_preview::{self, Block, CodeAction, Draw, Inline},
     theme::Theme,
     ui::{HoverFill as _, icon_button, icon_el, tooltip_view},
 };
@@ -52,6 +52,10 @@ pub enum SessionViewEvent {
     RunCommand(String),
     /// Put the files the agent changed since this turn back as they were.
     RestoreTo(usize),
+    /// An earlier message, edited: send `text` in place of turn `turn`'s
+    /// (the workspace asks about the files changed since, then
+    /// `Session::edit_and_send`).
+    Resend { turn: usize, text: String, context: Vec<ContextItem> },
 }
 
 pub struct SessionView {
@@ -81,6 +85,9 @@ pub struct SessionView {
     files: Arc<Vec<PathBuf>>,
     mentions: Option<(String, Vec<PathBuf>)>,
     mention_task: Option<(String, gpui::Task<()>)>,
+    /// The earlier message being edited (its turn): sending replaces it and
+    /// what came after.
+    editing: Option<usize>,
     /// Why the last thing attached wasn't, shown over the composer until
     /// the next try.
     pub notice: Option<SharedString>,
@@ -114,10 +121,17 @@ impl SessionView {
             context: Vec::new(),
             copied: None,
             selection: {
-                let view = cx.entity().downgrade();
-                crate::selectable_text::TextSelection::new(move |cx| {
-                    view.update(cx, |_, cx| cx.notify()).ok();
-                })
+                let (view, opener) = (cx.entity().downgrade(), cx.entity().downgrade());
+                crate::selectable_text::TextSelection::with_links(
+                    move |cx| {
+                        view.update(cx, |_, cx| cx.notify()).ok();
+                    },
+                    move |url, cx| {
+                        if let Some((path, line)) = file_link_target(url) {
+                            opener.update(cx, |_, cx| cx.emit(SessionViewEvent::OpenFile { path, line })).ok();
+                        }
+                    },
+                )
             },
             copied_entry: None,
             copied_reset: None,
@@ -126,6 +140,7 @@ impl SessionView {
             mentions: None,
             mention_task: None,
             notice: None,
+            editing: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
@@ -297,6 +312,14 @@ impl SessionView {
             return;
         }
         let old = self.list.item_count();
+        let entries = session.transcript.entries.len();
+        // The conversation went back: what was drawn of the entries gone
+        // goes too (a new entry may come at the same index).
+        if self.seen.is_some_and(|(_, len, _)| len > entries) {
+            self.markdown.retain(|ix, _| *ix < entries);
+            self.selection.clear();
+            self.selection.forget_from(entries);
+        }
         self.groups = session.transcript.groups();
         let count = self.groups.len() + 1;
         self.seen = Some(key);
@@ -325,6 +348,11 @@ impl SessionView {
         }
         let context = std::mem::take(&mut self.context);
         self.composer.update(cx, |e, cx| e.set_text("", cx));
+        if let Some(turn) = self.editing.take() {
+            cx.emit(SessionViewEvent::Resend { turn, text: text.trim().to_string(), context });
+            cx.notify();
+            return;
+        }
         self.session.update(cx, |s, cx| s.send(text.trim().to_string(), context, cx));
         // The newest message shows.
         self.list.scroll_to_reveal_item(self.list.item_count().saturating_sub(1));
@@ -333,9 +361,41 @@ impl SessionView {
     fn stop(&mut self, _: &StopAgent, _: &mut Window, cx: &mut Context<Self>) {
         if self.session.read(cx).state.busy() {
             self.session.update(cx, |s, cx| s.cancel(cx));
+        } else if self.editing.is_some() {
+            self.stop_editing(cx);
         } else {
             cx.propagate();
         }
+    }
+
+    /// Editing an earlier message (Edit on it): its text in the composer,
+    /// which sends it in that message's place. An agent that can't go back
+    /// gets the text to send as a new message.
+    fn edit_message(&mut self, turn: usize, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing = self.session.read(cx).can_rewind().then_some(turn);
+        self.composer.update(cx, |e, cx| {
+            e.set_text(&text, cx);
+            let end = text.len();
+            e.select_range(end..end, cx);
+        });
+        window.focus(&self.composer.focus_handle(cx));
+        cx.notify();
+    }
+
+    /// Puts an edit back as it was (Escape, or ✕ on its banner).
+    pub fn stop_editing(&mut self, cx: &mut Context<Self>) {
+        if self.editing.take().is_some() {
+            self.composer.update(cx, |e, cx| e.set_text("", cx));
+            cx.notify();
+        }
+    }
+
+    /// Edits `turn` again (the workspace's question about files was cancelled).
+    pub fn resume_editing(&mut self, turn: usize, text: &str, context: Vec<ContextItem>, cx: &mut Context<Self>) {
+        self.editing = Some(turn);
+        self.composer.update(cx, |e, cx| e.set_text(text, cx));
+        self.context = context;
+        cx.notify();
     }
 
     fn toggle(&mut self, key: String, default_open: bool, cx: &mut Context<Self>) {
@@ -390,6 +450,7 @@ impl SessionView {
                 let turn = session.turn_of(ix);
                 // A checkpoint: the files the agent changed from here on can go back.
                 let restorable = !session.state.busy() && session.checkpoints.changed_since(turn);
+                let rewinds = session.can_rewind();
                 let group = SharedString::from(format!("user-{ix}"));
                 // Yours on the right, in a bubble as wide as the text (as in
                 // Claude's apps); what you attached over it; its actions,
@@ -424,12 +485,8 @@ impl SessionView {
                         self.message_actions(ix, &group, text.clone(), cx)
                             .child(
                                 icon_button(SharedString::from(format!("edit-{ix}")), Icon::Pencil, theme.text_dim.into(), cx)
-                                    .tooltip(|_, cx| tooltip_view("Edit: put it in the composer to change and send again", cx))
-                                    .on_click(cx.listener(move |v, _, window, cx| {
-                                        let text = text.clone();
-                                        v.composer.update(cx, |e, cx| e.set_text(&text, cx));
-                                        window.focus(&v.composer.focus_handle(cx));
-                                    })),
+                                    .tooltip(move |_, cx| tooltip_view(if rewinds { "Edit: change it and send it again in its place" } else { "Edit: put it in the composer to change and send again" }, cx))
+                                    .on_click(cx.listener(move |v, _, window, cx| v.edit_message(turn, text.clone(), window, cx))),
                             )
                             .when(restorable, |el| {
                                 el.child(
@@ -467,6 +524,17 @@ impl SessionView {
                 // The agent's answer as plain text across the column, its
                 // Copy under it on hover.
                 let group = SharedString::from(format!("answer-{ix}"));
+                // The newest answer can be asked for again (agents that can
+                // go back: Kuana's).
+                let retry = {
+                    let session = self.session.read(cx);
+                    let entries = &session.transcript.entries;
+                    session.can_rewind()
+                        && session.is_connected()
+                        && !session.state.busy()
+                        && entries.iter().rposition(|e| matches!(e, Entry::Assistant { .. })) == Some(ix)
+                        && !entries[ix..].iter().any(|e| matches!(e, Entry::User { .. }))
+                };
                 div()
                     .id(group.clone())
                     .group(group.clone())
@@ -474,7 +542,13 @@ impl SessionView {
                     .flex()
                     .flex_col()
                     .child(markdown_preview::render(&blocks, &draw, cx))
-                    .child(self.message_actions(ix, &group, text, cx))
+                    .child(self.message_actions(ix, &group, text, cx).when(retry, |el| {
+                        el.child(
+                            icon_button(SharedString::from(format!("retry-{ix}")), Icon::Refresh, theme.text_dim.into(), cx)
+                                .tooltip(|_, cx| tooltip_view("Retry: answer the last message again", cx))
+                                .on_click(cx.listener(|v, _, _, cx| v.session.update(cx, |s, cx| s.retry_answer(cx)))),
+                        )
+                    }))
                     .into_any_element()
             }
             Entry::Thought { text } => {
@@ -584,7 +658,11 @@ impl SessionView {
             return blocks.clone();
         }
         let base = self.session.read(cx).cwd.clone();
-        let blocks = Rc::new(markdown_preview::parse(text, Some(&base)));
+        let mut blocks = markdown_preview::parse(text, Some(&base));
+        // Files the answer names (`src/main.rs:12`, or a link to one) open
+        // in the editor when clicked.
+        markdown_preview::for_each_inline(&mut blocks, &mut |inline| link_files(inline, &base));
+        let blocks = Rc::new(blocks);
         self.markdown.insert(ix, (text.len(), blocks.clone()));
         blocks
     }
@@ -841,7 +919,7 @@ impl SessionView {
                             v.session.update(cx, |s, cx| s.sign_in(&id, cx));
                         }))
                     }))
-                    .child(pill("auth-retry".into(), "I've signed in".into(), false, false, &theme).on_click(cx.listener(|v, _, _, cx| v.session.update(cx, |s, cx| s.retry(cx))))),
+                    .child(pill("auth-retry".into(), "I've signed in".into(), false, false, &theme).on_click(cx.listener(|v, _, _, cx| v.session.update(cx, |s, cx| s.signed_in(cx))))),
             );
         }
         if session.transcript.entries.is_empty() && !session.state.busy() {
@@ -1071,6 +1149,23 @@ impl SessionView {
                         .flex()
                         .flex_col()
                         .gap_1p5()
+                        .when_some(self.editing, |el, turn| {
+                            el.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .text_size(px(12.))
+                                    .text_color(theme.text_muted)
+                                    .child(icon_el(Icon::Pencil, px(12.), theme.accent.into()))
+                                    .child(div().flex_1().min_w_0().truncate().child(format!("Editing message {turn}: sending replaces it and everything after")))
+                                    .child(
+                                        icon_button("agent-stop-editing", Icon::X, theme.text_dim.into(), cx)
+                                            .tooltip(|_, cx| tooltip_view("Stop Editing (Esc)", cx))
+                                            .on_click(cx.listener(|v, _, _, cx| v.stop_editing(cx))),
+                                    ),
+                            )
+                        })
                         .when_some(self.notice.clone(), |el, notice| el.child(div().text_size(px(12.)).text_color(theme.warning).child(notice)))
                         .when(!self.context.is_empty(), |el| {
                             el.child(div().flex().flex_wrap().gap_1().children(self.context.iter().enumerate().map(|(i, item)| {
@@ -1295,6 +1390,65 @@ fn chip(label: String, icon: Icon, theme: &Theme) -> gpui::Div {
 }
 
 /// A rounded button with a label that isn't static (an agent's option names).
+/// How a link to a file is written: `kuana-file:<path>`, then `#<line>`.
+const FILE_LINK: &str = "kuana-file:";
+
+fn file_link_target(url: &str) -> Option<(PathBuf, Option<u32>)> {
+    let rest = url.strip_prefix(FILE_LINK)?;
+    let (path, line) = match rest.rsplit_once('#') {
+        Some((path, line)) => (path, line.parse().ok()),
+        None => (rest, None),
+    };
+    Some((PathBuf::from(path), line))
+}
+
+/// A place written as `path`, `path:12`, `path:12:3` or `path#L12`: the path
+/// and line.
+fn path_and_line(text: &str) -> (&str, Option<u32>) {
+    let text = text.trim();
+    if let Some((path, line)) = text.rsplit_once("#L")
+        && let Ok(line) = line.split('-').next().unwrap_or_default().parse()
+    {
+        return (path, Some(line));
+    }
+    let mut parts = text.splitn(3, ':');
+    let path = parts.next().unwrap_or_default();
+    let line = parts.next().and_then(|l| l.parse().ok());
+    if line.is_some() { (path, line) } else { (text, None) }
+}
+
+/// Code spans naming a file in the project (and links to one) become links
+/// that open it.
+fn link_files(inline: &mut Inline, cwd: &std::path::Path) {
+    let target = |text: &str| -> Option<String> {
+        let (path, line) = path_and_line(text);
+        if path.is_empty() || path.contains(char::is_whitespace) || path.contains("://") {
+            return None;
+        }
+        let full = if std::path::Path::new(path).is_absolute() { PathBuf::from(path) } else { cwd.join(path) };
+        full.is_file().then(|| format!("{FILE_LINK}{}{}", full.display(), line.map(|l| format!("#{l}")).unwrap_or_default()))
+    };
+    for (_, url) in &mut inline.links {
+        if !url.contains("://") && !url.starts_with("mailto:") && let Some(file) = target(url) {
+            *url = file;
+        }
+    }
+    let codes: Vec<Range<usize>> = inline.styles.iter().filter(|(_, s)| *s == markdown_preview::Style::Code).map(|(r, _)| r.clone()).collect();
+    for range in codes {
+        if inline.links.iter().any(|(r, _)| r.start < range.end && range.start < r.end) {
+            continue;
+        }
+        if let Some(text) = inline.text.get(range.clone())
+            && let Some(url) = target(text)
+        {
+            inline.links.push((range.clone(), url));
+            inline.styles.push((range, markdown_preview::Style::Link));
+        }
+    }
+    // The text's runs are laid out in order.
+    inline.styles.sort_by_key(|(range, _)| range.start);
+}
+
 /// The composer's round button (Send, Stop): filled in the accent when it
 /// does something, faint when not.
 fn round_button(id: &'static str, icon: Icon, on: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
@@ -1360,6 +1514,29 @@ fn menu_pill(id: impl Into<SharedString>, label: String, theme: &Theme) -> crate
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn places_name_a_path_and_a_line() {
+        assert_eq!(path_and_line("src/main.rs:12:3"), ("src/main.rs", Some(12)));
+        assert_eq!(path_and_line("src/main.rs#L40-L42"), ("src/main.rs", Some(40)));
+        assert_eq!(path_and_line("Cargo.toml"), ("Cargo.toml", None));
+        assert_eq!(path_and_line("a:b"), ("a:b", None));
+        assert_eq!(file_link_target("kuana-file:/p/a.rs#7"), Some((PathBuf::from("/p/a.rs"), Some(7))));
+        assert_eq!(file_link_target("https://x"), None);
+    }
+
+    #[test]
+    fn code_spans_naming_project_files_become_links() {
+        let dir = std::env::temp_dir().join(format!("kuana-file-links-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "fn main() {}").unwrap();
+        let text = "See src/main.rs:3 and missing.rs".to_string();
+        let mut inline = Inline { styles: vec![(4..17, markdown_preview::Style::Code), (22..32, markdown_preview::Style::Code)], text, links: Vec::new() };
+        link_files(&mut inline, &dir);
+        assert_eq!(inline.links, vec![(4..17, format!("kuana-file:{}#3", dir.join("src/main.rs").display()))]);
+        assert!(inline.styles.contains(&(4..17, markdown_preview::Style::Link)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn diff_previews_count_and_show_changed_lines() {

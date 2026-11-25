@@ -75,6 +75,28 @@ pub struct Item {
     pub blocks: Vec<Block>,
 }
 
+/// Calls `f` with every piece of inline text in `blocks`: paragraphs,
+/// headings, list items, quotes, table cells.
+pub fn for_each_inline(blocks: &mut [Block], f: &mut dyn FnMut(&mut Inline)) {
+    for block in blocks {
+        match block {
+            Block::Heading(_, inline) | Block::Paragraph(inline) => f(inline),
+            Block::Quote(inner) | Block::Center(inner) => for_each_inline(inner, f),
+            Block::List { items, .. } => {
+                for item in items {
+                    for_each_inline(&mut item.blocks, f);
+                }
+            }
+            Block::Table { rows, .. } => {
+                for inline in rows.iter_mut().flatten() {
+                    f(inline);
+                }
+            }
+            Block::Image { .. } | Block::Code { .. } | Block::Rule => {}
+        }
+    }
+}
+
 /// The document's blocks. Code is highlighted and images found here, once per
 /// version, not per frame; `base` is the document's folder (for relative images).
 pub fn parse(markdown: &str, base: Option<&Path>) -> Vec<Block> {

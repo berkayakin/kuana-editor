@@ -55,10 +55,15 @@ Your messages sit on the right, the agent's answers across the column, as in Cla
 
 - **Reading and copying**: select any text in the transcript with the mouse (across messages too;
   a double click takes a word, a triple click a paragraph) and copy it with **⌘C** / **Ctrl+C**.
-  Hovering a message shows **Copy**; yours also has **Edit** (back into the composer to change
-  and send again) and, once the agent changed files, **Restore Files to Here**. A code block shows
-  **Copy**, and **Run** for a shell command, which runs it in a Kuana terminal. When you've
-  scrolled up, ↓ takes you back to the newest.
+  Hovering a message shows **Copy**; yours also has **Edit** and, once the agent changed files,
+  **Restore Files to Here**. A code block shows **Copy**, and **Run** for a shell command, which
+  runs it in a Kuana terminal. A file the answer names (`src/main.rs:12`) opens at that line when
+  clicked. When you've scrolled up, ↓ takes you back to the newest.
+- **Going back** (Kuana Agent): **Retry** under the latest answer asks for it again, and **Edit**
+  on an earlier message sends your changed text in its place: the conversation goes back to
+  before it, for the agent too. If the agent changed files since, Kuana asks whether to put them
+  back. Other agents can't go back (ACP has no way to), so there Edit puts the text in the
+  composer to send as a new message.
 
 - **The transcript**: your messages, the agent's answers in Markdown, its thinking (folded), and
   each step it takes as a card: files read, searches, edits with their diff (**Open Diff** shows
