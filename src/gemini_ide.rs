@@ -614,7 +614,7 @@ mod tests {
         fs::write(dir.join("gemini-ide-server-2147483000-1.json"), gone.to_string()).unwrap();
         fs::write(dir.join("gemini-ide-server-2147483000-2.json"), json!({ "port": 2 }).to_string()).unwrap();
         let (server, _requests) = Server::start(vec![PathBuf::from("/work/app")], &dir).unwrap();
-        assert_eq!(dir.join("gemini-ide-server-2147483000-1.json").exists(), !cfg!(unix));
+        assert!(!dir.join("gemini-ide-server-2147483000-1.json").exists());
         assert!(dir.join("gemini-ide-server-2147483000-2.json").exists());
         let file = dir.join(format!("gemini-ide-server-{}-{}.json", std::process::id(), server.port()));
         let content: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();

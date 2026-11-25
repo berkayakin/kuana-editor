@@ -113,7 +113,7 @@ mod tests {
         fs::write(dir.join("2.lock"), other_ide.to_string()).unwrap();
         fs::write(dir.join("3.lock"), this_one.to_string()).unwrap();
         remove_stale(&dir);
-        assert_eq!(dir.join("1.lock").exists(), !cfg!(unix));
+        assert!(!dir.join("1.lock").exists());
         assert!(dir.join("2.lock").exists() && dir.join("3.lock").exists());
         let _ = fs::remove_dir_all(&dir);
     }
