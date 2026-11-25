@@ -103,13 +103,23 @@ Your messages sit on the right, the agent's answers across the column, as in Cla
   pictures (Kuana Agent does, on a model that sees images). **Drop** files on the session (from
   Finder or the file tree) to attach them: text files and pictures join the message; a folder, or
   a file that's neither, is named in the prompt (`@src/`) for the agent to look at.
-- **Changes**: the bar over the composer counts the files the agent changed. **Review** opens each
+- **Changes**: the cap on the composer's top edge counts the files the agent changed. **Review** opens each
   as a diff against what it was before the session touched it. **Keep All** keeps them, and
   **Reject All** puts every file back as it was. Every agent write is one undoable edit in its open
   document, and Local History keeps the version before it ("Before an agent's edit"). Agents that
   write files themselves (Claude Agent) are followed too: Kuana keeps each file as it was when the
   agent's edit comes up. What each session changed is kept with it, so Review, Reject All and
   Restore still work after Kuana restarts.
+- **Worktrees**: in a project in a Git repository, the folder pill under a new session's composer
+  chooses where it works before you send anything: the **Project Folder**, or a **New Worktree**,
+  a checkout of its own on a new branch (`kuana/agent-…`) from the last commit, kept in Kuana's own
+  folder, so the agent's edits touch neither your files nor other sessions'. Its pill then shows
+  the branch, with **Open Worktree in New Window** (to run or test it), **Commit Changes on Its
+  Branch** (the session's title as the message), **Merge into** your branch (commits what's left,
+  then merges with Kuana's own merge; conflicts show in the Commit view as for any merge) and
+  **Remove Worktree** (asks first; the branch goes too when it holds nothing new). A worktree
+  made for a session that never sends anything goes when its tab closes; deleting a session
+  removes its worktree and keeps its branch.
 - **Checkpoints**: hover one of your messages and click ↶ (**Restore Files to Here**) to put back
   every file the agent changed from that message on, as it was just before. Files it created go
   to the Trash. A file that wasn't open goes back byte for byte, whatever its encoding.

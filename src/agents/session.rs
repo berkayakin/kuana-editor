@@ -9,7 +9,7 @@
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
@@ -222,6 +222,8 @@ pub struct Session {
     pub auth_methods: Vec<AuthMethod>,
     /// What the agent changed, turn by turn (`note_change`, `changes`).
     pub checkpoints: Checkpoints,
+    /// The Git worktree of its own it works in (`worktree.rs`), if any.
+    pub worktree: Option<super::worktree::Worktree>,
     pub terminals: Terminals,
     /// Prompts sent while a turn ran, sent after it.
     pub queued: Vec<(String, Vec<ContextItem>)>,
@@ -267,6 +269,7 @@ impl Session {
         let s = saved.summary;
         let mut session = Session::with(s.id, s.agent, s.agent_name, s.cwd, launcher, saved.transcript, saved.acp_session, s.title, s.created, s.updated);
         session.checkpoints = saved.checkpoints;
+        session.worktree = s.worktree;
         session
     }
 
@@ -301,6 +304,7 @@ impl Session {
             usage: None,
             auth_methods: Vec::new(),
             checkpoints: Checkpoints::default(),
+            worktree: None,
             terminals: Terminals::default(),
             queued: Vec::new(),
             launcher,
@@ -334,7 +338,56 @@ impl Session {
             title: self.title.clone(),
             created: self.created,
             updated: self.updated,
+            worktree: self.worktree.clone(),
         }
+    }
+
+    /// The project folder the session belongs to: its worktree's, or where
+    /// it works (it's listed there; prompts sent are kept by it).
+    pub fn folder(&self) -> &Path {
+        self.worktree.as_ref().map_or(&self.cwd, |w| &w.project)
+    }
+
+    /// Its worktree was removed: its agent stops, and the session stays to
+    /// read (`connect` says why it can't go on).
+    pub fn worktree_removed(&mut self, cx: &mut Context<Self>) {
+        let Some(wt) = &mut self.worktree else { return };
+        wt.removed = true;
+        let branch = wt.branch.clone();
+        self.shut_down(false);
+        // Its changes went with the worktree (or into a merge): nothing to
+        // review or put back, and no agent to pick a mode or model for.
+        self.checkpoints.clear();
+        self.modes.clear();
+        self.mode = None;
+        self.options.clear();
+        self.agent = None;
+        self.transcript.notice(Level::Info, format!("Its worktree was removed ({branch}). Start a new session to go on."));
+        self.save(cx);
+        cx.notify();
+    }
+
+    /// Works somewhere else from now on (its own worktree, or the project
+    /// folder again), before anything was sent: the agent starts over there.
+    pub fn move_to(&mut self, cwd: PathBuf, worktree: Option<super::worktree::Worktree>, launcher: Launcher, cx: &mut Context<Self>) {
+        if !self.transcript.entries.is_empty() {
+            return;
+        }
+        self.shut_down(false);
+        self.agent = None;
+        self.acp_session = None;
+        self.modes.clear();
+        self.mode = None;
+        self.options.clear();
+        self.commands.clear();
+        self.usage = None;
+        self.auth_methods.clear();
+        self.state = State::Idle;
+        self.cwd = cwd;
+        self.worktree = worktree;
+        self.launcher = launcher;
+        self.start(cx);
+        cx.notify();
     }
 
     fn saved(&self) -> Option<history::Saved> {
@@ -460,6 +513,10 @@ impl Session {
 
     fn connect(&mut self, cx: &mut Context<Self>) {
         if matches!(self.state, State::Connecting) {
+            return;
+        }
+        if self.worktree.as_ref().is_some_and(|w| w.removed || !w.path.exists()) {
+            self.fail("This session's worktree was removed. Start a new session to go on.".into(), cx);
             return;
         }
         self.state = State::Connecting;

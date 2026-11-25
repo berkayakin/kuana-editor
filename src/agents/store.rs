@@ -228,6 +228,24 @@ impl AgentStore {
         Ok(session)
     }
 
+    /// Has a session that hasn't sent anything work somewhere else (its own
+    /// worktree, or back in the project folder): its agent starts over there.
+    pub fn move_session(&mut self, session: &Entity<Session>, cwd: std::path::PathBuf, worktree: Option<super::worktree::Worktree>, cx: &mut Context<Self>) -> Result<(), String> {
+        let agent = session.read(cx).agent_id.clone();
+        let launcher = self.launcher(&agent, &cwd, cx)?;
+        session.update(cx, |s, cx| s.move_to(cwd, worktree, launcher, cx));
+        cx.notify();
+        Ok(())
+    }
+
+    /// A session's summary, open or saved.
+    pub fn summary_of(&self, id: &str, cx: &App) -> Option<history::Summary> {
+        match self.sessions.iter().find(|s| s.read(cx).id == id) {
+            Some(session) => Some(session.read(cx).summary()),
+            None => self.saved.iter().find(|s| s.id == id).cloned(),
+        }
+    }
+
     /// An open session by id, or a saved one opened.
     pub fn open(&mut self, id: &str, cx: &mut Context<Self>) -> Option<Entity<Session>> {
         if let Some(session) = self.sessions.iter().find(|s| s.read(cx).id == id) {
@@ -306,6 +324,10 @@ impl AgentStore {
     fn quit(&mut self, cx: &mut Context<Self>) {
         for session in std::mem::take(&mut self.sessions) {
             session.update(cx, |s, _| s.shut_down(true));
+            // Quitting: removed now, not in the background.
+            if let Some(wt) = unused_worktree(session.read(cx)) {
+                let _ = super::worktree::remove(&wt, true);
+            }
         }
         self.subscriptions.clear();
     }
@@ -321,6 +343,15 @@ impl AgentStore {
                 s.shut_down(save);
                 cx.notify();
             });
+            if let Some(wt) = unused_worktree(session.read(cx)) {
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Err(err) = super::worktree::remove(&wt, true) {
+                            eprintln!("couldn't remove the unused worktree {}: {err}", wt.checkout.display());
+                        }
+                    })
+                    .detach();
+            }
         }
         self.sessions.retain(|s| s.read(cx).id != id);
         self.subscriptions.remove(id);
@@ -354,14 +385,14 @@ impl AgentStore {
         let mut rows: Vec<Row> = self
             .sessions
             .iter()
-            .filter(|s| inside(&s.read(cx).cwd))
+            .filter(|s| inside(s.read(cx).folder()))
             .map(|s| {
                 let session = s.read(cx);
                 Row { summary: session.summary(), live: Some(s.clone()) }
             })
             .collect();
         for saved in &self.saved {
-            if inside(&saved.cwd) && !rows.iter().any(|r| r.summary.id == saved.id) {
+            if inside(saved.folder()) && !rows.iter().any(|r| r.summary.id == saved.id) {
                 rows.push(Row { summary: saved.clone(), live: None });
             }
         }
@@ -372,6 +403,12 @@ impl AgentStore {
     pub fn live(&self) -> &[Entity<Session>] {
         &self.sessions
     }
+}
+
+/// The worktree of a session that never sent anything (it isn't saved, so
+/// nothing would ever find its worktree again): it goes with the session.
+fn unused_worktree(session: &Session) -> Option<super::worktree::Worktree> {
+    session.worktree.clone().filter(|wt| !wt.removed && session.transcript.entries.is_empty())
 }
 
 /// A session in the Agents view.

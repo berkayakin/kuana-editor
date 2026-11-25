@@ -168,7 +168,12 @@ impl Workspace {
     /// A session tab: the workspace hears it, and its session once.
     pub(super) fn add_agent_tab(&mut self, view: &Entity<SessionView>, window: &mut Window, cx: &mut Context<Self>) {
         let files = self.files.openable();
-        view.update(cx, |v, cx| v.set_files(files, cx));
+        let folder = view.read(cx).session.read(cx).folder().to_path_buf();
+        let in_repo = self.store_for(&folder, cx).is_some_and(|store| store.read(cx).repo().is_some());
+        view.update(cx, |v, cx| {
+            v.set_files(files, cx);
+            v.in_repo = in_repo;
+        });
         let sub = cx.subscribe_in(view, window, |ws, view, event: &SessionViewEvent, window, cx| ws.on_session_view(view, event, window, cx));
         self.agent_tabs.insert(view.entity_id(), vec![sub]);
         let session = view.read(cx).session.clone();
@@ -236,7 +241,12 @@ impl Workspace {
             }
             AgentsViewEvent::Delete(id) => {
                 let id = id.clone();
-                let answer = ask(window, "Delete this session?", "Its conversation goes for good; files it changed stay as they are.", "Delete", false, cx);
+                let worktree = store::store(cx).and_then(|s| s.read(cx).summary_of(&id, cx)).and_then(|s| s.worktree).filter(|w| !w.removed);
+                let detail = match &worktree {
+                    Some(wt) => format!("Its conversation goes for good, and its worktree too (changes not committed in it are lost); its branch {} stays.", wt.branch),
+                    None => "Its conversation goes for good; files it changed stay as they are.".to_string(),
+                };
+                let answer = ask(window, "Delete this session?", &detail, "Delete", false, cx);
                 cx.spawn_in(window, async move |this, cx| {
                     if !answer.await {
                         return;
@@ -250,6 +260,15 @@ impl Workspace {
                         ws.agent_sessions.remove(&id);
                         if let Some(store) = store::store(cx) {
                             store.update(cx, |s, cx| s.delete(&id, cx));
+                        }
+                        if let Some(wt) = worktree.clone() {
+                            cx.background_executor()
+                                .spawn(async move {
+                                    if let Err(err) = crate::agents::worktree::remove(&wt, false) {
+                                        eprintln!("couldn't remove the worktree {}: {err}", wt.checkout.display());
+                                    }
+                                })
+                                .detach();
                         }
                     })
                     .ok();
@@ -447,6 +466,42 @@ impl Workspace {
                 entries.push(MenuEntry::item("Picture File…", Icon::Palette));
                 actions.push(add(|ws, view, cx| ws.attach_pictures(view, cx), view.clone()));
             }
+            MenuKind::Place => {
+                let s = session.read(cx);
+                let fresh = s.transcript.entries.is_empty();
+                match (s.worktree.clone(), fresh) {
+                    (worktree, true) => {
+                        let here = worktree.is_none();
+                        let entry = if here { MenuEntry::item("Project Folder", Icon::Check) } else { MenuEntry::text("Project Folder") };
+                        entries.push(entry.detail(Some("Its edits land in your working copy, as you'd make them.".to_string())));
+                        let (session_a, view_a) = (session.clone(), view.clone());
+                        actions.push((!here).then(|| MenuAction::Call(std::rc::Rc::new(move |ws: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| ws.agent_to_project_folder(&session_a, &view_a, cx)))));
+                        let entry = if here { MenuEntry::text("New Worktree") } else { MenuEntry::item("New Worktree", Icon::Check) };
+                        entries.push(entry.detail(Some("A checkout of its own on a new branch, from the last commit: its edits don't touch your files or other sessions'.".to_string())));
+                        let (session_b, view_b) = (session.clone(), view.clone());
+                        actions.push(here.then(|| MenuAction::Call(std::rc::Rc::new(move |ws: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| ws.agent_to_worktree(&session_b, &view_b, cx)))));
+                    }
+                    (Some(wt), false) if !wt.removed => {
+                        // The project's branch as Git last told (read when the status was).
+                        let current = self.store_for(&wt.project, cx).and_then(|store| store.read(cx).status().branch.clone());
+                        let call = |f: fn(&mut Workspace, &Entity<Session>, &mut Window, &mut Context<Workspace>), session: Entity<Session>| {
+                            Some(MenuAction::Call(std::rc::Rc::new(move |ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| f(ws, &session, window, cx))))
+                        };
+                        entries.push(MenuEntry::item("Open Worktree in New Window", Icon::ExternalLink).detail(Some("To run, test or look around in it.".to_string())));
+                        actions.push(call(Workspace::open_agent_worktree, session.clone()));
+                        entries.push(MenuEntry::item("Commit Changes on Its Branch", Icon::GitCommit).detail(Some(format!("Everything it changed, as one commit on {}.", wt.branch))));
+                        actions.push(call(Workspace::commit_agent_worktree, session.clone()));
+                        let into = current.clone().unwrap_or_else(|| "the current branch".into());
+                        entries.push(MenuEntry::item(format!("Merge into {into}"), Icon::GitBranch).detail(Some("Commits what's left, then merges the branch into your project's.".to_string())));
+                        actions.push(current.is_some().then(|| call(Workspace::merge_agent_worktree, session.clone())).flatten());
+                        entries.push(MenuEntry::Separator);
+                        actions.push(None);
+                        entries.push(MenuEntry::item("Remove Worktree…", Icon::Trash));
+                        actions.push(call(Workspace::remove_agent_worktree, session.clone()));
+                    }
+                    _ => {}
+                }
+            }
             MenuKind::More => {
                 entries.push(MenuEntry::item("Copy as Markdown", Icon::Copy));
                 let s = session.clone();
@@ -614,7 +669,8 @@ impl Workspace {
     /// have landed already (the file has the diff's new text, not its old),
     /// the old text goes back in the copy kept.
     fn agent_will_edit(&mut self, session: &Entity<Session>, path: PathBuf, old: Option<&str>, new: Option<&str>, cx: &mut Context<Self>) {
-        if !self.in_project(&path) || session.read(cx).noted(&path) {
+        let in_worktree = session.read(cx).worktree.as_ref().is_some_and(|w| path.starts_with(&w.checkout));
+        if !(self.in_project(&path) || in_worktree) || session.read(cx).noted(&path) {
             return;
         }
         let Ok(mut before) = self.agent_before(&path, cx) else { return };
@@ -638,9 +694,10 @@ impl Workspace {
     /// step, then saved), else to the disk; outside the project only after
     /// asking. The text before goes to Local History and the session's log.
     fn agent_write(&mut self, session: &Entity<Session>, id: u64, path: PathBuf, content: String, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.in_project(&path) {
-            let detail = format!("{} wants to write {}, outside the project.", session.read(cx).agent_name, path.display());
-            let answer = ask(window, "Allow writing outside the project?", &detail, "Allow", true, cx);
+        if !self.agent_may_write(session, &path, cx) {
+            let place = if session.read(cx).worktree.is_some() { "its worktree" } else { "the project" };
+            let detail = format!("{} wants to write {}, outside {place}.", session.read(cx).agent_name, path.display());
+            let answer = ask(window, &format!("Allow writing outside {place}?"), &detail, "Allow", true, cx);
             let session = session.clone();
             cx.spawn_in(window, async move |this, cx| {
                 if answer.await {
@@ -653,6 +710,15 @@ impl Workspace {
             return;
         }
         self.write_for_agent(session, id, path, content, window, cx);
+    }
+
+    /// Where an agent writes without asking: the project, or for a session in
+    /// a worktree of its own, that worktree (the project folder is outside it).
+    fn agent_may_write(&self, session: &Entity<Session>, path: &Path, cx: &App) -> bool {
+        match &session.read(cx).worktree {
+            Some(wt) if !wt.removed => path.starts_with(&wt.checkout),
+            _ => self.in_project(path),
+        }
     }
 
     fn write_for_agent(&mut self, session: &Entity<Session>, id: u64, path: PathBuf, content: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -900,6 +966,163 @@ impl Workspace {
         }
         let item = ContextItem::Text { label: format!("Problems ({})", lines.len()), text: lines.join("\n") };
         view.update(cx, |v, cx| v.add_context(item, cx));
+    }
+
+    // ---- Worktrees (`agents/worktree.rs`) ----------------------------------------------------
+
+    /// New Worktree, before the first message: a checkout of its own on a new
+    /// branch, made in the background; then its agent starts over there.
+    fn agent_to_worktree(&mut self, session: &Entity<Session>, view: &Entity<SessionView>, cx: &mut Context<Self>) {
+        let (folder, name) = {
+            let s = session.read(cx);
+            (s.folder().to_path_buf(), crate::agents::worktree::name_for(&s.id))
+        };
+        view.update(cx, |v, cx| {
+            v.place_busy = Some("Making a worktree…".into());
+            cx.notify();
+        });
+        let made = cx.background_executor().spawn(async move { crate::agents::worktree::create(&folder, &name) });
+        let (session, view) = (session.clone(), view.clone());
+        cx.spawn(async move |this, cx| {
+            let made = made.await;
+            this.update(cx, |ws, cx| {
+                view.update(cx, |v, cx| {
+                    v.place_busy = None;
+                    cx.notify();
+                });
+                let moved = made.and_then(|wt| {
+                    let store = store::store(cx).ok_or("No agent store")?;
+                    // Something was sent meanwhile: it stays where it is.
+                    if !session.read(cx).transcript.entries.is_empty() {
+                        let _ = crate::agents::worktree::remove(&wt, true);
+                        return Ok(());
+                    }
+                    store.update(cx, |s, cx| s.move_session(&session, wt.path.clone(), Some(wt), cx))
+                });
+                if let Err(why) = moved {
+                    ws.toast(ToastKind::Error, "Couldn't make a worktree", Some(why), cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Project Folder, before the first message: the unused worktree goes
+    /// (with its branch) and the agent starts over in the project folder.
+    fn agent_to_project_folder(&mut self, session: &Entity<Session>, view: &Entity<SessionView>, cx: &mut Context<Self>) {
+        let Some(wt) = session.read(cx).worktree.clone() else { return };
+        let Some(store) = store::store(cx) else { return };
+        if let Err(why) = store.update(cx, |s, cx| s.move_session(session, wt.project.clone(), None, cx)) {
+            self.toast(ToastKind::Error, "Couldn't move the session", Some(why), cx);
+            return;
+        }
+        view.update(cx, |v, cx| {
+            v.place_busy = None;
+            cx.notify();
+        });
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(err) = crate::agents::worktree::remove(&wt, true) {
+                    eprintln!("couldn't remove the worktree {}: {err}", wt.checkout.display());
+                }
+            })
+            .detach();
+    }
+
+    fn open_agent_worktree(&mut self, session: &Entity<Session>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(wt) = session.read(cx).worktree.clone() else { return };
+        if !wt.path.exists() {
+            self.toast(ToastKind::Info, "The worktree is gone", Some(wt.path.display().to_string()), cx);
+            return;
+        }
+        self.open_project(wt.path, OpenIn::NewWindow, window, cx);
+    }
+
+    /// Commits everything the session changed in its worktree on its branch,
+    /// the session's title as the message.
+    fn commit_agent_worktree(&mut self, session: &Entity<Session>, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(wt) = session.read(cx).worktree.clone() else { return };
+        let message = session.read(cx).title.clone();
+        let committed = cx.background_executor().spawn(async move { crate::agents::worktree::commit_all(&wt, &message).map(|done| (done, wt.branch)) });
+        cx.spawn(async move |this, cx| {
+            let committed = committed.await;
+            this.update(cx, |ws, cx| match committed {
+                Ok((true, branch)) => ws.toast(ToastKind::Info, format!("Committed on {branch}"), None, cx),
+                Ok((false, _)) => ws.toast(ToastKind::Info, "Nothing to commit", Some("The worktree has no changes.".into()), cx),
+                Err(why) => ws.toast(ToastKind::Error, "Couldn't commit", Some(why), cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Commits what's left in the worktree, then merges its branch into the
+    /// project's current branch with Kuana's own merge (conflicts show in
+    /// the Commit view as for any merge).
+    fn merge_agent_worktree(&mut self, session: &Entity<Session>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(wt) = session.read(cx).worktree.clone() else { return };
+        let message = session.read(cx).title.clone();
+        let committed = cx.background_executor().spawn({
+            let wt = wt.clone();
+            async move { crate::agents::worktree::commit_all(&wt, &message) }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let committed = committed.await;
+            this.update_in(cx, |ws, window, cx| {
+                if let Err(why) = committed {
+                    ws.toast(ToastKind::Error, "Couldn't commit the worktree's changes", Some(why), cx);
+                    return;
+                }
+                let Some(store) = ws.store_for(&wt.project, cx) else {
+                    ws.toast(ToastKind::Error, "The project's repository isn't open", None, cx);
+                    return;
+                };
+                ws.show_repo(store, cx);
+                ws.run_git(GitOp::Merge(wt.branch.clone()), window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Removes the session's worktree, asking first; its branch goes too
+    /// when it holds nothing the project's branch lacks.
+    fn remove_agent_worktree(&mut self, session: &Entity<Session>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(wt) = session.read(cx).worktree.clone() else { return };
+        let checked = cx.background_executor().spawn({
+            let wt = wt.clone();
+            async move { (crate::agents::worktree::has_changes(&wt), crate::agents::worktree::unmerged(&wt)) }
+        });
+        let session = session.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let (changes, unmerged) = checked.await;
+            let detail = match (changes, unmerged) {
+                (true, _) => format!("It has changes that aren't committed; they're lost. Its branch {} stays.", wt.branch),
+                (false, true) => format!("Its branch {} has commits your branch doesn't, so it stays.", wt.branch),
+                (false, false) => format!("Its branch {} has nothing new and goes too.", wt.branch),
+            };
+            let Ok(answer) = this.update_in(cx, |_, window, cx| ask(window, "Remove the session's worktree?", &detail, "Remove", false, cx)) else { return };
+            if !answer.await {
+                return;
+            }
+            let removed = cx.background_executor().spawn({
+                let wt = wt.clone();
+                async move { crate::agents::worktree::remove(&wt, !changes && !unmerged) }
+            });
+            let removed = removed.await;
+            this.update(cx, |ws, cx| match removed {
+                Ok(()) => {
+                    session.update(cx, |s, cx| {
+                        s.worktree_removed(cx);
+                    });
+                    ws.toast(ToastKind::Info, "Worktree removed", None, cx);
+                }
+                Err(why) => ws.toast(ToastKind::Error, "Couldn't remove the worktree", Some(why), cx),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Files and folders dropped on a session (from Finder or the file tree):

@@ -86,6 +86,9 @@ pub enum MenuKind {
     Model,
     AddContext,
     More,
+    /// Where it works: the project folder or a worktree of its own (before
+    /// the first message), then its worktree's actions.
+    Place,
 }
 
 pub enum SessionViewEvent {
@@ -155,6 +158,11 @@ pub struct SessionView {
     /// Earlier prompts brought back with ↑ (newest first) and the one shown;
     /// over once the composer holds something else (`prompts::step`).
     recall: Option<(Vec<String>, usize)>,
+    /// Whether the session's project is in a Git repository (it may work in
+    /// a worktree of its own then), set by the workspace.
+    pub in_repo: bool,
+    /// What's being done to its worktree (made, removed…), shown on its pill.
+    pub place_busy: Option<SharedString>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -227,6 +235,8 @@ impl SessionView {
             dismissed: None,
             mentioned: Vec::new(),
             recall: None,
+            in_repo: false,
+            place_busy: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
@@ -282,7 +292,7 @@ impl SessionView {
         let matched = self.mentions.as_ref().is_some_and(|(q, _)| *q == query);
         let matching = self.mention_task.as_ref().is_some_and(|(q, _)| *q == query);
         if !matched && !matching {
-            let (files, cwd, wanted) = (self.files.clone(), self.session.read(cx).cwd.clone(), query.clone());
+            let (files, cwd, wanted) = (self.files.clone(), self.session.read(cx).folder().to_path_buf(), query.clone());
             let found = cx.background_executor().spawn(async move { super::mentions::matching(&files, &cwd, &wanted) });
             let task = cx.spawn(async move |view, cx| {
                 let found = found.await;
@@ -309,7 +319,7 @@ impl SessionView {
         let (range, query) = self.mention_query(cx)?;
         let found = match &self.mentions {
             Some((q, found)) if *q == query => found.clone(),
-            _ => super::mentions::matching(&self.files, &self.session.read(cx).cwd, &query),
+            _ => super::mentions::matching(&self.files, self.session.read(cx).folder(), &query),
         };
         let ix = self.pick_index(&query, found.len());
         found.into_iter().nth(ix).map(|path| (range, path))
@@ -382,7 +392,7 @@ impl SessionView {
             }
             let session = self.session.read(cx);
             let own: Vec<String> = session.transcript.entries.iter().filter_map(|e| if let Entry::User { text, .. } = e { Some(text.clone()) } else { None }).collect();
-            self.recall = Some((super::prompts::recallable(own.into_iter(), &session.cwd), 0));
+            self.recall = Some((super::prompts::recallable(own.into_iter(), session.folder()), 0));
         }
         let len = self.recall.as_ref().map_or(0, |(list, _)| list.len());
         let on_edge_line = if older { !text[..caret].contains('\n') } else { !text[caret..].contains('\n') };
@@ -431,12 +441,12 @@ impl SessionView {
 
     /// A suggestion taken: `@path` in the text, the file in the context.
     fn accept_mention(&mut self, range: Range<usize>, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let cwd = self.session.read(cx).cwd.clone();
+        let cwd = self.session.read(cx).folder().to_path_buf();
         let rel = path.strip_prefix(&cwd).unwrap_or(&path).to_string_lossy().into_owned();
         let text = self.composer.read(cx).text(cx);
         let (start, end) = (range.start.min(text.len()), range.end.min(text.len()));
         let inserted = format!("@{rel} ");
-        self.mentioned.push((path.clone(), format!("@{rel}")));
+        self.mentioned.push((self.session_path(&path, cx), format!("@{rel}")));
         let caret = start + inserted.len();
         let new_text = format!("{}{inserted}{}", &text[..start], text[end..].trim_start_matches(' '));
         self.composer.update(cx, |e, cx| {
@@ -461,7 +471,7 @@ impl SessionView {
     /// and pictures join the context, folders and other files are named in
     /// the prompt at the caret (`@path`), and why one wasn't taken shows.
     pub fn add_attachments(&mut self, attachments: Vec<Attachment>, window: &mut Window, cx: &mut Context<Self>) {
-        let cwd = self.session.read(cx).cwd.clone();
+        let cwd = self.session.read(cx).folder().to_path_buf();
         let mut named = Vec::new();
         self.notice = None;
         for attachment in attachments {
@@ -583,7 +593,24 @@ impl SessionView {
         &self.composer
     }
 
+    /// Where a project file is for this session: its copy in the session's
+    /// worktree when it has one there (a file only in the project folder,
+    /// untracked, stays as it is).
+    fn session_path(&self, path: &std::path::Path, cx: &App) -> PathBuf {
+        match &self.session.read(cx).worktree {
+            Some(wt) => Some(wt.map(path)).filter(|mapped| mapped != path && mapped.exists()).unwrap_or_else(|| path.to_path_buf()),
+            None => path.to_path_buf(),
+        }
+    }
+
     pub fn add_context(&mut self, item: ContextItem, cx: &mut Context<Self>) {
+        // A session in a worktree of its own is given its copies' paths, so
+        // it edits those, not the project folder's.
+        let item = match item {
+            ContextItem::File { path, text } => ContextItem::File { path: self.session_path(&path, cx), text },
+            ContextItem::Selection { path, lines, text } => ContextItem::Selection { path: self.session_path(&path, cx), lines, text },
+            item => item,
+        };
         if !self.context.contains(&item) {
             self.context.push(item);
         }
@@ -621,7 +648,7 @@ impl SessionView {
             return;
         }
         // For ↑ later, in this project's other sessions too.
-        let (folder, sent) = (self.session.read(cx).cwd.clone(), text.trim().to_string());
+        let (folder, sent) = (self.session.read(cx).folder().to_path_buf(), text.trim().to_string());
         cx.background_executor().spawn(async move { super::prompts::record(&folder, &sent) }).detach();
         self.recall = None;
         self.composer.update(cx, |e, cx| e.set_text("", cx));
@@ -1319,7 +1346,7 @@ impl SessionView {
             );
         }
         if session.transcript.entries.is_empty() && !session.working() {
-            let project = session.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let project = session.folder().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             // Ways to start, which fill the composer.
             let starts = [
                 (Icon::FolderTree, "Explain how this project is organized"),
@@ -1394,6 +1421,9 @@ impl SessionView {
             )
     }
 
+    /// The files the agent changed, as a cap on the composer's top edge:
+    /// inset from its corners, rounded on top only and sitting on its border,
+    /// so the two read as one shape (not two boxes with different corners).
     fn render_changes(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = Theme::get(cx).clone();
         let count = self.session.read(cx).changes().len();
@@ -1402,35 +1432,54 @@ impl SessionView {
         }
         Some(
             div()
+                .mx(px(18.))
+                .h(px(30.))
+                .pl_2p5()
+                .pr_1()
                 .flex()
                 .items_center()
-                .gap_1p5()
-                .px_3()
-                .py_1()
-                .mx_3()
-                .mb_1()
-                .rounded(px(10.))
+                .gap_1()
+                .rounded_t(px(10.))
+                .border_t_1()
+                .border_l_1()
+                .border_r_1()
+                .border_color(theme.border_subtle)
                 .bg(theme.elevated)
-                .text_size(px(12.5))
-                .child(icon_el(Icon::GitCompare, px(14.), theme.text_muted.into()))
-                .child(div().text_color(theme.text).child(format!("{count} file{} changed", if count == 1 { "" } else { "s" })))
+                .text_size(px(12.))
+                .child(icon_el(Icon::GitCompare, px(13.), theme.text_dim.into()))
+                .child(crate::ui::one_line(div().min_w_0().pl_0p5()).text_color(theme.text_muted).child(format!("{count} file{} changed", if count == 1 { "" } else { "s" })))
                 .child(div().flex_1())
-                .child(pill("agent-review".into(), "Review".into(), true, false, &theme).on_click(cx.listener(|_, _, _, cx| cx.emit(SessionViewEvent::Review))))
-                .child(pill("agent-keep".into(), "Keep All".into(), false, false, &theme).on_click(cx.listener(|_, _, _, cx| cx.emit(SessionViewEvent::KeepAll))))
-                .child(pill("agent-reject".into(), "Reject All".into(), false, true, &theme).on_click(cx.listener(|_, _, _, cx| cx.emit(SessionViewEvent::RejectAll))))
+                .child(cap_button("agent-review", "Review", theme.accent.into(), &theme).on_click(cx.listener(|_, _, _, cx| cx.emit(SessionViewEvent::Review))))
+                .child(cap_button("agent-keep", "Keep All", theme.text_muted.into(), &theme).on_click(cx.listener(|_, _, _, cx| cx.emit(SessionViewEvent::KeepAll))))
+                .child(cap_button("agent-reject", "Reject All", theme.error.into(), &theme).on_click(cx.listener(|_, _, _, cx| cx.emit(SessionViewEvent::RejectAll))))
                 .into_any_element(),
         )
     }
 
     fn render_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let changes = self.render_changes(cx);
         let mention = self.mention(cx);
-        let cwd = self.session.read(cx).cwd.clone();
+        // Paths shown relative to the project (a worktree session's own files, to its checkout).
+        let (cwd, here) = { let s = self.session.read(cx); (s.folder().to_path_buf(), s.cwd.clone()) };
         let theme = Theme::get(cx).clone();
         let session = self.session.read(cx);
         let busy = session.working();
         let queued = session.queued.len();
         let mode = session.mode_name().map(|name| (mode_icon(session), name));
         let model = model_label(session);
+        // Where it works: chosen before the first message (a project in a Git
+        // repository), then its worktree's branch.
+        let place: Option<(Icon, String, String)> = match (&self.place_busy, &session.worktree) {
+            (Some(busy), _) => Some((Icon::GitBranch, busy.to_string(), busy.to_string())),
+            // The branch's own name (`kuana/` is every session's).
+            (None, Some(wt)) if !wt.removed => {
+                Some((Icon::GitBranch, wt.branch.trim_start_matches("kuana/").to_string(), format!("Works in a worktree of its own, on branch {}", wt.branch)))
+            }
+            (None, None) if self.in_repo && session.transcript.entries.is_empty() => {
+                Some((Icon::Folder, "Project folder".to_string(), "Where the agent works: here, or a worktree of its own".to_string()))
+            }
+            _ => None,
+        };
         // Starting before the first prompt: where its controls will be.
         let starting = session.state == State::Connecting && !busy && mode.is_none() && model.is_none();
         let agent_name = session.agent_name.clone();
@@ -1509,6 +1558,8 @@ impl SessionView {
                         })),
                 )
             })
+            // On the box's top edge, right above it.
+            .children(changes)
             .child(
                 crate::ui::focus_ring(
                     div()
@@ -1568,7 +1619,7 @@ impl SessionView {
                                 // The whole place on hover: names repeat (`__init__.py`).
                                 let place = match item {
                                     ContextItem::File { path, .. } | ContextItem::Selection { path, .. } => {
-                                        Some(path.strip_prefix(&cwd).unwrap_or(path).display().to_string())
+                                        Some(path.strip_prefix(&here).or_else(|_| path.strip_prefix(&cwd)).unwrap_or(path).display().to_string())
                                     }
                                     _ => None,
                                 };
@@ -1609,6 +1660,14 @@ impl SessionView {
                                             .on_click(cx.listener(|_, e: &ClickEvent, _, cx| cx.emit(SessionViewEvent::Menu { kind: MenuKind::Mode, position: e.position() }))),
                                     )
                                 })
+                                .when_some(place, |el, (icon, label, tip)| {
+                                    el.child(
+                                        // Narrow, it gives way before the mode and the model.
+                                        shrinking(composer_pill("agent-place", Some(icon), label, &theme), 8.)
+                                            .tooltip(move |_, cx| tooltip_view(tip.clone(), cx))
+                                            .on_click(cx.listener(|_, e: &ClickEvent, _, cx| cx.emit(SessionViewEvent::Menu { kind: MenuKind::Place, position: e.position() }))),
+                                    )
+                                })
                                 .when(starting, |el| {
                                     el.child(crate::ui::one_line(div().min_w_0().pl_1()).text_size(px(11.5)).text_color(theme.text_dim).child(format!("Starting {agent_name}…")))
                                 })
@@ -1618,7 +1677,7 @@ impl SessionView {
                                 .child(div().flex_1())
                                 .when_some(model, |el, label| {
                                     el.child(
-                                        composer_pill("agent-model", None, label, &theme)
+                                        shrinking(composer_pill("agent-model", None, label, &theme), 0.4)
                                             .tooltip(|_, cx| tooltip_view("Model and options", cx))
                                             .on_click(cx.listener(|_, e: &ClickEvent, _, cx| cx.emit(SessionViewEvent::Menu { kind: MenuKind::Model, position: e.position() }))),
                                     )
@@ -1711,7 +1770,6 @@ impl Render for SessionView {
                         )
                     }),
             )
-            .children(self.render_changes(cx))
             .child(self.render_composer(window, cx))
     }
 }
@@ -1957,6 +2015,30 @@ fn pill(id: SharedString, label: SharedString, primary: bool, danger: bool, them
 
 /// A composer control that opens a menu (the mode, the model): its value
 /// and a chevron, cut short when the composer is narrow.
+/// A quiet text button on the changes cap: its color says what it does; a
+/// fill only under the pointer.
+fn cap_button(id: &'static str, label: &'static str, color: Hsla, theme: &Theme) -> crate::ui::Button {
+    div()
+        .id(id)
+        .h(px(22.))
+        .px_2()
+        .flex()
+        .items_center()
+        .rounded(px(6.))
+        .cursor_pointer()
+        .text_size(px(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(color)
+        .child(label)
+        .hover_fill(Hsla::from(theme.elevated).alpha(0.), theme.hover)
+}
+
+/// How much an element gives way when its row is too narrow (flex shrink).
+fn shrinking<E: gpui::Styled>(mut el: E, factor: f32) -> E {
+    el.style().flex_shrink = Some(factor);
+    el
+}
+
 fn composer_pill(id: &'static str, icon: Option<Icon>, label: String, theme: &Theme) -> crate::ui::Button {
     div()
         .id(id)

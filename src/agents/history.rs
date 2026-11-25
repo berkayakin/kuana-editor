@@ -20,6 +20,17 @@ pub struct Summary {
     /// Seconds since the epoch.
     pub created: u64,
     pub updated: u64,
+    /// The Git worktree it works in, when it has one of its own (`cwd` is
+    /// in it; the session belongs to `worktree.project`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<super::worktree::Worktree>,
+}
+
+impl Summary {
+    /// The project folder the session belongs to (its worktree's, or where it works).
+    pub fn folder(&self) -> &Path {
+        self.worktree.as_ref().map_or(&self.cwd, |w| &w.project)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -126,6 +137,7 @@ mod tests {
             title: "Fix the build".into(),
             created: 1,
             updated,
+            worktree: None,
         };
         let mut transcript = Transcript::default();
         transcript.push(Entry::User { text: "Fix the build".into(), context: vec![] });

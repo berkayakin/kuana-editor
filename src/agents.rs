@@ -13,3 +13,4 @@ pub mod store;
 pub mod terminals;
 pub mod transcript;
 pub mod view;
+pub mod worktree;
