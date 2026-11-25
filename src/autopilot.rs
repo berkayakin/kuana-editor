@@ -3,7 +3,10 @@
 //! platform's build on a demo project and exits nonzero if the script can't
 //! run through. `KUANA_AUTOPILOT=<file>` runs the file once the first window
 //! is open. Events go straight to GPUI's dispatch, so nothing types into
-//! other apps and the window needn't be frontmost.
+//! other apps and the window needn't be frontmost. On macOS it needn't even
+//! show: GPUI stops drawing a window other windows cover, so while one is
+//! covered, each step but `wait` draws a frame first (`draw`), and what a
+//! mark's screenshot by window id gets (`screencapture -l`) is current.
 //!
 //! One command per line (`#` starts a comment):
 //!
@@ -20,9 +23,15 @@
 //! - `drag <x> <y> <to x> <to y>`: press, move in steps, release (mouse steps
 //!   are macOS only: GPUI takes mouse events from the system alone, so they're
 //!   handed to its view as AppKit events, still without leaving Kuana)
+//! - `answer <button>`: click the button so named on the question the window
+//!   asks (a sheet on macOS: `window.prompt`'s Undo Changes, Cancel…)
 //! - `size <width> <height>`: resize the window's content, in points
 //! - `mark <name>`: print `kuana-autopilot: mark <name>` (the recorder starts
 //!   and stops on marks)
+//! - `follow <file>`: from here on, take steps from `file` as lines are added
+//!   to it (checked every 200 ms), until one quits: to drive a running Kuana
+//!   step by step, looking at it between steps. A step there that doesn't
+//!   parse or fails is reported and skipped.
 //! - `quit`: quit (hot exit: nothing asks)
 
 use std::{path::Path, time::Duration};
@@ -42,6 +51,9 @@ enum Step {
     Hover(f32, f32),
     Drag((f32, f32), (f32, f32)),
     Mark(String),
+    /// Click a button of the window's question (a sheet), by its title.
+    Answer(String),
+    Follow(std::path::PathBuf),
     Quit,
 }
 
@@ -126,6 +138,8 @@ fn parse(text: &str) -> Result<Vec<(usize, Step)>, String> {
                 Step::Drag((x, y), (to_x, to_y))
             }
             "mark" => Step::Mark(rest.trim().to_string()),
+            "answer" => Step::Answer(rest.trim().to_string()),
+            "follow" => Step::Follow(rest.trim().into()),
             "quit" => Step::Quit,
             other => return Err(format!("line {line_no}: unknown command “{other}”")),
         };
@@ -150,6 +164,10 @@ pub fn run(script: Script, cx: &mut App) {
     cx.spawn(async move |cx| {
         let mut pace = 80;
         for (line, step) in script.0 {
+            if let Step::Follow(path) = &step {
+                follow(path, &mut pace, cx).await;
+                return;
+            }
             if let Err(err) = perform(&step, &mut pace, cx).await {
                 eprintln!("kuana-autopilot: line {line}: {err}");
                 std::process::exit(1);
@@ -159,14 +177,45 @@ pub fn run(script: Script, cx: &mut App) {
     .detach();
 }
 
+/// Runs the lines added to `path` as they come (see `follow` in the module
+/// docs); what's there already runs first.
+async fn follow(path: &Path, pace: &mut u64, cx: &mut AsyncApp) {
+    let mut done = 0;
+    loop {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        // Only whole lines: one being written waits for its line break.
+        let whole = text.rfind('\n').map_or("", |end| &text[..end]);
+        let lines: Vec<&str> = whole.lines().collect();
+        for (ix, line) in lines.iter().enumerate().skip(done) {
+            done = ix + 1;
+            match parse(line) {
+                Ok(steps) => {
+                    for (_, step) in steps {
+                        if let Err(err) = perform(&step, pace, cx).await {
+                            eprintln!("kuana-autopilot: {}:{}: {err}", path.display(), ix + 1);
+                        }
+                    }
+                }
+                Err(err) => eprintln!("kuana-autopilot: {}:{}: {err}", path.display(), ix + 1),
+            }
+        }
+        cx.background_executor().timer(Duration::from_millis(200)).await;
+    }
+}
+
 async fn perform(step: &Step, pace: &mut u64, cx: &mut AsyncApp) -> Result<(), String> {
     let executor = cx.background_executor().clone();
     let sleep = |ms: u64| executor.timer(Duration::from_millis(ms));
+    if !matches!(step, Step::Wait(_) | Step::Pace(_) | Step::Follow(_)) {
+        draw();
+    }
     match step {
         Step::Wait(ms) => sleep(*ms).await,
         Step::Pace(ms) => *pace = *ms,
         Step::Keys(keys) => {
             for key in keys {
+                // Where a key goes comes from the last frame (what has focus).
+                draw();
                 in_window(cx, |window, cx| {
                     window.dispatch_keystroke(key.clone(), cx);
                     Ok(())
@@ -176,6 +225,7 @@ async fn perform(step: &Step, pace: &mut u64, cx: &mut AsyncApp) -> Result<(), S
         }
         Step::Type(text) => {
             for c in text.chars() {
+                draw();
                 in_window(cx, |window, cx| {
                     window.dispatch_keystroke(typed(c), cx);
                     Ok(())
@@ -227,6 +277,12 @@ async fn perform(step: &Step, pace: &mut u64, cx: &mut AsyncApp) -> Result<(), S
             mouse(cx, Mouse::Up, at(STEPS), 1)?;
             sleep(*pace).await;
         }
+        Step::Answer(title) => {
+            answer(title)?;
+            sleep(*pace).await;
+        }
+        // Handled by `run` (it takes over the rest of the script).
+        Step::Follow(_) => {}
         Step::Mark(name) => {
             use std::io::Write as _;
             println!("kuana-autopilot: mark {name}");
@@ -254,7 +310,7 @@ enum Mouse {
 /// content (from the top left), as AppKit would.
 #[cfg(target_os = "macos")]
 fn mouse(_: &mut AsyncApp, kind: Mouse, at: (f32, f32), clicks: usize) -> Result<(), String> {
-    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    use objc2::runtime::AnyObject;
     use objc2::{Encode, Encoding, RefEncode, class, msg_send};
 
     /// The Core Graphics event behind an `NSEvent`.
@@ -288,23 +344,9 @@ fn mouse(_: &mut AsyncApp, kind: Mouse, at: (f32, f32), clicks: usize) -> Result
         const ENCODING: Encoding =
             Encoding::Struct("CGRect", &[Point::ENCODING, Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING])]);
     }
-    let is_a = |object: &AnyObject, class: &AnyClass| -> bool {
-        let is: Bool = unsafe { msg_send![object, isKindOfClass: class] };
-        is.as_bool()
-    };
-    let (Some(window_class), Some(view_class)) = (AnyClass::get(c"GPUIWindow"), AnyClass::get(c"GPUIView")) else {
-        return Err("no GPUI window class".into());
-    };
+    let (window, view) = frontmost_view()?;
     unsafe {
-        let app: &AnyObject = msg_send![class!(NSApplication), sharedApplication];
-        // Front to back.
-        let windows: &AnyObject = msg_send![app, orderedWindows];
-        let count: usize = msg_send![windows, count];
-        let window = (0..count).map(|i| -> &AnyObject { msg_send![windows, objectAtIndex: i] }).find(|w| is_a(w, window_class)).ok_or("no window is open")?;
         let content: &AnyObject = msg_send![window, contentView];
-        let subviews: &AnyObject = msg_send![content, subviews];
-        let count: usize = msg_send![subviews, count];
-        let view = (0..count).map(|i| -> &AnyObject { msg_send![subviews, objectAtIndex: i] }).find(|v| is_a(v, view_class)).ok_or("the window has no GPUI view")?;
         let frame: Rect = msg_send![content, frame];
         // Window coordinates start at the bottom.
         let location = Point { x: at.0 as f64, y: frame.size.y - at.1 as f64 };
@@ -354,6 +396,105 @@ fn mouse(_: &mut AsyncApp, kind: Mouse, at: (f32, f32), clicks: usize) -> Result
 #[cfg(not(target_os = "macos"))]
 fn mouse(_: &mut AsyncApp, _: Mouse, _: (f32, f32), _: usize) -> Result<(), String> {
     Err("mouse steps only work on macOS".into())
+}
+
+/// The frontmost GPUI window and its view (AppKit objects, alive while the
+/// window is open).
+#[cfg(target_os = "macos")]
+fn frontmost_view() -> Result<(&'static objc2::runtime::AnyObject, &'static objc2::runtime::AnyObject), String> {
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    use objc2::{class, msg_send};
+
+    let is_a = |object: &AnyObject, class: &AnyClass| -> bool {
+        let is: Bool = unsafe { msg_send![object, isKindOfClass: class] };
+        is.as_bool()
+    };
+    let (Some(window_class), Some(view_class)) = (AnyClass::get(c"GPUIWindow"), AnyClass::get(c"GPUIView")) else {
+        return Err("no GPUI window class".into());
+    };
+    unsafe {
+        let app: &AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        // Front to back.
+        let windows: &AnyObject = msg_send![app, orderedWindows];
+        let count: usize = msg_send![windows, count];
+        let window = (0..count).map(|i| -> &AnyObject { msg_send![windows, objectAtIndex: i] }).find(|w| is_a(w, window_class)).ok_or("no window is open")?;
+        let content: &AnyObject = msg_send![window, contentView];
+        let subviews: &AnyObject = msg_send![content, subviews];
+        let count: usize = msg_send![subviews, count];
+        let view = (0..count).map(|i| -> &AnyObject { msg_send![subviews, objectAtIndex: i] }).find(|v| is_a(v, view_class)).ok_or("the window has no GPUI view")?;
+        Ok((window, view))
+    }
+}
+
+/// Draws the frontmost window's frame now when other windows cover it all
+/// (GPUI's display link is stopped then), as AppKit asks a view to on a
+/// resize: what changed since shows in a screenshot, and clicks and keys go
+/// by what's there now. Never inside `cx.update`: drawing takes the app.
+#[cfg(target_os = "macos")]
+fn draw() {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+
+    /// `NSWindowOcclusionStateVisible`.
+    const VISIBLE: usize = 1 << 1;
+    let Ok((window, view)) = frontmost_view() else { return };
+    unsafe {
+        let state: usize = msg_send![window, occlusionState];
+        if state & VISIBLE == 0 {
+            let layer: *const AnyObject = msg_send![view, layer];
+            let _: () = msg_send![view, displayLayer: layer];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn draw() {}
+
+/// Clicks the button titled `title` on the sheet the frontmost window shows
+/// (GPUI asks `window.prompt`'s questions with an `NSAlert` sheet), as a
+/// click would: the question answers that way.
+#[cfg(target_os = "macos")]
+fn answer(title: &str) -> Result<(), String> {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+
+    fn find<'a>(view: &'a AnyObject, button: &AnyClass, title: &str) -> Option<&'a AnyObject> {
+        unsafe {
+            let is: Bool = msg_send![view, isKindOfClass: button];
+            if is.as_bool() {
+                let name: *const AnyObject = msg_send![view, title];
+                let utf8: *const std::ffi::c_char = match name.as_ref() {
+                    Some(name) => msg_send![name, UTF8String],
+                    None => std::ptr::null(),
+                };
+                if !utf8.is_null() && std::ffi::CStr::from_ptr(utf8).to_string_lossy() == title {
+                    return Some(view);
+                }
+            }
+            let subviews: &AnyObject = msg_send![view, subviews];
+            let count: usize = msg_send![subviews, count];
+            (0..count).find_map(|i| -> Option<&'a AnyObject> {
+                let child: &AnyObject = msg_send![subviews, objectAtIndex: i];
+                find(child, button, title)
+            })
+        }
+    }
+    let button = AnyClass::get(c"NSButton").ok_or("no NSButton class")?;
+    let (window, _) = frontmost_view()?;
+    unsafe {
+        let sheet: *const AnyObject = msg_send![window, attachedSheet];
+        let sheet = sheet.as_ref().ok_or("the window asks nothing")?;
+        let content: &AnyObject = msg_send![sheet, contentView];
+        let found = find(content, button, title).ok_or_else(|| format!("the question has no “{title}” button"))?;
+        let sender: *const AnyObject = std::ptr::null();
+        let _: () = msg_send![found, performClick: sender];
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn answer(_: &str) -> Result<(), String> {
+    Err("answer only works on macOS".into())
 }
 
 fn in_window(cx: &mut AsyncApp, f: impl FnOnce(&mut Window, &mut App) -> Result<(), String>) -> Result<(), String> {
