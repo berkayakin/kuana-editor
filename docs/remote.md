@@ -77,6 +77,9 @@ happen inside the distribution, with its own tools.
   Windows too).
 - Git and SSH questions asked there (a password, a passphrase, a new host for `git pull`) are
   asked in Kuana.
+- [Claude Code](editing.md#claude-code) run there (in Kuana's terminal, or in the project's folder
+  in any terminal there) connects to the window through the connection: it sees your selection,
+  reads Kuana's problems and proposes its edits as diffs here.
 
 ## Ports
 

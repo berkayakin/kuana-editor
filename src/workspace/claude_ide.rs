@@ -1,8 +1,14 @@
 //! Claude Code's `/ide` connection for this window (`crate::claude_ide`):
-//! the window's server runs while a local project is open, the setting is
-//! on and Claude Code is installed; it's told the project's folders and the
-//! active editor's selection, and the window answers its tool calls: open
-//! editors, problems, opening files, unsaved changes and saving.
+//! the window's server runs while a project is open, the setting is on and
+//! Claude Code is installed where the project is; it's told the project's
+//! folders and the active editor's selection, and the window answers its
+//! tool calls: open editors, problems, opening files, unsaved changes and
+//! saving.
+//!
+//! A remote project's server is reached through its host: `kuana-server`
+//! listens there and writes Claude's lock file (`RemoteHost::listen_back`),
+//! and the host's terminals get its port. Paths cross through
+//! `Workspace::agent_map` (host paths to Claude, mount paths here).
 //!
 //! Edits Claude proposes (`openDiff`) open as diff tabs whose call waits
 //! until the user decides (`agent_ide.rs`, shared with Gemini CLI): Accept
@@ -17,32 +23,139 @@ use serde_json::{Value, json};
 #[derive(Default)]
 pub(super) struct ClaudeBridge {
     pub(super) server: Option<Server>,
+    /// The remote project's mount the server runs for (None: a local one).
+    mount: Option<PathBuf>,
+    /// A remote project's: where its host listens for Claude.
+    remote: Option<RemoteListen>,
+    /// Asking the host to listen (the server runs meanwhile).
+    starting: bool,
+    /// The connection to a host without Claude Code: not asked again until
+    /// the project reconnects or opens again.
+    declined: Option<std::sync::Weak<kuana_core::remote::RemoteHost>>,
     /// Takes the server's requests while it runs.
     requests: Option<Task<()>>,
     /// How many Claude Code sessions are connected (the status bar's item).
     pub(super) clients: usize,
 }
 
+/// A port on a remote project's host relayed to the window's server, with
+/// Claude's lock file there, and its terminals pointed at it.
+struct RemoteListen {
+    back: kuana_core::remote::client::ListenedBack,
+    terminals: ide::Advertised,
+}
+
 impl Workspace {
     /// Starts, updates or stops the window's server (after the project or
-    /// its folders change, and when settings do).
+    /// its folders change, settings do, or a remote project reconnected).
     pub(super) fn sync_claude_ide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let wanted = Settings::get(cx).claude_code_integration.unwrap_or(true) && ide::claude_installed();
-        let Some(folders) = self.agent_folders(wanted) else {
+        let wanted = Settings::get(cx).claude_code_integration.unwrap_or(true) && !cfg!(test);
+        let Some(project) = self.folders.as_ref().filter(|_| wanted) else {
             self.agents.claude = ClaudeBridge::default();
             return;
         };
-        if let Some(server) = &self.agents.claude.server {
-            server.set_folders(folders);
+        let folders = project.folders().to_vec();
+        let map = self.agent_map();
+        let claude_folders: Vec<PathBuf> = folders.iter().map(|f| map.to_agent(f)).collect();
+        let mount = kuana_core::remote::connection::host_of(project.primary()).map(|name| crate::fs::mount_root(&name));
+        // Another kind of project (local, or another host's).
+        if self.agents.claude.server.is_some() && self.agents.claude.mount != mount {
+            self.agents.claude = ClaudeBridge::default();
+        }
+        let Some(mount) = mount else {
+            if !ide::claude_installed() {
+                self.agents.claude = ClaudeBridge::default();
+                return;
+            }
+            if let Some(server) = &self.agents.claude.server {
+                server.set_folders(claude_folders);
+                return;
+            }
+            let Some(dir) = ide::lock_dir() else { return };
+            self.start_claude_server(claude_folders, Some(&dir), None, window, cx);
+            return;
+        };
+        // Its host's connection: none while it's lost (`reconnected` syncs again).
+        let host = kuana_core::remote::client::host_for(&mount).map(|(_, host)| host).filter(|host| host.is_connected());
+        let Some(host) = host else {
+            self.agents.claude = ClaudeBridge::default();
+            return;
+        };
+        if self.agents.claude.declined.as_ref().and_then(std::sync::Weak::upgrade).is_some_and(|declined| Arc::ptr_eq(&declined, &host)) {
             return;
         }
-        let Some(dir) = ide::lock_dir() else { return };
-        match Server::start(folders, &dir) {
+        if let Some(server) = &self.agents.claude.server {
+            match &self.agents.claude.remote {
+                Some(remote) if remote.back.is_on(&host) => {
+                    server.set_folders(claude_folders.clone());
+                    remote.back.set_folders(&claude_folders.iter().map(|f| f.to_string_lossy().into_owned()).collect::<Vec<_>>());
+                    remote.terminals.set_folders(remote.back.port, folders);
+                    return;
+                }
+                // The host's answer brings the folders up to date.
+                None if self.agents.claude.starting => {
+                    server.set_folders(claude_folders);
+                    return;
+                }
+                // The connection it was made on is gone.
+                _ => self.agents.claude = ClaudeBridge::default(),
+            }
+        }
+        if !self.start_claude_server(claude_folders.clone(), None, Some(mount), window, cx) {
+            return;
+        }
+        let Some(server) = &self.agents.claude.server else { return };
+        let (target, token) = (server.address(), server.token().to_string());
+        let shown: Vec<String> = claude_folders.iter().map(|f| f.to_string_lossy().into_owned()).collect();
+        let lock = json!({ "workspaceFolders": shown, "authToken": token });
+        let asked = Arc::downgrade(&host);
+        let listening = cx.background_executor().spawn(async move { host.listen_back(target, Some(lock)) });
+        self.agents.claude.starting = true;
+        cx.spawn_in(window, async move |ws, cx| {
+            let listened = listening.await;
+            ws.update_in(cx, |ws, window, cx| {
+                // Another server by now (the project changed): the port
+                // there goes again, dropped.
+                if ws.agents.claude.server.as_ref().is_none_or(|server| server.token() != token) {
+                    return;
+                }
+                ws.agents.claude.starting = false;
+                match listened {
+                    Ok(back) => {
+                        let terminals = ide::Advertised::new(back.port, Vec::new());
+                        ws.agents.claude.remote = Some(RemoteListen { back, terminals });
+                        // Folders that changed meanwhile, and the terminals'.
+                        ws.sync_claude_ide(window, cx);
+                    }
+                    // Not installed there: no server for it.
+                    Err(err) => {
+                        let declined = (err.kind() == std::io::ErrorKind::NotFound).then_some(asked);
+                        if declined.is_none() {
+                            eprintln!("couldn't reach Claude Code on the project's machine: {err}");
+                        }
+                        ws.agents.claude = ClaudeBridge { declined, ..ClaudeBridge::default() };
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Starts the window's server and takes its requests; false when it
+    /// didn't start.
+    fn start_claude_server(&mut self, folders: Vec<PathBuf>, lock_dir: Option<&Path>, mount: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        match Server::start(folders, lock_dir) {
             Ok((server, requests)) => {
                 self.agents.claude.server = Some(server);
+                self.agents.claude.mount = mount;
                 self.agents.claude.requests = Some(Self::take_agent_requests(requests, Self::claude_request, window, cx));
+                true
             }
-            Err(err) => eprintln!("couldn't start Claude Code's IDE server: {err}"),
+            Err(err) => {
+                eprintln!("couldn't start Claude Code's IDE server: {err}");
+                false
+            }
         }
     }
 
@@ -87,6 +200,7 @@ impl Workspace {
     }
 
     fn claude_open_editors(&self, cx: &App) -> Value {
+        let map = self.agent_map();
         let active = self.active_editor(cx).map(|e| e.entity_id());
         // A file split in two is one editor to Claude, active when either is.
         let mut tabs: Vec<(PathBuf, Value)> = Vec::new();
@@ -101,12 +215,12 @@ impl Workspace {
                 continue;
             }
             let tab = json!({
-                "uri": ide::file_url(path),
+                "uri": map.url(path),
                 "isActive": is_active,
                 "label": path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
                 "languageId": crate::lsp::servers::language_id(doc.language, path),
                 "isDirty": doc.is_dirty(),
-                "fileName": path,
+                "fileName": map.to_agent(path),
                 "isUntitled": false,
                 "lineCount": doc.line_count(),
             });
@@ -119,6 +233,7 @@ impl Workspace {
     /// language servers, moved by edits since) and what servers published
     /// for files that aren't open. `only` one file, listed even without any.
     fn claude_diagnostics(&self, only: Option<PathBuf>, cx: &App) -> Value {
+        let map = self.agent_map();
         let mut files = Vec::new();
         let mut open = HashSet::new();
         for editor in &self.editors {
@@ -132,7 +247,7 @@ impl Workspace {
             }
             let list: Vec<Value> = doc.diagnostics.iter().map(|d| ide::diagnostic_json(doc.rope(), d)).collect();
             if only.is_some() || !list.is_empty() {
-                files.push(json!({ "uri": ide::file_url(&path), "diagnostics": list }));
+                files.push(json!({ "uri": map.url(&path), "diagnostics": list }));
             }
         }
         let mut elsewhere: HashMap<PathBuf, Vec<Value>> = HashMap::new();
@@ -143,11 +258,11 @@ impl Workspace {
         }
         let mut elsewhere: Vec<_> = elsewhere.into_iter().collect();
         elsewhere.sort_by(|a, b| a.0.cmp(&b.0));
-        files.extend(elsewhere.into_iter().map(|(path, list)| json!({ "uri": ide::file_url(&path), "diagnostics": list })));
+        files.extend(elsewhere.into_iter().map(|(path, list)| json!({ "uri": map.url(&path), "diagnostics": list })));
         if files.is_empty()
             && let Some(path) = only
         {
-            files.push(json!({ "uri": ide::file_url(&path), "diagnostics": [] }));
+            files.push(json!({ "uri": map.url(&path), "diagnostics": [] }));
         }
         Value::Array(files)
     }
@@ -173,7 +288,7 @@ impl Workspace {
                 window.focus(&editor.focus_handle(cx));
             }
         });
-        Ok(vec![format!("Opened file: {}", path.display())])
+        Ok(vec![format!("Opened file: {}", self.agent_map().to_agent(&path).display())])
     }
 
     /// `checkDocumentDirty`, or with `save`, `saveDocument`: an open file's
@@ -237,7 +352,7 @@ impl Workspace {
         let e = editor.read(cx);
         let doc = e.doc.read(cx);
         let Some(path) = &doc.path else { return };
-        server.broadcast("at_mentioned", ide::mention(path, doc.rope(), e.primary_selection().range()));
+        server.broadcast("at_mentioned", ide::mention(&self.agent_map(), path, doc.rope(), e.primary_selection().range()));
     }
 
     /// Tells Claude the active editor's selection (it hears of it when it
@@ -248,7 +363,7 @@ impl Workspace {
         let e = editor.read(cx);
         let doc = e.doc.read(cx);
         if let (true, Some(path)) = (e.is_loaded(), &doc.path) {
-            server.set_selection(ide::selection_payload(path, doc.rope(), e.primary_selection().range()));
+            server.set_selection(ide::selection_payload(&self.agent_map(), path, doc.rope(), e.primary_selection().range()));
         }
     }
 }

@@ -1,7 +1,9 @@
 //! The window's side of terminal agents' connections (`crate::agent_ide`):
 //! what Claude Code's (`claude_ide.rs`) and Gemini CLI's (`gemini_ide.rs`)
-//! share. Their servers run while a local project is open, their setting is
-//! on and the agent is installed.
+//! share. Their servers run while a project is open, their setting is on
+//! and the agent is installed (Gemini CLI's for local projects only; Claude
+//! Code's for remote ones too, reached through the host, see
+//! `workspace/claude_ide.rs`). Paths cross through [`Workspace::agent_map`].
 //!
 //! The active editor is watched (`note_agent_editor`): once its selection,
 //! its text or the tabs have been still a moment, each connected agent is
@@ -118,9 +120,10 @@ impl Workspace {
         self.agents = AgentBridges::default();
     }
 
-    /// The project's folders when an agent's server should run for it: a
-    /// remote project's paths exist only through its connection, so an agent
-    /// here couldn't read them and one there can't reach this port.
+    /// The project's folders when an agent's server should run here for a
+    /// local project: a remote project's paths exist only through its
+    /// connection, so an agent here couldn't read them and one there can't
+    /// reach this port (Claude Code's is relayed by its host instead).
     pub(super) fn agent_folders(&self, wanted: bool) -> Option<Vec<PathBuf>> {
         self.folders
             .as_ref()
@@ -151,10 +154,17 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Paths as the project's agents name them: a remote project's are its
+    /// host's.
+    pub(super) fn agent_map(&self) -> crate::agent_ide::PathMap {
+        let mount = self.folders.as_ref().and_then(|p| kuana_core::remote::connection::host_of(p.primary())).map(|name| crate::fs::mount_root(&name));
+        crate::agent_ide::PathMap::new(mount)
+    }
+
     /// A path an agent names (a `file://` URL or a path, relative to the
-    /// project's first folder), as the tabs have it.
+    /// project's first folder; a remote project's host's), as the tabs have it.
     pub(super) fn agent_path(&self, given: &str) -> PathBuf {
-        let path = crate::agent_ide::path_of(given);
+        let path = self.agent_map().from_agent(given);
         let path = match &self.folders {
             Some(project) if path.is_relative() => project.primary().join(path),
             _ => path,

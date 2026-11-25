@@ -234,6 +234,8 @@ impl Workspace {
         self.refresh_git(cx);
         self.reload_documents(|_| true, cx);
         self.watch_connection(window, cx);
+        // Claude Code's port there went with the old connection.
+        self.sync_claude_ide(window, cx);
         cx.notify();
     }
 

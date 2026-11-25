@@ -3,12 +3,21 @@
 //! once all of it is), watches folders and scans projects. Requests are
 //! answered on threads of their own, so a slow one (a big file, a scan)
 //! doesn't hold up the rest.
+//!
+//! It also listens on the host's loopback for the client (`listen/*`), the
+//! reverse of `tcp/*`: each connection there is handed to the client
+//! (`listen/open`), which relays it to a port on its own machine. That's how
+//! Claude Code on the host reaches a Kuana window's `/ide` server, with the
+//! lock file that tells Claude about it written here (`claude_lock`).
 
 use std::{
     collections::HashMap,
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -20,10 +29,13 @@ use crate::{
     fs::{self, HostEntry},
 };
 
-/// Where `fs/trash` puts things (None: the platform's trash folder).
 #[derive(Clone, Default)]
 pub struct Options {
+    /// Where `fs/trash` puts things (None: the platform's trash folder).
     pub trash: Option<PathBuf>,
+    /// Where Claude Code's lock files go (None: where Claude looks, from
+    /// `CLAUDE_CONFIG_DIR` or the home folder; tests keep out of it).
+    pub claude_lock_dir: Option<PathBuf>,
 }
 
 /// The user's shell: `$SHELL`, else their account's (`docker exec` sets no
@@ -122,7 +134,30 @@ struct State {
     ptys: super::pty::Ptys,
     /// Connections to the host's own ports (`tcp/*`: a debug adapter's).
     sockets: Mutex<HashMap<u64, std::net::TcpStream>>,
+    /// Ports listened on for the client (`listen/*`), by id.
+    listeners: Mutex<HashMap<u64, Listening>>,
+    /// Connections made to those ports, by the id the client knows them by.
+    accepted: Mutex<HashMap<u64, std::net::TcpStream>>,
     next: Mutex<u64>,
+}
+
+/// A port listened on for the client (`listen/start`).
+struct Listening {
+    port: u16,
+    stop: Arc<AtomicBool>,
+    /// Claude Code's lock file advertising it, and its token.
+    lock: Option<(PathBuf, String)>,
+}
+
+impl Listening {
+    fn stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // Wakes the accepting thread, which then sees `stop` and ends.
+        let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+        if let Some((path, _)) = &self.lock {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// Serves one connection until it ends.
@@ -134,6 +169,8 @@ pub fn serve(input: impl Read, output: impl Write + Send + 'static, options: Opt
         #[cfg(unix)]
         ptys: Default::default(),
         sockets: Mutex::default(),
+        listeners: Mutex::default(),
+        accepted: Mutex::default(),
         next: Mutex::new(1),
     });
     #[cfg(unix)]
@@ -161,6 +198,13 @@ pub fn serve(input: impl Read, output: impl Write + Send + 'static, options: Opt
     if let Some(socket) = askpass {
         let _ = std::fs::remove_file(socket);
     }
+    // The client went: what it listened for here goes (lock files too).
+    for (_, listening) in state.listeners.lock().unwrap_or_else(|e| e.into_inner()).drain() {
+        listening.stop();
+    }
+    for (_, socket) in state.accepted.lock().unwrap_or_else(|e| e.into_inner()).drain() {
+        let _ = socket.shutdown(std::net::Shutdown::Both);
+    }
     // The client went: its programs end with it.
     for (_, process) in state.processes.lock().unwrap_or_else(|e| e.into_inner()).drain() {
         if let Some(child) = process.child.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
@@ -184,7 +228,7 @@ impl State {
         *next
     }
 
-    fn handle(&self, method: &str, params: &Value) -> io::Result<Value> {
+    fn handle(self: &Arc<Self>, method: &str, params: &Value) -> io::Result<Value> {
         let p = || path(params, "path");
         match method {
             "server/info" => Ok(json!({
@@ -253,6 +297,7 @@ impl State {
             "pty/foreground" => Ok(self.ptys.foreground(params["id"].as_u64().unwrap_or(0)).map(Value::from).unwrap_or(Value::Null)),
             "watch/start" => self.watch(&p()?),
             "tcp/connect" => self.tcp_connect(params),
+            "listen/start" => self.listen(params),
             "watch/add" => {
                 let id = params["id"].as_u64().unwrap_or(0);
                 let mut watchers = self.watchers.lock().unwrap_or_else(|e| e.into_inner());
@@ -311,6 +356,33 @@ impl State {
             }
             "watch/stop" => {
                 self.watchers.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+            }
+            "listen/send" => {
+                let data = BASE64.decode(params["data"].as_str().unwrap_or("")).unwrap_or_default();
+                let mut accepted = self.accepted.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(socket) = accepted.get_mut(&id)
+                    && socket.write_all(&data).is_err()
+                {
+                    accepted.remove(&id);
+                }
+            }
+            "listen/close" => {
+                if let Some(socket) = self.accepted.lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
+                    let _ = socket.shutdown(std::net::Shutdown::Both);
+                }
+            }
+            "listen/folders" => {
+                let listeners = self.listeners.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(Listening { port, lock: Some((path, token)), .. }) = listeners.get(&id)
+                    && let Some(dir) = path.parent()
+                {
+                    let _ = crate::claude_lock::write(dir, *port, std::process::id(), &strings(&params["workspaceFolders"]), token);
+                }
+            }
+            "listen/stop" => {
+                if let Some(listening) = self.listeners.lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
+                    listening.stop();
+                }
             }
             _ => {}
         }
@@ -418,6 +490,77 @@ impl State {
         Ok(Value::Null)
     }
 
+    /// Listens on a free port of this host's loopback for the client: each
+    /// connection there comes to it as `listen/open`, then `listen/data`, then
+    /// `listen/closed`. With `claude_lock` (`workspaceFolders`, `authToken`),
+    /// Claude Code's lock file names the port, so `claude` here finds it;
+    /// that needs Claude Code here.
+    fn listen(self: &Arc<Self>, params: &Value) -> io::Result<Value> {
+        let lock = &params["claude_lock"];
+        let lock_dir = if lock.is_object() {
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            let dir = match &self.options.claude_lock_dir {
+                Some(dir) => dir.clone(),
+                None => crate::claude_lock::lock_dir(env_var("CLAUDE_CONFIG_DIR").as_deref(), home.as_deref()).ok_or_else(|| io::Error::other("no home folder"))?,
+            };
+            if !crate::claude_lock::installed(&dir) && which("claude").is_none() {
+                return Err(io::Error::new(io::ErrorKind::NotFound, "Claude Code isn't installed there"));
+            }
+            crate::claude_lock::remove_stale(&dir);
+            Some(dir)
+        } else {
+            None
+        };
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let id = self.id();
+        let lock = match lock_dir {
+            Some(dir) => {
+                let token = lock["authToken"].as_str().unwrap_or_default().to_string();
+                let path = crate::claude_lock::write(&dir, port, std::process::id(), &strings(&lock["workspaceFolders"]), &token)?;
+                Some((path, token))
+            }
+            None => None,
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        self.listeners.lock().unwrap_or_else(|e| e.into_inner()).insert(id, Listening { port, stop: stop.clone(), lock });
+        let state = Arc::downgrade(self);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let Some(state) = state.upgrade() else { break };
+                if let Ok(stream) = stream {
+                    state.accepted_on(id, stream);
+                }
+            }
+        });
+        Ok(json!({ "id": id, "port": port }))
+    }
+
+    /// A connection to a port listened on for the client: the client hears
+    /// of it before any of what it sends.
+    fn accepted_on(&self, listener: u64, stream: std::net::TcpStream) {
+        let id = self.id();
+        let Ok(mut reading) = stream.try_clone() else { return };
+        self.accepted.lock().unwrap_or_else(|e| e.into_inner()).insert(id, stream);
+        if self.connection.notify("listen/open", json!({ "listener": listener, "id": id })).is_err() {
+            self.accepted.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+            return;
+        }
+        let connection = self.connection.clone();
+        std::thread::spawn(move || {
+            let mut buf = vec![0; 64 * 1024];
+            while let Ok(n) = reading.read(&mut buf) {
+                if n == 0 || connection.notify("listen/data", json!({ "id": id, "data": BASE64.encode(&buf[..n]) })).is_err() {
+                    break;
+                }
+            }
+            let _ = connection.notify("listen/closed", json!({ "id": id }));
+        });
+    }
+
     fn watch(&self, root: &Path) -> io::Result<Value> {
         let (watcher, mut changes) = crate::watcher::Watcher::new(root).map_err(io::Error::other)?;
         let id = self.id();
@@ -459,6 +602,16 @@ impl State {
         }
         Ok(to)
     }
+}
+
+/// A variable as the user's login shell sets it (`CLAUDE_CONFIG_DIR` in a
+/// profile), else as this server has it.
+fn env_var(name: &str) -> Option<String> {
+    login_env().iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()).or_else(|| std::env::var(name).ok())
+}
+
+fn strings(value: &Value) -> Vec<String> {
+    value.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
 }
 
 /// The user's trash folder: freedesktop's, or macOS's.

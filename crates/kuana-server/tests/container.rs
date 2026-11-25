@@ -168,10 +168,32 @@ fn a_running_container_is_worked_in() {
     fs::rename(&trashed, project.join("src/main.c")).unwrap();
     assert!(project.join("src/main.c").exists_on_host());
 
+    // A port here, reached from there (Claude Code's `/ide`), named by
+    // Claude's lock file there; both go with the connection.
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    let here = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let target = here.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let (mut stream, _) = here.accept().unwrap();
+        let mut buf = [0; 64];
+        let n = stream.read(&mut buf).unwrap();
+        std::io::Write::write_all(&mut stream, &buf[..n].to_ascii_uppercase()).unwrap();
+    });
+    let lock = serde_json::json!({ "workspaceFolders": ["/root/proj"], "authToken": "e2e-token" });
+    let back = connected.host.listen_back(target, Some(lock)).unwrap();
+    let lock_file = format!("/root/.claude/ide/{}.lock", back.port);
+    let lock: serde_json::Value = serde_json::from_str(&run(&["exec", &name, "cat", &lock_file])).unwrap();
+    assert_eq!((lock["workspaceFolders"].clone(), lock["authToken"].as_str(), lock["ideName"].as_str()), (serde_json::json!(["/root/proj"]), Some("e2e-token"), Some("Kuana")));
+    assert_eq!(run(&["exec", &name, "stat", "-c", "%a", &lock_file]), "600");
+    let said = run(&["exec", &name, "bash", "-c", &format!("exec 3<>/dev/tcp/127.0.0.1/{}; printf hello >&3; cat <&3", back.port)]);
+    assert_eq!(said, "HELLO");
+
     connection::disconnect(&connected.name);
     // The connection went: so did the server and what it ran.
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(run(&["exec", &name, "sh", "-c", "pgrep -c kuana-server || true"]), "0");
+    assert_eq!(run(&["exec", &name, "sh", "-c", &format!("test -e {lock_file} && echo left || echo gone")]), "gone");
+    drop(back);
 }
 
 /// An image's own PATH (`ENV PATH=/usr/local/cargo/bin:…`) survives a login

@@ -150,10 +150,18 @@ project's folder, type `/ide` and pick Kuana (or start it with `claude --ide`). 
 connected the status bar shows **Claude** with a green light. One Kuana window per project: each
 window offers its own folders.
 
+In a [remote project](remote.md) (SSH, WSL, a container), run `claude` there: in Kuana's terminal,
+which is a shell on that machine, or in any terminal there, in the project's folder. Kuana's
+server on that machine listens for it and passes the connection on to the window through the
+existing connection, so Claude sees and names that machine's paths and nothing needs to be open on
+its firewall. That needs Claude Code on that machine (Kuana looks when the project opens or
+reconnects).
+
 Nothing goes anywhere through Kuana: the connection is on your machine (a local port, with a lock
-file in `~/.claude/ide` holding its key). It's on once Claude Code has run on your machine, for
-local projects (not [remote ones](remote.md)); Settings → Editor → Claude Code
-(`"claude_code_integration": false`) turns it off.
+file in `~/.claude/ide` holding its key; for a remote project, a port and a lock file on that
+machine, which go when the window closes or disconnects). It's on once Claude Code has run on the
+machine the project is on; Settings → Editor → Claude Code (`"claude_code_integration": false`)
+turns it off.
 
 ## Gemini CLI
 

@@ -8,5 +8,9 @@ description = "Kuana's headless server for remote development"
 [dependencies]
 kuana-core = { path = "../kuana-core" }
 
+[dev-dependencies]
+# The container test reads the lock file Claude Code would (`listen_back`).
+serde_json = "1"
+
 [lints]
 workspace = true

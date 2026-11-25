@@ -17,13 +17,18 @@
 //! go to it as [`Request`]s, each waiting on its own thread so a slow answer
 //! holds up nothing else. What this shares with Gemini CLI's connection is in
 //! `agent_ide.rs`.
+//!
+//! A remote project's window (SSH, WSL, a container) runs its server here
+//! too, without a lock file: `kuana-server` listens on the host's loopback
+//! and relays each connection to it (`RemoteHost::listen_back`), and writes
+//! the lock file there; the host's terminals get that port ([`Advertised`]).
+//! Claude on the host names the host's paths (`agent_ide::PathMap`).
 
 mod protocol;
 
 use std::{
-    fs,
-    io,
-    net::{Ipv4Addr, TcpListener, TcpStream},
+    fs, io,
+    net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -42,9 +47,9 @@ use tungstenite::{
     http::{HeaderValue, StatusCode, header::SEC_WEBSOCKET_PROTOCOL},
 };
 
-pub use crate::agent_ide::{Request, ToolCall, file_url};
+pub use crate::agent_ide::{Request, ToolCall};
 
-use crate::agent_ide::{Routes, alive, same_token};
+use crate::agent_ide::{PathMap, Routes, same_token};
 use crate::lint::{Diagnostic, Severity};
 use crate::lsp::protocol::{Encoding, offset_to_position};
 
@@ -53,8 +58,6 @@ const AUTH_HEADER: &str = "x-claude-code-ide-authorization";
 /// The variables that point a terminal's `claude` at a window.
 const PORT_VARIABLE: &str = "CLAUDE_CODE_SSE_PORT";
 const ENABLE_VARIABLE: &str = "ENABLE_IDE_INTEGRATION";
-/// How Claude Code lists Kuana in `/ide`.
-const IDE_NAME: &str = "Kuana";
 /// How long a connection may take to say who it is.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a write may wait for a client that stopped reading.
@@ -62,16 +65,14 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Where Claude Code looks for IDEs' lock files.
 pub fn lock_dir() -> Option<PathBuf> {
-    match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) {
-        Some(dir) => Some(PathBuf::from(dir).join("ide")),
-        None => crate::clone_dialog::home_dir().map(|home| home.join(".claude").join("ide")),
-    }
+    let config = std::env::var("CLAUDE_CONFIG_DIR").ok();
+    kuana_core::claude_lock::lock_dir(config.as_deref(), crate::clone_dialog::home_dir().as_deref())
 }
 
 /// Whether Claude Code has run on this machine (its config folder exists),
 /// so people without it don't get a folder made in their home.
 pub fn claude_installed() -> bool {
-    lock_dir().and_then(|dir| dir.parent().map(Path::is_dir)).unwrap_or(false)
+    lock_dir().is_some_and(|dir| kuana_core::claude_lock::installed(&dir))
 }
 
 /// The servers running: which one a new terminal's `claude` should reach
@@ -85,6 +86,34 @@ pub fn terminal_env(cwd: &Path) -> Vec<(String, String)> {
     SERVERS.env_for(cwd)
 }
 
+fn env_for(port: u16) -> Vec<(String, String)> {
+    vec![(PORT_VARIABLE.to_string(), port.to_string()), (ENABLE_VARIABLE.to_string(), "true".to_string())]
+}
+
+/// A port terminals in some folders point `claude` at (a remote project's
+/// host's, with the mount's folders), until dropped.
+pub struct Advertised {
+    route: u64,
+}
+
+impl Advertised {
+    pub fn new(port: u16, folders: Vec<PathBuf>) -> Advertised {
+        let advertised = Advertised { route: Routes::key() };
+        advertised.set_folders(port, folders);
+        advertised
+    }
+
+    pub fn set_folders(&self, port: u16, folders: Vec<PathBuf>) {
+        SERVERS.set(self.route, folders, env_for(port));
+    }
+}
+
+impl Drop for Advertised {
+    fn drop(&mut self) {
+        SERVERS.remove(self.route);
+    }
+}
+
 /// A window's server. Dropping it stops it and removes its lock file.
 pub struct Server {
     shared: Arc<Shared>,
@@ -92,8 +121,11 @@ pub struct Server {
 
 struct Shared {
     port: u16,
+    /// Its route for terminals (`terminal_env`), when it has a lock file.
+    route: u64,
     token: String,
-    lock_path: PathBuf,
+    /// Its lock file, when it has one (a local window's).
+    lock_path: Option<PathBuf>,
     state: Mutex<protocol::State>,
     clients: Mutex<Vec<Client>>,
     requests: mpsc::UnboundedSender<Request>,
@@ -109,17 +141,22 @@ struct Client {
 }
 
 impl Server {
-    /// Listens on a free loopback port and writes the lock file into
-    /// `lock_dir`; the window's requests come out of the receiver.
-    pub fn start(folders: Vec<PathBuf>, lock_dir: &Path) -> io::Result<(Server, mpsc::UnboundedReceiver<Request>)> {
+    /// Listens on a free loopback port and, with `lock_dir`, writes the lock
+    /// file there and has terminals in `folders` point at it (a local
+    /// window's; a remote one's is advertised on its host); the window's
+    /// requests come out of the receiver. `folders` are as Claude names them.
+    pub fn start(folders: Vec<PathBuf>, lock_dir: Option<&Path>) -> io::Result<(Server, mpsc::UnboundedReceiver<Request>)> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let port = listener.local_addr()?.port();
-        remove_stale_locks(lock_dir);
+        if let Some(dir) = lock_dir {
+            kuana_core::claude_lock::remove_stale(dir);
+        }
         let (requests, received) = mpsc::unbounded();
         let shared = Arc::new(Shared {
             port,
+            route: Routes::key(),
             token: crate::instance::random_token(),
-            lock_path: lock_dir.join(format!("{port}.lock")),
+            lock_path: lock_dir.map(|dir| dir.join(format!("{port}.lock"))),
             state: Mutex::new(protocol::State { folders, selection: None }),
             clients: Mutex::new(Vec::new()),
             requests,
@@ -144,9 +181,19 @@ impl Server {
         Ok((server, received))
     }
 
+    /// Where it listens (loopback).
+    pub fn address(&self) -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::LOCALHOST, self.shared.port))
+    }
+
     #[cfg(test)]
     fn port(&self) -> u16 {
         self.shared.port
+    }
+
+    /// What Claude must send to connect (the lock file's `authToken`).
+    pub fn token(&self) -> &str {
+        &self.shared.token
     }
 
     /// Whether Claude is connected now.
@@ -193,8 +240,10 @@ impl Drop for Server {
     fn drop(&mut self) {
         let shared = &self.shared;
         shared.stopped.store(true, Ordering::Relaxed);
-        let _ = fs::remove_file(&shared.lock_path);
-        SERVERS.remove(shared.port);
+        if let Some(path) = &shared.lock_path {
+            let _ = fs::remove_file(path);
+        }
+        SERVERS.remove(shared.route);
         // Wakes the accepting thread, which then sees it's stopped, and ends
         // the clients' connections.
         let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, shared.port));
@@ -215,41 +264,18 @@ impl Shared {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).folders.clone()
     }
 
+    /// Terminals in its folders point at it, when it has a lock file.
     fn register(&self) {
-        let env = vec![(PORT_VARIABLE.to_string(), self.port.to_string()), (ENABLE_VARIABLE.to_string(), "true".to_string())];
-        SERVERS.set(self.port, self.folders(), env);
+        if self.lock_path.is_some() {
+            SERVERS.set(self.route, self.folders(), env_for(self.port));
+        }
     }
 
-    /// Writes the lock file, readable only by the user: it holds the token.
+    /// Writes the lock file, when it has one.
     fn write_lock(&self) -> io::Result<()> {
+        let Some(dir) = self.lock_path.as_ref().and_then(|p| p.parent()) else { return Ok(()) };
         let folders: Vec<String> = self.folders().iter().map(|f| f.display().to_string()).collect();
-        let content = json!({
-            "pid": std::process::id(),
-            "workspaceFolders": folders,
-            "ideName": IDE_NAME,
-            "transport": "ws",
-            "authToken": self.token,
-        });
-        let dir = self.lock_path.parent().ok_or_else(|| io::Error::other("no lock folder"))?;
-        crate::agent_ide::private_dir(dir, false)?;
-        crate::agent_ide::write_private(&self.lock_path, content.to_string().as_bytes())
-    }
-}
-
-/// Removes the lock files of Kuanas that ended without removing theirs (a
-/// crash, a kill), so `/ide` doesn't offer them.
-fn remove_stale_locks(dir: &Path) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "lock") {
-            continue;
-        }
-        let Some(lock) = fs::read(&path).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()) else { continue };
-        let Some(pid) = lock.get("pid").and_then(Value::as_u64) else { continue };
-        if lock.get("ideName").and_then(Value::as_str) == Some(IDE_NAME) && pid != u64::from(std::process::id()) && !alive(pid as u32) {
-            let _ = fs::remove_file(&path);
-        }
+        kuana_core::claude_lock::write(dir, self.port, std::process::id(), &folders, &self.token).map(|_| ())
     }
 }
 
@@ -378,14 +404,14 @@ fn ask_window(shared: &Shared, outgoing: std_mpsc::Sender<Option<String>>, id: V
 
 /// What `selection_changed` says of a selection (`range`, bytes) in a file:
 /// zero-based lines and UTF-16 columns, as VS Code counts them.
-pub fn selection_payload(path: &Path, rope: &Rope, range: std::ops::Range<usize>) -> Value {
+pub fn selection_payload(map: &PathMap, path: &Path, rope: &Rope, range: std::ops::Range<usize>) -> Value {
     let start = offset_to_position(rope, range.start, Encoding::Utf16);
     let end = offset_to_position(rope, range.end, Encoding::Utf16);
     let text = rope.byte_slice(range.start.min(rope.len_bytes())..range.end.min(rope.len_bytes())).to_string();
     json!({
         "text": text,
-        "filePath": path,
-        "fileUrl": file_url(path),
+        "filePath": map.to_agent(path),
+        "fileUrl": map.url(path),
         "selection": {
             "start": { "line": start.line, "character": start.character },
             "end": { "line": end.line, "character": end.character },
@@ -397,8 +423,8 @@ pub fn selection_payload(path: &Path, rope: &Rope, range: std::ops::Range<usize>
 /// `at_mentioned`'s params, which add a file to Claude's prompt: with a
 /// selection (`range`, bytes), its zero-based lines, the line it ends at the
 /// start of left out.
-pub fn mention(path: &Path, rope: &Rope, range: std::ops::Range<usize>) -> Value {
-    let mut params = json!({ "filePath": path });
+pub fn mention(map: &PathMap, path: &Path, rope: &Rope, range: std::ops::Range<usize>) -> Value {
+    let mut params = json!({ "filePath": map.to_agent(path) });
     if !range.is_empty() {
         let (start, end) = (range.start.min(rope.len_bytes()), range.end.min(rope.len_bytes()));
         let first = rope.byte_to_line(start);
@@ -532,7 +558,7 @@ mod tests {
     }
 
     fn lock_of(server: &Server) -> Value {
-        serde_json::from_slice(&fs::read(&server.shared.lock_path).unwrap()).unwrap()
+        serde_json::from_slice(&fs::read(server.shared.lock_path.as_ref().unwrap()).unwrap()).unwrap()
     }
 
     type Client = tungstenite::WebSocket<TcpStream>;
@@ -566,7 +592,7 @@ mod tests {
     #[test]
     fn writes_a_private_lock_file_and_removes_it() {
         let dir = temp_lock_dir("lock");
-        let (server, _requests) = Server::start(vec![PathBuf::from("/work/app")], &dir).unwrap();
+        let (server, _requests) = Server::start(vec![PathBuf::from("/work/app")], Some(&dir)).unwrap();
         let lock = lock_of(&server);
         assert_eq!(lock["ideName"], "Kuana");
         assert_eq!(lock["transport"], "ws");
@@ -576,38 +602,22 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            assert_eq!(fs::metadata(&server.shared.lock_path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(fs::metadata(server.shared.lock_path.as_ref().unwrap()).unwrap().permissions().mode() & 0o777, 0o600);
             assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
         }
         server.set_folders(vec![PathBuf::from("/work/app"), PathBuf::from("/work/lib")]);
         assert_eq!(lock_of(&server)["workspaceFolders"], json!(["/work/app", "/work/lib"]));
-        let path = server.shared.lock_path.clone();
+        let path = server.shared.lock_path.clone().unwrap();
         drop(server);
         assert!(!path.exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn removes_lock_files_of_kuanas_that_are_gone() {
-        let dir = temp_lock_dir("stale");
-        fs::create_dir_all(&dir).unwrap();
-        // A pid no process has (above the usual limits).
-        let gone = json!({ "pid": 2_147_483_000u32, "ideName": "Kuana" });
-        let other_ide = json!({ "pid": 2_147_483_000u32, "ideName": "Visual Studio Code" });
-        fs::write(dir.join("1.lock"), gone.to_string()).unwrap();
-        fs::write(dir.join("2.lock"), other_ide.to_string()).unwrap();
-        let (server, _requests) = Server::start(Vec::new(), &dir).unwrap();
-        assert_eq!(dir.join("1.lock").exists(), !cfg!(unix));
-        assert!(dir.join("2.lock").exists());
-        drop(server);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn terminals_reach_the_window_holding_their_folder() {
         let dir = temp_lock_dir("env");
-        let (outer, _a) = Server::start(vec![PathBuf::from("/kuana-env-test/app")], &dir).unwrap();
-        let (inner, _b) = Server::start(vec![PathBuf::from("/kuana-env-test/app/sub")], &dir).unwrap();
+        let (outer, _a) = Server::start(vec![PathBuf::from("/kuana-env-test/app")], Some(&dir)).unwrap();
+        let (inner, _b) = Server::start(vec![PathBuf::from("/kuana-env-test/app/sub")], Some(&dir)).unwrap();
         let port_for = |cwd: &str| terminal_env(Path::new(cwd)).into_iter().find(|(k, _)| k == PORT_VARIABLE).map(|(_, v)| v);
         assert_eq!(port_for("/kuana-env-test/app/src"), Some(outer.port().to_string()));
         assert_eq!(port_for("/kuana-env-test/app/sub/x"), Some(inner.port().to_string()));
@@ -622,7 +632,7 @@ mod tests {
     #[test]
     fn refuses_a_client_without_the_token() {
         let dir = temp_lock_dir("auth");
-        let (server, _requests) = Server::start(Vec::new(), &dir).unwrap();
+        let (server, _requests) = Server::start(Vec::new(), Some(&dir)).unwrap();
         assert!(connect(&server, "not-the-token").is_err());
         assert!(!server.has_clients());
         let _ = fs::remove_dir_all(&dir);
@@ -631,7 +641,7 @@ mod tests {
     #[test]
     fn talks_mcp_and_hands_tools_to_the_window() {
         let dir = temp_lock_dir("talk");
-        let (server, mut requests) = Server::start(vec![PathBuf::from("/work/app")], &dir).unwrap();
+        let (server, mut requests) = Server::start(vec![PathBuf::from("/work/app")], Some(&dir)).unwrap();
         server.set_selection(json!({ "text": "fn main" }));
         let mut client = connect(&server, &server.shared.token.clone()).unwrap();
         // The last selection comes first, then the window hears of the client.
@@ -680,23 +690,53 @@ mod tests {
         let rope = Rope::from_str("fn main() {}\nlet é = \"😀x\";\n");
         let line = "fn main() {}\n".len();
         let start = line + "let é = \"".len();
-        let payload = selection_payload(Path::new("/work/a.rs"), &rope, start..start + "😀x".len());
+        let payload = selection_payload(&PathMap::default(), Path::new("/work/a.rs"), &rope, start..start + "😀x".len());
         assert_eq!(payload["text"], "😀x");
         assert_eq!(payload["selection"]["start"], json!({ "line": 1, "character": 9 }));
         assert_eq!(payload["selection"]["end"], json!({ "line": 1, "character": 12 }));
         assert_eq!(payload["selection"]["isEmpty"], false);
-        assert_eq!(selection_payload(Path::new("/work/a.rs"), &rope, 3..3)["selection"]["isEmpty"], true);
+        assert_eq!(selection_payload(&PathMap::default(), Path::new("/work/a.rs"), &rope, 3..3)["selection"]["isEmpty"], true);
     }
 
     #[test]
     fn mentions_name_the_selected_lines() {
         let rope = Rope::from_str("one\ntwo\nthree\n");
         let path = Path::new("/work/a.txt");
-        assert_eq!(mention(path, &rope, 2..2), json!({ "filePath": "/work/a.txt" }));
-        assert_eq!(mention(path, &rope, 4..6), json!({ "filePath": "/work/a.txt", "lineStart": 1, "lineEnd": 1 }));
+        assert_eq!(mention(&PathMap::default(), path, &rope, 2..2), json!({ "filePath": "/work/a.txt" }));
+        assert_eq!(mention(&PathMap::default(), path, &rope, 4..6), json!({ "filePath": "/work/a.txt", "lineStart": 1, "lineEnd": 1 }));
         // Whole lines, the selection ending at the next line's start.
-        assert_eq!(mention(path, &rope, 0..8), json!({ "filePath": "/work/a.txt", "lineStart": 0, "lineEnd": 1 }));
-        assert_eq!(mention(path, &rope, 2..10)["lineEnd"], 2);
+        assert_eq!(mention(&PathMap::default(), path, &rope, 0..8), json!({ "filePath": "/work/a.txt", "lineStart": 0, "lineEnd": 1 }));
+        assert_eq!(mention(&PathMap::default(), path, &rope, 2..10)["lineEnd"], 2);
+    }
+
+    #[test]
+    fn a_remote_windows_server_writes_no_lock_file_here() {
+        let dir = temp_lock_dir("remote");
+        let (server, _requests) = Server::start(vec![PathBuf::from("/home/me/app")], None).unwrap();
+        assert!(!dir.exists() && server.shared.lock_path.is_none());
+        assert!(terminal_env(Path::new("/home/me/app")).is_empty());
+        // Its host's port is advertised to that host's terminals, by the mount's paths.
+        let mount = kuana_core::fs::mount_root("box-env-test");
+        let advertised = Advertised::new(43210, vec![mount.join("home/me/app")]);
+        assert!(terminal_env(&mount.join("home/me/app/src")).contains(&(PORT_VARIABLE.to_string(), "43210".to_string())));
+        assert!(terminal_env(Path::new("/home/me/app/src")).is_empty());
+        drop(advertised);
+        assert!(terminal_env(&mount.join("home/me/app/src")).is_empty());
+        let mut client = connect(&server, server.token()).unwrap();
+        send(&mut client, json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "getWorkspaceFolders" } }));
+        let folders: Value = serde_json::from_str(receive(&mut client)["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(folders["rootPath"], "/home/me/app");
+    }
+
+    #[test]
+    fn payloads_name_a_remote_projects_files_by_the_hosts_paths() {
+        let mount = kuana_core::fs::mount_root("box");
+        let map = PathMap::new(Some(mount.clone()));
+        let file = mount.join("home").join("me").join("a b.rs");
+        let rope = Rope::from_str("one\ntwo\n");
+        let payload = selection_payload(&map, &file, &rope, 4..7);
+        assert_eq!((payload["filePath"].as_str(), payload["fileUrl"].as_str()), (Some("/home/me/a b.rs"), Some("file:///home/me/a%20b.rs")));
+        assert_eq!(mention(&map, &file, &rope, 0..0)["filePath"], "/home/me/a b.rs");
     }
 
     #[test]

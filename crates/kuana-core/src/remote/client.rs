@@ -68,6 +68,11 @@ pub struct RemoteHost {
     ptys: Mutex<HashMap<u64, PtySinks>>,
     /// Local ends of forwarded connections (`forward`), by id.
     sockets: Mutex<HashMap<u64, std::net::TcpStream>>,
+    /// Where connections to the host's ports listened on for this side
+    /// (`listen_back`) go here, by the listener's id.
+    back_targets: Mutex<HashMap<u64, std::net::SocketAddr>>,
+    /// The local ends of those connections, by the server's id for them.
+    back_sockets: Mutex<HashMap<u64, std::net::TcpStream>>,
 }
 
 impl RemoteHost {
@@ -81,6 +86,8 @@ impl RemoteHost {
             watches: Mutex::default(),
             ptys: Mutex::default(),
             sockets: Mutex::default(),
+            back_targets: Mutex::default(),
+            back_sockets: Mutex::default(),
         });
         let weak = Arc::downgrade(&host);
         let connection = host.connection.clone();
@@ -114,6 +121,9 @@ impl RemoteHost {
                     for (_, sinks) in host.ptys.lock().unwrap_or_else(|e| e.into_inner()).drain() {
                         (sinks.exit)(None);
                     }
+                    for (_, socket) in host.back_sockets.lock().unwrap_or_else(|e| e.into_inner()).drain() {
+                        let _ = socket.shutdown(std::net::Shutdown::Both);
+                    }
                 }
             })
             .expect("a thread for the connection");
@@ -139,7 +149,7 @@ impl RemoteHost {
         self.connection.request(method, params)
     }
 
-    fn notified(&self, method: &str, params: &Value) {
+    fn notified(self: &Arc<Self>, method: &str, params: &Value) {
         let id = params["id"].as_u64().unwrap_or(0);
         match method {
             "proc/output" => {
@@ -179,6 +189,22 @@ impl RemoteHost {
             }
             "tcp/closed" => {
                 if let Some(socket) = self.sockets.lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
+                    let _ = socket.shutdown(std::net::Shutdown::Both);
+                }
+            }
+            "listen/open" => self.back_connected(params["listener"].as_u64().unwrap_or(0), id),
+            "listen/data" => {
+                let data = BASE64.decode(params["data"].as_str().unwrap_or("")).unwrap_or_default();
+                let mut sockets = self.back_sockets.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(socket) = sockets.get_mut(&id)
+                    && socket.write_all(&data).is_err()
+                {
+                    sockets.remove(&id);
+                    let _ = self.connection.notify("listen/close", json!({ "id": id }));
+                }
+            }
+            "listen/closed" => {
+                if let Some(socket) = self.back_sockets.lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
                     let _ = socket.shutdown(std::net::Shutdown::Both);
                 }
             }
@@ -300,6 +326,47 @@ impl RemoteHost {
         self.sockets.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     }
 
+    /// A port on the host's loopback whose connections come to `target` here
+    /// (the reverse of `forward`), until the result is dropped. With
+    /// `claude_lock` (`workspaceFolders`, `authToken`; host paths), the host
+    /// gets Claude Code's lock file for it, and the call fails when Claude
+    /// Code isn't installed there.
+    pub fn listen_back(self: &Arc<Self>, target: std::net::SocketAddr, claude_lock: Option<Value>) -> io::Result<ListenedBack> {
+        let answer = self.call("listen/start", json!({ "claude_lock": claude_lock }))?;
+        let (Some(id), Some(port)) = (answer["id"].as_u64(), answer["port"].as_u64().and_then(|p| u16::try_from(p).ok())) else {
+            return Err(io::Error::other("kuana-server didn't say where it listens"));
+        };
+        self.back_targets.lock().unwrap_or_else(|e| e.into_inner()).insert(id, target);
+        Ok(ListenedBack { host: Arc::downgrade(self), id, port })
+    }
+
+    /// A connection came to a port listened on for this side: it's relayed
+    /// to the listener's target, connected before anything it sends is read
+    /// (the next notifications), so none of it is lost.
+    fn back_connected(self: &Arc<Self>, listener: u64, id: u64) {
+        let target = self.back_targets.lock().unwrap_or_else(|e| e.into_inner()).get(&listener).copied();
+        let local = target.and_then(|target| std::net::TcpStream::connect_timeout(&target, std::time::Duration::from_secs(2)).ok());
+        let Some((local, mut reading)) = local.and_then(|local| local.try_clone().ok().map(|reading| (local, reading))) else {
+            let _ = self.connection.notify("listen/close", json!({ "id": id }));
+            return;
+        };
+        self.back_sockets.lock().unwrap_or_else(|e| e.into_inner()).insert(id, local);
+        let host = Arc::downgrade(self);
+        std::thread::spawn(move || {
+            let mut buf = vec![0; 64 * 1024];
+            while let Ok(n) = reading.read(&mut buf) {
+                let Some(host) = host.upgrade().filter(|_| n > 0) else { break };
+                if host.connection.notify("listen/send", json!({ "id": id, "data": BASE64.encode(&buf[..n]) })).is_err() {
+                    break;
+                }
+            }
+            if let Some(host) = host.upgrade() {
+                host.back_sockets.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                let _ = host.connection.notify("listen/close", json!({ "id": id }));
+            }
+        });
+    }
+
     /// The host's login shell (`$SHELL` there).
     pub fn shell(&self) -> Option<String> {
         self.call("server/info", Value::Null).ok()?["shell"].as_str().filter(|s| !s.is_empty()).map(str::to_string)
@@ -309,6 +376,38 @@ impl RemoteHost {
     pub fn scan(&self, path: &str) -> io::Result<Vec<(String, bool)>> {
         let files = self.call("scan", json!({ "path": path }))?;
         Ok(files.as_array().into_iter().flatten().filter_map(|f| Some((f[0].as_str()?.to_string(), f[1].as_bool().unwrap_or(false)))).collect())
+    }
+}
+
+/// A port listened on there for this side (`RemoteHost::listen_back`), until
+/// dropped: then it stops, and its lock file goes.
+pub struct ListenedBack {
+    host: std::sync::Weak<RemoteHost>,
+    id: u64,
+    /// The port on the host's loopback.
+    pub port: u16,
+}
+
+impl ListenedBack {
+    /// The project's folders changed: Claude Code's lock file says so.
+    pub fn set_folders(&self, folders: &[String]) {
+        if let Some(host) = self.host.upgrade() {
+            let _ = host.connection.notify("listen/folders", json!({ "id": self.id, "workspaceFolders": folders }));
+        }
+    }
+
+    /// Whether it's still there (the connection it was made on is).
+    pub fn is_on(&self, host: &Arc<RemoteHost>) -> bool {
+        self.host.upgrade().is_some_and(|h| Arc::ptr_eq(&h, host) && h.is_connected())
+    }
+}
+
+impl Drop for ListenedBack {
+    fn drop(&mut self) {
+        if let Some(host) = self.host.upgrade() {
+            host.back_targets.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+            let _ = host.connection.notify("listen/stop", json!({ "id": self.id }));
+        }
     }
 }
 

@@ -3894,6 +3894,7 @@ dependencies = [
  "oxc_semantic",
  "oxc_span 0.139.0",
  "oxc_syntax 0.139.0",
+ "percent-encoding",
  "polling",
  "pulldown-cmark",
  "regex",
@@ -3957,6 +3958,7 @@ name = "kuana-server"
 version = "0.3.2"
 dependencies = [
  "kuana-core",
+ "serde_json",
 ]
 
 [[package]]

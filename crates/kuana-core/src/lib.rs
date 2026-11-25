@@ -2,11 +2,13 @@
 //! (`kuana-server`, see `plans/remote-dev.md`) need. The editor re-exports
 //! these modules at its root, so `crate::search` and the like work as before.
 
+pub mod claude_lock;
 pub mod encoding;
 pub mod exec;
 pub mod fs;
 pub mod jsonc;
 pub mod paths;
+pub mod private_files;
 pub mod process;
 pub mod remote;
 pub mod project;

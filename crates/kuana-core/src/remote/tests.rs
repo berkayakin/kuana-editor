@@ -24,11 +24,17 @@ use crate::{
 fn connect(name: &str, trash: &Path) -> (PathBuf, Arc<RemoteHost>, std::thread::JoinHandle<()>) {
     let (server_in, client_out) = io::pipe().unwrap();
     let (client_in, server_out) = io::pipe().unwrap();
-    let options = server::Options { trash: Some(trash.to_path_buf()) };
+    let options = server::Options { trash: Some(trash.to_path_buf()), claude_lock_dir: Some(claude_lock_dir(trash)) };
     let serving = std::thread::spawn(move || server::serve(server_in, server_out, options));
     let host = RemoteHost::start(client_in, client_out);
     let root = client::mount(name, host.clone());
     (root, host, serving)
+}
+
+/// The server's Claude Code lock folder, beside its trash (made by the
+/// tests that need Claude Code "installed" there).
+fn claude_lock_dir(trash: &Path) -> PathBuf {
+    trash.with_extension("claude").join("ide")
 }
 
 fn temp(name: &str) -> PathBuf {
@@ -326,4 +332,58 @@ fn forwarded_ports_stop_when_dropped() {
     std::thread::sleep(Duration::from_millis(100));
     assert!(std::net::TcpStream::connect(("127.0.0.1", local)).is_err(), "still listening");
     client::unmount(&root);
+}
+
+/// The reverse: a port there whose connections come here (Claude Code on the
+/// host reaching a window's `/ide` server), advertised by a lock file there
+/// that goes when the port does.
+#[test]
+fn ports_here_are_reached_from_there() {
+    let trash = temp("back-trash");
+    let lock_dir = claude_lock_dir(&trash);
+    let _ = std::fs::remove_dir_all(lock_dir.parent().unwrap());
+    std::fs::create_dir_all(lock_dir.parent().unwrap()).unwrap();
+    let (root, host, _serving) = connect("back-test", &trash);
+    // Kuana's server here: answers in upper case, then hangs up.
+    let here = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let target = here.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let (mut stream, _) = here.accept().unwrap();
+        let mut buf = [0; 64];
+        let n = stream.read(&mut buf).unwrap();
+        stream.write_all(&buf[..n].to_ascii_uppercase()).unwrap();
+    });
+    let lock = serde_json::json!({ "workspaceFolders": ["/work/app"], "authToken": "token" });
+    let back = host.listen_back(target, Some(lock)).unwrap();
+    let lock_file = lock_dir.join(format!("{}.lock", back.port));
+    let read_lock = || serde_json::from_slice::<serde_json::Value>(&std::fs::read(&lock_file).unwrap()).unwrap();
+    assert_eq!(read_lock()["workspaceFolders"], serde_json::json!(["/work/app"]));
+    assert_eq!((read_lock()["authToken"].as_str(), read_lock()["pid"].as_u64()), (Some("token"), Some(u64::from(std::process::id()))));
+
+    // A program there connects to the port; what it says arrives here, the
+    // answer goes back, and so does the end.
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", back.port)).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    stream.write_all(b"hello there").unwrap();
+    let mut answer = [0; 11];
+    stream.read_exact(&mut answer).unwrap();
+    assert_eq!(&answer, b"HELLO THERE");
+    assert_eq!(stream.read(&mut [0; 8]).unwrap(), 0);
+
+    let wait_until = |done: &dyn Fn() -> bool| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "timed out");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    back.set_folders(&["/work/app".into(), "/work/lib".into()]);
+    wait_until(&|| read_lock()["workspaceFolders"].as_array().is_some_and(|f| f.len() == 2));
+    // Dropped: the port and the lock file go.
+    let port = back.port;
+    drop(back);
+    wait_until(&|| !lock_file.exists());
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err(), "still listening");
+    client::unmount(&root);
+    let _ = std::fs::remove_dir_all(lock_dir.parent().unwrap());
 }

@@ -1527,12 +1527,12 @@ fn start_pty(
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
     env.insert("TERM_PROGRAM".to_string(), "Kuana".to_string());
-    // Claude Code (`/ide`) and Gemini CLI (`/ide enable`): a local shell's
-    // `claude` or `gemini` connects to the window whose project holds the folder.
-    if remote.is_none() {
-        env.extend(crate::claude_ide::terminal_env(cwd));
-        env.extend(crate::gemini_ide::terminal_env(cwd));
-    }
+    // Claude Code (`/ide`) and Gemini CLI (`/ide enable`): the shell's
+    // `claude` or `gemini` connects to the window whose project holds the
+    // folder (a remote project's `claude` through the port its host listens
+    // on; Gemini CLI's routes are local folders only).
+    env.extend(crate::claude_ide::terminal_env(cwd));
+    env.extend(crate::gemini_ide::terminal_env(cwd));
     // Shell integration: Kuana's script for zsh, bash and fish; marks from
     // any shell that makes them itself are read too.
     let mut shell = shell;

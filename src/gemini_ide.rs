@@ -95,6 +95,8 @@ pub struct Server {
 
 struct Shared {
     port: u16,
+    /// Its route for terminals (`terminal_env`).
+    route: u64,
     token: String,
     file: PathBuf,
     state: Mutex<State>,
@@ -129,6 +131,7 @@ impl Server {
         let (requests, received) = mpsc::unbounded();
         let shared = Arc::new(Shared {
             port,
+            route: Routes::key(),
             token: crate::instance::random_token(),
             file: dir.join(protocol::file_name(std::process::id(), port)),
             state: Mutex::new(State { folders, context: None }),
@@ -208,7 +211,7 @@ impl Drop for Server {
         let shared = &self.shared;
         shared.stopped.store(true, Ordering::Relaxed);
         let _ = fs::remove_file(&shared.file);
-        SERVERS.remove(shared.port);
+        SERVERS.remove(shared.route);
         // Wakes the accepting thread, which then sees it's stopped.
         let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, shared.port));
         shared.end_connections();
@@ -239,7 +242,7 @@ impl Shared {
             (WORKSPACE_VARIABLE.to_string(), protocol::workspace_path(&folders)),
             (TOKEN_VARIABLE.to_string(), self.token.clone()),
         ];
-        SERVERS.set(self.port, folders, env);
+        SERVERS.set(self.route, folders, env);
     }
 
     fn write_file(&self) -> io::Result<()> {
