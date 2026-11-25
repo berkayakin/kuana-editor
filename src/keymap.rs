@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use crate::{
     agents::view::{SendMessage, StopAgent},
+    diff_view::{AcceptProposal, RejectProposal},
     about::About,
     editor::*,
     picker::ActionEntry,
@@ -31,7 +32,7 @@ use crate::{
         AddLogpoint, OpenExtensions, ReloadExtensions, ProjectTrust, UndoFileChange, RedoFileChange, OpenProjectSettings,
         ToggleResults, NextResult, PreviousResult, RerunFailedTests, ShowLocalHistory,
         ToggleAutoSave, ToggleSidebar, ToggleSidebarPosition, ToggleSecondSidebar, ToggleClassicLayout, ToggleToolsInTitleBar, ToggleCompactActivityBar, ToggleZenMode, AddToClaudeContext, ImportSettings, CheckForUpdates, WelcomeSetup, GoToSymbol, SplitTerminal, RenameTerminal, SelectOpenedFile, InstallShellCommand,
-        ToggleDatabase, NewDatabaseConnection, ToggleDatabaseResults, ToggleAgents, NewAgentSession, AskAgent, FixWithAgent, RunSqlStatement, RunSqlScript, NewSqlScript,
+        ToggleDatabase, NewDatabaseConnection, ToggleDatabaseResults, ToggleAgents, NewAgentSession, AskAgent, FixWithAgent, InlineAssist, WriteCommitMessage, RunSqlStatement, RunSqlScript, NewSqlScript,
         ToggleBookmark, ToggleBookmarkWithMnemonic, EditBookmarkDescription, ShowBookmarks, NextBookmark, PreviousBookmark, GoToBookmark, ShowTodo, ShowTestExplorer,
         OpenResultsInEditor, ProblemsInEditor, CompareWithClipboard, CompareWithFile, CompareWithBranch, NewScratchFile, ShowScratches,
     },
@@ -126,6 +127,8 @@ fn common(mac: bool) -> Vec<KeyBinding> {
         KeyBinding::new("down", MoveDown, Some("PushDialog")),
         // The diff viewer: F7 / ⇧F7 step through changes (JetBrains and VS Code).
         KeyBinding::new("f7", NextChange, Some("DiffView")),
+        KeyBinding::new("secondary-enter", AcceptProposal, Some("DiffView")),
+        KeyBinding::new("secondary-backspace", RejectProposal, Some("DiffView")),
         KeyBinding::new("shift-f7", PreviousChange, Some("DiffView")),
         KeyBinding::new("ctrl-alt-shift-down", NextChange, Some("DiffView")),
         KeyBinding::new("ctrl-alt-shift-up", PreviousChange, Some("DiffView")),
@@ -211,12 +214,14 @@ fn common(mac: bool) -> Vec<KeyBinding> {
             KeyBinding::new("cmd-alt-a", ToggleAgents, None),
             KeyBinding::new("cmd-alt-n", NewAgentSession, None),
             KeyBinding::new("cmd-alt-i", AskAgent, None),
+            KeyBinding::new("ctrl-enter", InlineAssist, Some("Editor")),
         ]);
     } else {
         b.extend([
             KeyBinding::new("ctrl-shift-y", ToggleAgents, None),
             KeyBinding::new("ctrl-shift-u", NewAgentSession, None),
             KeyBinding::new("ctrl-shift-h", AskAgent, None),
+            KeyBinding::new("alt-shift-i", InlineAssist, Some("Editor")),
         ]);
     }
     if mac {
@@ -996,6 +1001,8 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("New Agent Session", NewAgentSession),
         a("Ask Agent", AskAgent),
         a("Fix with Agent", FixWithAgent),
+        a("Inline Assist", InlineAssist),
+        a("Write Commit Message with AI", WriteCommitMessage),
         a("New Database Connection…", NewDatabaseConnection),
         a("Toggle Database Results", ToggleDatabaseResults),
         a("Run SQL Statement", RunSqlStatement),
@@ -1442,6 +1449,9 @@ mod tests {
             assert_eq!(resolve(base, "cmd-w", &["Workspace", "Terminal"]), Some("workspace::CloseTerminal"), "{base:?}");
         }
         assert_eq!(resolve(BaseKeymap::JetBrains, "cmd-t", &["Workspace", "Editor"]), Some("workspace::GitPull"));
+        // A proposed change's tab takes ⌘↩ / ⌘⌫ (Ctrl elsewhere).
+        assert_eq!(resolve(BaseKeymap::JetBrains, "cmd-enter", &["Workspace", "DiffView"]), Some("diff::AcceptProposal"));
+        assert_eq!(resolve(BaseKeymap::VSCode, "cmd-backspace", &["Workspace", "DiffView"]), Some("diff::RejectProposal"));
         // JetBrains' F7: Next Change in a diff, Step Into elsewhere.
         assert_eq!(resolve(BaseKeymap::JetBrains, "f7", &["Workspace", "DiffView"]), Some("editor::NextChange"));
         assert_eq!(resolve(BaseKeymap::JetBrains, "f7", &["Workspace", "Editor"]), Some("workspace::StepInto"));

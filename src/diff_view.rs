@@ -13,7 +13,7 @@ use std::{
 
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla, IntoElement, ListAlignment,
-    ListOffset, ListState, Pixels, Render, Rgba, SharedString, StyledText, Subscription, Task, Window, canvas, div, list,
+    ListOffset, ListState, Pixels, Render, Rgba, SharedString, StyledText, Subscription, Task, Window, actions, canvas, div, list,
     pattern_slash, prelude::*, px,
 };
 use ropey::Rope;
@@ -58,6 +58,16 @@ const SIDE_BY_SIDE_MIN_WIDTH: f32 = 720.;
 fn fits_side_by_side(width: Pixels) -> bool {
     width == px(0.) || width >= px(SIDE_BY_SIDE_MIN_WIDTH)
 }
+
+actions!(
+    diff,
+    [
+        /// Accept in a proposed change's tab (an agent's, Inline Assist's).
+        AcceptProposal,
+        /// Reject (or Stop, while it's written) in a proposed change's tab.
+        RejectProposal,
+    ]
+);
 
 pub enum DiffViewEvent {
     /// Nothing left to show (a working tree change staged or discarded): its tab closes.
@@ -211,6 +221,9 @@ pub struct DiffView {
     loading: Option<Task<()>>,
     /// The pause after an edit of `document` before the diff follows it.
     follow: Option<Task<()>>,
+    /// A proposed change still being written (Inline Assist streaming):
+    /// Accept waits for it.
+    writing: bool,
 }
 
 impl EventEmitter<DiffViewEvent> for DiffView {}
@@ -233,6 +246,7 @@ impl DiffView {
             seen_version: 0,
             loading: None,
             follow: None,
+            writing: false,
         };
         view.set_document(document, cx);
         view.reload(cx);
@@ -249,6 +263,18 @@ impl DiffView {
 
     pub fn source(&self) -> &DiffSource {
         &self.source
+    }
+
+    /// A proposed change's text as it's written; `writing` until the end.
+    pub fn set_proposed(&mut self, new_text: Arc<str>, writing: bool, cx: &mut Context<Self>) {
+        if let DiffSource::Proposed { text, .. } = &mut self.source {
+            if *text != new_text {
+                *text = new_text;
+                self.reload(cx);
+            }
+            self.writing = writing;
+            cx.notify();
+        }
     }
 
     /// Shows another diff in this view (a Local History version of the same file).
@@ -650,6 +676,7 @@ impl Render for DiffView {
             DiffSource::Commit { sha, summary, .. } => format!("{} · {}", &sha[..sha.len().min(8)], summary),
             DiffSource::History { label, .. } => format!("Local History · {label}"),
             DiffSource::Compare { with, .. } => format!("Compared with {}", with.label(&self.repo)),
+            DiffSource::Proposed { agent, .. } if self.writing => format!("{} is writing…", agent.name()),
             DiffSource::Proposed { agent, .. } => format!("Proposed by {}", agent.name()),
         };
         // Side by side / Unified switch.
@@ -736,13 +763,15 @@ impl Render for DiffView {
             )
             .when(matches!(self.source, DiffSource::Proposed { .. }), |el| {
                 el.child(
-                    text_button("diff-reject", "Reject", false, cx)
+                    text_button("diff-reject", if self.writing { "Stop" } else { "Reject" }, false, cx)
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(DiffViewEvent::Proposal { accepted: false }))),
                 )
-                .child(
-                    text_button("diff-accept", "Accept", true, cx)
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(DiffViewEvent::Proposal { accepted: true }))),
-                )
+                .when(!self.writing, |el| {
+                    el.child(
+                        text_button("diff-accept", "Accept", true, cx)
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(DiffViewEvent::Proposal { accepted: true }))),
+                    )
+                })
             })
             .when(!deleted, |el| {
                 let path = path.clone();
@@ -802,6 +831,14 @@ impl Render for DiffView {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_next))
             .on_action(cx.listener(Self::on_previous))
+            .when(matches!(self.source, DiffSource::Proposed { .. }), |el| {
+                el.on_action(cx.listener(|this, _: &AcceptProposal, _, cx| {
+                    if !this.writing {
+                        cx.emit(DiffViewEvent::Proposal { accepted: true });
+                    }
+                }))
+                .on_action(cx.listener(|_, _: &RejectProposal, _, cx| cx.emit(DiffViewEvent::Proposal { accepted: false })))
+            })
             .size_full()
             .child(header)
             .child(body)

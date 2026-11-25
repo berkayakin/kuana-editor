@@ -44,10 +44,6 @@ impl Message {
         Message { role: Role::User, content: vec![Part::text(text)] }
     }
 
-    pub fn assistant(text: impl Into<String>) -> Message {
-        Message { role: Role::Assistant, content: vec![Part::text(text)] }
-    }
-
     /// Its text parts, joined.
     pub fn text(&self) -> String {
         self.content.iter().filter_map(|p| if let Part::Text { text } = p { Some(text.as_str()) } else { None }).collect()
@@ -167,6 +163,7 @@ pub struct Reply {
 }
 
 impl Reply {
+    #[cfg(test)]
     pub fn text(&self) -> String {
         Message { role: Role::Assistant, content: self.parts.clone() }.text()
     }

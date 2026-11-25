@@ -100,6 +100,8 @@ mod folders;
 mod repos;
 mod git_ops;
 mod import;
+mod inline_assist;
+mod commit_draft;
 mod copilot;
 mod database;
 mod extension_ui;
@@ -318,6 +320,11 @@ actions!(
         AskAgent,
         /// Asks an agent to fix the problem at the caret.
         FixWithAgent,
+        /// The Commit view's message written by the AI model (`commit_draft.rs`).
+        WriteCommitMessage,
+        /// The selection rewritten (or code written at the caret) by the AI
+        /// model, as a proposed change (`workspace/inline_assist.rs`).
+        InlineAssist,
         NewDatabaseConnection,
         /// The Database panel (query results) in the bottom area.
         ToggleDatabaseResults,
@@ -956,6 +963,8 @@ pub struct Workspace {
     agent_sessions: HashMap<String, Subscription>,
     /// The agent a new session starts with (the one chosen last).
     last_agent: String,
+    /// The Commit view's message being written by the AI model (`commit_draft.rs`).
+    commit_draft: Option<Task<()>>,
     /// The Database panel: the last SQL run's results.
     db_results: Entity<QueryResults>,
     /// The last SQL run: its editor and its statements' ranges (Output's rows go to them).
@@ -1144,6 +1153,8 @@ impl Workspace {
             GitPanelEvent::OpenFile(path) => ws.open_path(path.clone(), window, cx),
             GitPanelEvent::OpenMerge(path) => ws.show_merge(path.clone(), window, cx),
             GitPanelEvent::Menu { file, staged, position } => ws.open_git_file_menu(file.clone(), *staged, *position, window, cx),
+            GitPanelEvent::DraftMessage { all, untracked, notes } => ws.draft_commit_message(*all, untracked.clone(), notes.clone(), cx),
+            GitPanelEvent::StopDraft => ws.commit_draft_ended(cx),
         });
         let tree = cx.new(ProjectTree::new);
         let tree_subscription = cx.subscribe_in(&tree, window, |ws, _, event: &TreeEvent, window, cx| match event {
@@ -1470,6 +1481,7 @@ impl Workspace {
             agent_tabs: HashMap::new(),
             agent_sessions: HashMap::new(),
             last_agent: crate::agents::store::KUANA_AGENT.to_string(),
+            commit_draft: None,
             db_results,
             db_run: None,
             has_db_results: false,

@@ -39,7 +39,7 @@ pub(super) struct AgentBridges {
     sent: Option<(EntityId, u64, u64)>,
     sending: Option<Task<()>>,
     /// Proposed changes waiting for the user, by their diff tab.
-    proposals: HashMap<EntityId, Proposal>,
+    pub(super) proposals: HashMap<EntityId, Proposal>,
     /// When each file was last the active tab (Unix milliseconds), which
     /// Gemini CLI orders its file list by.
     pub(super) focused: HashMap<PathBuf, u64>,
@@ -52,6 +52,10 @@ pub(super) enum Proposal {
     /// Gemini CLI's `openDiff` (answered when the tab opened): the user's
     /// decision goes as a notification naming the file as Gemini did.
     Gemini { file_path: String },
+    /// Inline Assist's rewrite (`workspace/inline_assist.rs`): `base` is the
+    /// file's text it was made from, `writing` the model's reply still
+    /// streaming in (dropped, it stops).
+    Assist { tab_name: String, base: Arc<str>, writing: Option<Task<()>> },
 }
 
 impl Proposal {
@@ -59,6 +63,7 @@ impl Proposal {
         match self {
             Proposal::Claude { .. } => Agent::ClaudeCode,
             Proposal::Gemini { .. } => Agent::GeminiCli,
+            Proposal::Assist { .. } => Agent::Kuana,
         }
     }
 
@@ -67,6 +72,7 @@ impl Proposal {
         match self {
             Proposal::Claude { tab_name, .. } => tab_name,
             Proposal::Gemini { file_path } => file_path,
+            Proposal::Assist { tab_name, .. } => tab_name,
         }
     }
 
@@ -79,6 +85,7 @@ impl Proposal {
                     server.broadcast("ide/diffRejected", json!({ "filePath": file_path }));
                 }
             }
+            Proposal::Assist { .. } => {}
         }
     }
 
@@ -103,6 +110,7 @@ impl Proposal {
                     Err(_) => server.broadcast("ide/diffRejected", json!({ "filePath": file_path })),
                 }
             }
+            Proposal::Assist { .. } => {}
         }
     }
 }
@@ -175,7 +183,7 @@ impl Workspace {
     /// Shows a proposed change in a diff tab, where it waits for the user. A
     /// proposal under the name of one shown replaces it. The proposal comes
     /// back when the tab couldn't open.
-    pub(super) fn show_proposal(&mut self, path: PathBuf, tab_name: String, text: String, proposal: Proposal, window: &mut Window, cx: &mut Context<Self>) -> Result<(), Box<Proposal>> {
+    pub(super) fn show_proposal(&mut self, path: PathBuf, tab_name: String, text: String, proposal: Proposal, window: &mut Window, cx: &mut Context<Self>) -> Result<Entity<DiffView>, Box<Proposal>> {
         let agent = proposal.agent();
         let source = DiffSource::Proposed { agent, new_file: !path.is_file_on_host(), path, tab_name: tab_name.clone(), text: text.into() };
         let replaced: Vec<EntityId> = self.agents.proposals.iter().filter(|(_, p)| p.agent() == agent && p.tab_name() == tab_name).map(|(id, _)| *id).collect();
@@ -187,7 +195,7 @@ impl Workspace {
         match self.show_diff(source, window, cx) {
             Some(diff) => {
                 self.agents.proposals.insert(diff.entity_id(), proposal);
-                Ok(())
+                Ok(diff)
             }
             None => Err(Box::new(proposal)),
         }
@@ -198,6 +206,18 @@ impl Workspace {
     pub(super) fn agent_proposal_decided(&mut self, diff: &Entity<DiffView>, accepted: bool, window: &mut Window, cx: &mut Context<Self>) {
         let proposal = self.agents.proposals.remove(&diff.entity_id());
         let DiffSource::Proposed { agent, path, text, new_file, .. } = diff.read(cx).source().clone() else { return };
+        if let Some(Proposal::Assist { tab_name, base, writing }) = proposal {
+            if accepted && writing.is_some() {
+                // Still being written: it waits for the end.
+                self.agents.proposals.insert(diff.entity_id(), Proposal::Assist { tab_name, base, writing });
+                return;
+            }
+            self.remove_item(&PaneItem::Diff(diff.clone()), window, cx);
+            if accepted {
+                self.accept_assist(&path, &base, &text, cx);
+            }
+            return;
+        }
         self.remove_item(&PaneItem::Diff(diff.clone()), window, cx);
         if !accepted {
             if let Some(proposal) = proposal {
@@ -308,6 +328,7 @@ impl Workspace {
             let id = match agent {
                 Agent::ClaudeCode => "claude-status",
                 Agent::GeminiCli => "gemini-status",
+                Agent::Kuana => "kuana-status",
             };
             items.push(
                 super::status_bar::status_button(id, theme)

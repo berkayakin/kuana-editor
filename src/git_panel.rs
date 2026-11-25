@@ -145,11 +145,18 @@ pub enum GitPanelEvent {
     OpenMerge(PathBuf),
     /// A file's row was right-clicked (`staged`: in the Staged section).
     Menu { file: FileStatus, staged: bool, position: Point<Pixels> },
+    /// Write the message with the AI model: from what the commit would take
+    /// (all tracked changes, else the staged ones and `untracked`), with
+    /// what's typed as notes.
+    DraftMessage { all: bool, untracked: Vec<String>, notes: String },
+    StopDraft,
 }
 
 pub struct GitPanel {
     message: Entity<Editor>,
     amend: bool,
+    /// The AI model is writing the message.
+    drafting: bool,
     /// Working-tree root of the repository, if the project is in one.
     repo: Option<PathBuf>,
     /// The open folder (to offer `git init` when it isn't a repository).
@@ -208,6 +215,7 @@ impl GitPanel {
         Self {
             message,
             amend: false,
+            drafting: false,
             repo: None,
             project: None,
             status: Arc::new(RepoStatus::default()),
@@ -289,6 +297,29 @@ impl GitPanel {
         }
         self.amend = false;
         cx.notify();
+    }
+
+    pub fn set_drafting(&mut self, drafting: bool, cx: &mut Context<Self>) {
+        if self.drafting != drafting {
+            self.drafting = drafting;
+            cx.notify();
+        }
+    }
+
+    /// The message box's text (a drafted message as it's written).
+    pub fn set_message(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.message.update(cx, |m, cx| m.set_text(text, cx));
+    }
+
+    /// The message box's AI button: write the message, or stop writing it.
+    pub fn draft_message(&mut self, cx: &mut Context<Self>) {
+        if self.drafting {
+            cx.emit(GitPanelEvent::StopDraft);
+            return;
+        }
+        let mut untracked: Vec<String> = self.include.iter().cloned().collect();
+        untracked.sort();
+        cx.emit(GitPanelEvent::DraftMessage { all: commits_all(&self.status, &self.include, self.amend), untracked, notes: self.message_text(cx) });
     }
 
     pub fn focus_message(&self, window: &mut Window, cx: &App) {
@@ -813,6 +844,7 @@ impl GitPanel {
                     el.hover_fill(rest, if can_commit { hover } else { rest })
                 })
         };
+        let draft_tip = if self.drafting { "Stop Writing" } else { "Write the Message with AI (what's typed guides it)" };
         div()
             .flex()
             .flex_col()
@@ -823,13 +855,26 @@ impl GitPanel {
             .border_color(theme.border_subtle)
             .child(focus_ring(
                 div()
+                    .relative()
                     .h(px(96.))
                     .px_2p5()
                     .py_1p5()
                     .rounded(px(10.))
                     .bg(theme.background)
                     .overflow_hidden()
-                    .child(self.message.clone()),
+                    .child(self.message.clone())
+                    .child(
+                        div().absolute().right(px(4.)).bottom(px(4.)).child(
+                            crate::ui::icon_button(
+                                "draft-message",
+                                if self.drafting { Icon::Stop } else { Icon::Sparkle },
+                                if self.drafting { theme.accent.into() } else { theme.text_dim.into() },
+                                cx,
+                            )
+                            .tooltip(move |_, cx| tooltip_view(draft_tip, cx))
+                            .on_click(cx.listener(|this, _, _, cx| this.draft_message(cx))),
+                        ),
+                    ),
                 "commit-message",
                 focused,
                 &theme,

@@ -24,6 +24,8 @@ pub use kuana_core::private_files::{alive, private_dir, write_private};
 pub enum Agent {
     ClaudeCode,
     GeminiCli,
+    /// Kuana's own model requests (Inline Assist), proposed like an agent's.
+    Kuana,
 }
 
 impl Agent {
@@ -31,6 +33,7 @@ impl Agent {
         match self {
             Agent::ClaudeCode => "Claude Code",
             Agent::GeminiCli => "Gemini CLI",
+            Agent::Kuana => "Kuana AI",
         }
     }
 
@@ -39,6 +42,7 @@ impl Agent {
         match self {
             Agent::ClaudeCode => "Claude",
             Agent::GeminiCli => "Gemini",
+            Agent::Kuana => "Kuana",
         }
     }
 }

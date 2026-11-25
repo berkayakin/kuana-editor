@@ -15,6 +15,7 @@ pub mod openai;
 pub mod providers;
 pub mod sse;
 pub mod stream;
+pub mod tasks;
 
 use std::collections::BTreeMap;
 

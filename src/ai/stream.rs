@@ -10,11 +10,11 @@ use std::{
     time::Duration,
 };
 
-use futures::{StreamExt as _, channel::mpsc};
+use futures::channel::mpsc;
 
 use super::{
     anthropic, http,
-    message::{Accumulator, Reply, Request, StreamEvent},
+    message::{Request, StreamEvent},
     openai,
     providers::{Endpoint, Wire},
     sse,
@@ -34,10 +34,12 @@ impl Drop for Stream {
     }
 }
 
+#[cfg(test)]
 impl Stream {
     /// Reads the whole reply, `each` seeing every event on the way.
-    pub async fn reply(mut self, mut each: impl FnMut(&StreamEvent)) -> Result<Reply, String> {
-        let mut acc = Accumulator::default();
+    pub async fn reply(mut self, mut each: impl FnMut(&StreamEvent)) -> Result<super::message::Reply, String> {
+        use futures::StreamExt as _;
+        let mut acc = super::message::Accumulator::default();
         while let Some(event) = self.events.next().await {
             each(&event);
             acc.push(&event);

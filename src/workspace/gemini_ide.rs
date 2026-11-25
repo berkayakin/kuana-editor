@@ -78,7 +78,7 @@ impl Workspace {
         let path = self.agent_path(&file_path);
         let proposal = Proposal::Gemini { file_path: file_path.clone() };
         let shown = self.show_proposal(path, file_path, text, proposal, window, cx);
-        call.answer(shown.map(|()| Vec::new()).map_err(|_| "Kuana couldn't show the change".to_string()));
+        call.answer(shown.map(|_| Vec::new()).map_err(|_| "Kuana couldn't show the change".to_string()));
     }
 
     /// Tells Gemini what's open and selected (it hears of it when it changed).
