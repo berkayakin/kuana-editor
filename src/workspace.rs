@@ -320,6 +320,8 @@ actions!(
         AskAgent,
         /// Asks an agent to fix the problem at the caret.
         FixWithAgent,
+        /// An agent explains the selection (or the definition around the caret).
+        ExplainWithAgent,
         /// The Commit view's message written by the AI model (`commit_draft.rs`).
         WriteCommitMessage,
         /// The selection rewritten (or code written at the caret) by the AI

@@ -423,6 +423,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_agent_session))
             .on_action(cx.listener(Self::ask_agent))
             .on_action(cx.listener(Self::fix_with_agent))
+            .on_action(cx.listener(Self::explain_with_agent))
             .on_action(cx.listener(Self::inline_assist))
             .on_action(cx.listener(Self::write_commit_message))
             .on_action(cx.listener(Self::new_database_connection))

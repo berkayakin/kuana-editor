@@ -469,6 +469,46 @@ impl Workspace {
         self.open_path(path, window, cx);
     }
 
+    /// For Inline Assist in a SQL file: its connection's kind and the tables
+    /// and views the Database view has read (with their columns where read),
+    /// so a request in words becomes SQL for this database.
+    pub(super) fn sql_schema_context(&self, path: &Path, cx: &App) -> Option<String> {
+        if !database::is_sql_path(path) {
+            return None;
+        }
+        let id = self.sql_connection(Some(path), cx)?;
+        let model = self.db_model(cx);
+        let model = model.read(cx);
+        let config = model.config(&id)?;
+        let mut tables: Vec<String> = Vec::new();
+        let mut owners: Vec<&(String, String)> = model.objects.keys().filter(|(c, _)| *c == id).collect();
+        owners.sort();
+        for key in owners {
+            let Some(crate::database::model::Loaded::Ready(objects)) = model.objects.get(key) else { continue };
+            for object in objects.iter().filter(|o| matches!(o.kind, ObjectKind::Table | ObjectKind::View | ObjectKind::MaterializedView)) {
+                let name = if key.1.is_empty() { object.name.clone() } else { format!("{}.{}", key.1, object.name) };
+                let columns = match model.details.get(&(id.clone(), key.1.clone(), object.name.clone())) {
+                    Some(crate::database::model::Loaded::Ready(crate::database::model::Details::Columns(columns))) => {
+                        let list: Vec<String> = columns.iter().map(|c| format!("{} {}{}", c.name, c.data_type, if c.primary { " primary key" } else { "" })).collect();
+                        format!("({})", list.join(", "))
+                    }
+                    _ => String::new(),
+                };
+                tables.push(format!("{}{name}{columns}", if object.kind == ObjectKind::Table { "" } else { "view " }));
+            }
+        }
+        let mut listed = String::new();
+        for table in &tables {
+            if listed.len() + table.len() > 16_000 {
+                listed.push_str("…\n");
+                break;
+            }
+            listed.push_str(table);
+            listed.push('\n');
+        }
+        Some(format!("<database kind=\"{}\">\n{listed}</database>", config.kind.name()))
+    }
+
     /// The connection a file's SQL runs on: an object's or a script's own,
     /// else the one chosen for it, else the Database view's selected one, else
     /// the only one connected, else the only one there is.

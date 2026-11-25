@@ -679,7 +679,7 @@ impl Workspace {
     /// a prompt sent right away.
     pub(super) fn fix_with_agent(&mut self, _: &FixWithAgent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = self.active_editor(cx) else { return };
-        let (path, prompt, context) = {
+        let (prompt, context) = {
             let e = editor.read(cx);
             let doc = e.doc.read(cx);
             let Some(path) = doc.path.clone() else { return };
@@ -701,9 +701,8 @@ impl Workspace {
             let text: String = (first..=last).map(|l| rope.line(l).to_string()).collect();
             let rel = self.display_rel(&path);
             let prompt = format!("Fix this problem in {rel} at line {}: {}", line + 1, problem.message);
-            (path.clone(), prompt, ContextItem::Selection { path, lines: (first + 1, last + 1), text })
+            (prompt, ContextItem::Selection { path, lines: (first + 1, last + 1), text })
         };
-        let _ = path;
         let Some(view) = self.target_session_view(window, cx) else { return };
         let session = view.read(cx).session.clone();
         session.update(cx, |s, cx| s.send(prompt, vec![context], cx));
@@ -712,6 +711,35 @@ impl Workspace {
 }
 
 /// The selection of an editor as context; None without one.
+impl Workspace {
+    /// Explain with Agent: the selection, else the definition around the
+    /// caret, else the file, sent with a request to explain it.
+    pub(super) fn explain_with_agent(&mut self, _: &ExplainWithAgent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor(cx) else { return };
+        let item = selection_context(&editor, cx).or_else(|| {
+            let (_, range) = editor.update(cx, |e, cx| e.symbol_at_caret(cx))?;
+            let doc = editor.read(cx).doc.read(cx);
+            let rope = doc.rope();
+            let (start, end) = (range.start.min(rope.len_bytes()), range.end.min(rope.len_bytes()));
+            Some(ContextItem::Selection {
+                path: doc.path.clone()?,
+                lines: (rope.byte_to_line(start) + 1, rope.byte_to_line(end) + 1),
+                text: rope.byte_slice(start..end).to_string(),
+            })
+        });
+        let item = item.or_else(|| {
+            let doc = editor.read(cx).doc.read(cx);
+            Some(ContextItem::File { path: doc.path.clone()?, text: doc.rope().to_string() })
+        });
+        let Some(item) = item else { return };
+        let prompt = format!("Explain {}: what it does, how it works, and anything surprising or worth knowing about it.", item.label());
+        let Some(view) = self.target_session_view(window, cx) else { return };
+        let session = view.read(cx).session.clone();
+        session.update(cx, |s, cx| s.send(prompt, vec![item], cx));
+        self.activate_item(&PaneItem::Agent(view.clone()), window, cx);
+    }
+}
+
 fn selection_context(editor: &Entity<Editor>, cx: &App) -> Option<ContextItem> {
     let e = editor.read(cx);
     let doc = e.doc.read(cx);

@@ -50,6 +50,14 @@ impl Editor {
         crumbs
     }
 
+    /// The innermost definition around the caret (its name and range), as the
+    /// outline last read knows it.
+    pub fn symbol_at_caret(&mut self, cx: &mut Context<Self>) -> Option<(String, std::ops::Range<usize>)> {
+        let head = self.primary_selection().head;
+        let outline = self.shown_outline(cx);
+        outline.iter().filter(|s| s.range.start <= head && head <= s.range.end).min_by_key(|s| s.range.len()).map(|s| (s.name.clone(), s.range.clone()))
+    }
+
     /// The outline's symbols as (first row, last row, offset), for the
     /// outline and version drawn: sticky scroll looks them up every frame.
     fn outline_rows(&mut self, cx: &mut Context<Self>) -> Arc<Vec<(usize, usize, usize)>> {

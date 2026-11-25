@@ -67,7 +67,8 @@ impl Workspace {
             }
         };
         let rel = self.display_rel(&target.path);
-        let request = crate::ai::tasks::inline_assist(&rel, target.language, &target.base, target.range.clone(), &instruction);
+        let schema = self.sql_schema_context(&target.path, cx);
+        let request = crate::ai::tasks::inline_assist(&rel, target.language, &target.base, target.range.clone(), &instruction, schema.as_deref());
         let name = target.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let tab_name = format!("Inline Assist · {name}");
         // The tab shows the file unchanged until the first words arrive.

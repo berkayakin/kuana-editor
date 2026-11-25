@@ -19,7 +19,8 @@ const DIFF_BYTES: usize = 60_000;
 
 /// Inline Assist's request: `text` is the whole file, `range` the selection
 /// (empty: write at the caret), `language` its name.
-pub fn inline_assist(path: &str, language: &str, text: &str, range: Range<usize>, instruction: &str) -> Request {
+/// `context`: more the model should know (a SQL file's database), if any.
+pub fn inline_assist(path: &str, language: &str, text: &str, range: Range<usize>, instruction: &str, context: Option<&str>) -> Request {
     let range = clamp(text, range);
     let (before, selected, after) = (&text[..range.start], &text[range.clone()], &text[range.end..]);
     let (before, after) = around(before, after, FILE_BYTES.saturating_sub(selected.len()));
@@ -39,8 +40,54 @@ pub fn inline_assist(path: &str, language: &str, text: &str, range: Range<usize>
         place = if inserting { "at the caret" } else { "in place of the selection" },
         place_short = if inserting { "the caret" } else { "the selection" },
     );
-    let user = format!("<file path=\"{path}\" language=\"{language}\">\n{marked}\n</file>\n\n<instruction>\n{}\n</instruction>", instruction.trim());
+    let system = match context {
+        Some(_) => format!("{system}\n\nThe <database> block is the database this SQL runs on: its kind and the tables, views and columns known so far. Write SQL in its dialect, for its tables."),
+        None => system,
+    };
+    let context = context.map(|c| format!("{c}\n\n")).unwrap_or_default();
+    let user = format!("{context}<file path=\"{path}\" language=\"{language}\">\n{marked}\n</file>\n\n<instruction>\n{}\n</instruction>", instruction.trim());
     Request::simple("", system, user)
+}
+
+/// The sides of a merge conflict, and the lines around it.
+pub struct ConflictSides<'a> {
+    pub ours: &'a str,
+    pub ours_label: &'a str,
+    pub base: Option<&'a str>,
+    pub theirs: &'a str,
+    pub theirs_label: &'a str,
+    pub before: &'a str,
+    pub after: &'a str,
+}
+
+/// A request to resolve one merge conflict: the reply is the lines that
+/// replace the whole block.
+pub fn resolve_conflict(path: &str, language: &str, sides: &ConflictSides) -> Request {
+    let system = "You resolve Git merge conflicts in Kuana, a code editor. Reply with only the lines that replace \
+                  the whole conflict block, its markers gone: no explanation, no Markdown fences. Keep what both \
+                  sides meant to do: combine their changes when they're compatible; when they truly contradict, \
+                  prefer the version that keeps the code correct and consistent with the lines around it. Keep the \
+                  file's indentation and style. Never leave conflict markers.";
+    let base = sides.base.map(|b| format!("<base>\n{b}</base>\n")).unwrap_or_default();
+    let user = format!(
+        "<file path=\"{path}\" language=\"{language}\">\n<before>\n{}</before>\n<ours label=\"{}\">\n{}</ours>\n{base}<theirs label=\"{}\">\n{}</theirs>\n<after>\n{}</after>\n</file>",
+        sides.before, sides.ours_label, sides.ours, sides.theirs_label, sides.theirs, sides.after
+    );
+    let mut request = Request::simple("", system, user);
+    request.max_tokens = 16_000;
+    request
+}
+
+/// A conflict's resolution from a reply: lines, each with its line break
+/// (none when the resolution is to drop the block). None when it still has
+/// conflict markers.
+pub fn conflict_resolution(reply: &str) -> Option<String> {
+    let text = strip_fences(reply);
+    let text = text.trim_matches(['\n', '\r']);
+    if text.lines().any(|l| ["<<<<<<<", "=======", ">>>>>>>", "|||||||"].iter().any(|m| l.starts_with(m))) {
+        return None;
+    }
+    Some(if text.trim().is_empty() { String::new() } else { format!("{text}\n") })
 }
 
 /// The code in Inline Assist's reply, fitted to what it replaces: fences and
@@ -183,13 +230,14 @@ mod tests {
     #[test]
     fn inline_assist_marks_the_selection_or_caret() {
         let text = "fn a() {\n    1\n}\n";
-        let request = inline_assist("src/a.rs", "Rust", text, 13..15, "make it two");
+        let request = inline_assist("src/a.rs", "Rust", text, 13..15, "make it two", None);
         let user = request.messages[0].text();
         assert!(user.contains("fn a() {\n    <selection>1\n</selection>}"), "{user}");
         assert!(user.contains("<instruction>\nmake it two\n</instruction>"));
         assert!(request.system.contains("in place of the selection"));
-        let request = inline_assist("src/a.rs", "Rust", text, 9..9, "add a line");
+        let request = inline_assist("src/a.rs", "Rust", text, 9..9, "add a line", Some("<database kind=\"PostgreSQL\">\nusers(id int)\n</database>"));
         assert!(request.messages[0].text().contains("fn a() {\n<caret/>    1"));
+        assert!(request.messages[0].text().starts_with("<database kind=\"PostgreSQL\">\nusers(id int)\n</database>\n\n<file"));
         assert!(request.system.contains("at the caret"));
     }
 
@@ -198,7 +246,7 @@ mod tests {
         let line = "let x = 1;\n";
         let text = line.repeat(30_000);
         let start = line.len() * 15_000;
-        let request = inline_assist("a.rs", "Rust", &text, start..start + line.len(), "x");
+        let request = inline_assist("a.rs", "Rust", &text, start..start + line.len(), "x", None);
         let user = request.messages[0].text();
         assert!(user.len() < FILE_BYTES + 500, "{}", user.len());
         assert!(user.contains("<selection>let x = 1;\n</selection>"));
@@ -232,6 +280,16 @@ mod tests {
         assert!(!user.contains("notes"));
         let user = commit_message("+y", &[], None, "fix login").messages[0].text();
         assert!(user.ends_with("The user's notes on this change (build the message around them):\nfix login"));
+    }
+
+    #[test]
+    fn conflicts_go_with_their_sides_and_come_back_as_lines() {
+        let sides = ConflictSides { ours: "a = 1\n", ours_label: "HEAD", base: Some("a = 0\n"), theirs: "a = 2\n", theirs_label: "feature", before: "x\n", after: "y\n" };
+        let user = resolve_conflict("f.py", "Python", &sides).messages[0].text();
+        assert!(user.contains("<ours label=\"HEAD\">\na = 1\n</ours>\n<base>\na = 0\n</base>\n<theirs label=\"feature\">\na = 2\n</theirs>"), "{user}");
+        assert_eq!(conflict_resolution("```python\na = 3\n```").as_deref(), Some("a = 3\n"));
+        assert_eq!(conflict_resolution("\n").as_deref(), Some(""));
+        assert_eq!(conflict_resolution("<<<<<<< HEAD\na\n=======\nb\n>>>>>>> x"), None);
     }
 
     #[test]

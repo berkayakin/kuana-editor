@@ -33,6 +33,12 @@ impl Conflict {
     }
 }
 
+/// The lines `rows` of `text` (split as [`parse`] does), each with its line
+/// break.
+pub fn section(text: &str, rows: Range<usize>) -> String {
+    text.split('\n').skip(rows.start).take(rows.len()).flat_map(|l| [l, "\n"]).collect()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Resolution {
     /// Keep the current branch's side (ours).
@@ -118,22 +124,29 @@ pub fn parse(text: &str) -> Vec<Conflict> {
 /// `text` with every conflict that combines cleanly replaced by its
 /// combination; also how many were and how many are left.
 pub fn resolve_simple(text: &str) -> (String, usize, usize) {
-    let conflicts = parse(text);
+    resolve_with(text, &parse(text), |c| c.merged.clone())
+}
+
+/// `text` (whose conflicts are `conflicts`, from [`parse`]) with each
+/// conflict `resolve` (called in order) gives text for replaced by it (lines, each with its
+/// line break); also how many were and how many are left.
+pub fn resolve_with(text: &str, conflicts: &[Conflict], mut resolve: impl FnMut(&Conflict) -> Option<String>) -> (String, usize, usize) {
+    let resolutions: Vec<Option<String>> = conflicts.iter().map(&mut resolve).collect();
     let (mut resolved, mut left) = (0, 0);
-    if conflicts.iter().all(|c| c.merged.is_none()) {
+    if resolutions.iter().all(Option::is_none) {
         return (text.to_string(), 0, conflicts.len());
     }
     let lines: Vec<&str> = text.split('\n').collect();
     let mut out = String::with_capacity(text.len());
     let mut row = 0;
-    for c in &conflicts {
+    for (c, resolution) in conflicts.iter().zip(resolutions) {
         for line in &lines[row..c.start] {
             out.push_str(line);
             out.push('\n');
         }
-        match &c.merged {
+        match resolution {
             Some(merged) => {
-                out.push_str(merged);
+                out.push_str(&merged);
                 resolved += 1;
             }
             None => {

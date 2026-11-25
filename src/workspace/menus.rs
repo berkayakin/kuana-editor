@@ -81,6 +81,8 @@ impl Workspace {
         }
         let (entry, action) = run(MenuEntry::item("Inline Assist…", Icon::Sparkle), Box::new(InlineAssist));
         add(entry, action);
+        let (entry, action) = run(MenuEntry::text("Explain with Agent"), Box::new(ExplainWithAgent));
+        add(entry, action);
         let (entry, action) = run(MenuEntry::text("Ask Agent"), Box::new(AskAgent));
         add(entry, action);
         if claude {
