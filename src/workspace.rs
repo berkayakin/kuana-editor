@@ -150,7 +150,7 @@ use self::{
     windows::*,
 };
 pub use self::{
-    agents::show_notified_session,
+    agents::{show_dictation_error, show_notified_session},
     bookmarks::GoToBookmark,
     extension_ui::{ToggleExtensionView, handle_extension_request},
     sessions::update_recent_projects,

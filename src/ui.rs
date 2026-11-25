@@ -1033,7 +1033,16 @@ pub fn binding_label(action: &dyn gpui::Action, window: &Window) -> Option<Strin
 /// first built-in binding is the primary one.
 pub fn binding_label_in(action: &dyn gpui::Action, context: &str, window: &Window) -> Option<String> {
     let context = gpui::KeyContext::parse(context).ok()?;
-    let bindings = window.bindings_for_action_in_context(action, context);
+    label_of(&window.bindings_for_action_in_context(action, context))
+}
+
+/// The shortcut for `action` where `focus` is (its contexts as last drawn:
+/// a binding for a context path like `AgentComposer > Editor`).
+pub fn binding_label_at(action: &dyn gpui::Action, focus: &gpui::FocusHandle, window: &Window) -> Option<String> {
+    label_of(&window.bindings_for_action_in(action, focus))
+}
+
+fn label_of(bindings: &[gpui::KeyBinding]) -> Option<String> {
     // The user's own binding (keymap.json) is the one to show.
     let binding = bindings
         .iter()

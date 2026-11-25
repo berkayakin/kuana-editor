@@ -17,6 +17,7 @@ pub mod providers;
 pub mod sse;
 pub mod stream;
 pub mod tasks;
+pub mod transcribe;
 
 use std::collections::BTreeMap;
 

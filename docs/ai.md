@@ -172,6 +172,31 @@ From the editor's right-click menu or Find Action:
   to explain it.
 - **Fix with Agent** (on a line with a problem): the problem and the lines around it, sent to fix.
 
+## Dictation
+
+Speak instead of typing, as in Claude's apps: click the **mic** in a session's composer (or
+**⌥⌘V** / **Ctrl+Alt+V** there), talk, and click it again; or hold it down while you talk and let
+go. Your words appear at the caret as you speak, underlined and dimmed until they're final, then
+stay as typed text: send them, edit them, or keep dictating. **Esc** takes them back out, typing
+meanwhile ends the dictation and keeps what was heard, and Undo takes a whole dictation back in one
+step. Words after text you typed join it (a space, no capital mid-sentence). Your project's name,
+its files' names and the files you attached are given to the recognizer as words to expect.
+**Edit → Dictate** (Find Action: Dictate) does the same in any text field, such as a commit message.
+
+- **macOS**: Apple's speech recognition, on the Mac where your language has an on-device model
+  (most do; otherwise Apple's servers). macOS asks once for the microphone and for speech
+  recognition.
+- **Windows**: Windows' own speech recognition. It needs **Online speech recognition** on (Settings
+  → Privacy & security → Speech) and the microphone allowed for desktop apps.
+- **Linux**: there's no system speech recognition, so dictation records with PipeWire, PulseAudio or
+  ALSA (`pw-record`, `parecord` or `arecord`) and sends the recording, when you stop, to a
+  transcription service you choose: `"dictation": { "provider": "openai" }` in settings.json, with
+  `"groq"`, or `"custom"` for a Whisper server of your own (its URL in Settings → AI). The words
+  come once it answers.
+
+Settings → AI → Dictation → **Language** sets the language you speak (the system's unless set).
+`"dictation": { "engine": "service" }` sends audio to the service on macOS and Windows too.
+
 ## Inline Assist
 
 Select code and press **⌃↩** (**Alt+Shift+I** on Windows and Linux), or choose **Inline Assist…** in
@@ -246,6 +271,7 @@ doesn't start is noted in the session's thinking. Settings → AI → Tools list
 | Send / new line / stop (in a session's composer) | ↩ / ⇧↩ / ⎋ | Enter / Shift+Enter / Esc |
 | Pick an @ or / suggestion / take it / hide the list (in the composer) | ↑↓ / ⇥ / ⎋ | ↑↓ / Tab / Esc |
 | Earlier prompts (in an empty composer) | ↑ / ↓ | ↑ / ↓ |
+| Dictate / stop (in a session's composer) / take it back | ⌥⌘V / ⌥⌘V / ⎋ | Ctrl+Alt+V / Ctrl+Alt+V / Esc |
 
 Explain with Agent, Fix with Agent and Write Commit Message with AI are in Find Action and the
 menus.
@@ -258,3 +284,7 @@ their own services. Keys stay in the keychain. Agents run on your machine as you
 permissions they ask for matter: Kuana Agent asks before edits and commands unless you allow them.
 In [Restricted Mode](settings.md#project-trust), Kuana Agent works as in any project; external
 agents are your own programs and run as you start them.
+
+Dictation listens only while the mic is lit. On macOS it's turned into text on the Mac where your
+language allows, else by Apple; on Windows by Windows' online speech recognition; on Linux the
+recording goes to the transcription service you set, and nowhere else.

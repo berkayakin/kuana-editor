@@ -445,6 +445,9 @@ pub struct Editor {
     /// A multi-line field's own text size (an agent's composer follows the
     /// chat's), else the UI's.
     text_size: Option<Pixels>,
+    /// Words are being dictated into it (`crate::dictation`): the marked
+    /// text is them, drawn dimmed until final.
+    dictating: bool,
     indent_unit: String,
     /// Display width of a tab character (and of an indent level with tabs).
     tab_size: usize,
@@ -645,6 +648,7 @@ impl Editor {
             marked_range: None,
             drawn_rows: 1,
             text_size: None,
+            dictating: false,
             indent_unit: String::new(),
             tab_size: file_settings.tab_size,
             file_settings,
@@ -1619,6 +1623,40 @@ impl Editor {
         self.edited(cx);
         self.prediction_edited(cx);
         cx.notify();
+    }
+
+    /// Dictated words (`crate::dictation`) in place of `range` (the words heard
+    /// before them), marked as text being composed until they're `done`, the
+    /// caret after them; the range they take now.
+    pub fn dictate(&mut self, range: Range<usize>, text: &str, done: bool, cx: &mut Context<Self>) -> Range<usize> {
+        let len = self.doc.read(cx).len();
+        let range = range.start.min(len)..range.end.min(len);
+        let before = self.selections.clone();
+        let new = self.change_doc(cx, |doc| doc.edit(vec![(range, text.to_string())], &before, EditKind::Other));
+        let new = new[0].clone();
+        self.set_selections(vec![Selection::cursor(new.end)], 0, cx);
+        self.marked_range = (!done && !new.is_empty()).then_some(new.clone());
+        self.dictating = !done;
+        self.reveal_primary = true;
+        self.after_edit(cx);
+        new
+    }
+
+    /// Dictate (any editor; an agent's composer takes it first, with its
+    /// project's words as hints): starts or stops dictating here.
+    fn dictate_into(&mut self, _: &crate::dictation::Dictate, _: &mut Window, cx: &mut Context<Self>) {
+        let hints: Vec<String> = self.doc.read(cx).path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).into_iter().collect();
+        let editor = cx.entity();
+        cx.defer(move |cx| crate::dictation::toggle(&editor, hints, cx));
+    }
+
+    /// Dictation is over: what's marked stays as typed text.
+    pub fn end_dictation(&mut self, cx: &mut Context<Self>) {
+        if self.dictating {
+            self.dictating = false;
+            self.marked_range = None;
+            cx.notify();
+        }
     }
 
     /// Puts `text` in place of the selections, as typing it would (a prompt
@@ -3243,6 +3281,15 @@ impl Editor {
     }
 
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        // Escape while words are dictated takes them back out (after this
+        // update: the dictation edits this editor).
+        if self.dictating {
+            let editor = cx.entity();
+            cx.defer(move |cx| {
+                crate::dictation::cancel_into(&editor, cx);
+            });
+            return;
+        }
         // Escape leaves a snippet's stops (and still does the rest below).
         self.snippet = None;
         if self.open_hunk.take().is_some() {
@@ -4260,6 +4307,12 @@ impl Editor {
                 cuts.push(col_of(link.start));
                 cuts.push(col_of(link.end));
             }
+            // Text being composed (an input method's, words being dictated).
+            let marked = self.marked_range.clone().filter(|m| m.start < part_end && m.end > part_start);
+            if let Some(m) = &marked {
+                cuts.push(col_of(m.start));
+                cuts.push(col_of(m.end));
+            }
             let todos = match &todo_regex {
                 Some(regex) => todo_ranges(regex, &highlights[hl_ix..], part_start..part_end, block_close, self.doc.read(cx).rope()),
                 None => Vec::new(),
@@ -4299,7 +4352,11 @@ impl Editor {
                 }
                 // ⌘/Ctrl-hover link: a plain underline, like the terminal's links.
                 let linked = self.lsp.link.as_ref().is_some_and(|l| l.start <= abs && abs < l.end);
-                let underline = if linked {
+                let composing = marked.as_ref().is_some_and(|m| m.start <= abs && abs < m.end);
+                let underline = if composing {
+                    // Composed text is underlined until it's committed, as macOS shows it.
+                    Some(UnderlineStyle { thickness: px(1.), color: Some(theme.text_dim.into()), wavy: false })
+                } else if linked {
                     Some(UnderlineStyle { thickness: px(1.), color: Some(theme.accent.into()), wavy: false })
                 } else if let Some(sev) = severity {
                     Some(UnderlineStyle { thickness: px(1.), color: Some(severity_color(&theme, sev)), wavy: true })
@@ -4313,6 +4370,10 @@ impl Editor {
                 }
                 if faded {
                     color.a *= UNNECESSARY_OPACITY;
+                }
+                // Dictated words not final yet are dimmed (they may still change).
+                if composing && self.dictating {
+                    color = theme.text_muted.into();
                 }
                 runs.push(TextRun {
                     len,
@@ -6493,6 +6554,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::add_cursor_above))
             .on_action(cx.listener(Self::add_cursor_below))
             .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::dictate_into))
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::delete_line))
             .on_action(cx.listener(Self::extend_selection))

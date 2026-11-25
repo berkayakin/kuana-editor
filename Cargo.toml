@@ -25,7 +25,7 @@ resources = ["assets/fonts/OFL.txt", "assets/fonts/JetBrainsMono-OFL.txt"]
 
 [package.metadata.bundle.osx]
 # Lets Finder offer Kuana in Open With for folders and files (Alternate: never the default app).
-info_plist_exts = ["assets/macos/document-types.plist"]
+info_plist_exts = ["assets/macos/document-types.plist", "assets/macos/privacy.plist"]
 
 [dependencies]
 # The GPUI-free part shared with the remote server (`crates/kuana-core`).
@@ -137,7 +137,7 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSDocumentController", "NSImage", "NSResponder"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSBundle", "NSData", "NSDictionary", "NSError", "NSFileManager", "NSObject", "NSString", "NSURL"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSBundle", "NSData", "NSDictionary", "NSError", "NSFileManager", "NSObject", "NSString", "NSURL", "NSUserDefaults", "NSValue"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # The window's HWND, whose taskbar button flashes for an agent session's news.

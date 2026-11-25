@@ -155,6 +155,9 @@ pub struct Settings {
     /// The size of an agent session's text: its messages, answers, steps
     /// and composer (`agent_font_size()`).
     pub agent_font_size: Option<f32>,
+    /// Dictation (`crate::dictation`): the language, and where speech
+    /// becomes text.
+    pub dictation: Option<crate::dictation::DictationSettings>,
     /// Model providers for Kuana's AI features (`crate::ai`): which, the
     /// model, other URLs. Only the user's settings, never a project's.
     pub ai: Option<crate::ai::AiSettings>,
@@ -613,6 +616,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "agent_notifications",
     "agent_keep_awake",
     "agent_font_size",
+    "dictation",
     "ai",
     "todo_patterns",
 ];
@@ -971,6 +975,7 @@ impl Settings {
             "agent_notifications" => self.agent_notifications.is_some(),
             "agent_keep_awake" => self.agent_keep_awake.is_some(),
             "agent_font_size" => self.agent_font_size.is_some(),
+            "dictation" => self.dictation.is_some(),
             "ai" => self.ai.is_some(),
             "minimap_width" => self.minimap_width.is_some(),
             "zen_full_screen" => self.zen_full_screen.is_some(),
@@ -1393,6 +1398,12 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // "agent_keep_awake": true,
   // The size of an agent session's text: messages, answers, steps, composer.
   // "agent_font_size": 15,
+  // Dictation (the mic in an agent's composer, Edit → Dictate): the language
+  // spoken (the system's unless set), and where speech becomes text: "system"
+  // (the computer's own recognition, macOS and Windows) or "service" (a
+  // transcription service, Linux's only: an AI provider that transcribes,
+  // "openai", "groq" or "custom" for a Whisper server, with its model).
+  // "dictation": { "language": "en-US", "engine": "system", "provider": "openai", "model": "gpt-4o-mini-transcribe" },
 
   // AI: the model provider Kuana's agent, inline assist and commit messages
   // use. Nothing is sent anywhere until a provider is chosen; keys live in the

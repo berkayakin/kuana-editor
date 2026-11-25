@@ -73,6 +73,9 @@ fn composer() -> Vec<KeyBinding> {
         KeyBinding::new("shift-enter", Newline, composer),
         KeyBinding::new("escape", StopAgent, composer),
         KeyBinding::new("tab", AcceptSuggestion, composer),
+        // Dictation, as VS Code's (⌥⌘V / Ctrl+Alt+V); here over the editor's
+        // Extract Variable, which a prompt has no use for.
+        KeyBinding::new("secondary-alt-v", crate::dictation::Dictate, composer),
         // Text selected in a session's transcript.
         KeyBinding::new("secondary-c", Copy, Some("AgentTranscript")),
     ]
@@ -1007,6 +1010,7 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Fix with Agent", FixWithAgent),
         a("Explain with Agent", ExplainWithAgent),
         a("Inline Assist", InlineAssist),
+        a("Dictate", crate::dictation::Dictate),
         a("Write Commit Message with AI", WriteCommitMessage),
         a("New Database Connection…", NewDatabaseConnection),
         a("Toggle Database Results", ToggleDatabaseResults),

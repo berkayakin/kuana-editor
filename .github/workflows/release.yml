@@ -168,8 +168,9 @@ jobs:
             exit 1
           fi
           echo "SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
-          # Notarization requires the hardened runtime and a secure timestamp.
-          codesign --force --options runtime --timestamp --sign "$identity" "$APP"
+          # Notarization requires the hardened runtime and a secure timestamp;
+          # under it, dictation's microphone needs the audio-input entitlement.
+          codesign --force --options runtime --timestamp --entitlements assets/macos/kuana.entitlements --sign "$identity" "$APP"
           codesign --verify --strict --verbose=2 "$APP"
       - name: Notarize Kuana.app
         if: steps.signing.outputs.notarize == 'true'

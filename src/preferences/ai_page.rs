@@ -250,6 +250,7 @@ impl Preferences {
             .child(section("Model", rows, &theme))
             .child(section("Agents", agent_rows, &theme))
             .child(section(Setting::AgentNotifications.section(), sessions, &theme))
+            .child(section(Setting::DictationLanguage.section(), vec![self.render_setting(Setting::DictationLanguage, window, cx)], &theme))
             .child(section("Tools", mcp_rows, &theme))
             .child(section(Setting::EditPredictions.section(), predictions, &theme))
             .child(section(Setting::ClaudeCode.section(), terminal_agents, &theme))

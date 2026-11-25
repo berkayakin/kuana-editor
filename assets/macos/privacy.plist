@@ -1,0 +1,4 @@
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Kuana listens while you dictate a prompt or other text.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Kuana turns what you dictate into text, on this Mac where the language allows.</string>

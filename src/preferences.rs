@@ -175,6 +175,7 @@ enum Setting {
     AgentNotifications,
     AgentKeepAwake,
     AgentFontSize,
+    DictationLanguage,
     VimMode,
     AutoSave,
     AutoSaveDelay,
@@ -196,7 +197,7 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Setting; 57] = [
+    const ALL: [Setting; 58] = [
         Setting::Theme,
         Setting::IconTheme,
         Setting::UiFontSize,
@@ -234,6 +235,7 @@ impl Setting {
         Setting::AgentNotifications,
         Setting::AgentKeepAwake,
         Setting::AgentFontSize,
+        Setting::DictationLanguage,
         Setting::VimMode,
         Setting::TodoPatterns,
         Setting::OpenFolderIn,
@@ -270,7 +272,7 @@ impl Setting {
             Setting::TabSize | Setting::HardTabs | Setting::LinkedEditing | Setting::CursorBlink | Setting::SoftWrap => Page::Editor,
             Setting::Rulers | Setting::ShowWhitespace | Setting::InlayHints | Setting::InlineValues | Setting::DocumentColors | Setting::SemanticTokens | Setting::CodeLens | Setting::VimMode | Setting::TodoPatterns | Setting::OpenFolderIn => Page::Editor,
             Setting::Minimap | Setting::MinimapWidth => Page::Editor,
-            Setting::EditPredictions | Setting::ClaudeCode | Setting::GeminiCli | Setting::AgentNotifications | Setting::AgentKeepAwake | Setting::AgentFontSize => Page::Ai,
+            Setting::EditPredictions | Setting::ClaudeCode | Setting::GeminiCli | Setting::AgentNotifications | Setting::AgentKeepAwake | Setting::AgentFontSize | Setting::DictationLanguage => Page::Ai,
             Setting::AutoSave
             | Setting::AutoSaveDelay
             | Setting::FormatOnSave
@@ -308,6 +310,7 @@ impl Setting {
             Setting::EditPredictions => "Edit predictions",
             Setting::ClaudeCode | Setting::GeminiCli => "Terminal agents",
             Setting::AgentNotifications | Setting::AgentKeepAwake | Setting::AgentFontSize => "Sessions",
+            Setting::DictationLanguage => "Dictation",
             Setting::VimMode => "Vim",
             Setting::TodoPatterns => "TODO",
             Setting::OpenFolderIn => "Projects",
@@ -364,6 +367,7 @@ impl Setting {
             Setting::AgentNotifications => "Notify me",
             Setting::AgentKeepAwake => "Keep the computer awake",
             Setting::AgentFontSize => "Text size",
+            Setting::DictationLanguage => "Language",
             Setting::VimMode => "Vim mode",
             Setting::AutoSave => "Auto-save",
             Setting::AutoSaveDelay => "Delay",
@@ -434,6 +438,10 @@ impl Setting {
             }
             Setting::AgentKeepAwake => "While a session works, the computer doesn't fall asleep from being idle. The display may still turn off.",
             Setting::AgentFontSize => "A session's messages, answers, steps and composer; the rest of the window keeps its own size.",
+            Setting::DictationLanguage if cfg!(target_os = "linux") => {
+                "What you speak into the mic in an agent's composer (or Edit → Dictate). Here it goes to a transcription service: set \"dictation\" → \"provider\" (openai, groq, or custom for a Whisper server) in settings.json."
+            }
+            Setting::DictationLanguage => "What you speak into the mic in an agent's composer (or Edit → Dictate). It's turned into text on this computer where the language allows.",
             Setting::VimMode => "Vim's Normal, Insert and Visual modes. The status bar shows the mode.",
             Setting::AutoSave => "Every mode but Off also saves when Kuana quits or a tab closes.",
             Setting::AutoSaveDelay => "How long after you stop typing.",
@@ -497,6 +505,7 @@ impl Setting {
             Setting::AgentNotifications => "ai agent session notification notify alert finished done needs answer permission dock badge",
             Setting::AgentKeepAwake => "ai agent session keep awake sleep caffeinate power idle prevent",
             Setting::AgentFontSize => "ai agent session chat font text size bigger smaller zoom read messages",
+            Setting::DictationLanguage => "dictation dictate voice speech to text microphone mic talk speak language transcribe whisper",
             Setting::VimMode => "vim vi modal normal insert visual keys",
             Setting::AutoSave => "autosave save automatically",
             Setting::AutoSaveDelay => "autosave milliseconds idle",
@@ -552,6 +561,7 @@ enum Menu {
     AiModel,
     AiEffort,
     AiCompletionModel,
+    DictationLanguage,
     LanguageServer,
     Formatter,
     /// One of an extension's settings (which one: `Preferences::ext_menu`).
@@ -1963,6 +1973,33 @@ impl Preferences {
             Setting::GeminiCli => self.switch_with_default("pref-gemini-cli", "gemini_cli_integration", settings.gemini_cli_integration, true, cx),
             Setting::AgentNotifications => self.switch_with_default("pref-agent-notify", "agent_notifications", settings.agent_notifications, true, cx),
             Setting::AgentKeepAwake => self.switch_with_default("pref-agent-awake", "agent_keep_awake", settings.agent_keep_awake, true, cx),
+            Setting::DictationLanguage => {
+                const SYSTEM: &str = "The system's language";
+                let current = settings.dictation.as_ref().and_then(|d| d.language.clone());
+                let mut options: Vec<(SharedString, bool)> = vec![(SYSTEM.into(), current.is_none())];
+                options.extend(crate::dictation::LANGUAGES.iter().map(|(tag, name)| (SharedString::from(*name), current.as_deref() == Some(*tag))));
+                let label = match &current {
+                    None => SYSTEM.to_string(),
+                    Some(tag) => crate::dictation::LANGUAGES.iter().find(|(t, _)| t == tag).map_or_else(|| tag.clone(), |(_, name)| name.to_string()),
+                };
+                self.dropdown(Menu::DictationLanguage, label.into(), px(220.), options, cx, move |this, ix, _, cx| {
+                    this.menu = None;
+                    let language = ix.checked_sub(1).map(|ix| crate::dictation::LANGUAGES[ix].0);
+                    let written = Settings::update("dictation", move |old| {
+                        let mut object = old.and_then(|v| v.as_object().cloned()).unwrap_or_default();
+                        match language {
+                            Some(tag) => {
+                                object.insert("language".into(), json!(tag));
+                            }
+                            None => {
+                                object.remove("language");
+                            }
+                        }
+                        (!object.is_empty()).then_some(serde_json::Value::Object(object))
+                    });
+                    this.write(written, cx);
+                })
+            }
             Setting::AgentFontSize => {
                 let (min, max) = (*crate::settings::AGENT_FONT_SIZES.start(), *crate::settings::AGENT_FONT_SIZES.end());
                 let size = settings.agent_font_size();
@@ -3219,6 +3256,7 @@ fn setting_key(setting: Setting) -> &'static str {
         Setting::AgentNotifications => "agent_notifications",
         Setting::AgentKeepAwake => "agent_keep_awake",
         Setting::AgentFontSize => "agent_font_size",
+        Setting::DictationLanguage => "dictation",
         Setting::VimMode => "vim_mode",
         Setting::AutoSave => "auto_save",
         Setting::AutoSaveDelay => "auto_save_delay",

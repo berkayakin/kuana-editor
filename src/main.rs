@@ -32,6 +32,7 @@ mod context_menu;
 mod dap;
 mod database;
 mod debugger;
+mod dictation;
 mod diff_view;
 mod document;
 mod document_diff;
@@ -211,6 +212,8 @@ fn menus_for(mac: bool) -> Vec<Menu> {
                 MenuItem::action("Replace…", Replace),
                 MenuItem::action("Find in Files…", FindInFiles),
                 MenuItem::action("Replace in Files…", ReplaceInFiles),
+                MenuItem::separator(),
+                MenuItem::action("Dictate", dictation::Dictate),
             ],
         },
         Menu {
@@ -376,6 +379,20 @@ fn set_dock_icon() {
 /// along with Kuana's own drag areas, so the two could cancel out. Double
 /// clicks in that strip go to GPUI's view directly (`window_drag_area` zooms);
 /// single ones still go through AppKit (the traffic lights are its buttons).
+/// AppKit adds its own Start Dictation… to the menu named Edit; Kuana's
+/// Dictate is there instead (`crate::dictation`), so it goes.
+#[cfg(target_os = "macos")]
+fn hide_system_dictation_item() {
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSDictionary, NSNumber, NSString, NSUserDefaults};
+    let key = NSString::from_str("NSDisabledDictationMenuItem");
+    let yes = NSNumber::new_bool(true);
+    let value: &AnyObject = yes.as_ref();
+    let defaults = NSDictionary::from_slices(&[&*key], &[value]);
+    // SAFETY: a dictionary of a string key to a number, as the call takes.
+    unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
+}
+
 #[cfg(target_os = "macos")]
 fn limit_window_zoom() {
     use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
@@ -480,6 +497,8 @@ fn main() {
     set_app_name();
     #[cfg(target_os = "macos")]
     limit_window_zoom();
+    #[cfg(target_os = "macos")]
+    hide_system_dictation_item();
 
     // Finder (Open With, double-click) and the `kuana` command send paths as
     // open-file events; they're handled once the app is running.
@@ -563,6 +582,15 @@ fn main() {
         updater::init(cx);
         state::init(cx);
         agents::store::init(cx);
+        dictation::init(cx);
+        // A dictation that couldn't start or go on says why where you are.
+        if let Some(store) = dictation::store(cx) {
+            cx.subscribe(&store, |_, event, cx| {
+                let dictation::DictationEvent::Failed(why) = event;
+                workspace::show_dictation_error(why.clone(), cx);
+            })
+            .detach();
+        }
         // A click on an agent session's notification brings it back.
         let (clicked_tx, mut clicked_rx) = futures::channel::mpsc::unbounded::<String>();
         kuana_os::notify::on_click(move |id| {

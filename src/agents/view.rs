@@ -167,6 +167,10 @@ pub struct SessionView {
     /// 13-point text the transcript's smaller labels were drawn for.
     chat_size: f32,
     scale: f32,
+    /// Words are being dictated into the composer (`crate::dictation`), and
+    /// when its mic button went down (held, releasing it stops).
+    dictating: bool,
+    mic_pressed: Option<std::time::Instant>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -243,12 +247,24 @@ impl SessionView {
             place_busy: None,
             chat_size: crate::settings::DEFAULT_AGENT_FONT_SIZE,
             scale: crate::settings::DEFAULT_AGENT_FONT_SIZE / 13.,
+            dictating: false,
+            mic_pressed: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
         // The prompts ↑ brings back, read now so the first ↑ needn't.
         cx.background_executor().spawn(async { super::prompts::load() }).detach();
         view._subscriptions.push(cx.observe_global::<crate::settings::Settings>(|v, cx| v.apply_text_size(cx)));
+        // The mic button follows a dictation into the composer (its level too).
+        if let Some(store) = crate::dictation::store(cx) {
+            view._subscriptions.push(cx.observe(&store, |v, store, cx| {
+                let into = store.read(cx).is_into(&v.composer);
+                if into || v.dictating {
+                    v.dictating = into;
+                    cx.notify();
+                }
+            }));
+        }
         view.apply_text_size(cx);
         view.sync(cx);
         // Scrolling redraws the view: the ↓ button shows while it's scrolled up.
@@ -381,6 +397,64 @@ impl SessionView {
         self.picked = ((at + delta).rem_euclid(len as isize) as usize, query);
         cx.notify();
         true
+    }
+
+    /// Dictate into the composer, or stop: the project's words as hints.
+    fn toggle_dictation(&mut self, cx: &mut Context<Self>) {
+        let hints = self.dictation_hints(cx);
+        crate::dictation::toggle(&self.composer, hints, cx);
+    }
+
+    /// Words a dictation should expect here: the project's name, the files
+    /// attached or mentioned, the names at the project's top.
+    fn dictation_hints(&self, cx: &App) -> Vec<String> {
+        let folder = self.session.read(cx).folder().to_path_buf();
+        let attached = self.context.iter().filter_map(|item| match item {
+            ContextItem::File { path, .. } | ContextItem::Selection { path, .. } => path.file_name(),
+            _ => None,
+        });
+        let mentioned = self.mentioned.iter().filter_map(|(path, _)| path.file_name());
+        // The project's files, shallowest first: their folders' names, their
+        // own and their stems (`cart.py` is said "cart").
+        let mut files: Vec<&std::path::Path> = self.files.iter().filter_map(|p| p.strip_prefix(&folder).ok()).collect();
+        files.sort_by_key(|p| p.components().count());
+        let names = files.into_iter().take(400).flat_map(|p| {
+            let top = p.components().next().filter(|_| p.components().count() > 1).map(|c| c.as_os_str());
+            top.into_iter().chain(p.file_name()).chain(p.file_stem())
+        });
+        let mut hints: Vec<String> = Vec::new();
+        for name in folder.file_name().into_iter().chain(attached).chain(mentioned).chain(names) {
+            let name = name.to_string_lossy().into_owned();
+            if name.len() > 1 && !name.starts_with('.') && !hints.contains(&name) {
+                hints.push(name);
+                if hints.len() >= 100 {
+                    break;
+                }
+            }
+        }
+        hints
+    }
+
+    /// The mic button pressed: starts dictating (or stops one going on).
+    fn mic_down(&mut self, cx: &mut Context<Self>) {
+        if self.dictating {
+            self.mic_pressed = None;
+            self.toggle_dictation(cx);
+        } else {
+            self.mic_pressed = Some(std::time::Instant::now());
+            self.toggle_dictation(cx);
+        }
+    }
+
+    /// Released: held a moment, it was push-to-talk, so it stops; a click
+    /// keeps it listening until the next.
+    fn mic_up(&mut self, cx: &mut Context<Self>) {
+        if let Some(pressed) = self.mic_pressed.take()
+            && pressed.elapsed() >= std::time::Duration::from_millis(450)
+            && self.dictating
+        {
+            self.toggle_dictation(cx);
+        }
     }
 
     /// The chat's text size, from `agent_font_size`: the composer types at
@@ -691,6 +765,10 @@ impl SessionView {
     }
 
     fn stop(&mut self, _: &StopAgent, _: &mut Window, cx: &mut Context<Self>) {
+        // Escape while dictating takes the words back out, nothing else.
+        if crate::dictation::cancel_into(&self.composer, cx) {
+            return;
+        }
         let suggesting = !self.command_matches(cx).is_empty() || self.current_mention(cx).is_some();
         if suggesting {
             self.dismissed = Some(self.composer.read(cx).text(cx));
@@ -1522,6 +1600,7 @@ impl SessionView {
         let picked_mention = self.mention_query(cx).map(|(_, query)| query).map_or(0, |query| self.pick_index(&query, usize::MAX));
         let focused = self.composer.focus_handle(cx).is_focused(window);
         let composer_height = self.composer.read(cx).content_height(cx);
+        let dictate_key = crate::ui::binding_label_at(&crate::dictation::Dictate, &self.composer.focus_handle(cx), window);
         div()
             .mx_3()
             .mb_3()
@@ -1596,6 +1675,11 @@ impl SessionView {
                         // Before the composer's own paste: a picture on the
                         // clipboard is attached, text goes on to the editor.
                         .capture_action(cx.listener(Self::paste_image))
+                        // Dictate here with the project's words as hints.
+                        .capture_action(cx.listener(|v, _: &crate::dictation::Dictate, _, cx| {
+                            cx.stop_propagation();
+                            v.toggle_dictation(cx);
+                        }))
                         // ⌘C with text selected in the transcript (and none in
                         // the composer) copies that.
                         .capture_action(cx.listener(Self::copy_selection))
@@ -1710,6 +1794,7 @@ impl SessionView {
                                             .on_click(cx.listener(|_, e: &ClickEvent, _, cx| cx.emit(SessionViewEvent::Menu { kind: MenuKind::Model, position: e.position() }))),
                                     )
                                 })
+                                .child(self.render_mic(&dictate_key, &theme, cx))
                                 // Send, which is Stop while the agent works and
                                 // nothing's typed (typed text queues).
                                 .map(|el| {
@@ -1734,6 +1819,54 @@ impl SessionView {
                     &theme,
                 ),
             )
+    }
+}
+
+impl SessionView {
+    /// The composer's mic: click to dictate (again to stop), or hold to
+    /// talk; while it listens, it's lit, its ring following the voice.
+    fn render_mic(&self, key: &Option<String>, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let store = crate::dictation::store(cx);
+        let (level, finishing) = store.as_ref().filter(|_| self.dictating).map_or((None, false), |s| (s.read(cx).level(), s.read(cx).finishing()));
+        let key = key.as_ref().map(|k| format!(" ({k})")).unwrap_or_default();
+        let tip = match (level.is_some(), finishing) {
+            (true, true) => "Writing down what you said…".to_string(),
+            (true, false) => format!("Stop dictating{key} · Esc takes it back"),
+            (false, _) => format!("Dictate{key} · hold to talk"),
+        };
+        let accent: Hsla = theme.accent.into();
+        // Lit while it listens; otherwise a fill only under the pointer.
+        let (rest, hover) = match level {
+            Some(_) => (Hsla::from(theme.accent_soft), Hsla::from(theme.accent_soft)),
+            None => (Hsla::from(theme.background).alpha(0.), Hsla::from(theme.hover)),
+        };
+        div()
+            .id("agent-mic")
+            .flex_shrink_0()
+            .size(px(28.))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .map(|el| match level {
+                // Listening: a ring as loud as the voice.
+                Some(level) if !finishing => el.border_2().border_color(accent.alpha(0.25 + 0.75 * level)).child(icon_el(Icon::Mic, px(15.), accent)),
+                Some(_) => el.child(
+                    div()
+                        .child(icon_el(Icon::Mic, px(15.), accent))
+                        .with_animation("mic-finishing", Animation::new(std::time::Duration::from_millis(900)).repeat().with_easing(pulsating_between(0.35, 1.)), |el, t| el.opacity(t)),
+                ),
+                None => el.child(icon_el(Icon::Mic, px(15.), theme.text_dim.into())),
+            })
+            .hover_fill(rest, hover)
+            .tooltip(move |_, cx| tooltip_view(tip.clone(), cx))
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener(|v, _, _, cx| {
+                cx.stop_propagation();
+                v.mic_down(cx);
+            }))
+            .on_mouse_up(gpui::MouseButton::Left, cx.listener(|v, _, _, cx| v.mic_up(cx)))
+            .into_any_element()
     }
 }
 

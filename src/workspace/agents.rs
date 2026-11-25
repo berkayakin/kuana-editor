@@ -1401,6 +1401,14 @@ pub fn show_notified_session(id: &str, cx: &mut App) {
     }
 }
 
+/// A dictation couldn't start or go on: why, in a toast in the window in front.
+pub fn show_dictation_error(why: String, cx: &mut App) {
+    let window = cx.active_window().or_else(|| cx.windows().into_iter().next());
+    if let Some(workspace) = window.and_then(|w| w.downcast::<Workspace>()) {
+        workspace.update(cx, |ws, _, cx| ws.toast(ToastKind::Error, "Dictation stopped", Some(why), cx)).ok();
+    }
+}
+
 /// The window's native handle where the system wants one for attention
 /// (Windows' `HWND`, whose taskbar button flashes).
 fn native_window(window: &Window) -> Option<isize> {

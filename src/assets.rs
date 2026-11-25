@@ -99,6 +99,7 @@ static ICONS: &[(&str, &[u8])] = icons![
     "type",
     "stop",
     "sparkle",
+    "mic",
 ];
 
 /// The app logo, sized for the 96pt welcome-screen mark (2x pixels).
@@ -256,6 +257,8 @@ pub enum Icon {
     Stop,
     /// AI: Kuana Agent, Inline Assist, generated text.
     Sparkle,
+    /// Dictation.
+    Mic,
 }
 
 impl Icon {
@@ -353,6 +356,7 @@ impl Icon {
             Icon::Type => "icons/type.svg",
             Icon::Stop => "icons/stop.svg",
             Icon::Sparkle => "icons/sparkle.svg",
+            Icon::Mic => "icons/mic.svg",
         }
     }
 }

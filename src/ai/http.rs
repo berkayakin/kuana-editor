@@ -82,6 +82,18 @@ pub fn post_lines(url: &str, headers: Headers, body: &Value, mut line: impl FnMu
     }
 }
 
+/// POSTs a body of `content_type` (a multipart form) and reads JSON back.
+pub fn post_json_reply(url: &str, headers: Headers, content_type: &str, body: Vec<u8>) -> Result<Value, HttpError> {
+    let mut request = agent().post(url).header("content-type", content_type);
+    for (name, value) in headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    let response = request.send(&body[..]).map_err(network)?;
+    let response = check(response)?;
+    let text = response.into_body().with_config().limit(16 * 1024 * 1024).read_to_string().map_err(network)?;
+    serde_json::from_str(&text).map_err(|e| HttpError { status: None, message: format!("Not JSON: {e}"), retry_after: None })
+}
+
 /// GETs JSON.
 pub fn get_json(url: &str, headers: Headers) -> Result<Value, HttpError> {
     let mut request = agent().get(url);
