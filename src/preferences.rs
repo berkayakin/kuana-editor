@@ -174,6 +174,7 @@ enum Setting {
     GeminiCli,
     AgentNotifications,
     AgentKeepAwake,
+    AgentFontSize,
     VimMode,
     AutoSave,
     AutoSaveDelay,
@@ -195,7 +196,7 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Setting; 56] = [
+    const ALL: [Setting; 57] = [
         Setting::Theme,
         Setting::IconTheme,
         Setting::UiFontSize,
@@ -232,6 +233,7 @@ impl Setting {
         Setting::GeminiCli,
         Setting::AgentNotifications,
         Setting::AgentKeepAwake,
+        Setting::AgentFontSize,
         Setting::VimMode,
         Setting::TodoPatterns,
         Setting::OpenFolderIn,
@@ -268,7 +270,7 @@ impl Setting {
             Setting::TabSize | Setting::HardTabs | Setting::LinkedEditing | Setting::CursorBlink | Setting::SoftWrap => Page::Editor,
             Setting::Rulers | Setting::ShowWhitespace | Setting::InlayHints | Setting::InlineValues | Setting::DocumentColors | Setting::SemanticTokens | Setting::CodeLens | Setting::VimMode | Setting::TodoPatterns | Setting::OpenFolderIn => Page::Editor,
             Setting::Minimap | Setting::MinimapWidth => Page::Editor,
-            Setting::EditPredictions | Setting::ClaudeCode | Setting::GeminiCli | Setting::AgentNotifications | Setting::AgentKeepAwake => Page::Ai,
+            Setting::EditPredictions | Setting::ClaudeCode | Setting::GeminiCli | Setting::AgentNotifications | Setting::AgentKeepAwake | Setting::AgentFontSize => Page::Ai,
             Setting::AutoSave
             | Setting::AutoSaveDelay
             | Setting::FormatOnSave
@@ -305,7 +307,7 @@ impl Setting {
             Setting::Minimap | Setting::MinimapWidth => "Minimap",
             Setting::EditPredictions => "Edit predictions",
             Setting::ClaudeCode | Setting::GeminiCli => "Terminal agents",
-            Setting::AgentNotifications | Setting::AgentKeepAwake => "Sessions",
+            Setting::AgentNotifications | Setting::AgentKeepAwake | Setting::AgentFontSize => "Sessions",
             Setting::VimMode => "Vim",
             Setting::TodoPatterns => "TODO",
             Setting::OpenFolderIn => "Projects",
@@ -361,6 +363,7 @@ impl Setting {
             Setting::GeminiCli => "Connect to Gemini CLI",
             Setting::AgentNotifications => "Notify me",
             Setting::AgentKeepAwake => "Keep the computer awake",
+            Setting::AgentFontSize => "Text size",
             Setting::VimMode => "Vim mode",
             Setting::AutoSave => "Auto-save",
             Setting::AutoSaveDelay => "Delay",
@@ -430,6 +433,7 @@ impl Setting {
                 "A system notification when a session finishes or needs your answer while you're in another window or app; clicking it takes you back to the session."
             }
             Setting::AgentKeepAwake => "While a session works, the computer doesn't fall asleep from being idle. The display may still turn off.",
+            Setting::AgentFontSize => "A session's messages, answers, steps and composer; the rest of the window keeps its own size.",
             Setting::VimMode => "Vim's Normal, Insert and Visual modes. The status bar shows the mode.",
             Setting::AutoSave => "Every mode but Off also saves when Kuana quits or a tab closes.",
             Setting::AutoSaveDelay => "How long after you stop typing.",
@@ -492,6 +496,7 @@ impl Setting {
             Setting::GeminiCli => "ai gemini cli google agent ide companion integration terminal selection diff",
             Setting::AgentNotifications => "ai agent session notification notify alert finished done needs answer permission dock badge",
             Setting::AgentKeepAwake => "ai agent session keep awake sleep caffeinate power idle prevent",
+            Setting::AgentFontSize => "ai agent session chat font text size bigger smaller zoom read messages",
             Setting::VimMode => "vim vi modal normal insert visual keys",
             Setting::AutoSave => "autosave save automatically",
             Setting::AutoSaveDelay => "autosave milliseconds idle",
@@ -1958,6 +1963,15 @@ impl Preferences {
             Setting::GeminiCli => self.switch_with_default("pref-gemini-cli", "gemini_cli_integration", settings.gemini_cli_integration, true, cx),
             Setting::AgentNotifications => self.switch_with_default("pref-agent-notify", "agent_notifications", settings.agent_notifications, true, cx),
             Setting::AgentKeepAwake => self.switch_with_default("pref-agent-awake", "agent_keep_awake", settings.agent_keep_awake, true, cx),
+            Setting::AgentFontSize => {
+                let (min, max) = (*crate::settings::AGENT_FONT_SIZES.start(), *crate::settings::AGENT_FONT_SIZES.end());
+                let size = settings.agent_font_size();
+                self.stepper("pref-agent-font-size", format!("{size}"), size > min, size < max, cx, move |this, step, cx| {
+                    let size = (Settings::get(cx).agent_font_size().round() + step as f32).clamp(min, max);
+                    let default = crate::settings::DEFAULT_AGENT_FONT_SIZE;
+                    this.set_or_default("agent_font_size", json!(size), json!(default), cx);
+                })
+            }
             Setting::ShellIntegration => {
                 self.switch_with_default("pref-shell-integration", "terminal_shell_integration", settings.terminal_shell_integration, true, cx)
             }
@@ -3204,6 +3218,7 @@ fn setting_key(setting: Setting) -> &'static str {
         Setting::GeminiCli => "gemini_cli_integration",
         Setting::AgentNotifications => "agent_notifications",
         Setting::AgentKeepAwake => "agent_keep_awake",
+        Setting::AgentFontSize => "agent_font_size",
         Setting::VimMode => "vim_mode",
         Setting::AutoSave => "auto_save",
         Setting::AutoSaveDelay => "auto_save_delay",

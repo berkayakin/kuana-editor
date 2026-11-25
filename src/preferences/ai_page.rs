@@ -241,7 +241,11 @@ impl Preferences {
         let agent_rows = self.render_agent_rows(&theme, cx);
         let predictions = vec![self.render_setting(Setting::EditPredictions, window, cx)];
         let terminal_agents = vec![self.render_setting(Setting::ClaudeCode, window, cx), self.render_setting(Setting::GeminiCli, window, cx)];
-        let sessions = vec![self.render_setting(Setting::AgentNotifications, window, cx), self.render_setting(Setting::AgentKeepAwake, window, cx)];
+        let sessions = vec![
+            self.render_setting(Setting::AgentFontSize, window, cx),
+            self.render_setting(Setting::AgentNotifications, window, cx),
+            self.render_setting(Setting::AgentKeepAwake, window, cx),
+        ];
         self.body()
             .child(section("Model", rows, &theme))
             .child(section("Agents", agent_rows, &theme))

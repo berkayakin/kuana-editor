@@ -54,7 +54,8 @@ A new session starts its agent at once, so its modes, models and `/` commands ar
 write the first message. New Session (the shortcut) starts one with the agent you used last.
 
 A session opens in a tab beside your code, which you can split, move and keep open like any tab.
-Your messages sit on the right, the agent's answers across the column, as in Claude's apps:
+Your messages sit on the right, the agent's answers across the column, as in Claude's apps, at
+their own text size (15 points unless Settings → AI → Sessions → **Text size** says otherwise):
 
 - **Reading and copying**: select any text in the transcript with the mouse (across messages too;
   a double click takes a word, a triple click a paragraph) and copy it with **⌘C** / **Ctrl+C**.

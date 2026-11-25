@@ -163,6 +163,10 @@ pub struct SessionView {
     pub in_repo: bool,
     /// What's being done to its worktree (made, removed…), shown on its pill.
     pub place_busy: Option<SharedString>,
+    /// The chat's text size (`agent_font_size`) and its scale against the
+    /// 13-point text the transcript's smaller labels were drawn for.
+    chat_size: f32,
+    scale: f32,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -237,11 +241,15 @@ impl SessionView {
             recall: None,
             in_repo: false,
             place_busy: None,
+            chat_size: crate::settings::DEFAULT_AGENT_FONT_SIZE,
+            scale: crate::settings::DEFAULT_AGENT_FONT_SIZE / 13.,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
         // The prompts ↑ brings back, read now so the first ↑ needn't.
         cx.background_executor().spawn(async { super::prompts::load() }).detach();
+        view._subscriptions.push(cx.observe_global::<crate::settings::Settings>(|v, cx| v.apply_text_size(cx)));
+        view.apply_text_size(cx);
         view.sync(cx);
         // Scrolling redraws the view: the ↓ button shows while it's scrolled up.
         let this = cx.entity().downgrade();
@@ -373,6 +381,21 @@ impl SessionView {
         self.picked = ((at + delta).rem_euclid(len as isize) as usize, query);
         cx.notify();
         true
+    }
+
+    /// The chat's text size, from `agent_font_size`: the composer types at
+    /// it, and the transcript's rows are measured again when it changes.
+    fn apply_text_size(&mut self, cx: &mut Context<Self>) {
+        let size = crate::settings::Settings::get(cx).agent_font_size();
+        self.composer.update(cx, |e, cx| e.set_text_size(Some(px(size)), cx));
+        if (size - self.chat_size).abs() > f32::EPSILON {
+            self.chat_size = size;
+            self.scale = size / 13.;
+            // Every row's height changes; the one at the top stays there.
+            let rows = self.list.item_count();
+            self.remeasure(rows, rows);
+            cx.notify();
+        }
     }
 
     /// ↑ (`older`) or ↓ with no suggestions showing: an earlier prompt into
@@ -762,6 +785,7 @@ impl SessionView {
     }
 
     fn render_entry(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let k = self.scale;
         let theme = Theme::get(cx).clone();
         let Some(entry) = self.session.read(cx).transcript.entries.get(ix).cloned() else { return div().into_any_element() };
         match entry {
@@ -793,6 +817,7 @@ impl SessionView {
                             .py(px(9.))
                             .rounded(px(16.))
                             .bg(theme.elevated)
+                            .text_size(px(self.chat_size))
                             .text_color(theme.text)
                             .whitespace_normal()
                             .child({
@@ -822,7 +847,7 @@ impl SessionView {
                 let blocks = self.markdown_of(ix, &text, cx);
                 let view = cx.entity().downgrade();
                 let draw = Draw {
-                    zoom: 0.92,
+                    zoom: self.chat_size / (theme.ui_font_size + 1.),
                     on_code: Some(Rc::new(move |action, _, cx| match action {
                         CodeAction::Copy { ix, text } => {
                             cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -886,7 +911,7 @@ impl SessionView {
                             .items_center()
                             .gap_1()
                             .cursor_pointer()
-                            .text_size(px(12.))
+                            .text_size(px(12. * k))
                             .text_color(theme.text_dim)
                             .hover(|s| s.text_color(theme.text_muted))
                             .child(icon_el(if open { Icon::ChevronDown } else { Icon::ChevronRight }, px(12.), theme.text_dim.into()))
@@ -894,7 +919,7 @@ impl SessionView {
                             .on_click(cx.listener(move |v, _, _, cx| v.toggle(toggle.clone(), false, cx))),
                     )
                     .when(open, |el| {
-                        el.child(div().mt_1().pl_4().text_size(px(12.5)).italic().text_color(theme.text_muted).whitespace_normal().child(text))
+                        el.child(div().mt_1().pl_4().text_size(px(12.5 * k)).italic().text_color(theme.text_muted).whitespace_normal().child(text))
                     })
                     .into_any_element()
             }
@@ -908,7 +933,7 @@ impl SessionView {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_dim).child("PLAN"))
+                .child(div().text_size(px(11. * k)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_dim).child("PLAN"))
                 .children(items.into_iter().map(|item| {
                     let (icon, color): (Icon, Hsla) = match item.status {
                         Status::Done => (Icon::SquareCheck, theme.success.into()),
@@ -939,7 +964,7 @@ impl SessionView {
                     .flex()
                     .items_start()
                     .gap_2()
-                    .text_size(px(12.5))
+                    .text_size(px(12.5 * k))
                     .text_color(color)
                     .child(div().pt(px(2.)).child(icon_el(icon, px(14.), color)))
                     .child(div().whitespace_normal().child(text))
@@ -1005,6 +1030,7 @@ impl SessionView {
 
     /// A run of finished tool calls, folded into one line until opened.
     fn render_run(&mut self, ix: usize, run: &[usize], cx: &mut Context<Self>) -> AnyElement {
+        let k = self.scale;
         let theme = Theme::get(cx).clone();
         let session = self.session.read(cx);
         let key = format!("run-{}", run.first().copied().unwrap_or(ix));
@@ -1029,7 +1055,7 @@ impl SessionView {
                     .items_center()
                     .gap_1p5()
                     .cursor_pointer()
-                    .text_size(px(12.5))
+                    .text_size(px(12.5 * k))
                     .text_color(theme.text_muted)
                     .hover(|s| s.text_color(theme.text))
                     .child(icon_el(if open { Icon::ChevronDown } else { Icon::ChevronRight }, px(12.), theme.text_dim.into()))
@@ -1042,6 +1068,7 @@ impl SessionView {
     }
 
     fn render_tool(&self, tool: &Tool, standalone: bool, cx: &mut Context<Self>) -> AnyElement {
+        let k = self.scale;
         let theme = Theme::get(cx).clone();
         let key = format!("tool-{}", tool.id);
         let asking = tool.permission.as_ref().is_some_and(|p| p.open);
@@ -1064,11 +1091,11 @@ impl SessionView {
             .items_center()
             .gap_1p5()
             .min_w_0()
-            .text_size(px(12.5))
+            .text_size(px(12.5 * k))
             .when(has_body && standalone, |el| el.cursor_pointer().on_click(cx.listener(move |v, _, _, cx| v.toggle(toggle.clone(), default_open, cx))))
             .when(has_body && standalone, |el| el.child(icon_el(if open { Icon::ChevronDown } else { Icon::ChevronRight }, px(12.), theme.text_dim.into())))
             .child(div().flex_shrink_0().child(icon_el(status_icon, px(14.), status_color)))
-            .child(tool_title(tool, &theme))
+            .child(tool_title(tool, &theme, k))
             .when_some(location, |el, loc| {
                 let label = format!("{}{}", loc.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), loc.line.map(|l| format!(":{l}")).unwrap_or_default());
                 let (path, line) = (loc.path.clone(), loc.line);
@@ -1078,7 +1105,7 @@ impl SessionView {
                         .ml_1()
                         .px_1p5()
                         .rounded(px(6.))
-                        .text_size(px(11.5))
+                        .text_size(px(11.5 * k))
                         .text_color(theme.text_dim)
                         .cursor_pointer()
                         .hover(|s| s.text_color(theme.accent))
@@ -1106,7 +1133,7 @@ impl SessionView {
                                     .px_2()
                                     .py_1p5()
                                     .font_family(theme.mono_font.clone())
-                                    .text_size(px(11.5))
+                                    .text_size(px(11.5 * k))
                                     .text_color(theme.text)
                                     .whitespace_normal()
                                     .child(format!("$ {command}")),
@@ -1119,13 +1146,14 @@ impl SessionView {
             .when(!asking && standalone, |el| {
                 let chosen = tool.permission.as_ref().and_then(|p| p.chosen.as_ref().and_then(|c| p.options.iter().find(|o| &o.id == c)));
                 el.when_some(chosen, |el, option| {
-                    el.child(div().pl_5().text_size(px(11.5)).text_color(theme.text_dim).child(format!("You chose: {}", option.name)))
+                    el.child(div().pl_5().text_size(px(11.5 * k)).text_color(theme.text_dim).child(format!("You chose: {}", option.name)))
                 })
             })
             .into_any_element()
     }
 
     fn render_content(&self, tool: &Tool, content: &ToolContent, cx: &mut Context<Self>) -> AnyElement {
+        let k = self.scale;
         let theme = Theme::get(cx).clone();
         match content {
             ToolContent::Text { text } if !text.trim_start().starts_with("```") => {
@@ -1138,7 +1166,7 @@ impl SessionView {
                 let shown: String = if all { text.clone() } else { text.lines().take(PREVIEW_LINES).collect::<Vec<_>>().join("\n") };
                 let index = tool.content.iter().position(|c| std::ptr::eq(c, content)).unwrap_or(0);
                 let blocks = self.tool_markdown_of(&tool.id, index, &shown, cx);
-                let draw = Draw { zoom: 0.88, on_code: None, copied: None, selection: None, pieces: Default::default(), wrap_code: true };
+                let draw = Draw { zoom: self.chat_size * 0.95 / (theme.ui_font_size + 1.), on_code: None, copied: None, selection: None, pieces: Default::default(), wrap_code: true };
                 div()
                     .text_color(theme.text_muted)
                     .child(markdown_preview::render(&blocks, &draw, cx))
@@ -1147,7 +1175,7 @@ impl SessionView {
                             div()
                                 .id(SharedString::from(key.clone()))
                                 .cursor_pointer()
-                                .text_size(px(11.5))
+                                .text_size(px(11.5 * k))
                                 .text_color(theme.text_dim)
                                 .hover(|s| s.text_color(theme.accent))
                                 .child(if all { "Show less".to_string() } else { format!("⋯ {} more lines", lines - PREVIEW_LINES) })
@@ -1185,7 +1213,7 @@ impl SessionView {
                 let (more_above, more_below) = if output && !all { (more, None) } else { (None, more) };
                 div()
                     .font_family(theme.mono_font.clone())
-                    .text_size(px(11.5))
+                    .text_size(px(11.5 * k))
                     .text_color(theme.text_muted)
                     .when(output, |el| el.rounded(px(8.)).bg(theme.elevated).px_2().py_1p5())
                     .children(more_above)
@@ -1211,7 +1239,7 @@ impl SessionView {
                             .px_2()
                             .py_1()
                             .bg(theme.elevated)
-                            .text_size(px(12.))
+                            .text_size(px(12. * k))
                             .child(crate::ui::file_icon(path, px(14.), &theme))
                             .child(div().text_color(theme.text).child(name.clone()))
                             .when(old.is_none(), |el| el.child(div().text_color(theme.git_added).child("new file")))
@@ -1231,7 +1259,7 @@ impl SessionView {
                             ),
                     )
                     .child(
-                        div().px_2().py_1().font_family(theme.mono_font.clone()).text_size(px(11.5)).flex().flex_col().children(lines.into_iter().map(|(sign, line)| {
+                        div().px_2().py_1().font_family(theme.mono_font.clone()).text_size(px(11.5 * k)).flex().flex_col().children(lines.into_iter().map(|(sign, line)| {
                             let (color, bg): (Hsla, Hsla) = match sign {
                                 '+' => (theme.git_added.into(), Hsla::from(theme.git_added).alpha(0.08)),
                                 '-' => (theme.git_deleted.into(), Hsla::from(theme.git_deleted).alpha(0.08)),
@@ -1262,7 +1290,7 @@ impl SessionView {
                     .px_2()
                     .py_1p5()
                     .font_family(theme.mono_font.clone())
-                    .text_size(px(11.5))
+                    .text_size(px(11.5 * k))
                     .text_color(theme.text_muted)
                     .child(div().whitespace_normal().child(if tail.is_empty() { "(no output yet)".to_string() } else { tail }))
                     .child(div().mt_1().text_color(theme.text_dim).child(status))
@@ -1310,7 +1338,7 @@ impl SessionView {
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .text_size(px(12.5))
+                    .text_size(px(12.5 * self.scale))
                     .text_color(theme.text_dim)
                     .child({
                         let spark = div().child(icon_el(Icon::Sparkle, px(13.), theme.accent.into()));
@@ -1793,7 +1821,7 @@ fn kind_icon(kind: Kind) -> Icon {
 /// the command in code. Each part is one font, as GPUI's cut with "…"
 /// measures with the element's font, and takes room whose width is known
 /// before its text is measured (`flex_1`), which the cut needs too.
-fn tool_title(tool: &Tool, theme: &Theme) -> AnyElement {
+fn tool_title(tool: &Tool, theme: &Theme, k: f32) -> AnyElement {
     let command = tool.input.as_ref().and_then(|i| i.get("command")).and_then(serde_json::Value::as_str);
     if let (Some(description), Some(command), Kind::Execute) = (tool_description(tool), command, tool.kind) {
         // Agents' descriptions are a few words; a long one is cut here.
@@ -1805,7 +1833,7 @@ fn tool_title(tool: &Tool, theme: &Theme) -> AnyElement {
             .items_center()
             .gap_2()
             .child(div().flex_shrink_0().whitespace_nowrap().text_color(theme.text_muted).child(description))
-            .child(crate::ui::one_line(div().flex_1().min_w_0()).font_family(theme.mono_font.clone()).text_size(px(12.)).text_color(theme.text).child(first_line(command)))
+            .child(crate::ui::one_line(div().flex_1().min_w_0()).font_family(theme.mono_font.clone()).text_size(px(12. * k)).text_color(theme.text).child(first_line(command)))
             .into_any_element();
     }
     crate::ui::one_line(div().flex_1().min_w_0()).text_color(theme.text_muted).child(first_line(&tool.title).replace('`', "")).into_any_element()

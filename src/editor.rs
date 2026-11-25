@@ -442,6 +442,9 @@ pub struct Editor {
     /// A multi-line field's rows when last laid out: its view (sized by
     /// `content_height`) hears when they change.
     drawn_rows: usize,
+    /// A multi-line field's own text size (an agent's composer follows the
+    /// chat's), else the UI's.
+    text_size: Option<Pixels>,
     indent_unit: String,
     /// Display width of a tab character (and of an indent level with tabs).
     tab_size: usize,
@@ -641,6 +644,7 @@ impl Editor {
             semantic_retries: 0,
             marked_range: None,
             drawn_rows: 1,
+            text_size: None,
             indent_unit: String::new(),
             tab_size: file_settings.tab_size,
             file_settings,
@@ -1853,14 +1857,24 @@ impl Editor {
         let theme = Theme::get(cx);
         match self.mode {
             EditorMode::Full => px(theme.editor_font_size),
-            EditorMode::SingleLine | EditorMode::MultiLine => px(theme.ui_font_size + 0.5),
+            EditorMode::SingleLine => px(theme.ui_font_size + 0.5),
+            EditorMode::MultiLine => self.text_size.unwrap_or(px(theme.ui_font_size + 0.5)),
+        }
+    }
+
+    /// A multi-line field's text size (None: the UI's), its lines spaced to it.
+    pub fn set_text_size(&mut self, size: Option<Pixels>, cx: &mut Context<Self>) {
+        if self.text_size != size {
+            self.text_size = size;
+            cx.notify();
         }
     }
 
     fn line_height(&self, cx: &App) -> Pixels {
         match self.mode {
             EditorMode::Full => px(Theme::get(cx).editor_line_height),
-            EditorMode::SingleLine | EditorMode::MultiLine => px(20.),
+            EditorMode::SingleLine => px(20.),
+            EditorMode::MultiLine => self.text_size.map_or(px(20.), |size| px((f32::from(size) * 1.4).round().max(20.))),
         }
     }
 
