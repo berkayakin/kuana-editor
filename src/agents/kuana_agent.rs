@@ -120,7 +120,15 @@ fn kept_file(id: &str) -> Option<PathBuf> {
     (!safe.is_empty()).then(|| crate::acp::install::agents_dir().map(|d| d.join("kuana").join(format!("{safe}.json"))))?
 }
 
+/// Sessions forgotten in this run: a turn ending after its session was
+/// deleted mustn't keep it again.
+static FORGOTTEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 fn keep(id: &str, session: &Session) {
+    let forgotten = FORGOTTEN.lock().unwrap_or_else(|e| e.into_inner());
+    if forgotten.iter().any(|f| f == id) {
+        return;
+    }
     let Some(path) = kept_file(id) else { return };
     let kept = Kept { cwd: session.cwd.clone(), messages: session.messages.clone(), mode: session.mode, model: session.model.clone() };
     let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| crate::state::write_atomic(&path, &serde_json::to_vec(&kept).unwrap_or_default()));
@@ -131,6 +139,7 @@ fn keep(id: &str, session: &Session) {
 
 /// Removes what's kept of a session (it was deleted).
 pub fn forget(id: &str) {
+    FORGOTTEN.lock().unwrap_or_else(|e| e.into_inner()).push(id.to_string());
     if let Some(path) = kept_file(id) {
         let _ = std::fs::remove_file(path);
     }
@@ -414,14 +423,17 @@ fn tool_specs(mode: Mode) -> Vec<ToolSpec> {
 /// Runs model calls and tools until the model ends its turn; the stop
 /// reason for `session/prompt`.
 fn run_turn(conn: &Connection, sessions: &Sessions, session_id: &str, choice: &ai::Choice, cancelled: &Arc<AtomicBool>) -> Result<&'static str, RpcError> {
-    start_mcp(conn, sessions, session_id)?;
+    start_mcp(conn, sessions, session_id, cancelled)?;
     for _ in 0..MAX_STEPS {
         if cancelled.load(Ordering::Relaxed) {
             return Ok("cancelled");
         }
         let (request, cwd, mode) = {
-            let sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
-            let session = sessions.get(session_id).ok_or_else(not_found)?;
+            let mut sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
+            let session = sessions.get_mut(session_id).ok_or_else(not_found)?;
+            // A long session leaves out old tool results before it outgrows
+            // the model's context (about 3 bytes a token, with room to spare).
+            shrink(&mut session.messages, context_window(&choice.model) as usize * 2);
             let mut tools = tool_specs(session.mode);
             if session.mode != Mode::Plan {
                 tools.extend(mcp_specs(session.mcp.as_deref().unwrap_or_default()));
@@ -498,19 +510,24 @@ fn run_turn(conn: &Connection, sessions: &Sessions, session_id: &str, choice: &a
 
 /// Starts the session's MCP servers the first time (side by side), telling
 /// the user (as a thought) about those that didn't start.
-fn start_mcp(conn: &Connection, sessions: &Sessions, session_id: &str) -> Result<(), RpcError> {
+fn start_mcp(conn: &Connection, sessions: &Sessions, session_id: &str, cancelled: &Arc<AtomicBool>) -> Result<(), RpcError> {
     let wanted = with_session(sessions, session_id, |s| s.mcp.is_none().then(|| (s.mcp_settings.clone(), s.cwd.clone())))?;
     let Some((servers, cwd)) = wanted else { return Ok(()) };
     let starting: Vec<_> = servers
         .into_iter()
         .map(|(name, settings)| {
-            let cwd = cwd.clone();
-            std::thread::spawn(move || mcp::Client::spawn(&name, &settings, &cwd))
+            let (cwd, cancelled) = (cwd.clone(), cancelled.clone());
+            std::thread::spawn(move || mcp::Client::spawn(&name, &settings, &cwd, &cancelled))
         })
         .collect();
+    let joined: Vec<_> = starting.into_iter().map(|s| s.join()).collect();
+    // Stopped meanwhile: started again with the next prompt.
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(());
+    }
     let mut clients = Vec::new();
-    for started in starting {
-        match started.join() {
+    for started in joined {
+        match started {
             Ok(Ok(client)) => clients.push(Arc::new(client)),
             Ok(Err(error)) => {
                 conn.notify("session/update", json!({ "sessionId": session_id, "update": { "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": format!("{error}\n") } } }));
@@ -551,6 +568,36 @@ fn with_session<T>(sessions: &Sessions, id: &str, f: impl FnOnce(&mut Session) -
 /// Tokens a model's context holds, for the session's meter.
 fn context_window(model: &str) -> u64 {
     if crate::ai::anthropic::adaptive_thinking(model) { 1_000_000 } else { 200_000 }
+}
+
+/// What an old tool result says once it's left out.
+const LEFT_OUT: &str = "[An earlier tool result, left out to save room. Run the tool again if it's needed.]";
+
+/// Leaves out the oldest tool results (longer than a note) while the
+/// conversation is over `budget` bytes; the last few messages stay whole.
+fn shrink(messages: &mut [Message], budget: usize) {
+    const KEEP_LAST: usize = 8;
+    let size = |part: &Part| match part {
+        Part::Text { text } | Part::Thinking { text, .. } => text.len(),
+        Part::Image { data, .. } | Part::RedactedThinking { data } => data.len(),
+        Part::ToolCall { input, .. } => input.to_string().len(),
+        Part::ToolResult { content, .. } => content.len(),
+    };
+    let mut total: usize = messages.iter().flat_map(|m| &m.content).map(size).sum();
+    let end = messages.len().saturating_sub(KEEP_LAST);
+    for message in &mut messages[..end] {
+        for part in &mut message.content {
+            if total <= budget {
+                return;
+            }
+            if let Part::ToolResult { content, .. } = part
+                && content.len() > LEFT_OUT.len() * 2
+            {
+                total = total - content.len() + LEFT_OUT.len();
+                *content = LEFT_OUT.to_string();
+            }
+        }
+    }
 }
 
 fn clip(text: &str) -> String {
@@ -800,7 +847,7 @@ impl Tools<'_> {
             let content = json!([{ "type": "content", "content": { "type": "text", "text": arguments } }]);
             self.ask(id, &format!("Use {tool} ({})", client.name), "other", content, &format!("Always allow {tool}"), &key)?;
         }
-        match client.call(&tool, input) {
+        match client.call(&tool, input, self.cancelled) {
             (text, false) => Ok(text),
             (text, true) => Err(text),
         }
@@ -956,6 +1003,21 @@ mod tests {
         assert!(replace("abc", "x", "y", false).unwrap_err().contains("wasn't found"));
         assert_eq!(replace("one\r\ntwo\r\n", "one\ntwo", "1\n2", false).unwrap(), "1\r\n2\r\n");
         assert!(replace("abc", "", "y", false).is_err());
+    }
+
+    #[test]
+    fn long_conversations_leave_out_old_tool_results() {
+        let result = |n: usize| Message { role: Role::User, content: vec![Part::ToolResult { id: format!("t{n}"), content: "x".repeat(10_000), is_error: false }] };
+        let mut messages: Vec<Message> = (0..20).map(result).collect();
+        shrink(&mut messages, 150_000);
+        let left_out = messages.iter().filter(|m| matches!(&m.content[0], Part::ToolResult { content, .. } if content == LEFT_OUT)).count();
+        // Oldest first, until it fits; the last eight always whole.
+        assert_eq!(left_out, 6);
+        assert!(matches!(&messages[0].content[0], Part::ToolResult { content, .. } if content == LEFT_OUT));
+        assert!(messages[12..].iter().all(|m| matches!(&m.content[0], Part::ToolResult { content, .. } if content.len() == 10_000)));
+        let mut small: Vec<Message> = (0..3).map(result).collect();
+        shrink(&mut small, 1_000_000);
+        assert!(small.iter().all(|m| matches!(&m.content[0], Part::ToolResult { content, .. } if content.len() == 10_000)));
     }
 
     #[test]

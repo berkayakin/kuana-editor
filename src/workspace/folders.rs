@@ -104,6 +104,7 @@ impl Workspace {
         self.start_watching(cx);
         self.sync_repos(window, cx);
         self.sync_agents(window, cx);
+        self.sync_agents_view(cx);
         // A server rooted in a folder that came or went starts again with its new root.
         self.lsp.update(cx, |s, cx| {
             s.set_folders(folders.clone());

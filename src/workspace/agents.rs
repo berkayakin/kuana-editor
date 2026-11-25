@@ -35,6 +35,20 @@ impl Workspace {
         self.agents_view.update(cx, |v, cx| v.set_folders(folders, cx));
     }
 
+    /// The project or the window closes: its sessions stop (saved), so no
+    /// agent goes on working, or asking a window that's gone.
+    pub(super) fn close_agent_sessions(&mut self, cx: &mut App) {
+        self.agent_tabs.clear();
+        let ids: Vec<String> = self.agent_sessions.drain().map(|(id, _)| id).collect();
+        if let Some(store) = store::store(cx) {
+            store.update(cx, |s, cx| {
+                for id in &ids {
+                    s.close(id, cx);
+                }
+            });
+        }
+    }
+
     pub(super) fn new_agent_session(&mut self, _: &NewAgentSession, window: &mut Window, cx: &mut Context<Self>) {
         let agent = self.last_agent.clone();
         self.start_agent_session(agent, window, cx);
@@ -396,8 +410,9 @@ impl Workspace {
                         command.push_str(&format!("{name}={} ", crate::run::shell_quote(value)));
                     }
                 }
-                let quoted: Vec<String> = std::iter::once(program.display().to_string()).chain(args.iter().cloned()).map(|a| crate::run::shell_quote(&a)).collect();
-                command.push_str(&quoted.join(" "));
+                // `chain` puts PowerShell's call operator before a quoted program.
+                let argv: Vec<String> = std::iter::once(program.display().to_string()).chain(args.iter().cloned()).collect();
+                command.push_str(&crate::run::chain(&[], &argv));
                 let name = format!("Sign in to {}", session.read(cx).agent_name);
                 let target = RunTarget { name, command, cwd: cwd.clone(), row: None, rows: 0..0, debug: None, test: None };
                 self.run_target(target, window, cx);
@@ -783,7 +798,9 @@ impl Workspace {
             let (_, range) = editor.update(cx, |e, cx| e.symbol_at_caret(cx))?;
             let doc = editor.read(cx).doc.read(cx);
             let rope = doc.rope();
-            let (start, end) = (range.start.min(rope.len_bytes()), range.end.min(rope.len_bytes()));
+            // On character boundaries, whatever the outline says.
+            let snap = |at: usize| rope.char_to_byte(rope.byte_to_char(at.min(rope.len_bytes())));
+            let (start, end) = (snap(range.start), snap(range.end));
             Some(ContextItem::Selection {
                 path: doc.path.clone()?,
                 lines: (rope.byte_to_line(start) + 1, rope.byte_to_line(end) + 1),

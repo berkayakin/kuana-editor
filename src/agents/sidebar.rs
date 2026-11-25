@@ -76,7 +76,9 @@ impl Render for AgentsView {
         let Some(store) = store::store(cx) else { return div().into_any_element() };
         self.watch(&store, cx);
         let rows = store.read(cx).sessions_in(&self.folders, cx);
-        let installed: Vec<(String, String)> = store.read(cx).choices().into_iter().filter(|c| c.installed).map(|c| (c.id, c.name)).collect();
+        // The quick-start buttons, only for an empty list.
+        let installed: Vec<(String, String)> =
+            if rows.is_empty() { store.read(cx).choices().into_iter().filter(|c| c.installed).map(|c| (c.id, c.name)).collect() } else { Vec::new() };
         let now = super::history::now();
         let header = crate::ui::view_header()
             .child(div().pl(px(6.)).flex_1().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_muted).child("AGENTS"))

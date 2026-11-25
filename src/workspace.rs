@@ -1137,7 +1137,11 @@ impl Workspace {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle);
         // Its Push and Merge windows go with it.
-        cx.on_release(|ws: &mut Self, cx| ws.close_tool_windows(cx)).detach();
+        cx.on_release(|ws: &mut Self, cx| {
+            ws.close_tool_windows(cx);
+            ws.close_agent_sessions(cx);
+        })
+        .detach();
         let find_bar = cx.new(FindBar::new);
         let find_subscription = cx.subscribe_in(&find_bar, window, |ws, _, event: &FindBarEvent, window, cx| match event {
             FindBarEvent::Dismissed => {

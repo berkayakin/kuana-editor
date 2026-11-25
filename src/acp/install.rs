@@ -64,11 +64,6 @@ pub fn installed(id: &str) -> Option<Installed> {
     there.then_some(record)
 }
 
-/// Whether the registry has a newer version than the one installed.
-pub fn update_available(entry: &Entry) -> bool {
-    installed(&entry.id).is_some_and(|i| !entry.version.is_empty() && i.version() != entry.version)
-}
-
 /// Installs (or updates) an agent. Blocking: downloads and npm.
 pub fn install(entry: &Entry) -> Result<Installed, String> {
     let kind = entry.install_kind().ok_or_else(|| format!("{} has no build for this computer", entry.name))?;

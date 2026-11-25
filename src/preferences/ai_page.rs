@@ -23,13 +23,22 @@ impl Preferences {
     }
 
     /// Changes the `ai` object; an empty one goes.
+    /// Changes the `ai` setting. What's typed in the URL and model fields is
+    /// saved first, and afterwards they show the new settings, so a later
+    /// save of those fields can't write the old values over a new provider
+    /// or model.
     fn write_ai(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut serde_json::Map<String, Value>)) {
+        let typed = self.commit_ai_fields(cx);
+        if !typed.is_empty() {
+            self.applied(typed, cx);
+        }
         let result = Settings::update("ai", |old| {
             let mut map = old.and_then(|v| v.as_object().cloned()).unwrap_or_default();
             f(&mut map);
             (!map.is_empty()).then_some(Value::Object(map))
         });
         self.write(result, cx);
+        self.fill_ai_fields(cx);
     }
 
     /// Reads the provider's models in the background (when it changed).

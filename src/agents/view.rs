@@ -68,9 +68,13 @@ pub struct SessionView {
     /// Context to send with the next prompt.
     pub context: Vec<ContextItem>,
     copied: Option<usize>,
+    /// Diff previews by tool call and file, with the sizes they were made
+    /// for: drawing a card mustn't diff whole files every frame.
+    diff_previews: std::cell::RefCell<HashMap<(String, PathBuf), (usize, usize, Rc<Preview>)>>,
     /// The project's files, for `@` mentions, and the last query's matches.
     files: Arc<Vec<PathBuf>>,
     mentions: Option<(String, Vec<PathBuf>)>,
+    mention_task: Option<(String, gpui::Task<()>)>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -99,8 +103,10 @@ impl SessionView {
             markdown: HashMap::new(),
             context: Vec::new(),
             copied: None,
+            diff_previews: Default::default(),
             files: Arc::default(),
             mentions: None,
+            mention_task: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
@@ -125,8 +131,8 @@ impl SessionView {
         }
     }
 
-    /// The `@…` being typed at the caret and the files it matches.
-    fn mention(&mut self, cx: &App) -> Option<(Range<usize>, Vec<PathBuf>)> {
+    /// The `@…` being typed at the caret and its query.
+    fn mention_query(&self, cx: &App) -> Option<(Range<usize>, String)> {
         let composer = self.composer.read(cx);
         let selection = composer.primary_selection();
         if !selection.range().is_empty() {
@@ -135,12 +141,44 @@ impl SessionView {
         let text = composer.text(cx);
         let range = super::mentions::mention_at(&text, selection.head)?;
         let query = text[range.start + 1..range.end].to_string();
-        if self.mentions.as_ref().is_none_or(|(q, _)| *q != query) {
-            let cwd = self.session.read(cx).cwd.clone();
-            self.mentions = Some((query.clone(), super::mentions::matching(&self.files, &cwd, &query)));
+        Some((range, query))
+    }
+
+    /// The `@…` being typed and the files it matches, as last matched: a new
+    /// query is matched in the background (a big project has many files),
+    /// the last matches showing meanwhile.
+    fn mention(&mut self, cx: &mut Context<Self>) -> Option<(Range<usize>, Vec<PathBuf>)> {
+        let (range, query) = self.mention_query(cx)?;
+        let matched = self.mentions.as_ref().is_some_and(|(q, _)| *q == query);
+        let matching = self.mention_task.as_ref().is_some_and(|(q, _)| *q == query);
+        if !matched && !matching {
+            let (files, cwd, wanted) = (self.files.clone(), self.session.read(cx).cwd.clone(), query.clone());
+            let found = cx.background_executor().spawn(async move { super::mentions::matching(&files, &cwd, &wanted) });
+            let task = cx.spawn(async move |view, cx| {
+                let found = found.await;
+                view.update(cx, |v, cx| {
+                    if let Some((query, _)) = v.mention_task.take() {
+                        v.mentions = Some((query, found));
+                    }
+                    cx.notify();
+                })
+                .ok();
+            });
+            self.mention_task = Some((query, task));
         }
         let found = self.mentions.as_ref().map(|(_, f)| f.clone()).unwrap_or_default();
         (!found.is_empty()).then_some((range, found))
+    }
+
+    /// The best match for the `@…` at the caret now (matched here if the
+    /// background match hasn't caught up: a key was pressed to take it).
+    fn current_mention(&mut self, cx: &mut Context<Self>) -> Option<(Range<usize>, PathBuf)> {
+        let (range, query) = self.mention_query(cx)?;
+        let found = match &self.mentions {
+            Some((q, found)) if *q == query => found.clone(),
+            _ => super::mentions::matching(&self.files, &self.session.read(cx).cwd, &query),
+        };
+        found.into_iter().next().map(|path| (range, path))
     }
 
     /// A suggestion taken: `@path` in the text, the file in the context.
@@ -156,24 +194,26 @@ impl SessionView {
             e.set_text(&new_text, cx);
             e.select_range(caret..caret, cx);
         });
-        match crate::fs::read(&path) {
-            Ok(bytes) => {
-                let mut text = String::from_utf8_lossy(&bytes[..bytes.len().min(MENTION_BYTES)]).into_owned();
-                if bytes.len() > MENTION_BYTES {
-                    text.push_str(&format!("\n[… {} more bytes left out]", bytes.len() - MENTION_BYTES));
-                }
-                self.add_context(ContextItem::File { path, text }, cx);
+        // Read off the UI thread; it joins the context when it's in.
+        let read = cx.background_executor().spawn({
+            let path = path.clone();
+            async move { crate::fs::read(&path) }
+        });
+        cx.spawn(async move |view, cx| {
+            let Ok(bytes) = read.await else { return };
+            let mut text = crate::encoding::decode(&bytes[..bytes.len().min(MENTION_BYTES)], None).0;
+            if bytes.len() > MENTION_BYTES {
+                text.push_str(&format!("\n[… {} more bytes left out]", bytes.len() - MENTION_BYTES));
             }
-            Err(_) => cx.notify(),
-        }
+            view.update(cx, |v, cx| v.add_context(ContextItem::File { path, text }, cx)).ok();
+        })
+        .detach();
         window.focus(&self.composer.focus_handle(cx));
     }
 
     /// Tab (and Enter, while suggestions show): the first `@` suggestion.
     fn accept_suggestion(&mut self, _: &AcceptSuggestion, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((range, found)) = self.mention(cx)
-            && let Some(first) = found.into_iter().next()
-        {
+        if let Some((range, first)) = self.current_mention(cx) {
             self.accept_mention(range, first, window, cx);
         }
     }
@@ -189,7 +229,7 @@ impl SessionView {
         self.groups = session.transcript.groups();
         let count = self.groups.len() + 1;
         self.seen = Some(key);
-        self.list.splice(0..old, count);
+        self.remeasure(old, count);
     }
 
     pub fn composer(&self) -> &Entity<Editor> {
@@ -204,7 +244,7 @@ impl SessionView {
     }
 
     fn send(&mut self, _: &SendMessage, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mention(cx).is_some() {
+        if self.current_mention(cx).is_some() {
             self.accept_suggestion(&AcceptSuggestion, window, cx);
             return;
         }
@@ -238,8 +278,20 @@ impl SessionView {
             self.closed.remove(&key);
             self.open.insert(key);
         }
-        self.list.splice(0..self.list.item_count(), self.list.item_count());
+        let count = self.list.item_count();
+        self.remeasure(count, count);
         cx.notify();
+    }
+
+    /// Has every row measured again, keeping the scroll position: a full
+    /// splice would put a list scrolled up back at its top (one following
+    /// the end, at the end, keeps following it).
+    fn remeasure(&mut self, old: usize, count: usize) {
+        let top = self.list.logical_scroll_top();
+        self.list.splice(0..old, count);
+        if top.item_ix < old {
+            self.list.scroll_to(top);
+        }
     }
 
     fn is_open(&self, key: &str, default_open: bool) -> bool {
@@ -509,7 +561,8 @@ impl SessionView {
                 div().text_size(px(12.)).text_color(theme.text_muted).font_family(theme.mono_font.clone()).whitespace_normal().child(shown).into_any_element()
             }
             ToolContent::Diff { path, old, new } => {
-                let (added, removed, lines) = diff_preview(old.as_deref().unwrap_or(""), new);
+                let preview = self.diff_preview_of(&tool.id, path, old.as_deref().unwrap_or(""), new);
+                let (added, removed, lines) = (preview.0, preview.1, preview.2.clone());
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let (p, o) = (path.clone(), old.clone());
                 div()
@@ -557,10 +610,7 @@ impl SessionView {
                     .into_any_element()
             }
             ToolContent::Terminal { id } => {
-                let shown = self.session.read(cx).terminals.shown(id);
-                let (output, exit) = shown.unwrap_or_default();
-                let lines: Vec<&str> = output.lines().collect();
-                let tail = lines[lines.len().saturating_sub(PREVIEW_LINES)..].join("\n");
+                let (tail, exit) = self.session.read(cx).terminals.tail(id, PREVIEW_LINES).unwrap_or_default();
                 let status = match exit {
                     None => "running…".to_string(),
                     Some(e) => e.code.map_or("stopped".to_string(), |c| format!("exit {c}")),
@@ -947,8 +997,27 @@ fn title_spans(title: &str, theme: &Theme) -> Vec<AnyElement> {
 
 /// Added and removed line counts, and the changed lines (with a line of
 /// context around each run), at most `PREVIEW_LINES`.
-fn diff_preview(old: &str, new: &str) -> (usize, usize, Vec<(char, String)>) {
-    let diff = similar::TextDiff::from_lines(old, new);
+/// Lines added, removed, and the first changed lines with their sign.
+type Preview = (usize, usize, Vec<(char, String)>);
+
+impl SessionView {
+    fn diff_preview_of(&self, tool: &str, path: &std::path::Path, old: &str, new: &str) -> Rc<Preview> {
+        let key = (tool.to_string(), path.to_path_buf());
+        let mut cache = self.diff_previews.borrow_mut();
+        if let Some((o, n, preview)) = cache.get(&key)
+            && (*o, *n) == (old.len(), new.len())
+        {
+            return preview.clone();
+        }
+        let preview = Rc::new(diff_preview(old, new));
+        cache.insert(key, (old.len(), new.len(), preview.clone()));
+        preview
+    }
+}
+
+fn diff_preview(old: &str, new: &str) -> Preview {
+    // A bounded diff: a huge rewrite shows coarser, not slower.
+    let diff = similar::TextDiff::configure().timeout(std::time::Duration::from_millis(100)).diff_lines(old, new);
     let (mut added, mut removed) = (0, 0);
     let mut lines = Vec::new();
     for change in diff.iter_all_changes() {

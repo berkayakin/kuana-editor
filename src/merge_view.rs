@@ -235,17 +235,23 @@ impl MergeView {
             .collect();
         self.ai = Some(cx.spawn(async move |this, cx| {
             let replies = futures::future::join_all(streams.into_iter().map(|mut stream| async move {
-                let (mut reply, mut error) = (String::new(), None);
+                let (mut reply, mut error, mut stop) = (String::new(), None, crate::ai::StopReason::EndTurn);
                 while let Some(event) = stream.events.next().await {
                     match event {
                         crate::ai::StreamEvent::Text { text, .. } => reply.push_str(&text),
+                        crate::ai::StreamEvent::Stop(reason) => stop = reason,
                         crate::ai::StreamEvent::Error(message) => error = Some(message),
                         _ => {}
                     }
                 }
-                match error {
-                    Some(message) => Err(message),
-                    None => crate::ai::tasks::conflict_resolution(&reply).ok_or_else(|| "The answer still had conflict markers.".to_string()),
+                // Only a whole answer resolves a conflict: an empty, refused or
+                // cut-off one would drop or truncate its lines.
+                match (error, stop) {
+                    (Some(message), _) => Err(message),
+                    (None, crate::ai::StopReason::Refusal) => Err("The model declined.".to_string()),
+                    (None, crate::ai::StopReason::MaxTokens) => Err("The answer was cut off.".to_string()),
+                    (None, _) if reply.trim().is_empty() => Err("The model sent nothing back.".to_string()),
+                    (None, _) => crate::ai::tasks::conflict_resolution(&reply).ok_or_else(|| "The answer still had conflict markers.".to_string()),
                 }
             }))
             .await;

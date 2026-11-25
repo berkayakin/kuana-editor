@@ -29,6 +29,9 @@ pub struct AgentChoice {
 }
 
 pub struct AgentStore {
+    /// Installed agents' versions, by id, as last read (`refresh_installed`):
+    /// what's installed is drawn every frame, the disk read only when it changes.
+    installed: HashMap<String, String>,
     registry: Vec<registry::Entry>,
     installing: HashMap<String, Task<()>>,
     errors: HashMap<String, String>,
@@ -52,12 +55,14 @@ pub fn init(cx: &mut App) {
             this.update(cx, |s: &mut AgentStore, cx| {
                 s.saved = saved;
                 s.registry = registry;
+                s.refresh_installed(cx);
                 cx.notify();
             })
             .ok();
         })
         .detach();
         AgentStore {
+            installed: HashMap::new(),
             registry: registry::fallback(),
             installing: HashMap::new(),
             errors: HashMap::new(),
@@ -97,9 +102,9 @@ impl AgentStore {
                 id: e.id.clone(),
                 name: e.name.clone(),
                 description: e.description.clone(),
-                installed: install::installed(&e.id).is_some(),
+                installed: self.installed.contains_key(&e.id),
                 installing: self.installing.contains_key(&e.id),
-                update: install::update_available(e),
+                update: self.installed.get(&e.id).is_some_and(|v| !e.version.is_empty() && *v != e.version),
                 error: self.errors.get(&e.id).cloned(),
             })
             .collect();
@@ -130,6 +135,22 @@ impl AgentStore {
                     Ok(()) => s.errors.remove(&id),
                     Err(error) => s.errors.insert(id, format!("Couldn't uninstall: {error}")),
                 };
+                s.refresh_installed(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Reads what's installed again (in the background).
+    fn refresh_installed(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self.registry.iter().map(|e| e.id.clone()).collect();
+        let read = cx.background_executor().spawn(async move { ids.into_iter().filter_map(|id| install::installed(&id).map(|i| (id, i.version().to_string()))).collect() });
+        cx.spawn(async move |this, cx| {
+            let installed = read.await;
+            this.update(cx, |s, cx| {
+                s.installed = installed;
                 cx.notify();
             })
             .ok();
@@ -150,8 +171,14 @@ impl AgentStore {
             let result = job.await;
             this.update(cx, |s, cx| {
                 s.installing.remove(&key);
-                if let Err(error) = result {
-                    s.errors.insert(key, format!("Couldn't install: {error}"));
+                match result {
+                    // Known at once: a session waiting for it starts now.
+                    Ok(installed) => {
+                        s.installed.insert(key, installed.version().to_string());
+                    }
+                    Err(error) => {
+                        s.errors.insert(key, format!("Couldn't install: {error}"));
+                    }
                 }
                 cx.notify();
             })
@@ -219,17 +246,21 @@ impl AgentStore {
     /// would outlive Kuana).
     fn quit(&mut self, cx: &mut Context<Self>) {
         for session in std::mem::take(&mut self.sessions) {
-            session.update(cx, |s, _| s.shut_down());
+            session.update(cx, |s, _| s.shut_down(true));
         }
         self.subscriptions.clear();
     }
 
     /// Closes a session: its agent stops (it stays saved).
     pub fn close(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.release(id, true, cx);
+    }
+
+    fn release(&mut self, id: &str, save: bool, cx: &mut Context<Self>) {
         if let Some(session) = self.sessions.iter().find(|s| s.read(cx).id == id).cloned() {
             session.update(cx, |s, cx| {
-                s.cancel(cx);
-                s.save(cx);
+                s.shut_down(save);
+                cx.notify();
             });
         }
         self.sessions.retain(|s| s.read(cx).id != id);
@@ -237,9 +268,15 @@ impl AgentStore {
         cx.notify();
     }
 
-    /// Deletes a session for good.
+    /// Deletes a session for good (a save still on its way is dropped:
+    /// `history` remembers it's deleted).
     pub fn delete(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.close(id, cx);
+        // Its agent's own id, which a session not saved yet knows only live.
+        let acp = self.sessions.iter().find(|s| s.read(cx).id == id).and_then(|s| s.read(cx).acp_session().map(str::to_string));
+        if let Some(acp) = acp {
+            super::kuana_agent::forget(&acp);
+        }
+        self.release(id, false, cx);
         self.saved.retain(|s| s.id != id);
         let id = id.to_string();
         cx.background_executor()

@@ -65,6 +65,7 @@ impl Workspace {
         self.update_recent_projects_for(&project, cx);
         self.folders = Some(project);
         self.sync_agents(window, cx);
+        self.sync_agents_view(cx);
         // A remote project: its connection is watched.
         self.watch_connection(window, cx);
         self.forward_ports(ports, cx);

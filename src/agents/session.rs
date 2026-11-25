@@ -277,8 +277,11 @@ impl Session {
     }
 
     /// Saves the session and stops its agent and terminals (Kuana quits).
-    pub fn shut_down(&mut self) {
-        self.save_now();
+    /// (`save`: saved first; a deleted session isn't.)
+    pub fn shut_down(&mut self, save: bool) {
+        if save {
+            self.save_now();
+        }
         if let (Some(agent), Some(id)) = (&self.agent, &self.acp_session) {
             agent.cancel(id);
         }
@@ -286,6 +289,18 @@ impl Session {
             agent.stop();
         }
         self.terminals.kill_all();
+        self.pump = None;
+        self.connecting = None;
+        self.turn_task = None;
+        self.pending_prompt = None;
+        self.queued.clear();
+        // Dropped unanswered, they answer the agent with an error.
+        self.permissions.clear();
+        self.requests.clear();
+        if self.state.busy() {
+            self.transcript.settle();
+            self.state = State::Idle;
+        }
     }
 
     /// Saves the transcript (in the background).
@@ -298,6 +313,11 @@ impl Session {
                 }
             })
             .detach();
+    }
+
+    /// The agent's own id for the session, once it has one.
+    pub fn acp_session(&self) -> Option<&str> {
+        self.acp_session.as_deref()
     }
 
     pub fn is_connected(&self) -> bool {
@@ -335,7 +355,7 @@ impl Session {
             let embedded = agent.init.agent_capabilities.prompt_capabilities.embedded_context;
             let auth: Vec<AuthMethod> = agent.init.auth_methods.iter().filter_map(|m| auth_method(serde_json::to_value(m).ok()?)).collect();
             let pump = cx.spawn({
-                let this = this.clone();
+                let (this, gone) = (this.clone(), Arc::downgrade(&agent));
                 async move |cx| {
                     let mut events = events;
                     while let Some(event) = events.next().await {
@@ -343,7 +363,7 @@ impl Session {
                             return;
                         }
                     }
-                    this.update(cx, |s, cx| s.disconnected(cx)).ok();
+                    this.update(cx, |s, cx| s.disconnected(&gone, cx)).ok();
                 }
             });
             this.update(cx, |s, _| {
@@ -406,15 +426,37 @@ impl Session {
         self.state = State::Failed(error.clone());
         self.pending_prompt = None;
         self.transcript.notice(Level::Error, error);
+        self.drop_queued();
         self.agent = None;
         cx.emit(SessionEvent::Finished);
         cx.notify();
     }
 
-    fn disconnected(&mut self, cx: &mut Context<Self>) {
+    /// Messages waiting for a turn that won't come: said in the transcript,
+    /// not left waiting.
+    fn drop_queued(&mut self) {
+        if !self.queued.is_empty() {
+            let n = self.queued.len();
+            self.queued.clear();
+            self.transcript.notice(Level::Warning, format!("{n} queued message{} weren't sent.", if n == 1 { "" } else { "s" }));
+        }
+    }
+
+    /// An agent's events ended. Only the session's current agent counts: an
+    /// old one's end, after a new one was started, changes nothing.
+    fn disconnected(&mut self, gone: &std::sync::Weak<Agent>, cx: &mut Context<Self>) {
+        let current = matches!((&self.agent, gone.upgrade()), (Some(agent), Some(gone)) if Arc::ptr_eq(agent, &gone));
+        if !current {
+            return;
+        }
         let tail = self.agent.as_ref().map(|a| a.stderr_tail()).unwrap_or_default();
         self.agent = None;
         self.pump = None;
+        // A connection being opened ends with its own error.
+        if self.state == State::Connecting {
+            cx.notify();
+            return;
+        }
         for (_, responder) in self.permissions.drain() {
             drop(responder);
         }
@@ -426,6 +468,7 @@ impl Session {
             self.transcript.settle();
             self.transcript.notice(Level::Error, text);
             self.state = State::Idle;
+            self.drop_queued();
             cx.emit(SessionEvent::Finished);
         }
         cx.notify();
@@ -557,7 +600,18 @@ impl Session {
                 self.state = State::NeedsAuth;
                 self.transcript.notice(Level::Warning, format!("Sign in to {} to go on.", self.agent_name));
             }
-            Err(e) if e.code == RpcError::CLOSED => {}
+            // The agent died: the next prompt starts another (its pump's end,
+            // coming after, is the old agent's and changes nothing).
+            Err(e) if e.code == RpcError::CLOSED => {
+                let tail = self.agent.take().map(|a| a.stderr_tail()).unwrap_or_default();
+                self.pump = None;
+                let mut text = format!("{} stopped.", self.agent_name);
+                if let Some(last) = tail.lines().rev().find(|l| !l.trim().is_empty()) {
+                    text.push_str(&format!(" {last}"));
+                }
+                self.transcript.settle();
+                self.transcript.notice(Level::Error, text);
+            }
             Err(e) => {
                 self.transcript.settle();
                 self.transcript.notice(Level::Error, e.message);
@@ -586,8 +640,13 @@ impl Session {
         }
         self.queued.clear();
         if matches!(self.state, State::Connecting) {
+            // The agent may be up but the session not opened on it: it starts
+            // over on the next prompt.
             self.connecting = None;
             self.pending_prompt = None;
+            self.agent = None;
+            self.pump = None;
+            self.replaying = false;
             self.state = State::Idle;
             self.transcript.notice(Level::Info, "Stopped.");
         }
@@ -1048,7 +1107,7 @@ mod tests {
                 crate::agents::transcript::ToolContent::Terminal { id } => Some(id.clone()),
                 _ => None,
             }).expect("the command's output shows in its card");
-            assert_eq!(s.terminals.shown(&terminal).unwrap().0.trim(), "ran");
+            assert_eq!(s.terminals.tail(&terminal, 5).unwrap().0.trim(), "ran");
             let changes = s.changes();
             assert_eq!(changes.len(), 1);
             assert_eq!(changes[0].1.text().as_deref(), Some("hello world\n"));
@@ -1067,7 +1126,7 @@ mod tests {
             Launcher::Kuana(choose) => choose.clone(),
             Launcher::Process(_) => unreachable!(),
         });
-        session.update(cx, |s, _| s.shut_down());
+        session.update(cx, |s, _| s.shut_down(true));
         drop(session);
         let entries = saved.transcript.entries.len();
         let session = cx.new(|_| Session::restored(saved, Launcher::Kuana(choose)));
@@ -1157,7 +1216,7 @@ read l"#;
         let second: Value = serde_json::from_str(&requests[2].1).unwrap();
         assert!(second.to_string().contains("sunny"), "{second}");
         drop(requests);
-        session.update(cx, |s, _| s.shut_down());
+        session.update(cx, |s, _| s.shut_down(true));
     }
 
     #[test]

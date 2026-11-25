@@ -10,7 +10,10 @@ use std::{
     collections::BTreeMap,
     io::{BufRead as _, BufReader},
     process::{Child, Stdio},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -86,7 +89,7 @@ pub struct Client {
 
 impl Client {
     /// Starts `settings`' program in `cwd` and lists its tools.
-    pub fn spawn(name: &str, settings: &ServerSettings, cwd: &std::path::Path) -> Result<Client, String> {
+    pub fn spawn(name: &str, settings: &ServerSettings, cwd: &std::path::Path, cancel: &AtomicBool) -> Result<Client, String> {
         let mut command = crate::process::command(&settings.command);
         command.args(&settings.args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         command.env("PATH", crate::lsp::servers::search_path());
@@ -97,13 +100,13 @@ impl Client {
         if let Some(stderr) = child.stderr.take() {
             let _ = std::thread::Builder::new().name("mcp stderr".into()).spawn(move || for _ in BufReader::new(stderr).split(b'\n') {});
         }
-        let mut client = Client::connect(name, stdout, stdin)?;
+        let mut client = Client::connect(name, stdout, stdin, cancel)?;
         client.child = Mutex::new(Some(child));
         Ok(client)
     }
 
     /// Talks to a server on `read` / `write` (a process's stdio, or a test's pipe).
-    pub fn connect(name: &str, read: impl std::io::Read + Send + 'static, write: impl std::io::Write + Send + 'static) -> Result<Client, String> {
+    pub fn connect(name: &str, read: impl std::io::Read + Send + 'static, write: impl std::io::Write + Send + 'static, cancel: &AtomicBool) -> Result<Client, String> {
         let (rpc, mut incoming) = Connection::start(read, write);
         let answering = rpc.clone();
         let _ = std::thread::Builder::new().name("mcp requests".into()).spawn(move || {
@@ -122,13 +125,13 @@ impl Client {
             "capabilities": {},
             "clientInfo": { "name": "kuana", "title": "Kuana", "version": env!("CARGO_PKG_VERSION") },
         });
-        wait(rpc.request("initialize", init), START_TIMEOUT).map_err(|e| format!("The MCP server {name} didn't start: {e}"))?;
+        wait(rpc.request("initialize", init), START_TIMEOUT, cancel).map_err(|e| format!("The MCP server {name} didn't start: {e}"))?;
         rpc.notify("notifications/initialized", json!({}));
         let mut tools = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
             let params = cursor.as_ref().map_or_else(|| json!({}), |c| json!({ "cursor": c }));
-            let page = wait(rpc.request("tools/list", params), START_TIMEOUT).map_err(|e| format!("The MCP server {name} didn't list its tools: {e}"))?;
+            let page = wait(rpc.request("tools/list", params), START_TIMEOUT, cancel).map_err(|e| format!("The MCP server {name} didn't list its tools: {e}"))?;
             tools.extend(page["tools"].as_array().into_iter().flatten().filter_map(|t| {
                 Some(Tool {
                     name: t["name"].as_str()?.to_string(),
@@ -144,10 +147,11 @@ impl Client {
         Ok(Client { name: name.to_string(), rpc, child: Mutex::new(None), tools })
     }
 
-    /// Calls a tool: its result as text, and whether it's an error.
-    pub fn call(&self, tool: &str, arguments: &Value) -> (String, bool) {
+    /// Calls a tool: its result as text, and whether it's an error. `cancel`
+    /// (the user's Stop) ends the wait.
+    pub fn call(&self, tool: &str, arguments: &Value, cancel: &AtomicBool) -> (String, bool) {
         let params = json!({ "name": tool, "arguments": arguments });
-        match wait(self.rpc.request("tools/call", params), CALL_TIMEOUT) {
+        match wait(self.rpc.request("tools/call", params), CALL_TIMEOUT, cancel) {
             Ok(result) => (result_text(&result), result["isError"].as_bool().unwrap_or(false)),
             Err(error) => (format!("The MCP server {} failed: {error}", self.name), true),
         }
@@ -185,17 +189,25 @@ fn result_text(result: &Value) -> String {
     parts.join("\n")
 }
 
-/// Waits for `answer` at most `timeout`.
-fn wait(answer: impl Future<Output = Result<Value, RpcError>>, timeout: Duration) -> Result<Value, String> {
-    let (tx, rx) = futures::channel::oneshot::channel::<()>();
-    let _ = std::thread::Builder::new().name("mcp timeout".into()).spawn(move || {
-        std::thread::sleep(timeout);
-        let _ = tx.send(());
+/// Waits for `answer` at most `timeout`, or until `cancel` is set. A ticker
+/// thread wakes the wait every 100 ms and ends with it.
+fn wait(answer: impl Future<Output = Result<Value, RpcError>>, timeout: Duration, cancel: &AtomicBool) -> Result<Value, String> {
+    let (tick, mut ticks) = futures::channel::mpsc::unbounded::<()>();
+    let _ = std::thread::Builder::new().name("mcp wait".into()).spawn(move || {
+        while tick.unbounded_send(()).is_ok() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
     });
+    let deadline = std::time::Instant::now() + timeout;
     futures::executor::block_on(async {
-        match futures::future::select(std::pin::pin!(answer), rx).await {
-            futures::future::Either::Left((answer, _)) => answer.map_err(|e| e.message),
-            futures::future::Either::Right(_) => Err(format!("no answer in {} s", timeout.as_secs())),
+        let mut answer = std::pin::pin!(answer);
+        loop {
+            match futures::future::select(answer.as_mut(), ticks.next()).await {
+                futures::future::Either::Left((answer, _)) => return answer.map_err(|e| e.message),
+                futures::future::Either::Right(_) if cancel.load(Ordering::Relaxed) => return Err("stopped".to_string()),
+                futures::future::Either::Right(_) if std::time::Instant::now() >= deadline => return Err(format!("no answer in {} s", timeout.as_secs())),
+                futures::future::Either::Right(_) => {}
+            }
         }
     })
 }
@@ -225,7 +237,7 @@ mod tests {
                 }
             })
         });
-        Client::connect("fake", client_read, client_write).unwrap()
+        Client::connect("fake", client_read, client_write, &AtomicBool::new(false)).unwrap()
     }
 
     #[test]
@@ -234,8 +246,13 @@ mod tests {
         let names: Vec<&str> = client.tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["echo", "fail"]);
         assert_eq!(client.tools[0].description, "Says it back");
-        assert_eq!(client.call("echo", &json!({ "text": "hi" })), ("hi".to_string(), false));
-        assert_eq!(client.call("fail", &json!({})), ("broken".to_string(), true));
+        let go = AtomicBool::new(false);
+        assert_eq!(client.call("echo", &json!({ "text": "hi" }), &go), ("hi".to_string(), false));
+        assert_eq!(client.call("fail", &json!({}), &go), ("broken".to_string(), true));
+        // Stop ends a call that gets no answer.
+        let stopped = AtomicBool::new(true);
+        let (text, failed) = client.call("silent", &json!({}), &stopped);
+        assert!(failed && text.ends_with("stopped"), "{text}");
     }
 
     #[test]

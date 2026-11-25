@@ -31,8 +31,9 @@ pub struct Saved {
     pub transcript: Transcript,
 }
 
-/// Held while the index is read and rewritten.
-static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Held while the index is read and rewritten; the sessions deleted in this
+/// run, which a save that was already on its way mustn't bring back.
+static WRITING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 pub fn dir() -> Option<PathBuf> {
     crate::acp::install::agents_dir().map(|d| d.join("sessions"))
@@ -63,7 +64,10 @@ fn write_index(list: &[Summary]) -> std::io::Result<()> {
 
 /// Saves a session and its summary. One at a time: each rewrites the index.
 pub fn save(saved: &Saved) -> std::io::Result<()> {
-    let _one = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    let deleted = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    if deleted.contains(&saved.summary.id) {
+        return Ok(());
+    }
     let Some(path) = file(&saved.summary.id) else { return Ok(()) };
     std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))?;
     crate::state::write_atomic(&path, &serde_json::to_vec(saved).unwrap_or_default())?;
@@ -82,7 +86,8 @@ pub fn delete(id: &str) -> std::io::Result<()> {
     if let Some(acp) = load(id).and_then(|s| s.acp_session) {
         super::kuana_agent::forget(&acp);
     }
-    let _one = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut deleted = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    deleted.push(id.to_string());
     if let Some(path) = file(id) {
         let _ = std::fs::remove_file(path);
     }

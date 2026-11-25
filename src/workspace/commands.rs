@@ -193,6 +193,8 @@ impl Workspace {
         self.watch_task = None;
         self.folders = None;
         self.stop_agents();
+        self.close_agent_sessions(cx);
+        self.sync_agents_view(cx);
         // Extensions' views for the project go, and their code hears it closed.
         self.refresh_extension_views(cx);
         self.show_sidebar = false;

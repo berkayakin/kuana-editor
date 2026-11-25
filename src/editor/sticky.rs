@@ -50,11 +50,13 @@ impl Editor {
         crumbs
     }
 
-    /// The innermost definition around the caret (its name and range), as the
-    /// outline last read knows it.
+    /// The innermost definition around the caret (its name and range), from
+    /// the outline of the text as it is now (an action, not a frame).
     pub fn symbol_at_caret(&mut self, cx: &mut Context<Self>) -> Option<(String, std::ops::Range<usize>)> {
         let head = self.primary_selection().head;
-        let outline = self.shown_outline(cx);
+        let (language, tree, rope) = (self.doc.read(cx).language, self.doc.read(cx).syntax().tree().cloned(), self.doc.read(cx).rope().clone());
+        let key = (self.doc.read(cx).tree_version(), language);
+        let outline = self.outline.now(key, move || tree.map(|tree| crate::syntax::symbols(language, &tree, &rope)).unwrap_or_default());
         outline.iter().filter(|s| s.range.start <= head && head <= s.range.end).min_by_key(|s| s.range.len()).map(|s| (s.name.clone(), s.range.clone()))
     }
 
