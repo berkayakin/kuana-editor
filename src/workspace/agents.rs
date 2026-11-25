@@ -8,7 +8,7 @@
 use super::*;
 use crate::acp::RpcError;
 use crate::agents::{
-    session::{ContextItem, Session, SessionEvent},
+    session::{Before, ContextItem, Session, SessionEvent},
     sidebar::AgentsViewEvent,
     store::{self, KUANA_AGENT},
     view::{MenuKind, SessionView, SessionViewEvent},
@@ -272,10 +272,11 @@ impl Workspace {
             SessionViewEvent::Menu { kind, position } => self.open_session_menu(view, kind.clone(), *position, window, cx),
             SessionViewEvent::Review => self.review_agent_changes(&session, window, cx),
             SessionViewEvent::KeepAll => session.update(cx, |s, cx| {
-                s.changes.clear();
+                s.checkpoints.clear();
                 cx.notify();
             }),
             SessionViewEvent::RejectAll => self.reject_agent_changes(&session, window, cx),
+            SessionViewEvent::RestoreTo(turn) => self.restore_agent_files(&session, *turn, window, cx),
             SessionViewEvent::RunCommand(command) => {
                 let cwd = session.read(cx).cwd.clone();
                 let first: String = command.lines().next().unwrap_or_default().chars().take(40).collect();
@@ -335,7 +336,7 @@ impl Workspace {
                     let markdown = s.read(cx).transcript.markdown();
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(markdown));
                 }))));
-                if !session.read(cx).changes.is_empty() {
+                if !session.read(cx).checkpoints.is_empty() {
                     entries.push(MenuEntry::item("Review Changes", Icon::GitCompare));
                     let s = session.clone();
                     actions.push(Some(MenuAction::Call(std::rc::Rc::new(move |ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| ws.review_agent_changes(&s, window, cx)))));
@@ -374,10 +375,11 @@ impl Workspace {
             }
             SessionEvent::TitleChanged => {}
             SessionEvent::ReadFile { id, path, line, limit } => {
-                let result = self.agent_read(path, *line, *limit, cx);
+                let result = self.agent_read(&resolve_agent_path(path), *line, *limit, cx);
                 session.update(cx, |s, _| s.answer(*id, result));
             }
-            SessionEvent::WriteFile { id, path, content } => self.agent_write(session, *id, path.clone(), content.clone(), window, cx),
+            // Where the write really lands decides whether it's in the project.
+            SessionEvent::WriteFile { id, path, content } => self.agent_write(session, *id, resolve_agent_path(path), content.clone(), window, cx),
             SessionEvent::Ext { id, method, params } => {
                 let result = match method.as_str() {
                     "_kuana/problems" => Ok(self.agent_problems(params.get("path").and_then(Value::as_str).map(PathBuf::from), cx)),
@@ -404,17 +406,18 @@ impl Workspace {
         }
     }
 
-    /// A file as the editor has it (its open document, else the disk), lines
-    /// `line` (1-based) on, at most `limit` of them.
-    fn agent_read(&self, path: &Path, line: Option<u32>, limit: Option<u32>, cx: &App) -> Result<Value, RpcError> {
-        let text = match self.documents.read(cx).get(path, cx) {
-            Some(doc) if !doc.read(cx).is_stand_in() => doc.read(cx).rope().to_string(),
-            _ => {
+    /// A file as the editor has it (its open document, read from disk first
+    /// for a restored tab, else the disk), lines `line` (1-based) on, at most
+    /// `limit` of them.
+    fn agent_read(&mut self, path: &Path, line: Option<u32>, limit: Option<u32>, cx: &mut Context<Self>) -> Result<Value, RpcError> {
+        let text = match self.agent_document(path, cx) {
+            Some(editor) => editor.read(cx).doc.read(cx).rope().to_string(),
+            None => {
                 let bytes = crate::fs::read(path).map_err(|e| RpcError::new(RpcError::NOT_FOUND, format!("{}: {e}", path.display())))?;
-                if bytes.contains(&0) {
+                if crate::encoding::looks_binary(&bytes) {
                     return Err(RpcError::internal(format!("{} isn't a text file", path.display())));
                 }
-                String::from_utf8_lossy(&bytes).into_owned()
+                crate::encoding::decode(&bytes, None).0
             }
         };
         let text = match (line, limit) {
@@ -426,6 +429,27 @@ impl Workspace {
             }
         };
         Ok(json!({ "content": text }))
+    }
+
+    /// The tab showing `path`, read from its file if it was a restored tab
+    /// that hadn't yet (so its unsaved text is what the agent sees and edits).
+    fn agent_document(&mut self, path: &Path, cx: &mut Context<Self>) -> Option<Entity<Editor>> {
+        let editor = self.tab_for(path, cx)?;
+        self.load_tab(&editor, cx);
+        editor.read(cx).is_loaded().then_some(editor)
+    }
+
+    /// What a file is before an agent writes it: its open document's text,
+    /// else its bytes, else missing. Err when it's there but can't be read.
+    fn agent_before(&mut self, path: &Path, cx: &mut Context<Self>) -> Result<Before, String> {
+        if let Some(editor) = self.agent_document(path, cx) {
+            return Ok(Before::Text(editor.read(cx).doc.read(cx).rope().to_string()));
+        }
+        match crate::fs::read(path) {
+            Ok(bytes) => Ok(Before::Bytes(bytes.into())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Before::Missing),
+            Err(e) => Err(format!("Couldn't read {} before writing it: {e}", path.display())),
+        }
     }
 
     /// Writes for an agent: through the file's tab when it has one (one undo
@@ -450,12 +474,21 @@ impl Workspace {
     }
 
     fn write_for_agent(&mut self, session: &Entity<Session>, id: u64, path: PathBuf, content: String, window: &mut Window, cx: &mut Context<Self>) {
-        let before = self.agent_read(&path, None, None, cx).ok().and_then(|v| v["content"].as_str().map(str::to_string));
-        session.update(cx, |s, _| s.note_change(path.clone(), before.clone()));
-        if let Some(before) = &before {
-            crate::local_history::record(&path, before, crate::local_history::Kind::BeforeAgent);
+        let before = match self.agent_before(&path, cx) {
+            Ok(before) => before,
+            Err(error) => {
+                session.update(cx, |s, _| s.answer(id, Err(RpcError::internal(error))));
+                return;
+            }
+        };
+        if let Some(text) = before.text() {
+            crate::local_history::record(&path, &text, crate::local_history::Kind::BeforeAgent);
         }
-        if let Some(editor) = self.tab_for(&path, cx).filter(|e| e.read(cx).is_loaded()) {
+        session.update(cx, |s, cx| {
+            s.note_change(&path, before);
+            cx.notify();
+        });
+        if let Some(editor) = self.agent_document(&path, cx) {
             editor.update(cx, |e, cx| e.replace_text(&content, cx));
             let saving = self.save_editor_task(&editor, window, cx);
             let session = session.clone();
@@ -498,27 +531,35 @@ impl Workspace {
 
     /// Opens each file the session changed as a diff against what it was.
     fn review_agent_changes(&mut self, session: &Entity<Session>, window: &mut Window, cx: &mut Context<Self>) {
-        let changes = session.read(cx).changes.clone();
+        let changes = session.read(cx).changes();
         if changes.is_empty() {
             self.toast(ToastKind::Info, "No changes to review", None, cx);
             return;
         }
-        for change in changes.iter().rev() {
-            let text: Arc<str> = change.before.clone().unwrap_or_default().into();
-            let label = if change.before.is_some() { "Before the agent" } else { "New file" };
-            self.show_diff(DiffSource::Compare { path: change.path.clone(), with: Compared::Text { label: label.into(), text } }, window, cx);
+        for (path, before) in changes.iter().rev() {
+            let text: Arc<str> = before.text().unwrap_or_default().into();
+            let label = if matches!(before, Before::Missing) { "New file" } else { "Before the agent" };
+            self.show_diff(DiffSource::Compare { path: path.clone(), with: Compared::Text { label: label.into(), text } }, window, cx);
         }
     }
 
-    /// Puts every changed file back as it was before the session touched it
-    /// (a file it created goes to the Trash).
+    /// Reject All: every changed file back as it was before the session.
     fn reject_agent_changes(&mut self, session: &Entity<Session>, window: &mut Window, cx: &mut Context<Self>) {
-        let changes = session.read(cx).changes.clone();
-        if changes.is_empty() {
+        self.restore_agent_files(session, 0, window, cx);
+    }
+
+    /// Puts the files the agent changed in `turn` and after back as they were
+    /// before it (a file it created goes to the Trash), after asking; turn 0
+    /// is the whole session (Reject All).
+    pub(super) fn restore_agent_files(&mut self, session: &Entity<Session>, turn: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let files = session.read(cx).checkpoints.restore_to(turn);
+        if files.is_empty() {
             return;
         }
-        let detail = changes.iter().map(|c| format!("• {}", self.display_rel(&c.path))).collect::<Vec<_>>().join("\n");
-        let answer = ask(window, &format!("Undo the agent's changes to {} file{}?", changes.len(), if changes.len() == 1 { "" } else { "s" }), &detail, "Undo Changes", false, cx);
+        let detail = files.iter().map(|(path, _)| format!("• {}", self.display_rel(path))).collect::<Vec<_>>().join("\n");
+        let count = format!("{} file{}", files.len(), if files.len() == 1 { "" } else { "s" });
+        let title = if turn == 0 { format!("Undo the agent's changes to {count}?") } else { format!("Put {count} back as they were before this message?") };
+        let answer = ask(window, &title, &detail, "Undo Changes", false, cx);
         let session = session.clone();
         cx.spawn_in(window, async move |this, cx| {
             if !answer.await {
@@ -526,33 +567,26 @@ impl Workspace {
             }
             this.update_in(cx, |ws, window, cx| {
                 let mut failed = Vec::new();
-                for change in &changes {
-                    let now = ws.agent_read(&change.path, None, None, cx).ok().and_then(|v| v["content"].as_str().map(str::to_string));
-                    if let Some(now) = &now {
-                        crate::local_history::record(&change.path, now, crate::local_history::Kind::BeforeRestore);
+                for (path, before) in &files {
+                    if let Ok(now) = ws.agent_before(path, cx)
+                        && let Some(text) = now.text()
+                    {
+                        crate::local_history::record(path, &text, crate::local_history::Kind::BeforeRestore);
                     }
-                    let result = match &change.before {
-                        Some(before) => match ws.tab_for(&change.path, cx).filter(|e| e.read(cx).is_loaded()) {
-                            Some(editor) => {
-                                editor.update(cx, |e, cx| e.replace_text(before, cx));
-                                ws.save_editor(&editor, window, cx);
-                                Ok(())
-                            }
-                            None => crate::fs::write(&change.path, before.as_bytes()).map_err(|e| e.to_string()),
-                        },
-                        None => crate::file_history::move_to_trash(&change.path).map(|_| ()).map_err(|e| e.to_string()),
-                    };
-                    if let Err(e) = result {
-                        failed.push(format!("{}: {e}", ws.display_rel(&change.path)));
+                    if let Err(e) = ws.put_back(path, before, window, cx) {
+                        failed.push(format!("{}: {e}", ws.display_rel(path)));
                     }
-                    ws.files_written([change.path.clone()], cx);
+                    ws.files_written([path.clone()], cx);
                 }
                 session.update(cx, |s, cx| {
-                    s.changes.clear();
+                    s.checkpoints.forget_from(turn);
+                    if turn > 0 {
+                        s.transcript.notice(crate::agents::transcript::Level::Info, format!("Files put back as they were before message {turn}."));
+                    }
                     cx.notify();
                 });
                 if failed.is_empty() {
-                    ws.toast(ToastKind::Success, format!("Put back {} file{}", changes.len(), if changes.len() == 1 { "" } else { "s" }), Some("Local History keeps the agent's version.".into()), cx);
+                    ws.toast(ToastKind::Success, format!("Put back {count}"), Some("Local History keeps the agent's version.".into()), cx);
                 } else {
                     ws.toast(ToastKind::Error, "Some files couldn't be put back", Some(failed.join("\n")), cx);
                 }
@@ -560,6 +594,33 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// One file back as it was: through its tab when it has one (one undo
+    /// step, saved), else its bytes written as they were; a file that didn't
+    /// exist goes to the Trash.
+    fn put_back(&mut self, path: &Path, before: &Before, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        if matches!(before, Before::Missing) {
+            if !path.exists() {
+                return Ok(());
+            }
+            if let Some(editor) = self.tab_for(path, cx) {
+                self.remove_item(&PaneItem::Editor(editor), window, cx);
+            }
+            return crate::file_history::move_to_trash(path).map(|_| ()).map_err(|e| e.to_string());
+        }
+        if let Some(editor) = self.agent_document(path, cx) {
+            let text = before.text().unwrap_or_default();
+            editor.update(cx, |e, cx| e.replace_text(&text, cx));
+            self.save_editor(&editor, window, cx);
+            return Ok(());
+        }
+        let bytes: Vec<u8> = match before {
+            Before::Bytes(bytes) => bytes.to_vec(),
+            Before::Text(text) => text.clone().into_bytes(),
+            Before::Missing => unreachable!("handled above"),
+        };
+        path.parent().map_or(Ok(()), crate::fs::create_dir_all).and_then(|()| crate::fs::write(path, &bytes)).map_err(|e| e.to_string())
     }
 
     // ---- Context and asking ----------------------------------------------------------------
@@ -742,6 +803,33 @@ impl Workspace {
     }
 }
 
+/// Where an agent's path really points: `.` and `..` resolved, and links
+/// followed as far as the path exists, so `/proj/../../.ssh/x` or a link out
+/// of the project isn't taken for a file in it.
+fn resolve_agent_path(path: &Path) -> PathBuf {
+    let mut plain = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                plain.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => plain.push(other),
+        }
+    }
+    // The deepest part that exists, with its links resolved, then the rest.
+    let mut existing = plain.as_path();
+    let mut rest = Vec::new();
+    while !existing.exists() {
+        let (Some(name), Some(parent)) = (existing.file_name(), existing.parent()) else { return plain };
+        rest.push(name.to_os_string());
+        existing = parent;
+    }
+    let mut resolved = crate::paths::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
+    resolved.extend(rest.iter().rev());
+    resolved
+}
+
 fn selection_context(editor: &Entity<Editor>, cx: &App) -> Option<ContextItem> {
     let e = editor.read(cx);
     let doc = e.doc.read(cx);
@@ -759,4 +847,25 @@ fn selection_context(editor: &Entity<Editor>, cx: &App) -> Option<ContextItem> {
         last -= 1;
     }
     Some(ContextItem::Selection { path, lines: (first, last), text })
+}
+
+#[cfg(test)]
+mod tests {
+    /// `..` and links out of a folder are resolved before anything checks
+    /// whether a path is in the project.
+    #[test]
+    fn agent_paths_resolve_dots_and_links() {
+        let root = crate::paths::canonicalize(&std::env::temp_dir()).unwrap().join(format!("kuana-agent-paths-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("proj/src")).unwrap();
+        let resolve = super::resolve_agent_path;
+        assert_eq!(resolve(&root.join("proj/src/../../outside.txt")), root.join("outside.txt"));
+        assert_eq!(resolve(&root.join("proj/./src/new/file.rs")), root.join("proj/src/new/file.rs"));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&root, root.join("proj/link")).unwrap();
+            assert_eq!(resolve(&root.join("proj/link/secret")), root.join("secret"));
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
 }

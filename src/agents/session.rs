@@ -18,7 +18,9 @@ use futures::StreamExt as _;
 use gpui::{Context, EventEmitter, Task};
 use serde_json::{Value, json};
 
+pub use super::checkpoints::Before;
 use super::{
+    checkpoints::Checkpoints,
     history, kuana_agent,
     terminals::Terminals,
     transcript::{Entry, Level, Permission, PermissionOption, Tool, Transcript},
@@ -115,15 +117,6 @@ impl ContextItem {
     }
 }
 
-/// A file the session's agent changed: what it held before the turn's
-/// first write to it (None: the agent created it).
-#[derive(Clone, Debug, PartialEq)]
-pub struct FileChange {
-    pub path: PathBuf,
-    pub before: Option<String>,
-    pub turn: usize,
-}
-
 /// What the workspace hears.
 pub enum SessionEvent {
     /// The agent asked for permission (the user should know if they're elsewhere).
@@ -159,7 +152,8 @@ pub struct Session {
     /// Tokens used of the context window.
     pub usage: Option<(u64, u64)>,
     pub auth_methods: Vec<AuthMethod>,
-    pub changes: Vec<FileChange>,
+    /// What the agent changed, turn by turn (`note_change`, `changes`).
+    pub checkpoints: Checkpoints,
     pub terminals: Terminals,
     /// Prompts sent while a turn ran, sent after it.
     pub queued: Vec<(String, Vec<ContextItem>)>,
@@ -213,6 +207,7 @@ impl Session {
         created: u64,
         updated: u64,
     ) -> Session {
+        let user_messages = transcript.entries.iter().filter(|e| matches!(e, Entry::User { .. })).count();
         Session {
             id,
             agent_id,
@@ -229,7 +224,7 @@ impl Session {
             commands: Vec::new(),
             usage: None,
             auth_methods: Vec::new(),
-            changes: Vec::new(),
+            checkpoints: Checkpoints::default(),
             terminals: Terminals::default(),
             queued: Vec::new(),
             launcher,
@@ -237,7 +232,8 @@ impl Session {
             acp_session,
             embedded_context: false,
             replaying: false,
-            turn: 0,
+            // Turns go on from the saved transcript's (`turn_of` counts them).
+            turn: user_messages,
             pending_prompt: None,
             mcp_servers: Vec::new(),
             permissions: HashMap::new(),
@@ -663,12 +659,21 @@ impl Session {
         }
     }
 
-    /// Notes a file the agent changed. The first write wins: rejecting the
-    /// change puts back what the file held before the session touched it.
-    pub fn note_change(&mut self, path: PathBuf, before: Option<String>) {
-        if !self.changes.iter().any(|c| c.path == path) {
-            self.changes.push(FileChange { path, before, turn: self.turn });
-        }
+    /// Notes a file the agent is about to write, with what it is now: the
+    /// first write per turn counts, so files can go back to before any turn
+    /// (or the session).
+    pub fn note_change(&mut self, path: &std::path::Path, before: Before) {
+        self.checkpoints.note(self.turn, path, before);
+    }
+
+    /// Every file the agent changed, with what it was before the session.
+    pub fn changes(&self) -> Vec<(PathBuf, Before)> {
+        self.checkpoints.files()
+    }
+
+    /// The turn a user message (by its index in the transcript) began.
+    pub fn turn_of(&self, entry: usize) -> usize {
+        self.transcript.entries.iter().take(entry + 1).filter(|e| matches!(e, Entry::User { .. })).count()
     }
 
     pub fn needs_you(&self) -> bool {
@@ -985,7 +990,7 @@ mod tests {
                     let before = std::fs::read_to_string(path).ok();
                     std::fs::write(path, content).unwrap();
                     session.update(cx, |s, _| {
-                        s.note_change(path.clone(), before);
+                        s.note_change(path, before.map_or(Before::Missing, Before::Text));
                         s.answer(*id, Ok(json!({})));
                     });
                 }
@@ -1044,8 +1049,9 @@ mod tests {
                 _ => None,
             }).expect("the command's output shows in its card");
             assert_eq!(s.terminals.shown(&terminal).unwrap().0.trim(), "ran");
-            assert_eq!(s.changes.len(), 1);
-            assert_eq!(s.changes[0].before.as_deref(), Some("hello world\n"));
+            let changes = s.changes();
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes[0].1.text().as_deref(), Some("hello world\n"));
         });
 
         // Saved at the turn's end, and read back.

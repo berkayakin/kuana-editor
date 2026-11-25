@@ -1,6 +1,7 @@
 //! Agent sessions: Kuana's UI for coding agents (Claude, Codex, Gemini CLI,
 //! GitHub Copilot… over ACP, and Kuana's own agent), see `plans/ai.md`.
 
+pub mod checkpoints;
 pub mod history;
 pub mod kuana_agent;
 pub mod mcp;

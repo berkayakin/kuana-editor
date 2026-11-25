@@ -146,12 +146,17 @@ impl Connection {
     pub fn request(&self, method: &str, params: Value) -> impl Future<Output = Result<Value, RpcError>> + use<> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (answer, answered) = oneshot::channel();
-        let sent = if self.is_closed() {
-            false
-        } else {
-            self.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(id, answer);
-            self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
+        // Closed is checked under the lock the reader drains with, after
+        // setting it: a request is either drained (answered "stopped") or refused.
+        let waiting = {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            let open = !self.is_closed();
+            if open {
+                pending.insert(id, answer);
+            }
+            open
         };
+        let sent = waiting && self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
         if !sent {
             self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
         }

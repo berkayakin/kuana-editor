@@ -115,6 +115,7 @@ fn check(mut response: ureq::http::Response<ureq::Body>) -> Result<ureq::http::R
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|s| s.is_finite())
         .map(|s| Duration::from_secs_f64(s.clamp(0., 120.)));
     let text = response.body_mut().with_config().limit(1024 * 1024).read_to_string().unwrap_or_default();
     Err(HttpError { status: Some(status), message: error_message(&text, status), retry_after })

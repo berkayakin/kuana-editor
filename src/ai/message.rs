@@ -60,7 +60,7 @@ pub struct ToolSpec {
 }
 
 /// How hard the model thinks, where the provider lets one say.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
     Low,

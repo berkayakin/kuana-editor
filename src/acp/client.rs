@@ -5,7 +5,6 @@
 
 use std::{
     collections::VecDeque,
-    io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::{Arc, Mutex},
@@ -101,13 +100,15 @@ impl Agent {
         if let Some(stderr) = stderr {
             let tail = tail.clone();
             let _ = std::thread::Builder::new().name("agent stderr".into()).spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                // As bytes: a line that isn't UTF-8 mustn't stop the draining,
+                // or the agent's next write to stderr fails.
+                crate::lsp::rpc::for_each_line(stderr, |line| {
                     let mut tail = tail.lock().unwrap_or_else(|e| e.into_inner());
                     if tail.len() == STDERR_LINES {
                         tail.pop_front();
                     }
                     tail.push_back(line);
-                }
+                });
             });
         }
         let (rpc, incoming) = Connection::start(stdout, stdin);

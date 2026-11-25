@@ -219,9 +219,10 @@ fn common(mac: bool) -> Vec<KeyBinding> {
         ]);
     } else {
         b.extend([
-            KeyBinding::new("ctrl-shift-y", ToggleAgents, None),
-            KeyBinding::new("ctrl-shift-u", NewAgentSession, None),
-            KeyBinding::new("ctrl-shift-h", AskAgent, None),
+            // Alt+Shift: free in every keymap, and no AltGr (Ctrl+Alt) letters.
+            KeyBinding::new("alt-shift-y", ToggleAgents, None),
+            KeyBinding::new("alt-shift-n", NewAgentSession, None),
+            KeyBinding::new("alt-shift-k", AskAgent, None),
             KeyBinding::new("alt-shift-i", InlineAssist, Some("Editor")),
         ]);
     }
@@ -1506,6 +1507,29 @@ mod tests {
             assert_eq!(resolve(base, "escape", &at), Some("agents::StopAgent"), "{base:?}");
             // Other editors keep theirs.
             assert_eq!(resolve(base, "enter", &["Workspace", "Editor"]), Some("editor::Newline"), "{base:?}");
+        }
+    }
+
+    /// The agents' shortcuts off macOS are used by nothing else in any keymap
+    /// (`secondary` there is Ctrl).
+    #[test]
+    fn agent_keys_are_free_off_macos() {
+        let ours = ["workspace::ToggleAgents", "workspace::NewAgentSession", "workspace::AskAgent", "workspace::InlineAssist"];
+        for base in BaseKeymap::ALL {
+            let all = layers(base, false);
+            let key_of = |b: &KeyBinding| {
+                let k = &b.keystrokes()[0];
+                let mut m = *k.modifiers();
+                if m.platform {
+                    m.platform = false;
+                    m.control = true;
+                }
+                (m, k.key().to_string())
+            };
+            for agent in all.iter().filter(|b| ours.contains(&b.action().name())) {
+                let clash: Vec<&str> = all.iter().filter(|b| !ours.contains(&b.action().name()) && b.keystrokes().len() == 1 && key_of(b) == key_of(agent)).map(|b| b.action().name()).collect();
+                assert!(clash.is_empty(), "{base:?}: {} shares its key with {clash:?}", agent.action().name());
+            }
         }
     }
 

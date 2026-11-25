@@ -460,7 +460,10 @@ fn run_turn(conn: &Connection, sessions: &Sessions, session_id: &str, choice: &a
             notify(json!({ "sessionUpdate": "usage_update", "used": reply.usage.context(), "size": context_window(&choice.model) }));
         }
         let calls: Vec<(String, String, Value)> = reply.tool_calls().map(|(id, name, input)| (id.to_string(), name.to_string(), input.clone())).collect();
-        with_session(sessions, session_id, |s| s.messages.push(Message { role: Role::Assistant, content: reply.parts.clone() }))?;
+        // An empty reply isn't kept: providers refuse empty messages.
+        if !reply.parts.is_empty() {
+            with_session(sessions, session_id, |s| s.messages.push(Message { role: Role::Assistant, content: reply.parts.clone() }))?;
+        }
         if !calls.is_empty() {
             // Every call gets a result, or the conversation can't go on.
             let mut results = Vec::new();
@@ -583,7 +586,19 @@ impl Tools<'_> {
     fn path(&self, input: &Value, key: &str) -> Result<PathBuf, String> {
         let given = input[key].as_str().filter(|p| !p.trim().is_empty()).ok_or_else(|| format!("`{key}` is required"))?;
         let path = Path::new(given);
-        Ok(if path.is_absolute() { path.to_path_buf() } else { self.cwd.join(path) })
+        let joined = if path.is_absolute() { path.to_path_buf() } else { self.cwd.join(path) };
+        // `a/../b` as `b`, so the path shown (and checked by Kuana) is the real one.
+        let mut plain = PathBuf::new();
+        for part in joined.components() {
+            match part {
+                std::path::Component::ParentDir => {
+                    plain.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => plain.push(other),
+            }
+        }
+        Ok(plain)
     }
 
     fn rel(&self, path: &Path) -> String {

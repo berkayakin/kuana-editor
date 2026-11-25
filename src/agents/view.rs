@@ -50,6 +50,8 @@ pub enum SessionViewEvent {
     RejectAll,
     KeepAll,
     RunCommand(String),
+    /// Put the files the agent changed since this turn back as they were.
+    RestoreTo(usize),
 }
 
 pub struct SessionView {
@@ -260,19 +262,37 @@ impl SessionView {
         let theme = Theme::get(cx).clone();
         let Some(entry) = self.session.read(cx).transcript.entries.get(ix).cloned() else { return div().into_any_element() };
         match entry {
-            Entry::User { text, context } => div()
-                .mt_2()
-                .px_3()
-                .py_2()
-                .rounded(px(10.))
-                .bg(theme.elevated)
-                .border_1()
-                .border_color(theme.border_subtle)
-                .child(div().text_color(theme.text).whitespace_normal().child(text))
-                .when(!context.is_empty(), |el| {
-                    el.child(div().mt_1p5().flex().flex_wrap().gap_1().children(context.iter().map(|label| chip(label.clone(), Icon::FileText, &theme))))
-                })
-                .into_any_element(),
+            Entry::User { text, context } => {
+                let session = self.session.read(cx);
+                let turn = session.turn_of(ix);
+                // A checkpoint: the files the agent changed from here on can go back.
+                let restorable = !session.state.busy() && session.checkpoints.changed_since(turn);
+                div()
+                    .id(SharedString::from(format!("user-{ix}")))
+                    .group("user-message")
+                    .relative()
+                    .mt_2()
+                    .px_3()
+                    .py_2()
+                    .rounded(px(10.))
+                    .bg(theme.elevated)
+                    .border_1()
+                    .border_color(theme.border_subtle)
+                    .child(div().text_color(theme.text).whitespace_normal().child(text))
+                    .when(!context.is_empty(), |el| {
+                        el.child(div().mt_1p5().flex().flex_wrap().gap_1().children(context.iter().map(|label| chip(label.clone(), Icon::FileText, &theme))))
+                    })
+                    .when(restorable, |el| {
+                        el.child(
+                            div().absolute().top(px(4.)).right(px(4.)).invisible().group_hover("user-message", |s| s.visible()).child(
+                                icon_button(SharedString::from(format!("restore-{ix}")), Icon::Undo, theme.text_dim.into(), cx)
+                                    .tooltip(|_, cx| tooltip_view("Restore Files to Here: put back what the agent changed from this message on", cx))
+                                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(SessionViewEvent::RestoreTo(turn)))),
+                            ),
+                        )
+                    })
+                    .into_any_element()
+            }
             Entry::Assistant { text } => {
                 let blocks = self.markdown_of(ix, &text, cx);
                 let view = cx.entity().downgrade();
@@ -690,7 +710,7 @@ impl SessionView {
 
     fn render_changes(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = Theme::get(cx).clone();
-        let count = self.session.read(cx).changes.len();
+        let count = self.session.read(cx).changes().len();
         if count == 0 {
             return None;
         }

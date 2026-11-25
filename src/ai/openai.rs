@@ -66,6 +66,11 @@ pub fn body(request: &Request, flavor: Flavor) -> Value {
                         _ => None,
                     })
                     .collect();
+                // Nothing to send back (an empty reply, reasoning alone):
+                // left out, since content may be empty only beside tool calls.
+                if text.is_empty() && calls.is_empty() {
+                    continue;
+                }
                 let mut m = json!({ "role": "assistant", "content": if text.is_empty() { Value::Null } else { json!(text) } });
                 if !calls.is_empty() {
                     m["tool_calls"] = json!(calls);
@@ -129,10 +134,9 @@ impl Decoder {
         }
         let Some(choice) = chunk.get("choices").and_then(Value::as_array).and_then(|c| c.first()) else { return events };
         let delta = choice.get("delta").cloned().unwrap_or_default();
-        for key in ["reasoning_content", "reasoning"] {
-            if let Some(text) = delta.get(key).and_then(Value::as_str).filter(|t| !t.is_empty()) {
-                events.push(StreamEvent::Thinking { index: THINKING, text: text.to_string() });
-            }
+        // Servers name it one way or the other (some send both, the same text).
+        if let Some(text) = ["reasoning_content", "reasoning"].iter().find_map(|key| delta.get(*key).and_then(Value::as_str).filter(|t| !t.is_empty())) {
+            events.push(StreamEvent::Thinking { index: THINKING, text: text.to_string() });
         }
         if let Some(text) = delta.get("content").and_then(Value::as_str).filter(|t| !t.is_empty()) {
             events.push(StreamEvent::Text { index: TEXT, text: text.to_string() });

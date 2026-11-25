@@ -46,9 +46,11 @@ fn record_path(id: &str) -> Option<PathBuf> {
     Some(agents_dir()?.join(sanitize(id)).join("installed.json"))
 }
 
-/// An id as a folder name.
+/// An id or version (from the registry) as one folder name: never empty,
+/// `.` or `..`, so it can't name a folder above.
 fn sanitize(id: &str) -> String {
-    id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' }).collect()
+    let name: String = id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' }).collect();
+    if name.chars().all(|c| c == '.') { format!("_{name}") } else { name }
 }
 
 /// What's installed of an agent, if anything still there.
@@ -100,8 +102,10 @@ pub fn install(entry: &Entry) -> Result<Installed, String> {
             let unpacked = lsp_install::unzip(&temp, &dir);
             std::fs::remove_file(&temp).ok();
             unpacked?;
-            let program = dir.join(binary.cmd.trim_start_matches("./").replace('\\', "/"));
-            if !program.is_file() {
+            let cmd = binary.cmd.trim_start_matches("./").replace('\\', "/");
+            let program = dir.join(&cmd);
+            // The program must be in what was unpacked.
+            if Path::new(&cmd).is_absolute() || cmd.split('/').any(|part| part == "..") || !program.is_file() {
                 return Err(format!("{} didn't unpack as expected (no {})", entry.name, binary.cmd));
             }
             lsp_install::make_executable(&program)?;

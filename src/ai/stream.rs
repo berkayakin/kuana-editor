@@ -119,7 +119,17 @@ fn run(endpoint: &Endpoint, request: &Request, stop: &AtomicBool, send: &mut dyn
             }
             Err(err) if err.retryable() && !streamed && attempt < ATTEMPTS && !stop.load(Ordering::Relaxed) => {
                 let wait = err.retry_after.unwrap_or(Duration::from_secs(u64::from(attempt) * 2)).min(Duration::from_secs(30));
-                std::thread::sleep(wait);
+                // In slices, so a cancel meanwhile doesn't send it again.
+                let until = std::time::Instant::now() + wait;
+                while std::time::Instant::now() < until {
+                    if stop.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    std::thread::sleep(Duration::from_millis(50).min(until.saturating_duration_since(std::time::Instant::now())));
+                }
+                if stop.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
             }
             Err(err) => return Err(err.to_string()),
         }

@@ -34,9 +34,9 @@ can set it, not a project's.
 
 ## Agent sessions
 
-The **Agents** view (the ✦ tab on the activity bar, **⌥⌘A** / **Ctrl+Shift+Y**) lists the
+The **Agents** view (the ✦ tab on the activity bar, **⌥⌘A** / **Alt+Shift+Y**) lists the
 project's sessions, newest first. A light shows what each is doing: working, waiting for you,
-failed, open or saved. **New Session** (+, **⌥⌘N** / **Ctrl+Shift+U**) picks an agent:
+failed, open or saved. **New Session** (+, **⌥⌘N** / **Alt+Shift+N**) picks an agent:
 
 - **Kuana Agent**, built in, on the model you chose in Settings → AI. See [below](#kuana-agent).
 - **Agents from the ACP registry**: Claude Agent (Claude Code's agent), Codex, Gemini CLI, GitHub
@@ -104,7 +104,7 @@ model menu switches the session's model. Its conversation with the model is kept
 
 From the editor's right-click menu or Find Action:
 
-- **Ask Agent** (**⌥⌘I** / **Ctrl+Shift+H**): the selection (or the file) goes to the current
+- **Ask Agent** (**⌥⌘I** / **Alt+Shift+K**): the selection (or the file) goes to the current
   session's composer, or a new session's.
 - **Explain with Agent**: the selection, else the function or type around the caret, with a request
   to explain it.
@@ -163,9 +163,9 @@ doesn't start is noted in the session's thinking. Settings → AI → Tools list
 
 | Action | macOS | Windows / Linux |
 | --- | --- | --- |
-| Agents view | ⌥⌘A | Ctrl+Shift+Y |
-| New agent session | ⌥⌘N | Ctrl+Shift+U |
-| Ask Agent | ⌥⌘I | Ctrl+Shift+H |
+| Agents view | ⌥⌘A | Alt+Shift+Y |
+| New agent session | ⌥⌘N | Alt+Shift+N |
+| Ask Agent | ⌥⌘I | Alt+Shift+K |
 | Inline Assist | ⌃↩ | Alt+Shift+I |
 | Accept / reject a proposed change (in its tab) | ⌘↩ / ⌘⌫ | Ctrl+Enter / Ctrl+Backspace |
 | Send / new line / stop (in a session's composer) | ↩ / ⇧↩ / ⎋ | Enter / Shift+Enter / Esc |

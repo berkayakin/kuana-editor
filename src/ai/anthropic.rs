@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
-use super::message::{Message, Part, Request, Role, StopReason, StreamEvent, Usage};
+use super::message::{Effort, Message, Part, Request, Role, StopReason, StreamEvent, Usage};
 use super::sse;
 
 /// The API version Kuana's requests are written for.
@@ -19,9 +19,20 @@ pub fn adaptive_thinking(model: &str) -> bool {
     ["opus-4-6", "opus-4-7", "opus-4-8", "opus-5", "sonnet-4-6", "sonnet-5", "haiku-5", "fable", "mythos"].iter().any(|m| model.contains(m))
 }
 
-/// Whether a model takes `output_config.effort`.
-fn takes_effort(model: &str) -> bool {
-    adaptive_thinking(model) || model.contains("opus-4-5")
+/// The effort a model takes for the one asked: None where it takes none;
+/// levels it doesn't have come down to its highest (Opus 4.5 has low to
+/// high, the 4.6 models no `xhigh`).
+fn effort_for(model: &str, effort: Effort) -> Option<Effort> {
+    if model.contains("opus-4-5") {
+        return Some(effort.min(Effort::High));
+    }
+    if !adaptive_thinking(model) {
+        return None;
+    }
+    if (model.contains("opus-4-6") || model.contains("sonnet-4-6")) && effort == Effort::Xhigh {
+        return Some(Effort::High);
+    }
+    Some(effort)
 }
 
 /// Whether the server-side refusal fallback applies (and is worth having):
@@ -40,7 +51,9 @@ pub fn body(request: &Request) -> Value {
         "model": request.model,
         "max_tokens": request.max_tokens,
         "stream": true,
-        "messages": request.messages.iter().map(message).collect::<Vec<_>>(),
+        // A message with nothing Anthropic takes (an empty reply, another
+        // provider's reasoning alone) is left out: empty content is refused.
+        "messages": request.messages.iter().map(message).filter(|m| m["content"].as_array().is_some_and(|c| !c.is_empty())).collect::<Vec<_>>(),
         // The longest stable prefix (tools, system, the conversation so far)
         // is cached: each turn of an agent loop re-sends it.
         "cache_control": { "type": "ephemeral" },
@@ -58,7 +71,7 @@ pub fn body(request: &Request) -> Value {
     if adaptive_thinking(&request.model) {
         body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
     }
-    if let Some(effort) = request.effort.filter(|_| takes_effort(&request.model)) {
+    if let Some(effort) = request.effort.and_then(|e| effort_for(&request.model, e)) {
         body["output_config"] = json!({ "effort": effort.key() });
     }
     if takes_fallback(&request.model) {
