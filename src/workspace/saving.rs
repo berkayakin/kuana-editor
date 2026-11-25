@@ -554,7 +554,7 @@ impl Workspace {
         let id = item.entity_id();
         let Some((pane, _)) = self.locate(id, cx) else { return };
         self.tab_subscriptions.remove(&id);
-        self.claude_tab_removed(id);
+        self.agent_tab_removed(id);
         let was_active_pane = pane == self.active_pane;
         pane.update(cx, |p, cx| p.remove(id, cx));
         if pane.read(cx).is_empty() {

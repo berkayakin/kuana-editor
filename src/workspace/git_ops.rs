@@ -1121,7 +1121,7 @@ impl Workspace {
         let subscription = cx.subscribe_in(diff, window, |ws, diff, event: &DiffViewEvent, window, cx| match event {
             DiffViewEvent::Close => ws.close_diff(diff, window, cx),
             DiffViewEvent::OpenFile(path) => ws.open_path(path.clone(), window, cx),
-            DiffViewEvent::Proposal { accepted } => ws.claude_proposal_decided(diff, *accepted, window, cx),
+            DiffViewEvent::Proposal { accepted } => ws.agent_proposal_decided(diff, *accepted, window, cx),
             DiffViewEvent::Restore { path, text } => {
                 // The version becomes the file: nothing left to compare.
                 ws.remove_item(&PaneItem::Diff(diff.clone()), window, cx);

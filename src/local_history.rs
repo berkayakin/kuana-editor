@@ -50,7 +50,7 @@ pub enum Kind {
     Reloaded,
     BeforeRollback,
     BeforeRestore,
-    /// Before an edit Claude Code proposed was accepted (`workspace/claude_ide.rs`).
+    /// Before an edit a terminal agent proposed was accepted (`workspace/agent_ide.rs`).
     BeforeAgent,
 }
 
@@ -77,7 +77,7 @@ impl Kind {
             Kind::Reloaded => "Changed on disk",
             Kind::BeforeRollback => "Before Rollback",
             Kind::BeforeRestore => "Before Restore",
-            Kind::BeforeAgent => "Before Claude Code's edit",
+            Kind::BeforeAgent => "Before an agent's edit",
         }
     }
 }

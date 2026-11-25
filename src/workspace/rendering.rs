@@ -315,7 +315,7 @@ impl Render for Workspace {
         self.load_shown_tabs(cx);
         self.make_shown_extension_views(window, cx);
         self.note_extension_editor(cx);
-        self.note_claude_editor(cx);
+        self.note_agent_editor(cx);
         self.update_window_title(window, cx);
         // A drag that ended without a drop (Escape, left the window) leaves no highlight.
         if !cx.has_active_drag() && self.tree.read(cx).has_drop_target() {

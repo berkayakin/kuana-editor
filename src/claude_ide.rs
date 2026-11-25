@@ -15,13 +15,14 @@
 //! Threads, like `askpass`: one accepting connections and one per client
 //! (Claude Code keeps one open per session). Tool calls that need the window
 //! go to it as [`Request`]s, each waiting on its own thread so a slow answer
-//! holds up nothing else.
+//! holds up nothing else. What this shares with Gemini CLI's connection is in
+//! `agent_ide.rs`.
 
 mod protocol;
 
 use std::{
     fs,
-    io::{self, Write as _},
+    io,
     net::{Ipv4Addr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
@@ -32,7 +33,7 @@ use std::{
     time::Duration,
 };
 
-use futures::channel::{mpsc, oneshot};
+use futures::channel::mpsc;
 use ropey::Rope;
 use serde_json::{Value, json};
 use tungstenite::{
@@ -41,8 +42,9 @@ use tungstenite::{
     http::{HeaderValue, StatusCode, header::SEC_WEBSOCKET_PROTOCOL},
 };
 
-pub use protocol::{file_url, path_of};
+pub use crate::agent_ide::{Request, ToolCall, file_url};
 
+use crate::agent_ide::{Routes, alive, same_token};
 use crate::lint::{Diagnostic, Severity};
 use crate::lsp::protocol::{Encoding, offset_to_position};
 
@@ -72,44 +74,15 @@ pub fn claude_installed() -> bool {
     lock_dir().and_then(|dir| dir.parent().map(Path::is_dir)).unwrap_or(false)
 }
 
-/// Something the window answers.
-pub enum Request {
-    /// A client connected: it should hear the current selection.
-    Connected,
-    /// A client went (Claude Code ended or ran `/ide` to leave).
-    Disconnected,
-    Tool(ToolCall),
-}
-
-/// A tool call the window answers (`protocol::WINDOW_TOOLS`).
-pub struct ToolCall {
-    pub name: String,
-    pub arguments: Value,
-    answer: oneshot::Sender<Result<Vec<String>, String>>,
-}
-
-impl ToolCall {
-    /// Text items (most of them JSON), or why it failed.
-    pub fn answer(self, answer: Result<Vec<String>, String>) {
-        let _ = self.answer.send(answer);
-    }
-}
-
-/// The servers running, by port, with their windows' folders: which one a
-/// new terminal's `claude` should reach (`terminal_env`).
-static SERVERS: Mutex<Vec<(u16, Vec<PathBuf>)>> = Mutex::new(Vec::new());
+/// The servers running: which one a new terminal's `claude` should reach
+/// (`terminal_env`).
+static SERVERS: Routes = Routes::new();
 static NEXT_CLIENT: AtomicU64 = AtomicU64::new(0);
 
 /// The variables for a shell started in `cwd`: the port of the window whose
 /// folder holds it (the innermost, with nested projects open), if any.
 pub fn terminal_env(cwd: &Path) -> Vec<(String, String)> {
-    let servers = SERVERS.lock().unwrap_or_else(|e| e.into_inner());
-    let best = servers
-        .iter()
-        .filter_map(|(port, folders)| folders.iter().filter(|f| cwd.starts_with(f)).map(|f| f.as_os_str().len()).max().map(|depth| (depth, *port)))
-        .max();
-    best.map(|(_, port)| vec![(PORT_VARIABLE.to_string(), port.to_string()), (ENABLE_VARIABLE.to_string(), "true".to_string())])
-        .unwrap_or_default()
+    SERVERS.env_for(cwd)
 }
 
 /// A window's server. Dropping it stops it and removes its lock file.
@@ -209,7 +182,7 @@ impl Server {
 
     /// Sends a notification to every connected client.
     pub fn broadcast(&self, method: &str, params: Value) {
-        let text = protocol::notification(method, params).to_string();
+        let text = crate::agent_ide::notification(method, params).to_string();
         for client in self.shared.clients.lock().unwrap_or_else(|e| e.into_inner()).iter() {
             let _ = client.outgoing.send(Some(text.clone()));
         }
@@ -221,7 +194,7 @@ impl Drop for Server {
         let shared = &self.shared;
         shared.stopped.store(true, Ordering::Relaxed);
         let _ = fs::remove_file(&shared.lock_path);
-        SERVERS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(port, _)| *port != shared.port);
+        SERVERS.remove(shared.port);
         // Wakes the accepting thread, which then sees it's stopped, and ends
         // the clients' connections.
         let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, shared.port));
@@ -243,13 +216,11 @@ impl Shared {
     }
 
     fn register(&self) {
-        let mut servers = SERVERS.lock().unwrap_or_else(|e| e.into_inner());
-        servers.retain(|(port, _)| *port != self.port);
-        servers.push((self.port, self.folders()));
+        let env = vec![(PORT_VARIABLE.to_string(), self.port.to_string()), (ENABLE_VARIABLE.to_string(), "true".to_string())];
+        SERVERS.set(self.port, self.folders(), env);
     }
 
-    /// Writes the lock file whole (a temp file renamed over it), readable
-    /// only by the user: it holds the token.
+    /// Writes the lock file, readable only by the user: it holds the token.
     fn write_lock(&self) -> io::Result<()> {
         let folders: Vec<String> = self.folders().iter().map(|f| f.display().to_string()).collect();
         let content = json!({
@@ -260,36 +231,9 @@ impl Shared {
             "authToken": self.token,
         });
         let dir = self.lock_path.parent().ok_or_else(|| io::Error::other("no lock folder"))?;
-        create_private_dir(dir)?;
-        let temp = dir.join(format!(".{}.{}.tmp", self.port, std::process::id()));
-        let _ = fs::remove_file(&temp);
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let written = options.open(&temp).and_then(|mut file| {
-            file.write_all(content.to_string().as_bytes())?;
-            file.sync_all()
-        });
-        match written.and_then(|()| fs::rename(&temp, &self.lock_path)) {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                let _ = fs::remove_file(&temp);
-                Err(err)
-            }
-        }
+        crate::agent_ide::private_dir(dir, false)?;
+        crate::agent_ide::write_private(&self.lock_path, content.to_string().as_bytes())
     }
-}
-
-fn create_private_dir(dir: &Path) -> io::Result<()> {
-    if dir.is_dir() {
-        return Ok(());
-    }
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(dir)
 }
 
 /// Removes the lock files of Kuanas that ended without removing theirs (a
@@ -307,37 +251,6 @@ fn remove_stale_locks(dir: &Path) {
             let _ = fs::remove_file(&path);
         }
     }
-}
-
-#[cfg(unix)]
-fn alive(pid: u32) -> bool {
-    // Not a real process id (0 and negative ones name process groups).
-    let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
-    if pid <= 0 {
-        return false;
-    }
-    // SAFETY: signal 0 only checks that the process exists.
-    let found = unsafe { libc::kill(pid, 0) } == 0;
-    found || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-#[cfg(windows)]
-fn alive(pid: u32) -> bool {
-    let tasklist = std::env::var_os("SystemRoot").map(|root| Path::new(&root).join("System32").join("tasklist.exe")).filter(|p| p.is_file());
-    let output = crate::process::command(tasklist.as_deref().unwrap_or("tasklist".as_ref()))
-        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-        .stdin(std::process::Stdio::null())
-        .output();
-    // Can't tell: its lock file stays.
-    output.map_or(true, |out| tasklist_lists(&String::from_utf8_lossy(&out.stdout), pid))
-}
-
-/// Whether `tasklist /FO CSV /NH` printed a row for `pid` (`"name","pid",…`);
-/// without one it prints a message in the system's language.
-#[cfg(any(windows, test))]
-fn tasklist_lists(output: &str, pid: u32) -> bool {
-    let column = format!("\",\"{pid}\",\"");
-    output.lines().any(|line| line.contains(&column))
 }
 
 /// Lets a WebSocket upgrade through only with the token, and echoes the
@@ -358,12 +271,6 @@ fn authorize(request: &Handshake, mut response: Response, token: &str) -> Result
         response.headers_mut().insert(SEC_WEBSOCKET_PROTOCOL, value);
     }
     Ok(response)
-}
-
-/// Compares without stopping at the first difference, so timing doesn't
-/// tell how much of a guess was right.
-fn same_token(given: &str, token: &str) -> bool {
-    given.len() == token.len() && given.bytes().zip(token.bytes()).fold(0u8, |diff, (a, b)| diff | (a ^ b)) == 0
 }
 
 /// A client's socket as its two threads use it: reads go straight to the
@@ -427,7 +334,7 @@ fn serve(stream: TcpStream, shared: &Arc<Shared>) {
     let id = NEXT_CLIENT.fetch_add(1, Ordering::Relaxed);
     let selection = shared.state.lock().unwrap_or_else(|e| e.into_inner()).selection.clone();
     if let Some(selection) = selection {
-        let _ = outgoing.send(Some(protocol::notification("selection_changed", selection).to_string()));
+        let _ = outgoing.send(Some(crate::agent_ide::notification("selection_changed", selection).to_string()));
     }
     shared.clients.lock().unwrap_or_else(|e| e.into_inner()).push(Client { id, outgoing: outgoing.clone(), socket: control });
     let _ = shared.requests.unbounded_send(Request::Connected);
@@ -462,14 +369,10 @@ fn serve(stream: TcpStream, shared: &Arc<Shared>) {
 /// Hands a tool call to the window and sends back its answer, waiting on a
 /// thread of its own.
 fn ask_window(shared: &Shared, outgoing: std_mpsc::Sender<Option<String>>, id: Value, name: String, arguments: Value) {
-    let (answer, answered) = oneshot::channel();
-    if shared.requests.unbounded_send(Request::Tool(ToolCall { name, arguments, answer })).is_err() {
-        let _ = outgoing.send(Some(protocol::tool_result(id, Err("Kuana's window is closed".into())).to_string()));
-        return;
-    }
+    let answered = crate::agent_ide::ask_window(&shared.requests, name, arguments);
     let _ = std::thread::Builder::new().name("claude ide tool".into()).spawn(move || {
-        let answer = futures::executor::block_on(answered).unwrap_or_else(|_| Err("Kuana couldn't answer".into()));
-        let _ = outgoing.send(Some(protocol::tool_result(id, answer).to_string()));
+        let answer = crate::agent_ide::wait_for(answered);
+        let _ = outgoing.send(Some(crate::agent_ide::tool_result(id, answer).to_string()));
     });
 }
 
@@ -698,14 +601,6 @@ mod tests {
         assert!(dir.join("2.lock").exists());
         drop(server);
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn reads_tasklists_rows() {
-        let listed = "\"kuana.exe\",\"4242\",\"Console\",\"1\",\"123,456 K\"\r\n";
-        assert!(tasklist_lists(listed, 4242));
-        assert!(!tasklist_lists(listed, 42));
-        assert!(!tasklist_lists("INFO: No tasks are running which match the specified criteria.\r\n", 4242));
     }
 
     #[test]

@@ -279,7 +279,7 @@ impl Workspace {
                 )
             })
             .when_some(self.render_background_documents(&theme, cx), |el, item| el.child(item))
-            .when_some(self.render_claude_status(&theme, cx), |el, item| el.child(item))
+            .children(self.render_agent_status(&theme, cx))
             .child(super::title_bar::window_drag_area("statusbar-free").flex_1().min_w_0())
             .when_some(self.render_downloads(&theme), |el, downloads| el.child(downloads))
             .when_some(updater::pending_version(cx).map(|v| format!("Kuana {v} is downloaded")), |el, tip| {
@@ -308,7 +308,7 @@ impl Workspace {
 }
 
 /// A status bar item that opens something (the problem counts, the menus,
-/// Claude Code's item): one size and rounding, filled under the pointer.
+/// agents' items): one size and rounding, filled under the pointer.
 pub(super) fn status_button(id: impl Into<gpui::ElementId>, theme: &Theme) -> crate::ui::Button {
     div().id(id).flex().items_center().h(px(24.)).px_2().rounded(px(9.)).cursor_pointer().hover_bg(theme.hover)
 }

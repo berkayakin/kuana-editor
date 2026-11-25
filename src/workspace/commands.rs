@@ -192,7 +192,7 @@ impl Workspace {
         self.watcher = None;
         self.watch_task = None;
         self.folders = None;
-        self.stop_claude_ide();
+        self.stop_agents();
         // Extensions' views for the project go, and their code hears it closed.
         self.refresh_extension_views(cx);
         self.show_sidebar = false;

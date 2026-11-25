@@ -89,7 +89,9 @@ mod activity_bar;
 mod app_menu;
 mod background;
 mod bookmarks;
+mod agent_ide;
 mod claude_ide;
+mod gemini_ide;
 mod commands;
 mod compare;
 mod file_tree;
@@ -953,8 +955,9 @@ pub struct Workspace {
     ext_problems: extension_ui::ProblemMap,
     /// What extensions' code keeps in this window: status items, timers, events on their way.
     ext_runtime: extension_ui::ExtensionRuntime,
-    /// Claude Code's `/ide` connection to this window (`workspace/claude_ide.rs`).
-    claude: claude_ide::ClaudeBridge,
+    /// Terminal agents' connections to this window, Claude Code's and Gemini
+    /// CLI's (`workspace/agent_ide.rs`).
+    agents: agent_ide::AgentBridges,
     /// The Files view.
     tree: Entity<ProjectTree>,
     /// The shells in the bottom area.
@@ -1257,8 +1260,8 @@ impl Workspace {
         let quit = cx.on_app_quit(|ws, cx| {
             // Programs extensions left running end with Kuana.
             extensions::ui_host::quitting();
-            // Claude Code stops offering this window (its lock file goes).
-            ws.stop_claude_ide();
+            // Agents stop being offered this window (their discovery files go).
+            ws.stop_agents();
             if ws.auto_save != AutoSave::Off {
                 ws.auto_save_all(true, cx);
             }
@@ -1326,8 +1329,8 @@ impl Workspace {
             cx.observe_global_in::<extensions::ExtensionsChanged>(window, |ws, window, cx| ws.extensions_changed(window, cx));
         // A folder was trusted or stopped being trusted (here or in another window).
         let trust_observer = cx.observe_global::<crate::trust::TrustChanged>(|ws, cx| ws.trust_changed(cx));
-        // Claude Code's connection follows its setting (it needs the window to answer).
-        let claude_observer = cx.observe_global_in::<Settings>(window, |ws, window, cx| ws.sync_claude_ide(window, cx));
+        // Agents' connections follow their settings (they need the window to answer).
+        let claude_observer = cx.observe_global_in::<Settings>(window, |ws, window, cx| ws.sync_agents(window, cx));
         // Extensions load before the first window: it asks for what they wait for.
         cx.defer_in(window, |ws, window, cx| ws.offer_wasi_sdk(window, cx));
         // Downloads run on other threads: redraw the status bar's progress
@@ -1450,7 +1453,7 @@ impl Workspace {
             has_ext_panel: false,
             ext_problems: HashMap::new(),
             ext_runtime: extension_ui::ExtensionRuntime::for_window(cx.entity_id().as_u64()),
-            claude: Default::default(),
+            agents: Default::default(),
             tree,
             terminals,
             problems,

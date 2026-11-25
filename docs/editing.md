@@ -125,7 +125,8 @@ that soft wrap breaks, nothing shows until the caret is on a line that fits.
 
 For chat and agents, use the tools you already have: Claude Code, Codex or Gemini CLI run in
 Kuana's terminal, and Kuana picks up the files they change (the Git gutter and the Commit view show
-what they did, Local History undoes it). Claude Code goes further: it connects to Kuana, as below.
+what they did, Local History undoes it). Claude Code and Gemini CLI go further: they connect to
+Kuana, as below.
 
 ## Claude Code
 
@@ -141,7 +142,7 @@ connects to VS Code and JetBrains IDEs (its `/ide` command), so it works with wh
 - **Its edits come as diffs.** When Claude asks to change a file (not in its auto-accept mode), the
   change opens in a **Proposed by Claude Code** tab beside the file: the file as it is, unsaved
   edits included, against Claude's version. **Accept** applies it as one edit you can undo and saves
-  the file (Local History keeps what it was, "Before Claude Code's edit"); **Reject**, or closing
+  the file (Local History keeps what it was, "Before an agent's edit"); **Reject**, or closing
   the tab, turns it down. Answering in the terminal instead closes the tab.
 
 Run `claude` in Kuana's terminal and it connects by itself. Started in another terminal, in the
@@ -153,6 +154,29 @@ Nothing goes anywhere through Kuana: the connection is on your machine (a local 
 file in `~/.claude/ide` holding its key). It's on once Claude Code has run on your machine, for
 local projects (not [remote ones](remote.md)); Settings → Editor → Claude Code
 (`"claude_code_integration": false`) turns it off.
+
+## Gemini CLI
+
+[Gemini CLI](https://github.com/google-gemini/gemini-cli) running in a terminal connects to Kuana
+through its IDE companion protocol, as it does to VS Code:
+
+- **It knows what you're working on**: the files open in Kuana's tabs, the most recently used
+  first (up to ten), and in the current one where the caret is and what's selected.
+- **Its edits come as diffs.** When Gemini asks to change a file, the change opens in a **Proposed
+  by Gemini CLI** tab beside the file, as Claude Code's do. **Accept** applies it as one edit you can
+  undo and saves the file (Local History keeps what it was); **Reject**, or closing the tab, turns it
+  down. Answering in the terminal instead closes the tab.
+
+Turn it on once in Gemini CLI with `/ide enable`; from then on `gemini` started in Kuana's terminal,
+or in another terminal in the project's folder, connects by itself (`/ide status` lists the files it
+sees). While it's connected the status bar shows **Gemini** with a green light. With the same project
+open in two windows, a `gemini` in a window's terminal connects to that window.
+
+Nothing goes anywhere through Kuana: the connection is on your machine (a local port, with a
+discovery file in the temp folder's `gemini-ide-<your user id>` holding its key). It's on once
+Gemini CLI has run on your machine (`~/.gemini` exists), for local projects (not
+[remote ones](remote.md)); Settings → Editor → Gemini CLI (`"gemini_cli_integration": false`) turns
+it off.
 
 ## Multibuffers
 

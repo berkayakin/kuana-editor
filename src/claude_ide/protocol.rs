@@ -4,12 +4,12 @@
 //! project's folders, the last selection), and gets back either the answer
 //! or a tool call for the window to answer ([`tool_result`]).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
-/// The MCP version answered when the client names none.
-const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
+pub use crate::agent_ide::Incoming;
+use crate::agent_ide::{file_url, tool, tool_result, window_tool};
 
 /// What the server knows without asking the window.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -19,17 +19,6 @@ pub struct State {
     /// The `selection_changed` payload of the active editor's selection,
     /// as last sent; None until there's been one.
     pub selection: Option<Value>,
-}
-
-/// What a frame calls for.
-#[derive(Debug, PartialEq)]
-pub enum Incoming {
-    /// Send this back.
-    Reply(Value),
-    /// A tool the window answers; its answer goes back with [`tool_result`].
-    Tool { id: Value, name: String, arguments: Value },
-    /// Nothing to answer: a notification, or a response to something sent.
-    Nothing,
 }
 
 /// Tools the window answers (the others are answered here), with the
@@ -51,66 +40,12 @@ const WINDOW_TOOLS: &[(&str, &[&str])] = &[
 /// Answers one text frame.
 pub fn handle(text: &str, state: &State) -> Incoming {
     let Ok(message) = serde_json::from_str::<Value>(text) else {
-        return Incoming::Reply(error(Value::Null, -32700, "Parse error"));
+        return Incoming::Reply(crate::agent_ide::error(Value::Null, -32700, "Parse error"));
     };
-    let Some(method) = message.get("method").and_then(Value::as_str) else {
-        // A response to a request of ours (none are sent yet).
-        return Incoming::Nothing;
-    };
-    let Some(id) = message.get("id").cloned() else {
-        // `notifications/initialized` and the like.
-        return Incoming::Nothing;
-    };
-    let params = message.get("params").cloned().unwrap_or(Value::Null);
-    let result = match method {
-        "initialize" => initialize(&params),
-        "ping" => json!({}),
-        "tools/list" => json!({ "tools": tool_definitions() }),
-        "prompts/list" => json!({ "prompts": [] }),
-        "resources/list" => json!({ "resources": [] }),
-        "tools/call" => return call(id, &params, state),
-        _ => return Incoming::Reply(error(id, -32601, &format!("Method not found: {method}"))),
-    };
-    Incoming::Reply(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+    crate::agent_ide::handle(&message, tool_definitions, |id, name, arguments| call(id, name, arguments, state))
 }
 
-/// A tool's answer from the window: text items (most of them JSON), or why
-/// it failed.
-pub fn tool_result(id: Value, answer: Result<Vec<String>, String>) -> Value {
-    let result = match answer {
-        Ok(texts) => json!({ "content": texts.into_iter().map(|t| json!({ "type": "text", "text": t })).collect::<Vec<_>>() }),
-        Err(message) => json!({ "content": [{ "type": "text", "text": message }], "isError": true }),
-    };
-    json!({ "jsonrpc": "2.0", "id": id, "result": result })
-}
-
-/// A notification to send to Claude.
-pub fn notification(method: &str, params: Value) -> Value {
-    json!({ "jsonrpc": "2.0", "method": method, "params": params })
-}
-
-/// A file's `file://` URL, as Claude names files.
-pub fn file_url(path: &Path) -> String {
-    url::Url::from_file_path(path).map(String::from).unwrap_or_else(|_| format!("file://{}", path.display()))
-}
-
-/// The path a `file://` URL (or a plain path) names.
-pub fn path_of(uri: &str) -> PathBuf {
-    url::Url::parse(uri).ok().filter(|u| u.scheme() == "file").and_then(|u| u.to_file_path().ok()).unwrap_or_else(|| PathBuf::from(uri))
-}
-
-fn initialize(params: &Value) -> Value {
-    let version = params.get("protocolVersion").and_then(Value::as_str).unwrap_or(DEFAULT_PROTOCOL_VERSION);
-    json!({
-        "protocolVersion": version,
-        "capabilities": { "logging": {}, "prompts": { "listChanged": true }, "tools": { "listChanged": true } },
-        "serverInfo": { "name": "kuana", "version": env!("CARGO_PKG_VERSION") },
-    })
-}
-
-fn call(id: Value, params: &Value, state: &State) -> Incoming {
-    let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
-    let arguments = params.get("arguments").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
+fn call(id: Value, name: &str, arguments: Value, state: &State) -> Incoming {
     let answer = match name {
         "getWorkspaceFolders" => Ok(vec![workspace_folders(&state.folders).to_string()]),
         // Claude's own plugins keep both: the selection now and the last
@@ -120,11 +55,8 @@ fn call(id: Value, params: &Value, state: &State) -> Incoming {
             state.selection.clone().unwrap_or_else(|| json!({ "success": false, "message": "No active editor found" })).to_string(),
         ]),
         _ => match WINDOW_TOOLS.iter().find(|(tool, _)| *tool == name) {
-            Some((_, required)) => match required.iter().find(|arg| arguments.get(**arg).and_then(Value::as_str).is_none()) {
-                Some(missing) => Err(format!("Missing argument: {missing}")),
-                None => return Incoming::Tool { id, name: name.to_string(), arguments },
-            },
-            None => return Incoming::Reply(error(id, -32602, &format!("Unknown tool: {name}"))),
+            Some((_, required)) => return window_tool(id, name, arguments, required),
+            None => return Incoming::Reply(crate::agent_ide::error(id, -32602, &format!("Unknown tool: {name}"))),
         },
     };
     Incoming::Reply(tool_result(id, answer))
@@ -139,10 +71,6 @@ fn workspace_folders(folders: &[PathBuf]) -> Value {
         })
         .collect();
     json!({ "success": true, "folders": entries, "rootPath": folders.first() })
-}
-
-fn error(id: Value, code: i64, message: &str) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
 /// What `tools/list` advertises (`close_tab` is Claude's own, unlisted).
@@ -192,14 +120,6 @@ fn tool_definitions() -> Vec<Value> {
     ]
 }
 
-fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
-    json!({
-        "name": name,
-        "description": description,
-        "inputSchema": { "type": "object", "properties": properties, "required": required, "additionalProperties": false },
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,16 +136,6 @@ mod tests {
     }
 
     #[test]
-    fn initialize_echoes_the_clients_version() {
-        let answer = reply(handle(&request("initialize", json!({ "protocolVersion": "2024-11-05" })), &State::default()));
-        assert_eq!(answer["id"], 7);
-        assert_eq!(answer["result"]["protocolVersion"], "2024-11-05");
-        assert_eq!(answer["result"]["serverInfo"]["name"], "kuana");
-        let answer = reply(handle(&request("initialize", json!({})), &State::default()));
-        assert_eq!(answer["result"]["protocolVersion"], DEFAULT_PROTOCOL_VERSION);
-    }
-
-    #[test]
     fn lists_the_tools_it_answers() {
         let answer = reply(handle(&request("tools/list", json!({})), &State::default()));
         let names: Vec<&str> = answer["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -234,14 +144,6 @@ mod tests {
         }
         assert!(names.contains(&"getWorkspaceFolders"));
         assert!(!names.contains(&"close_tab"));
-    }
-
-    #[test]
-    fn notifications_and_responses_get_no_answer() {
-        let initialized = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string();
-        assert_eq!(handle(&initialized, &State::default()), Incoming::Nothing);
-        let response = json!({ "jsonrpc": "2.0", "id": 1, "result": {} }).to_string();
-        assert_eq!(handle(&response, &State::default()), Incoming::Nothing);
     }
 
     #[test]
@@ -271,7 +173,6 @@ mod tests {
         let answer = reply(handle(&request("tools/call", json!({ "name": "getLatestSelection" })), &State::default()));
         let none: Value = serde_json::from_str(answer["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(none["success"], false);
-
     }
 
     #[test]
@@ -293,23 +194,5 @@ mod tests {
         // Without arguments at all, a tool that needs none still goes.
         let diagnostics = request("tools/call", json!({ "name": "getDiagnostics" }));
         assert!(matches!(handle(&diagnostics, &State::default()), Incoming::Tool { .. }));
-    }
-
-    #[test]
-    fn tool_results_carry_text_items_or_an_error() {
-        let ok = tool_result(json!(3), Ok(vec!["a".into(), "b".into()]));
-        assert_eq!(ok["result"]["content"][1]["text"], "b");
-        assert!(ok["result"].get("isError").is_none());
-        let failed = tool_result(json!(3), Err("no".into()));
-        assert_eq!(failed["result"]["isError"], true);
-    }
-
-    #[test]
-    fn file_urls_go_both_ways() {
-        let path = if cfg!(windows) { PathBuf::from(r"C:\work\a b.rs") } else { PathBuf::from("/work/a b.rs") };
-        let url = file_url(&path);
-        assert!(url.starts_with("file:///") && url.contains("a%20b.rs"), "{url}");
-        assert_eq!(path_of(&url), path);
-        assert_eq!(path_of("/plain/path.rs"), PathBuf::from("/plain/path.rs"));
     }
 }

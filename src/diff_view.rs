@@ -86,11 +86,11 @@ pub enum DiffSource {
     /// Something else → the file as it is (the open document's text): the
     /// clipboard, another file, the file at a branch or revision.
     Compare { path: PathBuf, with: Compared },
-    /// The file as it is (the open document's text) → a change Claude Code
-    /// proposed (`workspace/claude_ide.rs`), kept or dropped with Accept /
-    /// Reject. `tab_name` is Claude's name for it; `new_file`: the file
-    /// doesn't exist yet.
-    Proposed { path: PathBuf, tab_name: String, text: Arc<str>, new_file: bool },
+    /// The file as it is (the open document's text) → a change a terminal
+    /// agent proposed (`workspace/agent_ide.rs`), kept or dropped with
+    /// Accept / Reject. `tab_name` is the agent's name for it; `new_file`:
+    /// the file doesn't exist yet.
+    Proposed { agent: crate::agent_ide::Agent, path: PathBuf, tab_name: String, text: Arc<str>, new_file: bool },
 }
 
 /// What a file is compared with (`DiffSource::Compare`), the "before" side.
@@ -144,7 +144,7 @@ impl DiffSource {
             (DiffSource::Commit { sha: a, file: f, .. }, DiffSource::Commit { sha: b, file: g, .. }) => a == b && f.rel == g.rel,
             (DiffSource::History { path: a, .. }, DiffSource::History { path: b, .. }) => a == b,
             (DiffSource::Compare { path: a, with: x }, DiffSource::Compare { path: b, with: y }) => a == b && x.same(y),
-            (DiffSource::Proposed { tab_name: a, .. }, DiffSource::Proposed { tab_name: b, .. }) => a == b,
+            (DiffSource::Proposed { agent: x, tab_name: a, .. }, DiffSource::Proposed { agent: y, tab_name: b, .. }) => x == y && a == b,
             _ => false,
         }
     }
@@ -650,7 +650,7 @@ impl Render for DiffView {
             DiffSource::Commit { sha, summary, .. } => format!("{} · {}", &sha[..sha.len().min(8)], summary),
             DiffSource::History { label, .. } => format!("Local History · {label}"),
             DiffSource::Compare { with, .. } => format!("Compared with {}", with.label(&self.repo)),
-            DiffSource::Proposed { .. } => "Proposed by Claude Code".to_string(),
+            DiffSource::Proposed { agent, .. } => format!("Proposed by {}", agent.name()),
         };
         // Side by side / Unified switch.
         let segment = |id: &'static str, label: &'static str, on: bool| {

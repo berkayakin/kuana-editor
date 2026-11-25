@@ -280,6 +280,8 @@ impl Workspace {
             self.lsp.update(cx, |s, cx| s.register(&editor, cx));
         }
         self.refresh_git(cx);
+        // Gemini CLI is told whether the project is trusted.
+        self.schedule_agent_context(cx);
         cx.notify();
     }
 
