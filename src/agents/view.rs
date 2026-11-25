@@ -36,8 +36,10 @@ const PREVIEW_LINES: usize = 14;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum MenuKind {
+    /// The permission mode.
     Mode,
-    Option(String),
+    /// The model, its effort and the agent's other options.
+    Model,
     AddContext,
     More,
 }
@@ -69,6 +71,8 @@ pub struct SessionView {
     /// Closed by the user though open by default (a diff, a permission).
     closed: HashSet<String>,
     markdown: HashMap<usize, (usize, Rc<Vec<Block>>)>,
+    /// Tools' text as Markdown, by tool call and content (its length then).
+    tool_markdown: std::cell::RefCell<HashMap<(String, usize), (usize, Rc<Vec<Block>>)>>,
     /// Context to send with the next prompt.
     pub context: Vec<ContextItem>,
     copied: Option<usize>,
@@ -91,6 +95,19 @@ pub struct SessionView {
     /// Why the last thing attached wasn't, shown over the composer until
     /// the next try.
     pub notice: Option<SharedString>,
+    /// Whether typing asked the agent to start (`Session::start`).
+    started: bool,
+    /// Whether the agent was asking something when last seen.
+    asking: bool,
+    /// The suggestion picked with ↑/↓, and the query it was picked for (a
+    /// new query starts at the first again).
+    picked: (usize, String),
+    /// The composer's text when Escape hid the suggestions (they stay hidden
+    /// until it changes).
+    dismissed: Option<String>,
+    /// Files attached by an `@` mention, with the text it put in the
+    /// composer: deleting that text drops the file too.
+    mentioned: Vec<(PathBuf, String)>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -102,12 +119,27 @@ impl SessionView {
         let placeholder = format!("Ask {} anything · @ for a file, / for commands", session.read(cx).agent_name);
         let composer = cx.new(|cx| Editor::multi_line(placeholder, cx));
         let subscriptions = vec![
-            cx.observe(&session, |view, _, cx| {
+            cx.observe(&session, |view, session, cx| {
                 view.sync(cx);
+                // The agent asks something: where it asks shows, even if the
+                // transcript was scrolled up (it waits for the answer).
+                let asking = session.read(cx).needs_you();
+                if asking && !view.asking {
+                    view.follow_end();
+                }
+                view.asking = asking;
                 cx.notify();
             }),
             cx.subscribe(&session, |_, _, _: &SessionEvent, cx| cx.notify()),
-            cx.observe(&composer, |_, _, cx| cx.notify()),
+            cx.observe(&composer, |view, composer, cx| {
+                // Something typed for a session whose agent isn't up (a
+                // restored one): it starts now, not when the prompt's sent.
+                if !view.started && !composer.read(cx).text(cx).is_empty() {
+                    view.started = true;
+                    view.session.update(cx, |s, cx| s.start(cx));
+                }
+                cx.notify()
+            }),
         ];
         let mut view = SessionView {
             session,
@@ -118,6 +150,7 @@ impl SessionView {
             open: HashSet::new(),
             closed: HashSet::new(),
             markdown: HashMap::new(),
+            tool_markdown: Default::default(),
             context: Vec::new(),
             copied: None,
             selection: {
@@ -141,6 +174,11 @@ impl SessionView {
             mention_task: None,
             notice: None,
             editing: None,
+            started: false,
+            asking: false,
+            picked: (0, String::new()),
+            dismissed: None,
+            mentioned: Vec::new(),
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
@@ -187,6 +225,9 @@ impl SessionView {
     /// query is matched in the background (a big project has many files),
     /// the last matches showing meanwhile.
     fn mention(&mut self, cx: &mut Context<Self>) -> Option<(Range<usize>, Vec<PathBuf>)> {
+        if self.suggestions_dismissed(cx) {
+            return None;
+        }
         let (range, query) = self.mention_query(cx)?;
         let matched = self.mentions.as_ref().is_some_and(|(q, _)| *q == query);
         let matching = self.mention_task.as_ref().is_some_and(|(q, _)| *q == query);
@@ -212,12 +253,77 @@ impl SessionView {
     /// The best match for the `@…` at the caret now (matched here if the
     /// background match hasn't caught up: a key was pressed to take it).
     fn current_mention(&mut self, cx: &mut Context<Self>) -> Option<(Range<usize>, PathBuf)> {
+        if self.suggestions_dismissed(cx) {
+            return None;
+        }
         let (range, query) = self.mention_query(cx)?;
         let found = match &self.mentions {
             Some((q, found)) if *q == query => found.clone(),
             _ => super::mentions::matching(&self.files, &self.session.read(cx).cwd, &query),
         };
-        found.into_iter().next().map(|path| (range, path))
+        let ix = self.pick_index(&query, found.len());
+        found.into_iter().nth(ix).map(|path| (range, path))
+    }
+
+    /// Whether Escape hid the suggestions for the text as it is.
+    fn suggestions_dismissed(&self, cx: &App) -> bool {
+        self.dismissed.as_ref().is_some_and(|text| *text == self.composer.read(cx).text(cx))
+    }
+
+    /// The agent's `/` commands matching what's typed at the composer's
+    /// start: names starting with it, then names holding it.
+    fn command_matches(&self, cx: &App) -> Vec<(String, String)> {
+        let text = self.composer.read(cx).text(cx);
+        let Some(typed) = text.strip_prefix('/').filter(|typed| !typed.contains(char::is_whitespace)) else { return Vec::new() };
+        if self.suggestions_dismissed(cx) {
+            return Vec::new();
+        }
+        let typed = typed.to_lowercase();
+        let commands = &self.session.read(cx).commands;
+        let starts = |name: &str| name.to_lowercase().starts_with(&typed);
+        let mut found: Vec<(String, String)> = commands.iter().filter(|(name, _)| starts(name)).cloned().collect();
+        found.extend(commands.iter().filter(|(name, _)| !starts(name) && name.to_lowercase().contains(&typed)).cloned());
+        found
+    }
+
+    /// The picked suggestion of `len` for `query` (the first for a new query).
+    fn pick_index(&self, query: &str, len: usize) -> usize {
+        if self.picked.1 == query { self.picked.0.min(len.saturating_sub(1)) } else { 0 }
+    }
+
+    /// ↑/↓ while suggestions show: the pick moves (round), and the key is
+    /// taken; otherwise it goes on to the composer.
+    fn move_pick(&mut self, delta: isize, cx: &mut Context<Self>) -> bool {
+        let (query, len) = {
+            let commands = self.command_matches(cx);
+            if !commands.is_empty() {
+                (self.composer.read(cx).text(cx), commands.len())
+            } else if let Some((_, query)) = self.mention_query(cx).filter(|_| !self.suggestions_dismissed(cx))
+                && let Some((matched, found)) = &self.mentions
+                && *matched == query
+                && !found.is_empty()
+            {
+                let len = found.len();
+                (query, len)
+            } else {
+                return false;
+            }
+        };
+        let at = self.pick_index(&query, len) as isize;
+        self.picked = ((at + delta).rem_euclid(len as isize) as usize, query);
+        cx.notify();
+        true
+    }
+
+    /// A command taken: `/name ` in the composer, the caret after it.
+    fn accept_command(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = format!("/{name} ");
+        self.composer.update(cx, |e, cx| {
+            e.set_text(&text, cx);
+            e.select_range(text.len()..text.len(), cx);
+        });
+        window.focus(&self.composer.focus_handle(cx));
+        cx.notify();
     }
 
     /// A suggestion taken: `@path` in the text, the file in the context.
@@ -227,6 +333,7 @@ impl SessionView {
         let text = self.composer.read(cx).text(cx);
         let (start, end) = (range.start.min(text.len()), range.end.min(text.len()));
         let inserted = format!("@{rel} ");
+        self.mentioned.push((path.clone(), format!("@{rel}")));
         let caret = start + inserted.len();
         let new_text = format!("{}{inserted}{}", &text[..start], text[end..].trim_start_matches(' '));
         self.composer.update(cx, |e, cx| {
@@ -299,8 +406,15 @@ impl SessionView {
 
     /// Tab (and Enter, while suggestions show): the first `@` suggestion.
     fn accept_suggestion(&mut self, _: &AcceptSuggestion, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((range, first)) = self.current_mention(cx) {
-            self.accept_mention(range, first, window, cx);
+        if let Some((range, picked)) = self.current_mention(cx) {
+            self.accept_mention(range, picked, window, cx);
+            return;
+        }
+        let commands = self.command_matches(cx);
+        if !commands.is_empty() {
+            let text = self.composer.read(cx).text(cx);
+            let (name, _) = commands[self.pick_index(&text, commands.len())].clone();
+            self.accept_command(&name, window, cx);
         }
     }
 
@@ -326,6 +440,12 @@ impl SessionView {
         self.remeasure(old, count);
     }
 
+    /// Whether the transcript is scrolled up from its end (more than a line).
+    fn scrolled_up(&self) -> bool {
+        let below = self.list.max_offset_for_scrollbar().height + self.list.scroll_px_offset_for_scrollbar().y;
+        below > px(24.)
+    }
+
     pub fn composer(&self) -> &Entity<Editor> {
         &self.composer
     }
@@ -342,11 +462,31 @@ impl SessionView {
             self.accept_suggestion(&AcceptSuggestion, window, cx);
             return;
         }
+        let commands = self.command_matches(cx);
+        if !commands.is_empty() {
+            let text = self.composer.read(cx).text(cx);
+            let (name, _) = &commands[self.pick_index(&text, commands.len())];
+            if text.trim() != format!("/{name}") {
+                self.accept_suggestion(&AcceptSuggestion, window, cx);
+                return;
+            }
+        }
         let text = self.composer.read(cx).text(cx);
         if text.trim().is_empty() && self.context.is_empty() {
             return;
         }
-        let context = std::mem::take(&mut self.context);
+        // A file mentioned with `@`, its mention deleted since, isn't sent.
+        let mentioned = std::mem::take(&mut self.mentioned);
+        let context: Vec<ContextItem> = std::mem::take(&mut self.context)
+            .into_iter()
+            .filter(|item| match item {
+                ContextItem::File { path, .. } => mentioned.iter().filter(|(p, _)| p == path).all(|(_, mention)| text.contains(mention.as_str())),
+                _ => true,
+            })
+            .collect();
+        if text.trim().is_empty() && context.is_empty() {
+            return;
+        }
         self.composer.update(cx, |e, cx| e.set_text("", cx));
         if let Some(turn) = self.editing.take() {
             cx.emit(SessionViewEvent::Resend { turn, text: text.trim().to_string(), context });
@@ -354,12 +494,23 @@ impl SessionView {
             return;
         }
         self.session.update(cx, |s, cx| s.send(text.trim().to_string(), context, cx));
-        // The newest message shows.
-        self.list.scroll_to_reveal_item(self.list.item_count().saturating_sub(1));
+        // The newest message shows, and what the agent does after it.
+        self.follow_end();
+    }
+
+    /// Back to the end of the transcript, following it as it grows.
+    fn follow_end(&self) {
+        self.list.reset(self.list.item_count());
     }
 
     fn stop(&mut self, _: &StopAgent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.session.read(cx).state.busy() {
+        let suggesting = !self.command_matches(cx).is_empty() || self.current_mention(cx).is_some();
+        if suggesting {
+            self.dismissed = Some(self.composer.read(cx).text(cx));
+            cx.notify();
+            return;
+        }
+        if self.session.read(cx).working() {
             self.session.update(cx, |s, cx| s.cancel(cx));
         } else if self.editing.is_some() {
             self.stop_editing(cx);
@@ -409,6 +560,11 @@ impl SessionView {
             self.closed.remove(&key);
             self.open.insert(key);
         }
+        // What's on screen stays put, so what opens grows downward, as on a
+        // page (a list following its end would grow it upward instead).
+        if !self.scrolled_up() && self.list.max_offset_for_scrollbar().height > px(0.) {
+            self.list.scroll_by(-self.list.viewport_bounds().size.height);
+        }
         let count = self.list.item_count();
         self.remeasure(count, count);
         cx.notify();
@@ -449,7 +605,7 @@ impl SessionView {
                 let session = self.session.read(cx);
                 let turn = session.turn_of(ix);
                 // A checkpoint: the files the agent changed from here on can go back.
-                let restorable = !session.state.busy() && session.checkpoints.changed_since(turn);
+                let restorable = !session.working() && session.checkpoints.changed_since(turn);
                 let rewinds = session.can_rewind();
                 let group = SharedString::from(format!("user-{ix}"));
                 // Yours on the right, in a bubble as wide as the text (as in
@@ -519,6 +675,7 @@ impl SessionView {
                     copied: self.copied,
                     selection: Some((self.selection.clone(), ix)),
                     pieces: Default::default(),
+                    wrap_code: true,
                 };
                 let _ = window;
                 // The agent's answer as plain text across the column, its
@@ -651,6 +808,21 @@ impl SessionView {
         )
     }
 
+    fn tool_markdown_of(&self, tool: &str, index: usize, text: &str, cx: &App) -> Rc<Vec<Block>> {
+        let key = (tool.to_string(), index);
+        if let Some((len, blocks)) = self.tool_markdown.borrow().get(&key)
+            && *len == text.len()
+        {
+            return blocks.clone();
+        }
+        let base = self.session.read(cx).cwd.clone();
+        let mut blocks = markdown_preview::parse(text, Some(&base));
+        markdown_preview::for_each_inline(&mut blocks, &mut |inline| link_files(inline, &base));
+        let blocks = Rc::new(blocks);
+        self.tool_markdown.borrow_mut().insert(key, (text.len(), blocks.clone()));
+        blocks
+    }
+
     fn markdown_of(&mut self, ix: usize, text: &str, cx: &App) -> Rc<Vec<Block>> {
         if let Some((len, blocks)) = self.markdown.get(&ix)
             && *len == text.len()
@@ -709,7 +881,9 @@ impl SessionView {
         let theme = Theme::get(cx).clone();
         let key = format!("tool-{}", tool.id);
         let asking = tool.permission.as_ref().is_some_and(|p| p.open);
-        let has_body = !tool.content.is_empty() || asking;
+        // A command the row doesn't show whole (described, or several lines).
+        let command = tool_command(tool);
+        let has_body = !tool.content.is_empty() || asking || command.is_some();
         let default_open = asking || tool.content.iter().any(|c| matches!(c, ToolContent::Diff { .. } | ToolContent::Terminal { .. }));
         let open = standalone && has_body && self.is_open(&key, default_open);
         let (status_icon, status_color): (Icon, Hsla) = match tool.status {
@@ -729,8 +903,8 @@ impl SessionView {
             .text_size(px(12.5))
             .when(has_body && standalone, |el| el.cursor_pointer().on_click(cx.listener(move |v, _, _, cx| v.toggle(toggle.clone(), default_open, cx))))
             .when(has_body && standalone, |el| el.child(icon_el(if open { Icon::ChevronDown } else { Icon::ChevronRight }, px(12.), theme.text_dim.into())))
-            .child(icon_el(status_icon, px(14.), status_color))
-            .child(div().min_w_0().flex().flex_wrap().items_baseline().children(title_spans(&tool.title, &theme)))
+            .child(div().flex_shrink_0().child(icon_el(status_icon, px(14.), status_color)))
+            .child(tool_title(tool, &theme))
             .when_some(location, |el, loc| {
                 let label = format!("{}{}", loc.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), loc.line.map(|l| format!(":{l}")).unwrap_or_default());
                 let (path, line) = (loc.path.clone(), loc.line);
@@ -753,7 +927,30 @@ impl SessionView {
             .flex_col()
             .gap_1()
             .child(header)
-            .when(open, |el| el.child(div().pl_5().flex().flex_col().gap_1p5().children(tool.content.iter().map(|c| self.render_content(tool, c, cx)))))
+            .when(open, |el| {
+                el.child(
+                    div()
+                        .pl_5()
+                        .flex()
+                        .flex_col()
+                        .gap_1p5()
+                        .when_some(command, |el, command| {
+                            el.child(
+                                div()
+                                    .rounded(px(8.))
+                                    .bg(theme.elevated)
+                                    .px_2()
+                                    .py_1p5()
+                                    .font_family(theme.mono_font.clone())
+                                    .text_size(px(11.5))
+                                    .text_color(theme.text)
+                                    .whitespace_normal()
+                                    .child(format!("$ {command}")),
+                            )
+                        })
+                        .children(tool.content.iter().map(|c| self.render_content(tool, c, cx))),
+                )
+            })
             .when(open && asking, |el| el.child(self.render_permission(tool, cx)))
             .when(!asking && standalone, |el| {
                 let chosen = tool.permission.as_ref().and_then(|p| p.chosen.as_ref().and_then(|c| p.options.iter().find(|o| &o.id == c)));
@@ -767,9 +964,70 @@ impl SessionView {
     fn render_content(&self, tool: &Tool, content: &ToolContent, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::get(cx).clone();
         match content {
+            ToolContent::Text { text } if !text.trim_start().starts_with("```") => {
+                // Prose (a plan to approve, a search's summary): Markdown,
+                // whole while the agent asks about it.
+                let asking = tool.permission.as_ref().is_some_and(|p| p.open);
+                let lines = text.lines().count();
+                let key = format!("all-{}", tool.id);
+                let all = asking || lines <= PREVIEW_LINES * 2 || self.is_open(&key, false);
+                let shown: String = if all { text.clone() } else { text.lines().take(PREVIEW_LINES).collect::<Vec<_>>().join("\n") };
+                let index = tool.content.iter().position(|c| std::ptr::eq(c, content)).unwrap_or(0);
+                let blocks = self.tool_markdown_of(&tool.id, index, &shown, cx);
+                let draw = Draw { zoom: 0.88, on_code: None, copied: None, selection: None, pieces: Default::default(), wrap_code: true };
+                div()
+                    .text_color(theme.text_muted)
+                    .child(markdown_preview::render(&blocks, &draw, cx))
+                    .when(!asking && lines > PREVIEW_LINES * 2, |el| {
+                        el.child(
+                            div()
+                                .id(SharedString::from(key.clone()))
+                                .cursor_pointer()
+                                .text_size(px(11.5))
+                                .text_color(theme.text_dim)
+                                .hover(|s| s.text_color(theme.accent))
+                                .child(if all { "Show less".to_string() } else { format!("⋯ {} more lines", lines - PREVIEW_LINES) })
+                                .on_click(cx.listener(move |v, _, _, cx| v.toggle(key.clone(), false, cx))),
+                        )
+                    })
+                    .into_any_element()
+            }
             ToolContent::Text { text } => {
-                let shown: String = text.lines().take(PREVIEW_LINES).collect::<Vec<_>>().join("\n");
-                div().text_size(px(12.)).text_color(theme.text_muted).font_family(theme.mono_font.clone()).whitespace_normal().child(shown).into_any_element()
+                let (text, output) = unfenced(text);
+                let lines: Vec<&str> = text.lines().collect();
+                let key = format!("all-{}", tool.id);
+                let all = self.is_open(&key, false);
+                // Output's end matters most (a test run's summary); other text's start.
+                let hidden = lines.len().saturating_sub(PREVIEW_LINES);
+                let shown = match (all || hidden == 0, output) {
+                    (true, _) => lines.join("\n"),
+                    (false, true) => lines[hidden..].join("\n"),
+                    (false, false) => lines[..PREVIEW_LINES].join("\n"),
+                };
+                let more = (hidden > 0).then(|| {
+                    let label = match (all, output) {
+                        (true, _) => "Show less".to_string(),
+                        (false, true) => format!("⋯ {hidden} line{} above", if hidden == 1 { "" } else { "s" }),
+                        (false, false) => format!("⋯ {hidden} more line{}", if hidden == 1 { "" } else { "s" }),
+                    };
+                    div()
+                        .id(SharedString::from(key.clone()))
+                        .cursor_pointer()
+                        .text_color(theme.text_dim)
+                        .hover(|s| s.text_color(theme.accent))
+                        .child(label)
+                        .on_click(cx.listener(move |v, _, _, cx| v.toggle(key.clone(), false, cx)))
+                });
+                let (more_above, more_below) = if output && !all { (more, None) } else { (None, more) };
+                div()
+                    .font_family(theme.mono_font.clone())
+                    .text_size(px(11.5))
+                    .text_color(theme.text_muted)
+                    .when(output, |el| el.rounded(px(8.)).bg(theme.elevated).px_2().py_1p5())
+                    .children(more_above)
+                    .child(div().whitespace_normal().child(if output && text.trim().is_empty() { "(no output)".to_string() } else { shown }))
+                    .children(more_below)
+                    .into_any_element()
             }
             ToolContent::Diff { path, old, new } => {
                 let preview = self.diff_preview_of(&tool.id, path, old.as_deref().unwrap_or(""), new);
@@ -815,7 +1073,7 @@ impl SessionView {
                                 '-' => (theme.git_deleted.into(), Hsla::from(theme.git_deleted).alpha(0.08)),
                                 _ => (theme.text_dim.into(), Hsla::transparent_black()),
                             };
-                            div().bg(bg).text_color(color).whitespace_nowrap().overflow_hidden().child(format!("{sign} {line}"))
+                            div().bg(bg).text_color(color).whitespace_normal().child(format!("{sign} {line}"))
                         })),
                     )
                     .into_any_element()
@@ -876,7 +1134,8 @@ impl SessionView {
         let session = self.session.read(cx);
         let mut col = div().flex().flex_col().gap_2().pb_2();
         let status = match &session.state {
-            State::Connecting => Some(format!("Starting {}…", session.agent_name)),
+            // Starting with nothing sent shows in the composer, not here.
+            State::Connecting if session.working() => Some(format!("Starting {}…", session.agent_name)),
             State::Running => Some("Working…".to_string()),
             State::Waiting => Some("Waiting for your answer".to_string()),
             _ => None,
@@ -922,7 +1181,7 @@ impl SessionView {
                     .child(pill("auth-retry".into(), "I've signed in".into(), false, false, &theme).on_click(cx.listener(|v, _, _, cx| v.session.update(cx, |s, cx| s.signed_in(cx))))),
             );
         }
-        if session.transcript.entries.is_empty() && !session.state.busy() {
+        if session.transcript.entries.is_empty() && !session.working() {
             let project = session.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             // Ways to start, which fill the composer.
             let starts = [
@@ -974,32 +1233,13 @@ impl SessionView {
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
         let session = self.session.read(cx);
-        let mode = session.mode.as_ref().and_then(|m| session.modes.iter().find(|x| &x.id == m)).map(|m| m.name.clone());
-        let options: Vec<(String, String)> = session
-            .options
-            .iter()
-            .filter(|o| !o.choices.is_empty())
-            .map(|o| {
-                let current = o.current.as_str().unwrap_or_default();
-                let name = o.choices.iter().find(|(v, _)| v == current).map_or_else(|| current.to_string(), |(_, n)| n.clone());
-                (o.id.clone(), name)
-            })
-            .collect();
         let usage = session.usage.filter(|(_, size)| *size > 0).map(|(used, size)| (used as f64 / size as f64 * 100.).round() as u64);
         crate::ui::panel_header()
             .px_3()
             .child(icon_el(Icon::Sparkle, px(14.), theme.accent.into()))
-            .child(div().min_w_0().flex_shrink().truncate().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(session.title.clone()))
+            .child(crate::ui::one_line(div().min_w_0().flex_shrink()).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(session.title.clone()))
             .child(div().flex_shrink_0().text_size(px(12.)).text_color(theme.text_dim).child(session.agent_name.clone()))
             .child(div().flex_1())
-            .when_some(mode, |el, mode| {
-                el.child(menu_pill("agent-mode", mode, &theme).on_click(cx.listener(|_, e: &ClickEvent, _, cx| cx.emit(SessionViewEvent::Menu { kind: MenuKind::Mode, position: e.position() }))))
-            })
-            .children(options.into_iter().map(|(id, name)| {
-                let kind = MenuKind::Option(id.clone());
-                menu_pill(SharedString::from(format!("agent-opt-{id}")), name, &theme)
-                    .on_click(cx.listener(move |_, e: &ClickEvent, _, cx| cx.emit(SessionViewEvent::Menu { kind: kind.clone(), position: e.position() })))
-            }))
             .when_some(usage, |el, pct| {
                 el.child(
                     div()
@@ -1050,16 +1290,22 @@ impl SessionView {
         let cwd = self.session.read(cx).cwd.clone();
         let theme = Theme::get(cx).clone();
         let session = self.session.read(cx);
-        let busy = session.state.busy();
+        let busy = session.working();
         let queued = session.queued.len();
+        let mode = session.mode_name().map(|name| (mode_icon(session), name));
+        let model = model_label(session);
+        // Starting before the first prompt: where its controls will be.
+        let starting = session.state == State::Connecting && !busy && mode.is_none() && model.is_none();
+        let agent_name = session.agent_name.clone();
         let text = self.composer.read(cx).text(cx);
-        // The agent's `/` commands while one is being typed.
-        let commands: Vec<(String, String)> = match text.strip_prefix('/') {
-            Some(typed) if !typed.contains(char::is_whitespace) => {
-                session.commands.iter().filter(|(name, _)| name.starts_with(typed)).take(6).cloned().collect()
-            }
-            _ => Vec::new(),
-        };
+        // The agent's `/` commands while one is being typed: at most 8, the
+        // picked one among them.
+        let all_commands = self.command_matches(cx);
+        let picked_command = self.pick_index(&text, all_commands.len());
+        let first_shown = picked_command.saturating_sub(7);
+        let commands: Vec<(usize, String, String)> =
+            all_commands.into_iter().enumerate().skip(first_shown).take(8).map(|(i, (name, description))| (i, name, description)).collect();
+        let picked_mention = self.mention_query(cx).map(|(_, query)| query).map_or(0, |query| self.pick_index(&query, usize::MAX));
         let focused = self.composer.focus_handle(cx).is_focused(window);
         div()
             .mx_3()
@@ -1087,12 +1333,12 @@ impl SessionView {
                                 .px_2()
                                 .py(px(3.))
                                 .cursor_pointer()
-                                .when(i == 0, |el| el.bg(theme.hover))
+                                .when(i == picked_mention, |el| el.bg(theme.hover))
                                 .row_hover(theme.hover)
                                 .child(crate::ui::file_icon(&path, px(14.), &theme))
-                                .child(div().text_color(theme.text).child(name))
-                                .child(div().min_w_0().truncate().text_color(theme.text_dim).child(rel))
-                                .when(i == 0, |el| el.child(div().flex_1()).child(div().text_size(px(11.)).text_color(theme.text_dim).child("Tab")))
+                                .child(div().flex_shrink_0().text_color(theme.text).child(name))
+                                .child(crate::ui::one_line(div().flex_1().min_w_0()).text_color(theme.text_dim).child(rel))
+                                .when(i == picked_mention, |el| el.child(div().flex_shrink_0().text_size(px(11.)).text_color(theme.text_dim).child("Tab")))
                                 .on_click(cx.listener(move |v, _, window, cx| v.accept_mention(range.clone(), path.clone(), window, cx)))
                         })),
                 )
@@ -1106,23 +1352,22 @@ impl SessionView {
                         .border_color(theme.border_subtle)
                         .bg(theme.elevated)
                         .py_1()
-                        .children(commands.into_iter().map(|(name, description)| {
-                            let insert = format!("/{name} ");
+                        .children(commands.into_iter().map(|(i, name, description)| {
+                            let picked = i == picked_command;
                             div()
                                 .id(SharedString::from(format!("cmd-{name}")))
                                 .flex()
+                                .items_center()
                                 .gap_2()
                                 .px_2()
                                 .py(px(3.))
                                 .cursor_pointer()
+                                .when(picked, |el| el.bg(theme.hover))
                                 .row_hover(theme.hover)
-                                .child(div().text_color(theme.accent).child(format!("/{name}")))
-                                .child(div().min_w_0().truncate().text_color(theme.text_dim).child(description))
-                                .on_click(cx.listener(move |v, _, window, cx| {
-                                    let insert = insert.clone();
-                                    v.composer.update(cx, |e, cx| e.set_text(&insert, cx));
-                                    window.focus(&v.composer.focus_handle(cx));
-                                }))
+                                .child(div().flex_shrink_0().text_color(theme.accent).child(format!("/{name}")))
+                                .child(crate::ui::one_line(div().flex_1().min_w_0()).text_color(theme.text_dim).child(description))
+                                .when(picked, |el| el.child(div().flex_shrink_0().text_size(px(11.)).text_color(theme.text_dim).child("Tab")))
+                                .on_click(cx.listener(move |v, _, window, cx| v.accept_command(&name, window, cx)))
                         })),
                 )
             })
@@ -1137,6 +1382,17 @@ impl SessionView {
                         // ⌘C with text selected in the transcript (and none in
                         // the composer) copies that.
                         .capture_action(cx.listener(Self::copy_selection))
+                        // ↑/↓ pick among suggestions while they show.
+                        .capture_action(cx.listener(|v, _: &crate::editor::MoveUp, _, cx| {
+                            if v.move_pick(-1, cx) {
+                                cx.stop_propagation();
+                            }
+                        }))
+                        .capture_action(cx.listener(|v, _: &crate::editor::MoveDown, _, cx| {
+                            if v.move_pick(1, cx) {
+                                cx.stop_propagation();
+                            }
+                        }))
                         .on_action(cx.listener(Self::send))
                         .on_action(cx.listener(Self::accept_suggestion))
                         .on_action(cx.listener(Self::stop))
@@ -1170,7 +1426,17 @@ impl SessionView {
                         .when(!self.context.is_empty(), |el| {
                             el.child(div().flex().flex_wrap().gap_1().children(self.context.iter().enumerate().map(|(i, item)| {
                                 let icon = if matches!(item, ContextItem::Image { .. }) { Icon::Palette } else { Icon::FileText };
-                                chip(item.label(), icon, &theme).child(
+                                // The whole place on hover: names repeat (`__init__.py`).
+                                let place = match item {
+                                    ContextItem::File { path, .. } | ContextItem::Selection { path, .. } => {
+                                        Some(path.strip_prefix(&cwd).unwrap_or(path).display().to_string())
+                                    }
+                                    _ => None,
+                                };
+                                chip(item.label(), icon, &theme)
+                                    .id(SharedString::from(format!("ctx-{i}")))
+                                    .when_some(place, |el, place| el.tooltip(move |_, cx| tooltip_view(place.clone(), cx)))
+                                    .child(
                                     div()
                                         .id(SharedString::from(format!("ctx-x-{i}")))
                                         .cursor_pointer()
@@ -1192,13 +1458,31 @@ impl SessionView {
                                 .gap_1()
                                 .child(
                                     icon_button("agent-add-context", Icon::Plus, theme.text_dim.into(), cx)
+                                        .flex_shrink_0()
                                         .tooltip(|_, cx| tooltip_view("Add context: a file, the selection, the problems, the Git diff", cx))
                                         .on_click(cx.listener(|_, e: &ClickEvent, _, cx| cx.emit(SessionViewEvent::Menu { kind: MenuKind::AddContext, position: e.position() }))),
                                 )
+                                .when_some(mode, |el, (icon, name)| {
+                                    el.child(
+                                        composer_pill("agent-mode", Some(icon), name, &theme)
+                                            .tooltip(|_, cx| tooltip_view("What the agent may do without asking", cx))
+                                            .on_click(cx.listener(|_, e: &ClickEvent, _, cx| cx.emit(SessionViewEvent::Menu { kind: MenuKind::Mode, position: e.position() }))),
+                                    )
+                                })
+                                .when(starting, |el| {
+                                    el.child(crate::ui::one_line(div().min_w_0().pl_1()).text_size(px(11.5)).text_color(theme.text_dim).child(format!("Starting {agent_name}…")))
+                                })
                                 .when(queued > 0, |el| {
-                                    el.child(div().text_size(px(11.5)).text_color(theme.text_dim).child(format!("{queued} queued · sent when the agent is done")))
+                                    el.child(crate::ui::one_line(div().min_w_0().pl_1()).text_size(px(11.5)).text_color(theme.text_dim).child(format!("{queued} queued · sent when the agent is done")))
                                 })
                                 .child(div().flex_1())
+                                .when_some(model, |el, label| {
+                                    el.child(
+                                        composer_pill("agent-model", None, label, &theme)
+                                            .tooltip(|_, cx| tooltip_view("Model and options", cx))
+                                            .on_click(cx.listener(|_, e: &ClickEvent, _, cx| cx.emit(SessionViewEvent::Menu { kind: MenuKind::Model, position: e.position() }))),
+                                    )
+                                })
                                 // Send, which is Stop while the agent works and
                                 // nothing's typed (typed text queues).
                                 .map(|el| {
@@ -1261,7 +1545,7 @@ impl Render for SessionView {
                     .child(transcript)
                     .child(crate::ui::scrollbar("agent-transcript-scrollbar", &self.list, cx))
                     // Scrolled up: a way back to the newest.
-                    .when(self.list.logical_scroll_top().item_ix + 1 < self.list.item_count(), |el| {
+                    .when(self.scrolled_up(), |el| {
                         el.child(
                             div().absolute().bottom(px(10.)).left_0().right_0().flex().justify_center().child(
                                 div()
@@ -1280,8 +1564,7 @@ impl Render for SessionView {
                                     .tooltip(|_, cx| tooltip_view("Scroll to the newest", cx))
                                     .on_click(cx.listener(|v, _, _, cx| {
                                         // Following the end again, as a new session does.
-                                        let count = v.list.item_count();
-                                        v.list.reset(count);
+                                        v.follow_end();
                                         cx.notify();
                                     })),
                             ),
@@ -1307,20 +1590,63 @@ fn kind_icon(kind: Kind) -> Icon {
     }
 }
 
-/// A tool title with its `code` parts in the code font.
-fn title_spans(title: &str, theme: &Theme) -> Vec<AnyElement> {
-    title
-        .split('`')
-        .enumerate()
-        .filter(|(_, s)| !s.is_empty())
-        .map(|(i, s)| {
-            if i % 2 == 1 {
-                div().px(px(3.)).font_family(theme.mono_font.clone()).text_size(px(12.)).text_color(theme.text).child(s.to_string()).into_any_element()
-            } else {
-                div().text_color(theme.text_muted).child(s.to_string()).into_any_element()
-            }
-        })
-        .collect()
+/// A tool call's row: its title's first line or, for a command the agent
+/// described (Claude's Bash has a `description`), the description and then
+/// the command in code. Each part is one font, as GPUI's cut with "…"
+/// measures with the element's font, and takes room whose width is known
+/// before its text is measured (`flex_1`), which the cut needs too.
+fn tool_title(tool: &Tool, theme: &Theme) -> AnyElement {
+    let command = tool.input.as_ref().and_then(|i| i.get("command")).and_then(serde_json::Value::as_str);
+    if let (Some(description), Some(command), Kind::Execute) = (tool_description(tool), command, tool.kind) {
+        // Agents' descriptions are a few words; a long one is cut here.
+        let description: String = if description.chars().count() > 60 { format!("{}…", description.chars().take(59).collect::<String>()) } else { description.to_string() };
+        return div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(div().flex_shrink_0().whitespace_nowrap().text_color(theme.text_muted).child(description))
+            .child(crate::ui::one_line(div().flex_1().min_w_0()).font_family(theme.mono_font.clone()).text_size(px(12.)).text_color(theme.text).child(first_line(command)))
+            .into_any_element();
+    }
+    crate::ui::one_line(div().flex_1().min_w_0()).text_color(theme.text_muted).child(first_line(&tool.title).replace('`', "")).into_any_element()
+}
+
+/// The text's first line, "…" after it when there are more.
+fn first_line(text: &str) -> String {
+    let text = text.trim();
+    match text.split_once('\n') {
+        Some((line, _)) => format!("{} …", line.trim_end()),
+        None => text.to_string(),
+    }
+}
+
+/// What the agent said a command is for (one line), when it did.
+fn tool_description(tool: &Tool) -> Option<&str> {
+    tool.input.as_ref()?.get("description")?.as_str().map(str::trim).filter(|d| !d.is_empty() && !d.contains('\n'))
+}
+
+/// A command the row doesn't show whole: the card shows it.
+fn tool_command(tool: &Tool) -> Option<String> {
+    if tool.kind != Kind::Execute {
+        return None;
+    }
+    let command = tool.input.as_ref()?.get("command")?.as_str()?.trim();
+    (tool_description(tool).is_some() || command.contains('\n')).then(|| command.to_string())
+}
+
+/// A tool's text without the Markdown fence agents put around a command's
+/// output (Claude's "```console … ```"), and whether it had one: output.
+fn unfenced(text: &str) -> (&str, bool) {
+    let trimmed = text.trim();
+    if let Some(rest) = trimmed.strip_prefix("```")
+        && let Some((_, body)) = rest.split_once('\n')
+        && let Some(inner) = body.strip_suffix("```")
+    {
+        return (inner.trim_end_matches('\n'), true);
+    }
+    (text, false)
 }
 
 /// Added and removed line counts, and the changed lines (with a line of
@@ -1389,7 +1715,6 @@ fn chip(label: String, icon: Icon, theme: &Theme) -> gpui::Div {
         .child(label)
 }
 
-/// A rounded button with a label that isn't static (an agent's option names).
 /// How a link to a file is written: `kuana-file:<path>`, then `#<line>`.
 const FILE_LINK: &str = "kuana-file:";
 
@@ -1445,8 +1770,6 @@ fn link_files(inline: &mut Inline, cwd: &std::path::Path) {
             inline.styles.push((range, markdown_preview::Style::Link));
         }
     }
-    // The text's runs are laid out in order.
-    inline.styles.sort_by_key(|(range, _)| range.start);
 }
 
 /// The composer's round button (Send, Stop): filled in the accent when it
@@ -1492,23 +1815,67 @@ fn pill(id: SharedString, label: SharedString, primary: bool, danger: bool, them
         .hover_fill(rest, hover)
 }
 
-/// A header control that opens a menu: its current value and a chevron.
-fn menu_pill(id: impl Into<SharedString>, label: String, theme: &Theme) -> crate::ui::Button {
+/// A composer control that opens a menu (the mode, the model): its value
+/// and a chevron, cut short when the composer is narrow.
+fn composer_pill(id: &'static str, icon: Option<Icon>, label: String, theme: &Theme) -> crate::ui::Button {
     div()
-        .id(gpui::ElementId::Name(id.into()))
+        .id(id)
         .h(px(24.))
         .px_2()
+        .min_w_0()
         .flex()
-        .flex_shrink_0()
+        .flex_shrink()
         .items_center()
         .gap_1()
-        .rounded(px(8.))
+        .rounded(px(12.))
         .cursor_pointer()
         .text_size(px(12.))
         .text_color(theme.text_muted)
-        .child(label)
-        .child(icon_el(Icon::ChevronDown, px(11.), theme.text_dim.into()))
+        .when_some(icon, |el, icon| el.child(div().flex_shrink_0().child(icon_el(icon, px(13.), theme.text_dim.into()))))
+        .child(crate::ui::one_line(div().min_w_0()).child(label))
+        .child(div().flex_shrink_0().child(icon_el(Icon::ChevronDown, px(11.), theme.text_dim.into())))
         .hover_bg(theme.hover)
+}
+
+/// An icon for the permission mode, by what its id says it does (agents
+/// name theirs: Claude's `default`, `acceptEdits`, `plan`, `auto`,
+/// `bypassPermissions`; Kuana Agent's `ask`, `edit`, `plan`).
+fn mode_icon(session: &Session) -> Icon {
+    let id = match session.mode_option() {
+        Some(option) => option.current.as_str().unwrap_or_default().to_lowercase(),
+        None => session.mode.clone().unwrap_or_default().to_lowercase(),
+    };
+    if id.contains("bypass") || id.contains("dontask") || id.contains("yolo") {
+        Icon::ShieldAlert
+    } else if id.contains("plan") {
+        Icon::FileText
+    } else if id.contains("edit") || id.contains("write") {
+        Icon::Pencil
+    } else if id.contains("auto") {
+        Icon::Bolt
+    } else {
+        Icon::ShieldCheck
+    }
+}
+
+/// What the composer's model button says: the model, its effort and the
+/// switches that are on ("Opus 5.5 · High · Fast mode"); "Options" for an
+/// agent with options but no model; None without options.
+fn model_label(session: &Session) -> Option<String> {
+    let options: Vec<&super::session::ConfigOption> = session.options.iter().filter(|o| o.category.as_deref() != Some("mode") && !o.choices.is_empty()).collect();
+    if options.is_empty() {
+        return None;
+    }
+    let of = |category: &str| options.iter().find(|o| o.category.as_deref() == Some(category));
+    let mut parts = Vec::new();
+    if let Some(model) = of("model") {
+        parts.push(model.current_name());
+    }
+    if let Some(effort) = of("thought_level").filter(|o| o.current.as_str() != Some("default")) {
+        parts.push(effort.current_name());
+    }
+    parts.extend(options.iter().filter(|o| o.switch() == Some(true)).map(|o| o.name.clone()));
+    Some(if parts.is_empty() { "Options".into() } else { parts.join(" · ") })
 }
 
 #[cfg(test)]

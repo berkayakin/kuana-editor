@@ -636,6 +636,30 @@ fn styled_line(text: &str, spans: Option<&Vec<(Range<usize>, Highlight)>>, empha
     StyledText::new(SharedString::from(text.to_string())).with_highlights(highlights.collect::<Vec<_>>())
 }
 
+/// How fast an element gives way, against its neighbors', when a row is
+/// too narrow (CSS's `flex-shrink`; 1 by default).
+fn shrink_factor(mut el: gpui::Div, factor: f32) -> gpui::Div {
+    el.style().flex_shrink = Some(factor);
+    el
+}
+
+/// A file's name, then its folder, dim: one line, so cutting it from the
+/// end takes the folder before the name.
+fn file_title(rel: &str, theme: &Theme) -> StyledText {
+    let (folder, name) = match rel.rsplit_once(['/', '\\']) {
+        Some((folder, name)) => (Some(folder), name),
+        None => (None, rel),
+    };
+    let mut text = name.to_string();
+    let mut highlights = vec![(0..name.len(), HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() })];
+    if let Some(folder) = folder.filter(|f| !f.is_empty()) {
+        text.push_str("  ");
+        highlights.push((text.len()..text.len() + folder.len(), HighlightStyle { color: Some(theme.text_dim.into()), ..Default::default() }));
+        text.push_str(folder);
+    }
+    StyledText::new(SharedString::from(text)).with_highlights(highlights)
+}
+
 impl Focusable for DiffView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -704,14 +728,13 @@ impl Render for DiffView {
             .border_b_1()
             .border_color(theme.border_subtle)
             .child(icon_el(Icon::GitCompare, px(15.), theme.text_muted.into()))
-            .child(file_icon)
-            // A long path (a file outside the project) gives way, so the
-            // buttons at the right stay on screen.
-            .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(rel.clone()))
+            .child(div().flex_shrink_0().child(file_icon))
+            // The name, then its folder, dim, cut with "…" from the end: in a
+            // narrow pane the badge gives way first, then the folder, then the
+            // name, so the buttons at the right stay on screen.
+            .child(shrink_factor(crate::ui::one_line(div().min_w_0()), 0.05).child(file_title(&rel, &theme)))
             .child(
-                div()
-                    .min_w_0()
-                    .truncate()
+                shrink_factor(crate::ui::one_line(div().min_w_0()), 8.)
                     .px_1p5()
                     .rounded(px(4.))
                     .bg(change_color(&theme, change).alpha(0.15))

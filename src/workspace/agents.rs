@@ -86,6 +86,19 @@ impl Workspace {
         }
         match store.update(cx, |s, cx| s.new_session(&agent, &cwd, cx)) {
             Ok(session) => {
+                // Started now: its modes, models and commands show while
+                // the first prompt is written.
+                session.update(cx, |s, cx| s.start(cx));
+                if self.last_agent != agent {
+                    let remembered = agent.clone();
+                    cx.background_executor()
+                        .spawn(async move {
+                            if let Err(err) = SessionState::change(|state| state.last_agent = Some(remembered)) {
+                                eprintln!("couldn't save the agent used last: {err}");
+                            }
+                        })
+                        .detach();
+                }
                 self.last_agent = agent;
                 Some(self.open_session_view(session, window, cx))
             }
@@ -172,7 +185,7 @@ impl Workspace {
     pub(super) fn close_agent_tab(&mut self, view: &Entity<SessionView>, window: &mut Window, cx: &mut Context<Self>) {
         let session = view.read(cx).session.clone();
         let others = self.items(cx).into_iter().filter_map(|i| i.agent().cloned()).filter(|v| v != view && v.read(cx).session == session).count();
-        let busy = session.read(cx).state.busy();
+        let busy = session.read(cx).working();
         if others == 0 && busy {
             let answer = ask(window, "Stop the agent?", "It's still working; closing the tab stops it. The session stays in the Agents view.", "Stop and Close", true, cx);
             let view = view.clone();
@@ -249,22 +262,24 @@ impl Workspace {
         let start = |id: String| Some(MenuAction::Call(std::rc::Rc::new(move |ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| {
             ws.start_agent_session(id.clone(), window, cx);
         })));
+        // The agent New Agent Session starts (the one used last) shows its shortcut.
+        let shortcut = binding_label(&NewAgentSession, window);
         for choice in choices.iter().filter(|c| c.installed) {
-            let icon = if choice.id == self.last_agent { Icon::Check } else { Icon::Sparkle };
-            entries.push(MenuEntry::item(choice.name.clone(), icon));
+            let entry = MenuEntry::item(choice.name.clone(), Icon::Sparkle);
+            entries.push(if choice.id == self.last_agent { entry.shortcut(shortcut.clone()) } else { entry });
             actions.push(start(choice.id.clone()));
         }
-        let to_install: Vec<_> = choices.iter().filter(|c| !c.installed).collect();
-        if !to_install.is_empty() {
-            entries.push(MenuEntry::Separator);
+        // Agents being installed; the rest (the registry lists dozens) in a
+        // picker that filters.
+        for choice in choices.iter().filter(|c| c.installing) {
+            entries.push(MenuEntry::item(format!("{} (installing…)", choice.name), Icon::Download));
             actions.push(None);
-            entries.push(MenuEntry::Header("Install".into()));
-            actions.push(None);
-            for choice in to_install {
-                let label = if choice.installing { format!("{} (installing…)", choice.name) } else { choice.name.clone() };
-                entries.push(MenuEntry::item(label, Icon::Download));
-                actions.push(start(choice.id.clone()));
-            }
+        }
+        if choices.iter().any(|c| !c.installed && !c.installing) {
+            entries.push(MenuEntry::item("Install an Agent…", Icon::Download));
+            actions.push(Some(MenuAction::Call(std::rc::Rc::new(|ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| {
+                ws.pick_agent_to_install(window, cx);
+            }))));
         }
         entries.push(MenuEntry::Separator);
         actions.push(None);
@@ -273,6 +288,42 @@ impl Workspace {
             cx.defer(|cx| crate::preferences::open(Some(crate::preferences::Page::Ai), cx));
         }))));
         self.show_context_menu(entries, actions, position, None, window, cx);
+    }
+
+    /// The registry's agents not installed yet, to filter; the one chosen
+    /// installs, then a session with it starts.
+    fn pick_agent_to_install(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(store) = store::store(cx) else { return };
+        let choices: Vec<crate::picker::Choice> = store
+            .read(cx)
+            .choices()
+            .into_iter()
+            .filter(|c| !c.installed && !c.installing)
+            .map(|c| crate::picker::Choice {
+                id: c.id,
+                label: c.name.into(),
+                detail: Some(c.error.map_or(c.description, |error| format!("Last install failed: {error}")).into()).filter(|d: &SharedString| !d.is_empty()),
+                icon: Some(Icon::Download.path().into()),
+                file: None,
+            })
+            .collect();
+        let picker = cx.new(|cx| {
+            let mut picker = crate::picker::Picker::new(crate::picker::PickerMode::Choices, None, Arc::new(Vec::new()), Vec::new(), Arc::new(Vec::new()), window, cx);
+            picker.set_choices("Install an Agent".into(), "Agent", choices, cx);
+            picker.set_title_icon(Icon::Sparkle, cx);
+            picker
+        });
+        let subscription = cx.subscribe_in(&picker, window, |ws, _, event: &crate::picker::PickerEvent, window, cx| match event {
+            crate::picker::PickerEvent::Chosen(id) => {
+                let id = id.clone();
+                ws.close_modal(window, cx);
+                ws.start_agent_session(id, window, cx);
+            }
+            crate::picker::PickerEvent::Dismissed => ws.close_modal(window, cx),
+            _ => {}
+        });
+        self.modals.open(Modal::Picker(picker), subscription);
+        cx.notify();
     }
 
     fn on_session_view(&mut self, view: &Entity<SessionView>, event: &SessionViewEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -308,25 +359,69 @@ impl Workspace {
         match kind {
             MenuKind::Mode => {
                 let s = session.read(cx);
-                for mode in s.modes.clone() {
-                    let current = s.mode.as_deref() == Some(mode.id.as_str());
-                    entries.push(if current { MenuEntry::item(mode.name.clone(), Icon::Check) } else { MenuEntry::text(mode.name.clone()) });
-                    let (session, id) = (session.clone(), mode.id.clone());
-                    actions.push(Some(MenuAction::Call(std::rc::Rc::new(move |_, _, cx: &mut Context<Workspace>| session.update(cx, |s, cx| s.set_mode(&id, cx))))));
+                // The mode option where the agent has one (ACP's successor
+                // to modes), else its modes.
+                let choices: Vec<(String, String, Option<String>, bool)> = match s.mode_option() {
+                    Some(option) => {
+                        let current = option.current.as_str().unwrap_or_default();
+                        option.choices.iter().map(|c| (c.value.clone(), c.name.clone(), c.description.clone(), c.value == current)).collect()
+                    }
+                    None => s.modes.iter().map(|m| (m.id.clone(), m.name.clone(), m.description.clone(), s.mode.as_deref() == Some(m.id.as_str()))).collect(),
+                };
+                let option = s.mode_option().map(|o| o.id.clone());
+                for (value, name, description, current) in choices {
+                    let entry = if current { MenuEntry::item(name, Icon::Check) } else { MenuEntry::text(name) };
+                    entries.push(entry.detail(description));
+                    let (session, option) = (session.clone(), option.clone());
+                    actions.push(Some(MenuAction::Call(std::rc::Rc::new(move |_, _, cx: &mut Context<Workspace>| {
+                        session.update(cx, |s, cx| match &option {
+                            Some(option) => s.set_option(option, Value::String(value.clone()), cx),
+                            None => s.set_mode(&value, cx),
+                        })
+                    }))));
                 }
             }
-            MenuKind::Option(option) => {
+            MenuKind::Model => {
                 let s = session.read(cx);
-                let Some(o) = s.options.iter().find(|o| o.id == option).cloned() else { return };
-                entries.push(MenuEntry::Header(o.name.clone().into()));
-                actions.push(None);
-                for (value, name) in o.choices {
-                    let current = o.current.as_str() == Some(value.as_str());
-                    entries.push(if current { MenuEntry::item(name, Icon::Check) } else { MenuEntry::text(name) });
-                    let (session, id) = (session.clone(), option.clone());
-                    actions.push(Some(MenuAction::Call(std::rc::Rc::new(move |_, _, cx: &mut Context<Workspace>| {
-                        session.update(cx, |s, cx| s.set_option(&id, Value::String(value.clone()), cx));
-                    }))));
+                let mut options: Vec<crate::agents::session::ConfigOption> =
+                    s.options.iter().filter(|o| o.category.as_deref() != Some("mode") && !o.choices.is_empty()).cloned().collect();
+                // The model first, then its effort, then the rest as the agent lists them.
+                options.sort_by_key(|o| match o.category.as_deref() {
+                    Some("model") => 0,
+                    Some("thought_level") => 1,
+                    _ => 2,
+                });
+                let set = |session: &Entity<Session>, option: &str, value: String| -> Option<MenuAction> {
+                    let (session, option) = (session.clone(), option.to_string());
+                    Some(MenuAction::Call(std::rc::Rc::new(move |_, _, cx: &mut Context<Workspace>| {
+                        session.update(cx, |s, cx| s.set_option(&option, Value::String(value.clone()), cx));
+                    })))
+                };
+                let mut switches = Vec::new();
+                for o in &options {
+                    if let Some(on) = o.switch() {
+                        switches.push((o.clone(), on));
+                        continue;
+                    }
+                    let current = o.current.as_str().unwrap_or_default();
+                    entries.push(MenuEntry::Header(o.name.clone().into()));
+                    actions.push(None);
+                    for choice in &o.choices {
+                        let entry = if choice.value == current { MenuEntry::item(choice.name.clone(), Icon::Check) } else { MenuEntry::text(choice.name.clone()) };
+                        // "Opus 5.5 · Best for…" under "Opus 5.5": the name once.
+                        let detail = choice.description.as_deref().map(|d| d.strip_prefix(choice.name.as_str()).map_or(d, |rest| rest.trim_start_matches([' ', '·']))).filter(|d| !d.is_empty());
+                        entries.push(entry.detail(detail.map(str::to_string)));
+                        actions.push(set(&session, &o.id, choice.value.clone()));
+                    }
+                }
+                if !switches.is_empty() && !entries.is_empty() {
+                    entries.push(MenuEntry::Separator);
+                    actions.push(None);
+                }
+                for (o, on) in switches {
+                    let entry = if on { MenuEntry::item(o.name.clone(), Icon::Check) } else { MenuEntry::text(o.name.clone()) };
+                    entries.push(entry.detail(o.description.clone()));
+                    actions.push(o.switch_value(!on).and_then(|value| set(&session, &o.id, value)));
                 }
             }
             MenuKind::AddContext => {
@@ -377,6 +472,9 @@ impl Workspace {
     // ---- What sessions ask -------------------------------------------------------------
 
     fn on_session_event(&mut self, session: &Entity<Session>, event: &SessionEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(event, SessionEvent::Finished) {
+            self.drop_unchanged_files(session, cx);
+        }
         match event {
             SessionEvent::NeedsYou | SessionEvent::Finished => {
                 let shown = self.active_item(cx).and_then(|i| i.agent().cloned()).is_some_and(|v| v.read(cx).session == *session) && window.is_window_active();
@@ -397,6 +495,7 @@ impl Workspace {
             }
             // Where the write really lands decides whether it's in the project.
             SessionEvent::WriteFile { id, path, content } => self.agent_write(session, *id, resolve_agent_path(path), content.clone(), window, cx),
+            SessionEvent::WillEdit { path, old, new } => self.agent_will_edit(session, resolve_agent_path(path), old.as_deref(), new.as_deref(), cx),
             SessionEvent::Ext { id, method, params } => {
                 let result = match method.as_str() {
                     "_kuana/problems" => Ok(self.agent_problems(params.get("path").and_then(Value::as_str).map(PathBuf::from), cx)),
@@ -468,6 +567,53 @@ impl Workspace {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Before::Missing),
             Err(e) => Err(format!("Couldn't read {} before writing it: {e}", path.display())),
         }
+    }
+
+    /// A turn ended: files noted for it that are as they were before it (an
+    /// edit refused, or put back) aren't changes.
+    fn drop_unchanged_files(&mut self, session: &Entity<Session>, cx: &mut Context<Self>) {
+        let noted = session.read(cx).noted_this_turn();
+        let same: Vec<PathBuf> = noted
+            .into_iter()
+            .filter(|(path, before)| self.agent_before(path, cx).is_ok_and(|now| now.text() == before.text()))
+            .map(|(path, _)| path)
+            .collect();
+        if !same.is_empty() {
+            session.update(cx, |s, cx| {
+                for path in &same {
+                    s.unchanged(path);
+                }
+                s.save(cx);
+                cx.notify();
+            });
+        }
+    }
+
+    /// A file an agent is about to change (`SessionEvent::WillEdit`): what it
+    /// is now is kept for Review, Reject All and Restore, and in Local
+    /// History. Agents that write the disk themselves (Claude's) never ask
+    /// Kuana to write, so this is the only time to keep it. Should the change
+    /// have landed already (the file has the diff's new text, not its old),
+    /// the old text goes back in the copy kept.
+    fn agent_will_edit(&mut self, session: &Entity<Session>, path: PathBuf, old: Option<&str>, new: Option<&str>, cx: &mut Context<Self>) {
+        if !self.in_project(&path) || session.read(cx).noted(&path) {
+            return;
+        }
+        let Ok(mut before) = self.agent_before(&path, cx) else { return };
+        if let (Some(new), Some(text)) = (new, before.text()) {
+            match old {
+                Some(old) if !old.is_empty() && !text.contains(old) && text.contains(new) => before = Before::Text(text.replacen(new, old, 1)),
+                None if text == new => before = Before::Missing,
+                _ => {}
+            }
+        }
+        if let Some(text) = before.text() {
+            crate::local_history::record(&path, &text, crate::local_history::Kind::BeforeAgent);
+        }
+        session.update(cx, |s, cx| {
+            s.note_change(&path, before);
+            cx.notify();
+        });
     }
 
     /// Writes for an agent: through the file's tab when it has one (one undo
@@ -587,9 +733,9 @@ impl Workspace {
                 let failed = ws.put_back_files(&files, window, cx);
                 session.update(cx, |s, cx| {
                     s.checkpoints.forget_from(turn);
-                    if turn > 0 {
-                        s.transcript.notice(crate::agents::transcript::Level::Info, format!("Files put back as they were before message {turn}."));
-                    }
+                    let text = if turn > 0 { format!("Files put back as they were before message {turn}.") } else { format!("The agent's changes to {count} were undone.") };
+                    s.transcript.notice(crate::agents::transcript::Level::Info, text);
+                    s.save(cx);
                     cx.notify();
                 });
                 if failed.is_empty() {

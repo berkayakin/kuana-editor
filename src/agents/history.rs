@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::checkpoints::Checkpoints;
 use super::transcript::Transcript;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -29,6 +30,9 @@ pub struct Saved {
     #[serde(default)]
     pub acp_session: Option<String>,
     pub transcript: Transcript,
+    /// What the agent's files were before it changed them, by turn.
+    #[serde(default, skip_serializing_if = "Checkpoints::is_empty")]
+    pub checkpoints: Checkpoints,
 }
 
 /// Held while the index is read and rewritten; the sessions deleted in this
@@ -125,9 +129,9 @@ mod tests {
         };
         let mut transcript = Transcript::default();
         transcript.push(Entry::User { text: "Fix the build".into(), context: vec![] });
-        let saved = Saved { summary: summary("history-test-a", 10), acp_session: Some("s1".into()), transcript };
+        let saved = Saved { summary: summary("history-test-a", 10), acp_session: Some("s1".into()), transcript, checkpoints: Default::default() };
         save(&saved).unwrap();
-        save(&Saved { summary: summary("history-test-b", 20), acp_session: None, transcript: Transcript::default() }).unwrap();
+        save(&Saved { summary: summary("history-test-b", 20), acp_session: None, transcript: Transcript::default(), checkpoints: Default::default() }).unwrap();
         let ids: Vec<String> = index().into_iter().map(|s| s.id).filter(|id| id.starts_with("history-test")).collect();
         assert_eq!(ids, vec!["history-test-b".to_string(), "history-test-a".to_string()]);
         // The generation counter isn't saved (it counts changes in this run).

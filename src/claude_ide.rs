@@ -380,6 +380,14 @@ fn serve(stream: TcpStream, shared: &Arc<Shared>) {
                     protocol::Incoming::Tool { id, name, arguments } => ask_window(shared, outgoing.clone(), id, name, arguments),
                     protocol::Incoming::Nothing => {}
                 }
+                // Initialized, Claude takes notifications: where the user is
+                // goes again (the one sent on connecting can come too early
+                // for it, and the selection is only sent when it changes).
+                if is_initialized(text.as_str())
+                    && let Some(selection) = state.selection
+                {
+                    let _ = outgoing.send(Some(crate::agent_ide::notification("selection_changed", selection).to_string()));
+                }
             }
             // A ping's pong goes out at the next read; a close is answered
             // there too, and the read after it fails.
@@ -390,6 +398,12 @@ fn serve(stream: TcpStream, shared: &Arc<Shared>) {
     shared.clients.lock().unwrap_or_else(|e| e.into_inner()).retain(|client| client.id != id);
     let _ = outgoing.send(None);
     let _ = shared.requests.unbounded_send(Request::Disconnected);
+}
+
+/// Whether a message is MCP's `notifications/initialized` (the client is
+/// ready for the server's notifications).
+fn is_initialized(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text).ok().is_some_and(|message| message.get("method").and_then(serde_json::Value::as_str) == Some("notifications/initialized"))
 }
 
 /// Hands a tool call to the window and sends back its answer, waiting on a
@@ -652,6 +666,11 @@ mod tests {
 
         send(&mut client, json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } }));
         assert_eq!(receive(&mut client)["result"]["serverInfo"]["name"], "kuana");
+        // Initialized, it hears the selection again (the first may have come
+        // before it took notifications).
+        send(&mut client, json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+        let again = receive(&mut client);
+        assert_eq!((again["method"].as_str(), again["params"]["text"].as_str()), (Some("selection_changed"), Some("fn main")));
 
         send(&mut client, json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "checkDocumentDirty", "arguments": { "filePath": "/work/app/a.rs" } } }));
         let Some(Request::Tool(call)) = futures::executor::block_on(requests.next()) else { panic!("no tool call") };

@@ -99,15 +99,15 @@ impl Proposal {
         }
     }
 
-    /// The accepted change is in the file (`Ok`), or couldn't be put there.
-    fn applied(self, bridges: &AgentBridges, applied: Result<(), String>, text: &str) {
+    /// The user accepted `text`. The agent writes it itself once told
+    /// (Claude Code applies its edit after `FILE_SAVED`, as Gemini CLI does
+    /// after `ide/diffAccepted`; neither's own editor extension writes it).
+    fn accepted(self, bridges: &AgentBridges, text: &str) {
         match self {
-            Proposal::Claude { call, .. } => call.answer(applied.map(|()| vec!["FILE_SAVED".to_string(), text.to_string()])),
+            Proposal::Claude { call, .. } => call.answer(Ok(vec!["FILE_SAVED".to_string(), text.to_string()])),
             Proposal::Gemini { file_path } => {
-                let Some(server) = &bridges.gemini.server else { return };
-                match applied {
-                    Ok(()) => server.broadcast("ide/diffAccepted", json!({ "filePath": file_path, "content": text })),
-                    Err(_) => server.broadcast("ide/diffRejected", json!({ "filePath": file_path })),
+                if let Some(server) = &bridges.gemini.server {
+                    server.broadcast("ide/diffAccepted", json!({ "filePath": file_path, "content": text }));
                 }
             }
             Proposal::Assist { .. } => {}
@@ -192,8 +192,15 @@ impl Workspace {
                 old.superseded(&self.agents);
             }
         }
+        // The keyboard stays where it is: in the agent's terminal, which asks
+        // the same question (Enter answers there), or an editor being typed
+        // in. The tab only shows.
+        let focused = window.focused(cx);
         match self.show_diff(source, window, cx) {
             Some(diff) => {
+                if let Some(focused) = focused {
+                    window.focus(&focused);
+                }
                 self.agents.proposals.insert(diff.entity_id(), proposal);
                 Ok(diff)
             }
@@ -205,7 +212,7 @@ impl Workspace {
     /// when nobody waits any more (the agent ended meanwhile).
     pub(super) fn agent_proposal_decided(&mut self, diff: &Entity<DiffView>, accepted: bool, window: &mut Window, cx: &mut Context<Self>) {
         let proposal = self.agents.proposals.remove(&diff.entity_id());
-        let DiffSource::Proposed { agent, path, text, new_file, .. } = diff.read(cx).source().clone() else { return };
+        let DiffSource::Proposed { path, text, new_file, .. } = diff.read(cx).source().clone() else { return };
         if let Some(Proposal::Assist { tab_name, base, writing }) = proposal {
             if accepted && writing.is_some() {
                 // Still being written: it waits for the end.
@@ -219,50 +226,41 @@ impl Workspace {
             return;
         }
         self.remove_item(&PaneItem::Diff(diff.clone()), window, cx);
+        // Back on the file, where the change lands (or doesn't).
+        if let Some(editor) = self.tab_for(&path, cx) {
+            self.activate_item(&PaneItem::Editor(editor), window, cx);
+        }
+        let Some(proposal) = proposal else { return };
         if !accepted {
-            if let Some(proposal) = proposal {
-                proposal.reject(&self.agents);
-            }
+            proposal.reject(&self.agents);
             return;
         }
-        // The agent hears "accepted" only once the file is saved: a failed
-        // save is its error (the save's own prompt tells the user).
-        let applying = self.apply_agent_change(agent, &path, &text, new_file, window, cx);
-        cx.spawn(async move |ws, cx| {
-            let applied = applying.await;
-            if let Some(proposal) = proposal {
-                ws.update(cx, |ws, _| proposal.applied(&ws.agents, applied, &text)).ok();
-            }
-        })
-        .detach();
+        // The agent writes the file (`Proposal::accepted`); its tab reloads
+        // when it does. Local History keeps what it was.
+        if !new_file {
+            self.keep_before_agent(&path, cx);
+        }
+        proposal.accepted(&self.agents, &text);
     }
 
-    /// Puts a proposed text in its file: a new file is written; an existing
-    /// one's document gets it as one undoable edit and is saved (without
-    /// format on save, which would change what the agent then writes). The
-    /// task ends when the file is written.
-    fn apply_agent_change(&mut self, agent: Agent, path: &Path, text: &Arc<str>, new_file: bool, window: &mut Window, cx: &mut Context<Self>) -> Task<Result<(), String>> {
-        if new_file && !path.is_file_on_host() {
-            let written = path.parent().map_or(Ok(()), crate::fs::create_dir_all).and_then(|()| crate::fs::write(path, text.as_bytes()));
-            if let Err(err) = written {
-                self.toast(ToastKind::Error, format!("Couldn't create the file {} proposed", agent.name()), Some(err.to_string()), cx);
-                return Task::ready(Err(err.to_string()));
-            }
-            self.files_written([path.to_path_buf()], cx);
-            self.open_path(path.to_path_buf(), window, cx);
-            return Task::ready(Ok(()));
-        }
-        self.open_path(path.to_path_buf(), window, cx);
-        let Some(editor) = self.tab_for(path, cx) else {
-            let message = format!("Couldn't open {}", path.display());
-            self.toast(ToastKind::Error, format!("Couldn't apply {}'s change", agent.name()), Some(message.clone()), cx);
-            return Task::ready(Err(message));
-        };
-        let current = editor.read(cx).doc.read(cx).rope().clone();
+    /// Records a file as it is now (its open document's text, else its
+    /// file) in Local History, before an agent changes it.
+    fn keep_before_agent(&mut self, path: &Path, cx: &mut Context<Self>) {
         let kept = path.to_path_buf();
-        cx.background_executor().spawn(async move { crate::local_history::record_rope(&kept, &current, crate::local_history::Kind::BeforeAgent) }).detach();
-        editor.update(cx, |e, cx| e.replace_text(text, cx));
-        self.save_editor_task(&editor, window, cx)
+        match self.tab_for(path, cx).filter(|e| e.read(cx).is_loaded()) {
+            Some(editor) => {
+                let current = editor.read(cx).doc.read(cx).rope().clone();
+                cx.background_executor().spawn(async move { crate::local_history::record_rope(&kept, &current, crate::local_history::Kind::BeforeAgent) }).detach();
+            }
+            None => cx
+                .background_executor()
+                .spawn(async move {
+                    if let Ok(bytes) = crate::fs::read(&kept) {
+                        crate::local_history::record(&kept, &crate::encoding::decode(&bytes, None).0, crate::local_history::Kind::BeforeAgent);
+                    }
+                })
+                .detach(),
+        }
     }
 
     /// Closes the proposed changes' tabs `which` takes (given each one's
@@ -281,17 +279,30 @@ impl Workspace {
                 which(proposal, &path).then_some((*id, found))
             })
             .collect();
+        // The agent closes them (the user answered in its terminal): the
+        // keyboard stays where it is, unless it was in a tab that goes.
+        let closing: Vec<&Entity<DiffView>> = chosen.iter().filter_map(|(_, found)| found.as_ref().map(|(diff, _)| diff)).collect();
+        let focused = window.focused(cx).filter(|_| !closing.iter().any(|diff| diff.focus_handle(cx).contains_focused(window, cx)));
         let mut taken = Vec::new();
+        let mut files = Vec::new();
         for (id, found) in chosen {
             let Some(proposal) = self.agents.proposals.remove(&id) else { continue };
             let text = match found {
-                Some((diff, DiffSource::Proposed { text, .. })) => {
+                Some((diff, DiffSource::Proposed { text, path, .. })) => {
                     self.remove_item(&PaneItem::Diff(diff), window, cx);
+                    files.push(path);
                     Some(text)
                 }
                 _ => None,
             };
             taken.push((proposal, text));
+        }
+        // Their files show again, where the change lands (or doesn't).
+        if let Some(editor) = files.iter().find_map(|path| self.tab_for(path, cx)) {
+            self.activate_item(&PaneItem::Editor(editor), window, cx);
+        }
+        if let Some(focused) = focused {
+            window.focus(&focused);
         }
         taken
     }

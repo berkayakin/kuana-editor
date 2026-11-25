@@ -247,7 +247,7 @@ impl Item for SessionView {
         // What it's doing shows on its tab.
         TabIcon::Ui(if session.needs_you() {
             Icon::CircleAlert
-        } else if session.state.busy() {
+        } else if session.working() {
             Icon::Refresh
         } else {
             Icon::Sparkle

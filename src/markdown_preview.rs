@@ -668,6 +668,9 @@ pub struct Draw {
     pub selection: Option<(Rc<crate::selectable_text::TextSelection>, usize)>,
     /// The next piece's number (pieces are numbered in drawing order).
     pub pieces: std::cell::Cell<usize>,
+    /// Long code lines wrap (an agent's narrow column, where they couldn't
+    /// be read otherwise) instead of being cut.
+    pub wrap_code: bool,
 }
 
 impl Draw {
@@ -935,30 +938,50 @@ fn shell_command(lang: &str, text: &str) -> Option<String> {
 }
 
 /// Styled text; links open in the browser when clicked.
-fn render_inline(inline: &Inline, id: (&'static str, usize), d: &Draw, cx: &App) -> AnyElement {
-    let theme = Theme::get(cx);
-    let highlights: Vec<(Range<usize>, HighlightStyle)> = inline
-        .styles
-        .iter()
-        .filter(|(r, _)| r.start < r.end)
-        .map(|(range, style)| {
-            let mut h = HighlightStyle::default();
-            match style {
-                Style::Bold => h.font_weight = Some(FontWeight::BOLD),
-                Style::Italic => h.font_style = Some(FontStyle::Italic),
-                Style::Strike => h.strikethrough = Some(StrikethroughStyle { thickness: px(1.), color: None }),
-                Style::Code => {
-                    h.background_color = Some(theme.hover.into());
-                    h.color = Some(theme.syntax.string.into());
-                }
-                Style::Link => {
-                    h.color = Some(theme.accent.into());
-                    h.underline = Some(UnderlineStyle { thickness: px(1.), color: None, wavy: false });
-                }
+/// An inline's styles as GPUI's text takes them: ranges in order that don't
+/// overlap (it lays runs one after another by length), each with what every
+/// style over it makes together. Markdown's styles nest (bold around italic,
+/// a link around code); a link's color is the one that shows.
+fn text_highlights(styles: &[(Range<usize>, Style)], theme: &Theme) -> Vec<(Range<usize>, HighlightStyle)> {
+    let look = |style: &Style| {
+        let mut h = HighlightStyle::default();
+        match style {
+            Style::Bold => h.font_weight = Some(FontWeight::BOLD),
+            Style::Italic => h.font_style = Some(FontStyle::Italic),
+            Style::Strike => h.strikethrough = Some(StrikethroughStyle { thickness: px(1.), color: None }),
+            Style::Code => {
+                h.background_color = Some(theme.hover.into());
+                h.color = Some(theme.syntax.string.into());
             }
-            (range.clone(), h)
-        })
-        .collect();
+            Style::Link => {
+                h.color = Some(theme.accent.into());
+                h.underline = Some(UnderlineStyle { thickness: px(1.), color: None, wavy: false });
+            }
+        }
+        h
+    };
+    let mut styles: Vec<&(Range<usize>, Style)> = styles.iter().filter(|(r, _)| r.start < r.end).collect();
+    // Applied in this order, links last.
+    styles.sort_by_key(|(_, style)| *style == Style::Link);
+    let mut cuts: Vec<usize> = styles.iter().flat_map(|(r, _)| [r.start, r.end]).collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut out: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+    for pair in cuts.windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        let Some(h) = styles.iter().filter(|(r, _)| r.start <= start && end <= r.end).map(|(_, style)| look(style)).reduce(HighlightStyle::highlight) else {
+            continue;
+        };
+        match out.last_mut() {
+            Some((last, same)) if last.end == start && *same == h => last.end = end,
+            _ => out.push((start..end, h)),
+        }
+    }
+    out
+}
+
+fn render_inline(inline: &Inline, id: (&'static str, usize), d: &Draw, cx: &App) -> AnyElement {
+    let highlights = text_highlights(&inline.styles, Theme::get(cx));
     let content = SharedString::from(inline.text.clone());
     let text = match d.piece(content.clone(), StyledText::new(content).with_highlights(highlights), inline.links.clone(), cx) {
         Ok(piece) => return div().child(piece).into_any_element(),
@@ -1006,8 +1029,7 @@ fn highlighted_code(text: &str, highlights: &[(Range<usize>, Highlight)], d: &Dr
         .iter()
         .map(|(range, kind)| (range.clone(), HighlightStyle { color: Some(theme.highlight_color(*kind)), ..Default::default() }));
     div()
-        .whitespace_nowrap()
-        .overflow_hidden()
+        .map(|el| if d.wrap_code { el.whitespace_normal() } else { el.whitespace_nowrap().overflow_hidden() })
         .map(|el| {
             let content = SharedString::from(text.to_string());
             // Code is selectable too, where the drawing's text is.
@@ -1022,6 +1044,22 @@ fn highlighted_code(text: &str, highlights: &[(Range<usize>, Highlight)], d: &Dr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_styles_become_runs_in_order() {
+        let theme = Theme::blank_for_tests();
+        // "a **b *c* d** e" and a linked code span: bold 2..7 around italic 4..5,
+        // code 9..12 inside a link 9..12, given inner first as the parser does.
+        let styles = vec![(4..5, Style::Italic), (2..7, Style::Bold), (9..12, Style::Link), (9..12, Style::Code)];
+        let runs = text_highlights(&styles, &theme);
+        let ranges: Vec<Range<usize>> = runs.iter().map(|(r, _)| r.clone()).collect();
+        assert_eq!(ranges, vec![2..4, 4..5, 5..7, 9..12]);
+        assert!(runs[1].1.font_weight == Some(FontWeight::BOLD) && runs[1].1.font_style == Some(FontStyle::Italic));
+        // The link's color and underline win over the code's color; its background stays.
+        let link = runs[3].1;
+        assert_eq!(link.color, Some(theme.accent.into()));
+        assert!(link.underline.is_some() && link.background_color.is_some());
+    }
 
     #[test]
     fn parses_common_markdown() {

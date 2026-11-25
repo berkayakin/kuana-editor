@@ -191,6 +191,7 @@ impl Render for MarkdownPreview {
             copied: self.copied.as_ref().map(|(ix, _)| *ix),
             selection: None,
             pieces: Default::default(),
+            wrap_code: false,
         };
         div()
             .id("markdown-preview-item")

@@ -46,9 +46,12 @@ title or agent. **New Session** (+, **⌥⌘N** / **Alt+Shift+N**) picks an agen
   [Agent Client Protocol](https://agentclientprotocol.com), so they work in Kuana as they do in Zed.
   Settings → AI → Agents installs, updates and uninstalls them. They go into Kuana's own folder:
   npm packages with your Node.js (or Kuana's own copy), binaries checked against the registry's
-  checksum, and Python ones through `uv`. An agent you haven't installed is installed the first
-  time you start a session with it. Agents that need you to sign in offer it in the session: a
-  terminal method runs in a Kuana terminal tab.
+  checksum, and Python ones through `uv`. **Install an Agent…** in the New Session menu lists
+  the rest, with a filter; one you pick installs, then its session starts. Agents that need you
+  to sign in offer it in the session: a terminal method runs in a Kuana terminal tab.
+
+A new session starts its agent at once, so its modes, models and `/` commands are there while you
+write the first message. New Session (the shortcut) starts one with the agent you used last.
 
 A session opens in a tab beside your code, which you can split, move and keep open like any tab.
 Your messages sit on the right, the agent's answers across the column, as in Claude's apps:
@@ -67,16 +70,21 @@ Your messages sit on the right, the agent's answers across the column, as in Cla
 
 - **The transcript**: your messages, the agent's answers in Markdown, its thinking (folded), and
   each step it takes as a card: files read, searches, edits with their diff (**Open Diff** shows
-  it in full), commands with their output as it runs. Runs of finished steps fold into one line
-  ("Read 4 files, edited 2"). The agent's plan shows as a checklist.
+  it in full), commands with what they're for and their output (its end first; click for the
+  rest). Runs of finished steps fold into one line ("Read 4 files, edited 2"). The agent's plan
+  shows as a checklist, and a plan it asks you to approve shows whole, in Markdown.
 - **Permissions**: when the agent asks before doing something, the card offers the agent's choices
-  (Allow, Always Allow, Reject…). A session that waits for you lights its tab and its row, and a
-  toast tells you if you're elsewhere.
-- **The header**: the agent's modes and options (model, reasoning…) as menus, how full its
-  context is, and **⋯** for Copy as Markdown, Review Changes and Delete.
+  (Allow, Always Allow, Reject…). A session that waits for you lights its tab and its row, shows
+  the question even if you'd scrolled up, and a toast tells you if you're elsewhere.
+- **The header**: the session's title and agent, how full its context is, and **⋯** for Copy as
+  Markdown, Review Changes and Delete.
 - **The composer**: **Enter** sends, **Shift+Enter** starts a new line, **Esc** stops the agent.
-  Messages you send while it works wait their turn. Type **@** and part of a name to attach a
-  project file (Tab, Enter or a click picks the first match). Type **/** for the agent's commands.
+  Messages you send while it works wait their turn. Under the text, as in Claude's apps: the
+  permission mode (Claude Agent's Manual, Accept edits, Plan, Auto…; Kuana Agent's Ask, Edit,
+  Plan) and, by the send button, the model with its effort and switches (Fast mode…), each a menu
+  that says what its choices do. Type **@** and part of a name to attach a project file, or **/**
+  for the agent's commands: ↑/↓ pick, Tab or Enter takes the pick, Esc hides the list. Deleting
+  an `@` mention before sending drops its file.
   **+** attaches the current file, the selection, the open files, the problems, the uncommitted
   changes (Git diff) or a picture file. **⌘V** / **Ctrl+V** with a picture on the clipboard (a
   screenshot, a design) attaches it too: PNG, JPEG, GIF or WebP, up to 5 MB, for agents that take
@@ -84,7 +92,10 @@ Your messages sit on the right, the agent's answers across the column, as in Cla
 - **Changes**: the bar over the composer counts the files the agent changed. **Review** opens each
   as a diff against what it was before the session touched it. **Keep All** keeps them, and
   **Reject All** puts every file back as it was. Every agent write is one undoable edit in its open
-  document, and Local History keeps the version before it ("Before an agent's edit").
+  document, and Local History keeps the version before it ("Before an agent's edit"). Agents that
+  write files themselves (Claude Agent) are followed too: Kuana keeps each file as it was when the
+  agent's edit comes up. What each session changed is kept with it, so Review, Reject All and
+  Restore still work after Kuana restarts.
 - **Checkpoints**: hover one of your messages and click ↶ (**Restore Files to Here**) to put back
   every file the agent changed from that message on, as it was just before. Files it created go
   to the Trash. A file that wasn't open goes back byte for byte, whatever its encoding.
@@ -114,7 +125,7 @@ Files an `.aiignore` or `.cursorignore` names (gitignore syntax, in the file's f
 above it) are kept away from it: it doesn't list, search, read or change them. Tab completion
 doesn't send them either.
 
-Its modes, in the session's header:
+Its modes, under the composer:
 
 | Mode | What it may do |
 | --- | --- |
@@ -208,7 +219,7 @@ doesn't start is noted in the session's thinking. Settings → AI → Tools list
 | Inline Assist | ⌃↩ | Alt+Shift+I |
 | Accept / reject a proposed change (in its tab) | ⌘↩ / ⌘⌫ | Ctrl+Enter / Ctrl+Backspace |
 | Send / new line / stop (in a session's composer) | ↩ / ⇧↩ / ⎋ | Enter / Shift+Enter / Esc |
-| Attach the first @ suggestion (in the composer) | ⇥ | Tab |
+| Pick an @ or / suggestion / take it / hide the list (in the composer) | ↑↓ / ⇥ / ⎋ | ↑↓ / Tab / Esc |
 
 Explain with Agent, Fix with Agent and Write Commit Message with AI are in Find Action and the
 menus.

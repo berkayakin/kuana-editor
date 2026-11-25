@@ -156,6 +156,9 @@ pub struct SessionState {
     /// Local projects whose dev container was offered (once each).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devcontainer_offered: Vec<PathBuf>,
+    /// The agent a session was last started with: New Agent Session's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_agent: Option<String>,
     /// Welcome Setup was finished (Get Started or Escape). Only finishing it
     /// sets this; the older `onboarded` key was also set by guessing from
     /// existing files, so installs that never saw the setup missed it.

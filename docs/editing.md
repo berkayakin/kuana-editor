@@ -142,9 +142,10 @@ connects to VS Code and JetBrains IDEs (its `/ide` command), so it works with wh
   and the rest.
 - **Its edits come as diffs.** When Claude asks to change a file (not in its auto-accept mode), the
   change opens in a **Proposed by Claude Code** tab beside the file: the file as it is, unsaved
-  edits included, against Claude's version. **Accept** applies it as one edit you can undo and saves
-  the file (Local History keeps what it was, "Before an agent's edit"); **Reject**, or closing
-  the tab, turns it down. Answering in the terminal instead closes the tab.
+  edits included, against Claude's version. **Accept** lets Claude make the change (it writes the
+  file, and its tab shows the new text; Local History keeps what it was, "Before an agent's
+  edit"); **Reject**, or closing the tab, turns it down. Answering in the terminal instead closes
+  the tab.
 
 Run `claude` in Kuana's terminal and it connects by itself. Started in another terminal, in the
 project's folder, type `/ide` and pick Kuana (or start it with `claude --ide`). While it's
@@ -172,8 +173,8 @@ through its IDE companion protocol, as it does to VS Code:
 - **It knows what you're working on**: the files open in Kuana's tabs, the most recently used
   first (up to ten), and in the current one where the caret is and what's selected.
 - **Its edits come as diffs.** When Gemini asks to change a file, the change opens in a **Proposed
-  by Gemini CLI** tab beside the file, as Claude Code's do. **Accept** applies it as one edit you can
-  undo and saves the file (Local History keeps what it was); **Reject**, or closing the tab, turns it
+  by Gemini CLI** tab beside the file, as Claude Code's do. **Accept** lets Gemini make the change
+  (it writes the file; Local History keeps what it was); **Reject**, or closing the tab, turns it
   down. Answering in the terminal instead closes the tab.
 
 Turn it on once in Gemini CLI with `/ide enable`; from then on `gemini` started in Kuana's terminal,

@@ -766,6 +766,15 @@ pub fn folder_icon(open: bool, size: Pixels, theme: &Theme) -> Img {
     img(file_icons::folder_source(open, theme.appearance)).size(size).flex_shrink_0()
 }
 
+/// One line of text cut with "…" at the width the element ends up with.
+/// GPUI's `truncate` keeps a line that doesn't wrap at its first
+/// measurement, often its full width (taken while a flex row sizes its
+/// items), so it's never cut; a line that may wrap is measured again at its
+/// final width, and here kept to one line.
+pub fn one_line<E: Styled>(el: E) -> E {
+    el.overflow_hidden().line_clamp(1).text_ellipsis()
+}
+
 pub fn icon_el(icon: Icon, size: Pixels, color: Hsla) -> impl IntoElement {
     svg().path(icon.path()).size(size).flex_shrink_0().text_color(color)
 }
@@ -1144,6 +1153,9 @@ fn tooltip_box(theme: &Theme) -> Div {
 }
 
 pub fn tooltip_view(text: impl Into<SharedString>, cx: &mut App) -> AnyView {
+    if crate::context_menu::menu_open(cx) {
+        return cx.new(|_| gpui::EmptyView).into();
+    }
     let text = text.into();
     cx.new(|_| Tooltip(text)).into()
 }
@@ -1166,6 +1178,9 @@ impl Render for LiveTooltip {
 }
 
 pub fn live_tooltip_view(text: fn() -> String, cx: &mut App) -> AnyView {
+    if crate::context_menu::menu_open(cx) {
+        return cx.new(|_| gpui::EmptyView).into();
+    }
     cx.new(|_| LiveTooltip { text, tick: None }).into()
 }
 
@@ -1187,6 +1202,9 @@ impl<T: 'static> Render for EntityTooltip<T> {
 }
 
 pub fn entity_tooltip_view<T: 'static>(entity: &Entity<T>, text: impl Fn(&T, &App) -> String + 'static, cx: &mut App) -> AnyView {
+    if crate::context_menu::menu_open(cx) {
+        return cx.new(|_| gpui::EmptyView).into();
+    }
     cx.new(|cx| EntityTooltip { entity: entity.downgrade(), text: Box::new(text), _observe: cx.observe(entity, |_, _, cx| cx.notify()) })
         .into()
 }

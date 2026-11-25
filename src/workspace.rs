@@ -1486,7 +1486,7 @@ impl Workspace {
             agents_view,
             agent_tabs: HashMap::new(),
             agent_sessions: HashMap::new(),
-            last_agent: crate::agents::store::KUANA_AGENT.to_string(),
+            last_agent: SessionState::load().last_agent.unwrap_or_else(|| crate::agents::store::KUANA_AGENT.to_string()),
             commit_draft: None,
             db_results,
             db_run: None,

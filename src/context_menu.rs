@@ -19,6 +19,8 @@ pub enum MenuEntry {
         icon: Option<Icon>,
         shortcut: Option<SharedString>,
         danger: bool,
+        /// A line under the label, smaller (what a choice means).
+        detail: Option<SharedString>,
     },
     Header(SharedString),
     Separator,
@@ -26,17 +28,24 @@ pub enum MenuEntry {
 
 impl MenuEntry {
     pub fn item(label: impl Into<SharedString>, icon: Icon) -> Self {
-        MenuEntry::Item { label: label.into(), icon: Some(icon), shortcut: None, danger: false }
+        MenuEntry::Item { label: label.into(), icon: Some(icon), shortcut: None, danger: false, detail: None }
     }
 
     /// An item without an icon (its column stays reserved for alignment).
     pub fn text(label: impl Into<SharedString>) -> Self {
-        MenuEntry::Item { label: label.into(), icon: None, shortcut: None, danger: false }
+        MenuEntry::Item { label: label.into(), icon: None, shortcut: None, danger: false, detail: None }
     }
 
     pub fn shortcut(mut self, keys: Option<String>) -> Self {
         if let MenuEntry::Item { shortcut, .. } = &mut self {
             *shortcut = keys.map(Into::into);
+        }
+        self
+    }
+
+    pub fn detail(mut self, text: Option<impl Into<SharedString>>) -> Self {
+        if let MenuEntry::Item { detail, .. } = &mut self {
+            *detail = text.map(Into::into);
         }
         self
     }
@@ -69,10 +78,30 @@ pub struct ContextMenu {
 
 impl EventEmitter<ContextMenuEvent> for ContextMenu {}
 
+/// The menus made, while they're open (`menu_open`).
+#[derive(Default)]
+struct OpenMenus(Vec<gpui::WeakEntity<ContextMenu>>);
+
+impl gpui::Global for OpenMenus {}
+
+/// Whether a context menu is open. Tooltips built meanwhile are empty: GPUI
+/// shows a tooltip by its element's bounds, even through the overlay a menu
+/// lays over the window, so a button's would cover the menu it just opened
+/// under the pointer.
+pub fn menu_open(cx: &App) -> bool {
+    cx.try_global::<OpenMenus>().is_some_and(|menus| menus.0.iter().any(|menu| menu.upgrade().is_some()))
+}
+
 impl ContextMenu {
     pub fn new(entries: Vec<MenuEntry>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle);
+        // Closed, a menu is dropped: `menu_open` needs no word of it.
+        let me = cx.weak_entity();
+        cx.update_default_global::<OpenMenus, _>(|menus, _| {
+            menus.0.retain(|menu| menu.upgrade().is_some());
+            menus.0.push(me);
+        });
         Self { entries, selected: None, focus_handle }
     }
 
@@ -158,7 +187,7 @@ impl Render for ContextMenu {
                     .text_color(theme.text_dim)
                     .child(label.to_uppercase())
                     .into_any_element(),
-                MenuEntry::Item { label, icon, shortcut, danger } => {
+                MenuEntry::Item { label, icon, shortcut, danger, detail } => {
                     let selected = self.selected == Some(ix);
                     let color: Hsla = if *danger { theme.error.into() } else { theme.text.into() };
                     // The whole row (not just its text) is the hover and click target.
@@ -173,9 +202,9 @@ impl Render for ContextMenu {
                                 .id(ix)
                                 .relative()
                                 .flex()
-                                .items_center()
                                 .gap(px(7.))
-                                .h(px(24.))
+                                // With a line under the label, the icon (a check) goes by the label.
+                                .map(|el| if detail.is_some() { el.items_start().min_h(px(24.)).py(px(4.)) } else { el.items_center().h(px(24.)) })
                                 .px(px(7.))
                                 .rounded(px(6.))
                                 .cursor_pointer()
@@ -189,10 +218,12 @@ impl Render for ContextMenu {
                                     }
                                 }))
                                 .on_click(cx.listener(move |_, _, _, cx| cx.emit(ContextMenuEvent::Chose(ix))))
-                                .child(div().w(px(14.)).flex_shrink_0().when_some(*icon, |el, icon| {
+                                .child(div().w(px(14.)).flex_shrink_0().when(detail.is_some(), |el| el.h(px(16.)).flex().items_center()).when_some(*icon, |el, icon| {
                                     el.child(icon_el(icon, px(13.), if *danger { color } else { theme.text_muted.into() }))
                                 }))
-                                .child(div().flex_1().child(label.clone()))
+                                .child(div().flex_1().flex().flex_col().child(label.clone()).when_some(detail.clone(), |el, detail| {
+                                    el.child(div().max_w(px(300.)).text_size(px(11.5)).text_color(theme.text_dim).child(detail))
+                                }))
                                 .when_some(shortcut.clone(), |el, keys| {
                                     el.child(div().pl_4().text_size(px(12.)).text_color(theme.text_dim).child(keys))
                                 }),

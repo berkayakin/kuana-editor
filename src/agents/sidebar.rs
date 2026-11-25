@@ -137,12 +137,12 @@ impl Render for AgentsView {
                 )
             })
             .children(rows.into_iter().map(|row| {
-                let state = row.live.as_ref().map(|s| s.read(cx).state.clone());
+                let state = row.live.as_ref().map(|s| (s.read(cx).state.clone(), s.read(cx).working()));
                 let (light, tip): (Hsla, &str) = match &state {
-                    Some(State::Running) | Some(State::Connecting) => (theme.accent.into(), "Working"),
-                    Some(State::Waiting) | Some(State::NeedsAuth) => (theme.warning.into(), "Waiting for you"),
-                    Some(State::Failed(_)) => (theme.error.into(), "Failed"),
-                    Some(State::Idle) => (theme.success.into(), "Open"),
+                    Some((State::Waiting | State::NeedsAuth, _)) => (theme.warning.into(), "Waiting for you"),
+                    Some((State::Failed(_), _)) => (theme.error.into(), "Failed"),
+                    Some((_, true)) => (theme.accent.into(), "Working"),
+                    Some(_) => (theme.success.into(), "Open"),
                     None => (Hsla::from(theme.text_dim).alpha(0.5), "Saved"),
                 };
                 let id = row.summary.id.clone();
@@ -166,8 +166,8 @@ impl Render for AgentsView {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(div().truncate().text_color(theme.text).child(row.summary.title.clone()))
-                            .child(div().truncate().text_size(px(11.5)).text_color(theme.text_dim).child(format!("{} · {}", row.summary.agent_name, ago(now, row.summary.updated)))),
+                            .child(crate::ui::one_line(div()).text_color(theme.text).child(row.summary.title.clone()))
+                            .child(crate::ui::one_line(div()).text_size(px(11.5)).text_color(theme.text_dim).child(format!("{} · {}", row.summary.agent_name, ago(now, row.summary.updated)))),
                     )
                     .child(
                         div()

@@ -23,7 +23,7 @@ use super::{
     checkpoints::Checkpoints,
     history, kuana_agent,
     terminals::Terminals,
-    transcript::{Entry, Level, Permission, PermissionOption, Tool, Transcript},
+    transcript::{Entry, Kind, Level, Permission, PermissionOption, Tool, ToolContent, Transcript},
 };
 use crate::acp::{self, Agent, FromAgent, Responder, RpcError, schema};
 
@@ -66,10 +66,43 @@ pub struct Mode {
 pub struct ConfigOption {
     pub id: String,
     pub name: String,
+    pub description: Option<String>,
+    /// ACP's: `mode`, `model`, `thought_level`, or the agent's own.
     pub category: Option<String>,
     pub current: Value,
-    /// `(value, name)`; empty for a yes/no option.
-    pub choices: Vec<(String, String)>,
+    /// Empty for a yes/no option.
+    pub choices: Vec<Choice>,
+}
+
+/// One value a session option can take.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Choice {
+    pub value: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+impl ConfigOption {
+    /// The current value's name (its value when it isn't listed).
+    pub fn current_name(&self) -> String {
+        let current = self.current.as_str().unwrap_or_default();
+        self.choices.iter().find(|c| c.value == current).map_or_else(|| current.to_string(), |c| c.name.clone())
+    }
+
+    /// For an option that's on or off (its choices are those two), whether
+    /// it's on.
+    pub fn switch(&self) -> Option<bool> {
+        let is = |c: &Choice, word: &str| c.value.eq_ignore_ascii_case(word) || c.name.eq_ignore_ascii_case(word);
+        let on = self.choices.iter().find(|c| is(c, "on"))?;
+        self.choices.iter().find(|c| is(c, "off"))?;
+        (self.choices.len() == 2).then(|| self.current.as_str() == Some(on.value.as_str()))
+    }
+
+    /// The value that turns a `switch` on or off.
+    pub fn switch_value(&self, on: bool) -> Option<String> {
+        let word = if on { "on" } else { "off" };
+        self.choices.iter().find(|c| c.value.eq_ignore_ascii_case(word) || c.name.eq_ignore_ascii_case(word)).map(|c| c.value.clone())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -93,6 +126,9 @@ pub enum ContextItem {
     /// A picture (pasted, or a file): its name, MIME type and bytes.
     Image { name: String, mime: String, data: Arc<[u8]> },
 }
+
+/// How long after a transcript change it's saved (`save_soon`).
+const SAVE_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The largest picture sent (providers refuse bigger ones).
 pub const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
@@ -154,6 +190,12 @@ pub enum SessionEvent {
     ReadFile { id: u64, path: PathBuf, line: Option<u32>, limit: Option<u32> },
     /// Answer with `{}` once written.
     WriteFile { id: u64, path: PathBuf, content: String },
+    /// A tool call is about to change `path` (its first in this turn): what
+    /// the file is now goes to `note_change`. Agents that write the disk
+    /// themselves (Claude's) never send `WriteFile`. `old`/`new`: the
+    /// call's diff, when it has one (`old` None: a new file), to tell a
+    /// change that already landed.
+    WillEdit { path: PathBuf, old: Option<String>, new: Option<String> },
     /// A `_kuana/…` request.
     Ext { id: u64, method: String, params: Value },
     /// A terminal sign-in to run for the user.
@@ -207,6 +249,8 @@ pub struct Session {
     turn_task: Option<Task<()>>,
     connecting: Option<Task<()>>,
     ticker: Option<Task<()>>,
+    /// A save on its way (`save_soon`).
+    saving: Option<Task<()>>,
 }
 
 impl EventEmitter<SessionEvent> for Session {}
@@ -221,7 +265,9 @@ impl Session {
     /// A saved session, connected again on its next prompt.
     pub fn restored(saved: history::Saved, launcher: Launcher) -> Session {
         let s = saved.summary;
-        Session::with(s.id, s.agent, s.agent_name, s.cwd, launcher, saved.transcript, saved.acp_session, s.title, s.created, s.updated)
+        let mut session = Session::with(s.id, s.agent, s.agent_name, s.cwd, launcher, saved.transcript, saved.acp_session, s.title, s.created, s.updated);
+        session.checkpoints = saved.checkpoints;
+        session
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -275,6 +321,7 @@ impl Session {
             turn_task: None,
             connecting: None,
             ticker: None,
+            saving: None,
         }
     }
 
@@ -294,7 +341,7 @@ impl Session {
         if self.transcript.entries.is_empty() {
             return None;
         }
-        Some(history::Saved { summary: self.summary(), acp_session: self.acp_session.clone(), transcript: self.transcript.clone() })
+        Some(history::Saved { summary: self.summary(), acp_session: self.acp_session.clone(), transcript: self.transcript.clone(), checkpoints: self.checkpoints.clone() })
     }
 
     /// Saves the transcript right away (Kuana is quitting), its unfinished
@@ -311,6 +358,8 @@ impl Session {
     /// Saves the session and stops its agent and terminals (Kuana quits).
     /// (`save`: saved first; a deleted session isn't.)
     pub fn shut_down(&mut self, save: bool) {
+        // A save on its way would write a deleted session back.
+        self.saving = None;
         if save {
             self.save_now();
         }
@@ -336,6 +385,23 @@ impl Session {
         }
     }
 
+    /// Saves `SAVE_DELAY` after the transcript changes, one save for the
+    /// changes meanwhile: a turn's progress isn't lost if Kuana is killed
+    /// before the turn ends (the end saves too).
+    fn save_soon(&mut self, cx: &mut Context<Self>) {
+        if self.saving.is_some() {
+            return;
+        }
+        self.saving = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SAVE_DELAY).await;
+            this.update(cx, |s, cx| {
+                s.saving = None;
+                s.save(cx);
+            })
+            .ok();
+        }));
+    }
+
     /// Saves the transcript (in the background).
     pub fn save(&self, cx: &mut Context<Self>) {
         let Some(saved) = self.saved() else { return };
@@ -357,7 +423,40 @@ impl Session {
         self.agent.as_ref().is_some_and(|a| !a.is_closed())
     }
 
+    /// Whether a turn runs, or a prompt waits for the agent to start: what
+    /// Stop stops. The agent starting with nothing to send (`start`) isn't.
+    pub fn working(&self) -> bool {
+        match self.state {
+            State::Running | State::Waiting => true,
+            State::Connecting => self.pending_prompt.is_some(),
+            _ => false,
+        }
+    }
+
+    /// The option that picks the permission mode: one of category `mode`
+    /// (ACP's successor to modes, which agents send both of for a while).
+    pub fn mode_option(&self) -> Option<&ConfigOption> {
+        self.options.iter().find(|o| o.category.as_deref() == Some("mode") && !o.choices.is_empty())
+    }
+
+    /// The current permission mode's name, from the mode option or the modes.
+    pub fn mode_name(&self) -> Option<String> {
+        match self.mode_option() {
+            Some(option) => Some(option.current_name()),
+            None => self.mode.as_ref().and_then(|m| self.modes.iter().find(|x| &x.id == m)).map(|m| m.name.clone()),
+        }
+    }
+
     // ---- Connecting -------------------------------------------------------------
+
+    /// Starts the agent before the first prompt (a new session; a restored
+    /// one once something's typed), so what it offers shows while the prompt
+    /// is written: its modes and models, its `/` commands, a sign-in.
+    pub fn start(&mut self, cx: &mut Context<Self>) {
+        if self.agent.is_none() && self.state == State::Idle {
+            self.connect(cx);
+        }
+    }
 
     fn connect(&mut self, cx: &mut Context<Self>) {
         if matches!(self.state, State::Connecting) {
@@ -579,7 +678,10 @@ impl Session {
         if text.trim().is_empty() && context.is_empty() {
             return;
         }
-        if self.state.busy() {
+        // While the agent starts with no prompt waiting (`start`), this one
+        // waits for it; otherwise it waits for the turn to end.
+        let starting = self.state == State::Connecting && self.pending_prompt.is_none();
+        if self.state.busy() && !starting {
             self.queued.push((text, context));
             cx.notify();
             return;
@@ -593,7 +695,7 @@ impl Session {
         self.updated = history::now();
         // Saved now too, so a turn cut short (a quit, a crash) keeps the prompt.
         self.save(cx);
-        if self.is_connected() && self.acp_session.is_some() {
+        if !starting && self.is_connected() && self.acp_session.is_some() {
             let blocks = self.blocks(&text, &context);
             let rewind = self.pending_rewind.take();
             self.run_prompt(rewind, blocks, cx);
@@ -653,7 +755,7 @@ impl Session {
     /// since were put back (else they stay as they are, and count as the
     /// turn before's).
     pub fn edit_and_send(&mut self, turn: usize, text: String, context: Vec<ContextItem>, files_put_back: bool, cx: &mut Context<Self>) {
-        if self.state.busy() || !self.can_rewind() {
+        if self.working() || !self.can_rewind() {
             return;
         }
         let Some(at) = self.user_entry(turn) else { return };
@@ -736,6 +838,10 @@ impl Session {
 
     /// Stops the turn: the agent is told, open questions are answered "cancelled".
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
+        // Starting with nothing to send: nothing to stop.
+        if self.state == State::Connecting && self.pending_prompt.is_none() {
+            return;
+        }
         if let (Some(agent), Some(id)) = (&self.agent, &self.acp_session) {
             agent.cancel(id);
         }
@@ -830,6 +936,47 @@ impl Session {
         self.checkpoints.note(self.turn, path, before);
     }
 
+    /// Whether what `path` was before this turn is kept already.
+    pub fn noted(&self, path: &std::path::Path) -> bool {
+        self.checkpoints.has(self.turn, path)
+    }
+
+    /// The files noted in the current turn, with what they were before it.
+    pub fn noted_this_turn(&self) -> Vec<(PathBuf, Before)> {
+        self.checkpoints.of_turn(self.turn)
+    }
+
+    /// `path` ended the turn as it began it (an edit refused): it didn't change.
+    pub fn unchanged(&mut self, path: &std::path::Path) {
+        self.checkpoints.forget(self.turn, path);
+    }
+
+    /// The files a tool call is about to change (its diffs, and an edit's
+    /// places), each told once a turn: `SessionEvent::WillEdit`.
+    fn announce_edits(&mut self, tool_id: &str, cx: &mut Context<Self>) {
+        let Some(tool) = self.transcript.tool(tool_id) else { return };
+        let mut edits: Vec<(PathBuf, Option<String>, Option<String>)> = Vec::new();
+        for content in &tool.content {
+            if let ToolContent::Diff { path, old, new } = content
+                && !edits.iter().any(|(p, ..)| p == path)
+            {
+                edits.push((path.clone(), old.clone(), Some(new.clone())));
+            }
+        }
+        if matches!(tool.kind, Kind::Edit | Kind::Delete | Kind::Move) {
+            for location in &tool.locations {
+                if !edits.iter().any(|(p, ..)| *p == location.path) {
+                    edits.push((location.path.clone(), None, None));
+                }
+            }
+        }
+        for (path, old, new) in edits {
+            if path.is_absolute() && !self.noted(&path) {
+                cx.emit(SessionEvent::WillEdit { path, old, new });
+            }
+        }
+    }
+
     /// Every file the agent changed, with what it was before the session.
     pub fn changes(&self) -> Vec<(PathBuf, Before)> {
         self.checkpoints.files()
@@ -865,7 +1012,17 @@ impl Session {
                 if conversation && self.replaying {
                     return;
                 }
-                if !self.transcript.apply(update) {
+                let tool_id = match update {
+                    schema::SessionUpdate::ToolCall(call) => Some(call.tool_call_id.to_string()),
+                    schema::SessionUpdate::ToolCallUpdate(call) => Some(call.tool_call_id.to_string()),
+                    _ => None,
+                };
+                if self.transcript.apply(update) {
+                    if let Some(id) = tool_id {
+                        self.announce_edits(&id, cx);
+                    }
+                    self.save_soon(cx);
+                } else {
                     match update {
                         schema::SessionUpdate::AvailableCommandsUpdate(u) => {
                             self.commands = u.available_commands.iter().map(|c| (c.name.clone(), c.description.clone())).collect();
@@ -878,6 +1035,7 @@ impl Session {
                             {
                                 self.title = title.clone();
                                 cx.emit(SessionEvent::TitleChanged);
+                                self.save_soon(cx);
                             }
                         }
                         schema::SessionUpdate::UsageUpdate(u) => self.usage = Some((u.used, u.size)),
@@ -903,6 +1061,7 @@ impl Session {
                 }
                 let update = schema::SessionUpdate::ToolCallUpdate(request.tool_call.clone());
                 self.transcript.apply(&update);
+                self.announce_edits(&id, cx);
                 if let Some(tool) = self.transcript.tool_mut(&id) {
                     tool.permission = Some(Permission {
                         options: request
@@ -924,6 +1083,7 @@ impl Session {
                     old.ok(json!({ "outcome": { "outcome": "cancelled" } }));
                 }
                 self.state = State::Waiting;
+                self.save(cx);
                 cx.emit(SessionEvent::NeedsYou);
                 cx.notify();
             }
@@ -1051,18 +1211,19 @@ fn auth_method(value: Value) -> Option<AuthMethod> {
 
 fn config_option(value: Value) -> Option<ConfigOption> {
     let id = value.get("id")?.as_str()?.to_string();
+    let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).filter(|t| !t.trim().is_empty()).map(str::to_string);
     let mut choices = Vec::new();
     let mut add = |options: &Value| {
+        let mut push = |o: &Value| {
+            if let Some(v) = o.get("value").and_then(Value::as_str) {
+                choices.push(Choice { value: v.to_string(), name: text(o, "name").unwrap_or_else(|| v.to_string()), description: text(o, "description") });
+            }
+        };
         for o in options.as_array().into_iter().flatten() {
-            if let Some(inner) = o.get("options") {
+            match o.get("options") {
                 // A group of options.
-                for g in inner.as_array().into_iter().flatten() {
-                    if let Some(v) = g.get("value").and_then(Value::as_str) {
-                        choices.push((v.to_string(), g.get("name").and_then(Value::as_str).unwrap_or(v).to_string()));
-                    }
-                }
-            } else if let Some(v) = o.get("value").and_then(Value::as_str) {
-                choices.push((v.to_string(), o.get("name").and_then(Value::as_str).unwrap_or(v).to_string()));
+                Some(inner) => inner.as_array().into_iter().flatten().for_each(&mut push),
+                None => push(o),
             }
         }
     };
@@ -1071,6 +1232,7 @@ fn config_option(value: Value) -> Option<ConfigOption> {
     }
     Some(ConfigOption {
         name: value.get("name").and_then(Value::as_str).unwrap_or(&id).to_string(),
+        description: text(&value, "description"),
         category: value.get("category").and_then(Value::as_str).map(str::to_string),
         current: value.get("currentValue").cloned().unwrap_or(Value::Null),
         id,
@@ -1087,7 +1249,8 @@ mod tests {
         let option = config_option(json!({ "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "a",
             "options": [{ "value": "a", "name": "A" }, { "group": "g", "name": "More", "options": [{ "value": "b" }] }] }))
         .unwrap();
-        assert_eq!(option.choices, vec![("a".into(), "A".into()), ("b".into(), "b".into())]);
+        let choices: Vec<(&str, &str)> = option.choices.iter().map(|c| (c.value.as_str(), c.name.as_str())).collect();
+        assert_eq!(choices, vec![("a", "A"), ("b", "b")]);
         assert_eq!(option.current, json!("a"));
         let method = auth_method(json!({ "id": "login", "name": "Log in", "type": "terminal", "args": ["login"], "env": { "X": "1" } })).unwrap();
         assert_eq!(method.terminal, Some((vec!["login".to_string()], vec![("X".to_string(), "1".to_string())])));
