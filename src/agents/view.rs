@@ -6,7 +6,7 @@
 //! (opening files and diffs, attaching context, reviewing changes) go out
 //! as [`SessionViewEvent`]s.
 
-use std::{collections::HashMap, collections::HashSet, path::PathBuf, rc::Rc};
+use std::{collections::HashMap, collections::HashSet, ops::Range, path::PathBuf, rc::Rc, sync::Arc};
 
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, InteractiveElement as _,
@@ -24,7 +24,10 @@ use crate::{
     ui::{HoverFill as _, icon_button, icon_el, tooltip_view},
 };
 
-actions!(agents, [SendMessage, StopAgent]);
+actions!(agents, [SendMessage, StopAgent, AcceptSuggestion]);
+
+/// The most of a mentioned file attached.
+const MENTION_BYTES: usize = 256 * 1024;
 
 /// The transcript's column, for reading comfort in a wide pane.
 const COLUMN: f32 = 780.;
@@ -63,6 +66,9 @@ pub struct SessionView {
     /// Context to send with the next prompt.
     pub context: Vec<ContextItem>,
     copied: Option<usize>,
+    /// The project's files, for `@` mentions, and the last query's matches.
+    files: Arc<Vec<PathBuf>>,
+    mentions: Option<(String, Vec<PathBuf>)>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -91,6 +97,8 @@ impl SessionView {
             markdown: HashMap::new(),
             context: Vec::new(),
             copied: None,
+            files: Arc::default(),
+            mentions: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
@@ -100,7 +108,72 @@ impl SessionView {
 
     /// Another view of the same session (a split).
     pub fn split_of(other: &Entity<SessionView>, cx: &mut Context<Self>) -> SessionView {
-        SessionView::new(other.read(cx).session.clone(), cx)
+        let mut view = SessionView::new(other.read(cx).session.clone(), cx);
+        view.files = other.read(cx).files.clone();
+        view
+    }
+
+    /// The project's files, which `@` suggests.
+    pub fn set_files(&mut self, files: Arc<Vec<PathBuf>>, cx: &mut Context<Self>) {
+        if !Arc::ptr_eq(&self.files, &files) {
+            // A big project's list may be freed here: not on the UI thread.
+            let old = std::mem::replace(&mut self.files, files);
+            cx.background_executor().spawn(async move { drop(old) }).detach();
+            self.mentions = None;
+        }
+    }
+
+    /// The `@…` being typed at the caret and the files it matches.
+    fn mention(&mut self, cx: &App) -> Option<(Range<usize>, Vec<PathBuf>)> {
+        let composer = self.composer.read(cx);
+        let selection = composer.primary_selection();
+        if !selection.range().is_empty() {
+            return None;
+        }
+        let text = composer.text(cx);
+        let range = super::mentions::mention_at(&text, selection.head)?;
+        let query = text[range.start + 1..range.end].to_string();
+        if self.mentions.as_ref().is_none_or(|(q, _)| *q != query) {
+            let cwd = self.session.read(cx).cwd.clone();
+            self.mentions = Some((query.clone(), super::mentions::matching(&self.files, &cwd, &query)));
+        }
+        let found = self.mentions.as_ref().map(|(_, f)| f.clone()).unwrap_or_default();
+        (!found.is_empty()).then_some((range, found))
+    }
+
+    /// A suggestion taken: `@path` in the text, the file in the context.
+    fn accept_mention(&mut self, range: Range<usize>, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = self.session.read(cx).cwd.clone();
+        let rel = path.strip_prefix(&cwd).unwrap_or(&path).to_string_lossy().into_owned();
+        let text = self.composer.read(cx).text(cx);
+        let (start, end) = (range.start.min(text.len()), range.end.min(text.len()));
+        let inserted = format!("@{rel} ");
+        let caret = start + inserted.len();
+        let new_text = format!("{}{inserted}{}", &text[..start], text[end..].trim_start_matches(' '));
+        self.composer.update(cx, |e, cx| {
+            e.set_text(&new_text, cx);
+            e.select_range(caret..caret, cx);
+        });
+        match crate::fs::read(&path) {
+            Ok(bytes) => {
+                let mut text = String::from_utf8_lossy(&bytes[..bytes.len().min(MENTION_BYTES)]).into_owned();
+                if bytes.len() > MENTION_BYTES {
+                    text.push_str(&format!("\n[… {} more bytes left out]", bytes.len() - MENTION_BYTES));
+                }
+                self.add_context(ContextItem::File { path, text }, cx);
+            }
+            Err(_) => cx.notify(),
+        }
+        window.focus(&self.composer.focus_handle(cx));
+    }
+
+    /// Tab (and Enter, while suggestions show): the first `@` suggestion.
+    fn accept_suggestion(&mut self, _: &AcceptSuggestion, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((range, found)) = self.mention(cx)
+            && let Some(first) = found.into_iter().next()
+        {
+            self.accept_mention(range, first, window, cx);
+        }
     }
 
     /// Re-groups the transcript when it changed and has the list measure again.
@@ -128,7 +201,11 @@ impl SessionView {
         cx.notify();
     }
 
-    fn send(&mut self, _: &SendMessage, _: &mut Window, cx: &mut Context<Self>) {
+    fn send(&mut self, _: &SendMessage, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mention(cx).is_some() {
+            self.accept_suggestion(&AcceptSuggestion, window, cx);
+            return;
+        }
         let text = self.composer.read(cx).text(cx);
         if text.trim().is_empty() && self.context.is_empty() {
             return;
@@ -639,7 +716,9 @@ impl SessionView {
         )
     }
 
-    fn render_composer(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mention = self.mention(cx);
+        let cwd = self.session.read(cx).cwd.clone();
         let theme = Theme::get(cx).clone();
         let session = self.session.read(cx);
         let busy = session.state.busy();
@@ -658,6 +737,37 @@ impl SessionView {
             .mb_3()
             .flex()
             .flex_col()
+            .when_some(mention, |el, (range, found)| {
+                el.child(
+                    div()
+                        .mb_1()
+                        .rounded(px(10.))
+                        .border_1()
+                        .border_color(theme.border_subtle)
+                        .bg(theme.elevated)
+                        .py_1()
+                        .children(found.into_iter().enumerate().map(|(i, path)| {
+                            let rel = path.strip_prefix(&cwd).unwrap_or(&path).to_string_lossy().into_owned();
+                            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                            let range = range.clone();
+                            div()
+                                .id(SharedString::from(format!("mention-{i}")))
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .px_2()
+                                .py(px(3.))
+                                .cursor_pointer()
+                                .when(i == 0, |el| el.bg(theme.hover))
+                                .row_hover(theme.hover)
+                                .child(crate::ui::file_icon(&path, px(14.), &theme))
+                                .child(div().text_color(theme.text).child(name))
+                                .child(div().min_w_0().truncate().text_color(theme.text_dim).child(rel))
+                                .when(i == 0, |el| el.child(div().flex_1()).child(div().text_size(px(11.)).text_color(theme.text_dim).child("Tab")))
+                                .on_click(cx.listener(move |v, _, window, cx| v.accept_mention(range.clone(), path.clone(), window, cx)))
+                        })),
+                )
+            })
             .when(!commands.is_empty(), |el| {
                 el.child(
                     div()
@@ -693,6 +803,7 @@ impl SessionView {
                         .id("agent-composer")
                         .key_context("AgentComposer")
                         .on_action(cx.listener(Self::send))
+                        .on_action(cx.listener(Self::accept_suggestion))
                         .on_action(cx.listener(Self::stop))
                         .rounded(px(12.))
                         .border_1()

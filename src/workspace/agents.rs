@@ -134,6 +134,8 @@ impl Workspace {
 
     /// A session tab: the workspace hears it, and its session once.
     pub(super) fn add_agent_tab(&mut self, view: &Entity<SessionView>, window: &mut Window, cx: &mut Context<Self>) {
+        let files = self.files.openable();
+        view.update(cx, |v, cx| v.set_files(files, cx));
         let sub = cx.subscribe_in(view, window, |ws, view, event: &SessionViewEvent, window, cx| ws.on_session_view(view, event, window, cx));
         self.agent_tabs.insert(view.entity_id(), vec![sub]);
         let session = view.read(cx).session.clone();

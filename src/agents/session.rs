@@ -171,7 +171,9 @@ pub struct Session {
     /// transcript already holds.
     replaying: bool,
     turn: usize,
-    pending_prompt: Option<Vec<Value>>,
+    /// A prompt sent before the agent was ready: made into content blocks
+    /// once it's connected, when it's known whether it takes embedded files.
+    pending_prompt: Option<(String, Vec<ContextItem>)>,
     permissions: HashMap<String, Responder>,
     requests: HashMap<u64, Responder>,
     next_request: u64,
@@ -378,7 +380,8 @@ impl Session {
                             s.set_options(&options);
                         }
                         s.state = State::Idle;
-                        if let Some(blocks) = s.pending_prompt.take() {
+                        if let Some((text, context)) = s.pending_prompt.take() {
+                            let blocks = s.blocks(&text, &context);
                             s.run_prompt(blocks, cx);
                         }
                     }
@@ -505,17 +508,24 @@ impl Session {
         self.updated = history::now();
         // Saved now too, so a turn cut short (a quit, a crash) keeps the prompt.
         self.save(cx);
-        let mut blocks = vec![json!({ "type": "text", "text": text })];
-        blocks.extend(context.iter().map(|c| c.block(self.embedded_context)));
         if self.is_connected() && self.acp_session.is_some() {
+            let blocks = self.blocks(&text, &context);
             self.run_prompt(blocks, cx);
         } else {
-            self.pending_prompt = Some(blocks);
+            self.pending_prompt = Some((text, context));
             if !matches!(self.state, State::NeedsAuth) {
                 self.connect(cx);
             }
         }
         cx.notify();
+    }
+
+    /// A prompt's content blocks: its text, then its context (embedded files
+    /// where the agent takes them, else text).
+    fn blocks(&self, text: &str, context: &[ContextItem]) -> Vec<Value> {
+        let mut blocks = vec![json!({ "type": "text", "text": text })];
+        blocks.extend(context.iter().map(|c| c.block(self.embedded_context)));
+        blocks
     }
 
     fn run_prompt(&mut self, blocks: Vec<Value>, cx: &mut Context<Self>) {
@@ -979,7 +989,9 @@ mod tests {
             .detach();
         });
 
-        session.update(cx, |s, cx| s.send("Say goodbye and check it".into(), Vec::new(), cx));
+        // Sent before the agent is connected: its context still goes embedded.
+        let notes = ContextItem::File { path: dir.join("notes.md"), text: "be brief".into() };
+        session.update(cx, |s, cx| s.send("Say goodbye and check it".into(), vec![notes], cx));
         assert_eq!(session.read_with(cx, |s, _| s.title.clone()), "Say goodbye and check it");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
@@ -1004,6 +1016,10 @@ mod tests {
         }
 
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "goodbye world\n");
+        let first: Value = serde_json::from_str(&server.requests.lock().unwrap()[1].1).unwrap();
+        let embedded = format!("<context source=\"{}\">\nbe brief\n</context>", dir.join("notes.md").display());
+        let parts = first["messages"][0]["content"].as_array().unwrap();
+        assert!(parts.iter().any(|p| p["text"] == embedded.as_str()), "{first}");
         assert_eq!(needs_you.get(), 2, "the edit and the command asked");
         session.read_with(cx, |s, _| {
             let tools: Vec<(&str, Status)> = s.transcript.entries.iter().filter_map(|e| match e {

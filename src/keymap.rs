@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    agents::view::{SendMessage, StopAgent},
+    agents::view::{AcceptSuggestion, SendMessage, StopAgent},
     diff_view::{AcceptProposal, RejectProposal},
     about::About,
     editor::*,
@@ -72,6 +72,7 @@ fn composer() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-enter", SendMessage, composer),
         KeyBinding::new("shift-enter", Newline, composer),
         KeyBinding::new("escape", StopAgent, composer),
+        KeyBinding::new("tab", AcceptSuggestion, composer),
     ]
 }
 

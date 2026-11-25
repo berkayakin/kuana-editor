@@ -263,6 +263,10 @@ impl Workspace {
             let files = self.files.openable();
             picker.update(cx, |p, cx| p.set_files(files, cx));
         }
+        let openable = self.files.openable();
+        for view in self.items(cx).into_iter().filter_map(|i| i.agent().cloned()) {
+            view.update(cx, |v, cx| v.set_files(openable.clone(), cx));
+        }
         self.todo_project_listed(cx);
         self.tests_project_listed(cx);
         self.project_updated_unchanged(cx);
