@@ -641,6 +641,23 @@ pub struct Draw {
     pub on_code: Option<Rc<dyn Fn(CodeAction, &mut Window, &mut App)>>,
     /// The code block whose Copy button shows a check (by its `ix`).
     pub copied: Option<usize>,
+    /// Selectable text: the selection the pieces share, and the first part
+    /// of their keys (a message's index); None draws plain text.
+    pub selection: Option<(Rc<crate::selectable_text::TextSelection>, usize)>,
+    /// The next piece's number (pieces are numbered in drawing order).
+    pub pieces: std::cell::Cell<usize>,
+}
+
+impl Draw {
+    /// `text` as the next piece, selectable, when the drawing has a
+    /// selection; else `text` back.
+    fn piece(&self, content: SharedString, text: StyledText, links: Vec<(Range<usize>, String)>, cx: &App) -> Result<AnyElement, StyledText> {
+        let Some((selection, base)) = self.selection.as_ref() else { return Err(text) };
+        let n = self.pieces.get();
+        self.pieces.set(n + 1);
+        let color = Theme::get(cx).selection.into();
+        Ok(crate::selectable_text::SelectableText::new((*base, n), content, text, selection.clone(), links, color).into_any_element())
+    }
 }
 
 /// A code block's button was clicked.
@@ -682,10 +699,10 @@ fn render_block(block: &Block, ix: usize, d: &Draw, cx: &App) -> AnyElement {
                 .line_height(px(size * 1.3))
                 .font_weight(FontWeight::SEMIBOLD)
                 .when(*level <= 2, |el| el.pb_1p5().border_b_1().border_color(theme.border_subtle))
-                .child(render_inline(inline, ("md-heading", ix), cx))
+                .child(render_inline(inline, ("md-heading", ix), d, cx))
                 .into_any_element()
         }
-        Block::Paragraph(inline) => render_inline(inline, ("md-p", ix), cx),
+        Block::Paragraph(inline) => render_inline(inline, ("md-p", ix), d, cx),
         Block::Image { src, alt, path, width } => {
             match path {
                 Some(path) => img(path.clone())
@@ -716,7 +733,7 @@ fn render_block(block: &Block, ix: usize, d: &Draw, cx: &App) -> AnyElement {
                 .font(font(theme.mono_font.clone()))
                 .text_size(px((theme.editor_font_size - 1.) * d.zoom))
                 .line_height(px(line))
-                .child(highlighted_code(text, highlights, cx))
+                .child(highlighted_code(text, highlights, d, cx))
                 .when_some(d.on_code.clone(), |el, on_code| {
                     el.child(code_buttons(ix, text, command.as_deref(), group, on_code, d.copied == Some(ix), cx).top(px(bar_top)).right(px(bar_top)))
                 })
@@ -781,7 +798,7 @@ fn render_block(block: &Block, ix: usize, d: &Draw, cx: &App) -> AnyElement {
                     .when(r > 0, |el| el.border_t_1().border_color(theme.border_subtle))
                     .when(r == 0, |el| el.bg(theme.panel).font_weight(FontWeight::SEMIBOLD))
                     .children(row.iter().enumerate().map(|(c, cell)| {
-                        let cell_el = div().flex_1().min_w_0().px_2().py_1().child(render_inline(cell, ("md-cell", (ix * 100 + r) * 100 + c), cx));
+                        let cell_el = div().flex_1().min_w_0().px_2().py_1().child(render_inline(cell, ("md-cell", (ix * 100 + r) * 100 + c), d, cx));
                         match aligns.get(c) {
                             Some(Alignment::Center) => cell_el.flex().justify_center(),
                             Some(Alignment::Right) => cell_el.flex().justify_end(),
@@ -896,7 +913,7 @@ fn shell_command(lang: &str, text: &str) -> Option<String> {
 }
 
 /// Styled text; links open in the browser when clicked.
-fn render_inline(inline: &Inline, id: (&'static str, usize), cx: &App) -> AnyElement {
+fn render_inline(inline: &Inline, id: (&'static str, usize), d: &Draw, cx: &App) -> AnyElement {
     let theme = Theme::get(cx);
     let highlights: Vec<(Range<usize>, HighlightStyle)> = inline
         .styles
@@ -920,7 +937,11 @@ fn render_inline(inline: &Inline, id: (&'static str, usize), cx: &App) -> AnyEle
             (range.clone(), h)
         })
         .collect();
-    let text = StyledText::new(SharedString::from(inline.text.clone())).with_highlights(highlights);
+    let content = SharedString::from(inline.text.clone());
+    let text = match d.piece(content.clone(), StyledText::new(content).with_highlights(highlights), inline.links.clone(), cx) {
+        Ok(piece) => return div().child(piece).into_any_element(),
+        Err(text) => text,
+    };
     if inline.links.is_empty() {
         return div().child(text).into_any_element();
     }
@@ -957,7 +978,7 @@ fn code_highlights(lang: &str, text: &str) -> Vec<(Range<usize>, Highlight)> {
     Syntax::new(language, &rope).highlights(&rope, 0..text.len())
 }
 
-fn highlighted_code(text: &str, highlights: &[(Range<usize>, Highlight)], cx: &App) -> AnyElement {
+fn highlighted_code(text: &str, highlights: &[(Range<usize>, Highlight)], d: &Draw, cx: &App) -> AnyElement {
     let theme = Theme::get(cx);
     let highlights = highlights
         .iter()
@@ -965,7 +986,14 @@ fn highlighted_code(text: &str, highlights: &[(Range<usize>, Highlight)], cx: &A
     div()
         .whitespace_nowrap()
         .overflow_hidden()
-        .child(StyledText::new(SharedString::from(text.to_string())).with_highlights(highlights))
+        .map(|el| {
+            let content = SharedString::from(text.to_string());
+            // Code is selectable too, where the drawing's text is.
+            match d.piece(content.clone(), StyledText::new(content).with_highlights(highlights), Vec::new(), cx) {
+                Ok(piece) => el.child(piece),
+                Err(styled) => el.child(styled),
+            }
+        })
         .into_any_element()
 }
 

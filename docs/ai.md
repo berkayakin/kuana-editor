@@ -50,7 +50,15 @@ title or agent. **New Session** (+, **⌥⌘N** / **Alt+Shift+N**) picks an agen
   time you start a session with it. Agents that need you to sign in offer it in the session: a
   terminal method runs in a Kuana terminal tab.
 
-A session opens in a tab beside your code, which you can split, move and keep open like any tab:
+A session opens in a tab beside your code, which you can split, move and keep open like any tab.
+Your messages sit on the right, the agent's answers across the column, as in Claude's apps:
+
+- **Reading and copying**: select any text in the transcript with the mouse (across messages too;
+  a double click takes a word, a triple click a paragraph) and copy it with **⌘C** / **Ctrl+C**.
+  Hovering a message shows **Copy**; yours also has **Edit** (back into the composer to change
+  and send again) and, once the agent changed files, **Restore Files to Here**. A code block shows
+  **Copy**, and **Run** for a shell command, which runs it in a Kuana terminal. When you've
+  scrolled up, ↓ takes you back to the newest.
 
 - **The transcript**: your messages, the agent's answers in Markdown, its thinking (folded), and
   each step it takes as a card: files read, searches, edits with their diff (**Open Diff** shows

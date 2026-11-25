@@ -88,6 +88,7 @@ mod project_search;
 mod push_dialog;
 mod remotes_dialog;
 mod results_panel;
+mod selectable_text;
 mod settings;
 mod snippets;
 mod state;

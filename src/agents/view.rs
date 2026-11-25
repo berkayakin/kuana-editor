@@ -11,7 +11,7 @@ use std::{collections::HashMap, collections::HashSet, ops::Range, path::PathBuf,
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, InteractiveElement as _,
     IntoElement, ListAlignment, ListState, ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions,
-    div, list, prelude::FluentBuilder as _, px,
+    Animation, AnimationExt as _, div, list, prelude::FluentBuilder as _, pulsating_between, px, relative,
 };
 
 use super::session::{ContextItem, Session, SessionEvent, State};
@@ -68,6 +68,12 @@ pub struct SessionView {
     /// Context to send with the next prompt.
     pub context: Vec<ContextItem>,
     copied: Option<usize>,
+    /// What's selected in the transcript (its text is selectable, across
+    /// messages).
+    selection: Rc<crate::selectable_text::TextSelection>,
+    /// The message whose Copy was just clicked (a check shows a moment).
+    copied_entry: Option<usize>,
+    copied_reset: Option<gpui::Task<()>>,
     /// Diff previews by tool call and file, with the sizes they were made
     /// for: drawing a card mustn't diff whole files every frame.
     diff_previews: std::cell::RefCell<HashMap<(String, PathBuf), (usize, usize, Rc<Preview>)>>,
@@ -86,7 +92,8 @@ impl EventEmitter<SessionViewEvent> for SessionView {}
 
 impl SessionView {
     pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> SessionView {
-        let composer = cx.new(|cx| Editor::multi_line("Ask the agent… (@ adds a file, / its commands)", cx));
+        let placeholder = format!("Ask {} anything · @ for a file, / for commands", session.read(cx).agent_name);
+        let composer = cx.new(|cx| Editor::multi_line(placeholder, cx));
         let subscriptions = vec![
             cx.observe(&session, |view, _, cx| {
                 view.sync(cx);
@@ -106,6 +113,14 @@ impl SessionView {
             markdown: HashMap::new(),
             context: Vec::new(),
             copied: None,
+            selection: {
+                let view = cx.entity().downgrade();
+                crate::selectable_text::TextSelection::new(move |cx| {
+                    view.update(cx, |_, cx| cx.notify()).ok();
+                })
+            },
+            copied_entry: None,
+            copied_reset: None,
             diff_previews: Default::default(),
             files: Arc::default(),
             mentions: None,
@@ -115,6 +130,11 @@ impl SessionView {
             _subscriptions: subscriptions,
         };
         view.sync(cx);
+        // Scrolling redraws the view: the ↓ button shows while it's scrolled up.
+        let this = cx.entity().downgrade();
+        view.list.set_scroll_handler(move |_, _, cx| {
+            this.update(cx, |_, cx| cx.notify()).ok();
+        });
         view
     }
 
@@ -213,6 +233,22 @@ impl SessionView {
         })
         .detach();
         window.focus(&self.composer.focus_handle(cx));
+    }
+
+    fn copy_selection(&mut self, _: &crate::editor::Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.composer.read(cx).primary_selection().range().is_empty() {
+            return;
+        }
+        if self.copy_transcript(cx) {
+            cx.stop_propagation();
+        }
+    }
+
+    /// Copies what's selected in the transcript; whether anything was.
+    fn copy_transcript(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(text) = self.selection.text() else { return false };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        true
     }
 
     /// ⌘V / Ctrl+V with a picture on the clipboard: it's attached (and the
@@ -354,30 +390,55 @@ impl SessionView {
                 let turn = session.turn_of(ix);
                 // A checkpoint: the files the agent changed from here on can go back.
                 let restorable = !session.state.busy() && session.checkpoints.changed_since(turn);
+                let group = SharedString::from(format!("user-{ix}"));
+                // Yours on the right, in a bubble as wide as the text (as in
+                // Claude's apps); what you attached over it; its actions,
+                // under it, on hover.
                 div()
-                    .id(SharedString::from(format!("user-{ix}")))
-                    .group("user-message")
-                    .relative()
-                    .mt_2()
-                    .px_3()
-                    .py_2()
-                    .rounded(px(10.))
-                    .bg(theme.elevated)
-                    .border_1()
-                    .border_color(theme.border_subtle)
-                    .child(div().text_color(theme.text).whitespace_normal().child(text))
+                    .id(group.clone())
+                    .group(group.clone())
+                    .mt_3()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap_1()
                     .when(!context.is_empty(), |el| {
-                        el.child(div().mt_1p5().flex().flex_wrap().gap_1().children(context.iter().map(|label| chip(label.clone(), Icon::FileText, &theme))))
+                        el.child(div().max_w(relative(0.85)).flex().flex_wrap().justify_end().gap_1().children(context.iter().map(|label| chip(label.clone(), Icon::FileText, &theme))))
                     })
-                    .when(restorable, |el| {
-                        el.child(
-                            div().absolute().top(px(4.)).right(px(4.)).invisible().group_hover("user-message", |s| s.visible()).child(
-                                icon_button(SharedString::from(format!("restore-{ix}")), Icon::Undo, theme.text_dim.into(), cx)
-                                    .tooltip(|_, cx| tooltip_view("Restore Files to Here: put back what the agent changed from this message on", cx))
-                                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(SessionViewEvent::RestoreTo(turn)))),
-                            ),
-                        )
-                    })
+                    .child(
+                        div()
+                            .max_w(relative(0.85))
+                            .px(px(14.))
+                            .py(px(9.))
+                            .rounded(px(16.))
+                            .bg(theme.elevated)
+                            .text_color(theme.text)
+                            .whitespace_normal()
+                            .child({
+                                let content = SharedString::from(text.clone());
+                                let styled = gpui::StyledText::new(content.clone());
+                                crate::selectable_text::SelectableText::new((ix, 0), content, styled, self.selection.clone(), Vec::new(), theme.selection.into())
+                            }),
+                    )
+                    .child(
+                        self.message_actions(ix, &group, text.clone(), cx)
+                            .child(
+                                icon_button(SharedString::from(format!("edit-{ix}")), Icon::Pencil, theme.text_dim.into(), cx)
+                                    .tooltip(|_, cx| tooltip_view("Edit: put it in the composer to change and send again", cx))
+                                    .on_click(cx.listener(move |v, _, window, cx| {
+                                        let text = text.clone();
+                                        v.composer.update(cx, |e, cx| e.set_text(&text, cx));
+                                        window.focus(&v.composer.focus_handle(cx));
+                                    })),
+                            )
+                            .when(restorable, |el| {
+                                el.child(
+                                    icon_button(SharedString::from(format!("restore-{ix}")), Icon::Undo, theme.text_dim.into(), cx)
+                                        .tooltip(|_, cx| tooltip_view("Restore Files to Here: put back what the agent changed from this message on", cx))
+                                        .on_click(cx.listener(move |_, _, _, cx| cx.emit(SessionViewEvent::RestoreTo(turn)))),
+                                )
+                            }),
+                    )
                     .into_any_element()
             }
             Entry::Assistant { text } => {
@@ -399,9 +460,22 @@ impl SessionView {
                         }
                     })),
                     copied: self.copied,
+                    selection: Some((self.selection.clone(), ix)),
+                    pieces: Default::default(),
                 };
                 let _ = window;
-                div().py_1().child(markdown_preview::render(&blocks, &draw, cx)).into_any_element()
+                // The agent's answer as plain text across the column, its
+                // Copy under it on hover.
+                let group = SharedString::from(format!("answer-{ix}"));
+                div()
+                    .id(group.clone())
+                    .group(group.clone())
+                    .py_1()
+                    .flex()
+                    .flex_col()
+                    .child(markdown_preview::render(&blocks, &draw, cx))
+                    .child(self.message_actions(ix, &group, text, cx))
+                    .into_any_element()
             }
             Entry::Thought { text } => {
                 let key = format!("thought-{ix}");
@@ -421,7 +495,7 @@ impl SessionView {
                             .text_color(theme.text_dim)
                             .hover(|s| s.text_color(theme.text_muted))
                             .child(icon_el(if open { Icon::ChevronDown } else { Icon::ChevronRight }, px(12.), theme.text_dim.into()))
-                            .child("Thought")
+                            .child("Thought process")
                             .on_click(cx.listener(move |v, _, _, cx| v.toggle(toggle.clone(), false, cx))),
                     )
                     .when(open, |el| {
@@ -477,6 +551,30 @@ impl SessionView {
                     .into_any_element()
             }
         }
+    }
+
+    /// A message's actions, shown while it's hovered: Copy (a check for a
+    /// moment after), then what the caller adds.
+    fn message_actions(&self, ix: usize, group: &SharedString, text: String, cx: &mut Context<Self>) -> gpui::Div {
+        let theme = Theme::get(cx);
+        let copied = self.copied_entry == Some(ix);
+        div().h(px(24.)).flex().items_center().gap_0p5().invisible().group_hover(group.clone(), |s| s.visible()).when(copied, |el| el.visible()).child(
+            icon_button(SharedString::from(format!("copy-message-{ix}")), if copied { Icon::Check } else { Icon::Copy }, theme.text_dim.into(), cx)
+                .tooltip(|_, cx| tooltip_view("Copy", cx))
+                .on_click(cx.listener(move |v, _, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                    v.copied_entry = Some(ix);
+                    cx.notify();
+                    v.copied_reset = Some(cx.spawn(async move |v, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+                        v.update(cx, |v, cx| {
+                            v.copied_entry = None;
+                            cx.notify();
+                        })
+                        .ok();
+                    }));
+                })),
+        )
     }
 
     fn markdown_of(&mut self, ix: usize, text: &str, cx: &App) -> Rc<Vec<Block>> {
@@ -713,7 +811,19 @@ impl SessionView {
                     .gap_1p5()
                     .text_size(px(12.5))
                     .text_color(theme.text_dim)
-                    .child(icon_el(Icon::Sparkle, px(13.), theme.accent.into()))
+                    .child({
+                        let spark = div().child(icon_el(Icon::Sparkle, px(13.), theme.accent.into()));
+                        // A slow pulse while the agent works (still with reduced effects).
+                        if session.state == State::Running && !theme.reduce_effects {
+                            spark
+                                .with_animation("agent-working", Animation::new(std::time::Duration::from_millis(1600)).repeat().with_easing(pulsating_between(0.35, 1.)), |el, t| {
+                                    el.opacity(t)
+                                })
+                                .into_any_element()
+                        } else {
+                            spark.into_any_element()
+                        }
+                    })
                     .child(status),
             );
         }
@@ -735,19 +845,47 @@ impl SessionView {
             );
         }
         if session.transcript.entries.is_empty() && !session.state.busy() {
+            let project = session.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            // Ways to start, which fill the composer.
+            let starts = [
+                (Icon::FolderTree, "Explain how this project is organized"),
+                (Icon::GitCompare, "Review my uncommitted changes"),
+                (Icon::Bug, "Find and fix a bug in the file I have open"),
+                (Icon::Play, "Run the tests and fix what fails"),
+            ];
             col = col.child(
                 div()
-                    .pt_8()
+                    .pt_10()
+                    .pb_2()
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap_2()
-                    .child(icon_el(Icon::Sparkle, px(28.), theme.accent.into()))
-                    .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(session.agent_name.clone()))
-                    .child(div().text_color(theme.text_dim).text_center().whitespace_normal().child(format!(
-                        "Ask for a change, a fix, an explanation. It works in {}.",
-                        session.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-                    ))),
+                    .gap_3()
+                    .child(icon_el(Icon::Sparkle, px(30.), theme.accent.into()))
+                    .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(format!("What should we work on in {project}?")))
+                    .child(div().text_color(theme.text_dim).child(format!("{} reads, edits and runs things here; you approve what matters.", session.agent_name)))
+                    .child(div().pt_2().flex().flex_wrap().justify_center().gap_2().children(starts.into_iter().enumerate().map(|(i, (icon, prompt))| {
+                        div()
+                            .id(("agent-start", i))
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .h(px(30.))
+                            .px_3()
+                            .rounded(px(15.))
+                            .border_1()
+                            .border_color(theme.border_subtle)
+                            .cursor_pointer()
+                            .text_size(px(12.5))
+                            .text_color(theme.text_muted)
+                            .child(icon_el(icon, px(14.), theme.text_dim.into()))
+                            .child(prompt)
+                            .hover_fill(Hsla::from(theme.background).alpha(0.), theme.hover)
+                            .on_click(cx.listener(move |v, _, window, cx| {
+                                v.composer.update(cx, |e, cx| e.set_text(prompt, cx));
+                                window.focus(&v.composer.focus_handle(cx));
+                            }))
+                    }))),
             );
         }
         col.into_any_element()
@@ -918,18 +1056,21 @@ impl SessionView {
                         // Before the composer's own paste: a picture on the
                         // clipboard is attached, text goes on to the editor.
                         .capture_action(cx.listener(Self::paste_image))
+                        // ⌘C with text selected in the transcript (and none in
+                        // the composer) copies that.
+                        .capture_action(cx.listener(Self::copy_selection))
                         .on_action(cx.listener(Self::send))
                         .on_action(cx.listener(Self::accept_suggestion))
                         .on_action(cx.listener(Self::stop))
-                        .rounded(px(12.))
+                        .rounded(px(18.))
                         .border_1()
                         .bg(theme.background)
-                        .px_2()
-                        .pt_1p5()
-                        .pb_1()
+                        .px_3()
+                        .pt_2p5()
+                        .pb_2()
                         .flex()
                         .flex_col()
-                        .gap_1()
+                        .gap_1p5()
                         .when_some(self.notice.clone(), |el, notice| el.child(div().text_size(px(12.)).text_color(theme.warning).child(notice)))
                         .when(!self.context.is_empty(), |el| {
                             el.child(div().flex().flex_wrap().gap_1().children(self.context.iter().enumerate().map(|(i, item)| {
@@ -948,7 +1089,7 @@ impl SessionView {
                                 )
                             })))
                         })
-                        .child(div().min_h(px(44.)).max_h(px(220.)).child(self.composer.clone()))
+                        .child(div().px_0p5().min_h(px(24.)).max_h(px(240.)).child(self.composer.clone()))
                         .child(
                             div()
                                 .flex()
@@ -959,26 +1100,28 @@ impl SessionView {
                                         .tooltip(|_, cx| tooltip_view("Add context: a file, the selection, the problems, the Git diff", cx))
                                         .on_click(cx.listener(|_, e: &ClickEvent, _, cx| cx.emit(SessionViewEvent::Menu { kind: MenuKind::AddContext, position: e.position() }))),
                                 )
-                                .child(div().text_size(px(11.5)).text_color(theme.text_dim).child(if queued > 0 {
-                                    format!("{queued} queued · sent when the agent is done")
-                                } else if busy {
-                                    "Esc stops · messages queue".to_string()
-                                } else {
-                                    "Enter sends · Shift+Enter new line".to_string()
-                                }))
-                                .child(div().flex_1())
-                                .when(busy, |el| {
-                                    el.child(
-                                        icon_button("agent-stop", Icon::Stop, theme.error.into(), cx)
-                                            .tooltip(|_, cx| tooltip_view("Stop", cx))
-                                            .on_click(cx.listener(|v, _, _, cx| v.session.update(cx, |s, cx| s.cancel(cx)))),
-                                    )
+                                .when(queued > 0, |el| {
+                                    el.child(div().text_size(px(11.5)).text_color(theme.text_dim).child(format!("{queued} queued · sent when the agent is done")))
                                 })
-                                .child(
-                                    icon_button("agent-send", Icon::ArrowUp, if text.trim().is_empty() { theme.text_dim.into() } else { theme.accent.into() }, cx)
-                                        .tooltip(|_, cx| tooltip_view("Send", cx))
-                                        .on_click(cx.listener(|v, _, window, cx| v.send(&SendMessage, window, cx))),
-                                ),
+                                .child(div().flex_1())
+                                // Send, which is Stop while the agent works and
+                                // nothing's typed (typed text queues).
+                                .map(|el| {
+                                    if busy && text.trim().is_empty() {
+                                        el.child(
+                                            round_button("agent-stop", Icon::Stop, true, &theme)
+                                                .tooltip(|_, cx| tooltip_view("Stop (Esc)", cx))
+                                                .on_click(cx.listener(|v, _, _, cx| v.session.update(cx, |s, cx| s.cancel(cx)))),
+                                        )
+                                    } else {
+                                        let ready = !text.trim().is_empty() || !self.context.is_empty();
+                                        el.child(
+                                            round_button("agent-send", Icon::ArrowUp, ready, &theme)
+                                                .tooltip(|_, cx| tooltip_view("Send (Enter) · Shift+Enter for a new line", cx))
+                                                .on_click(cx.listener(|v, _, window, cx| v.send(&SendMessage, window, cx))),
+                                        )
+                                    }
+                                }),
                         ),
                     "agent-composer-ring",
                     focused,
@@ -1007,7 +1150,49 @@ impl Render for SessionView {
             .flex_col()
             .bg(theme.background)
             .child(self.render_header(cx))
-            .child(div().flex_1().min_h_0().relative().child(transcript).child(crate::ui::scrollbar("agent-transcript-scrollbar", &self.list, cx)))
+            .child(
+                div()
+                    .id("agent-transcript")
+                    // A click in the transcript gives it the keyboard, so ⌘C
+                    // copies what's selected there.
+                    .track_focus(&self.focus)
+                    .key_context("AgentTranscript")
+                    .on_action(cx.listener(|v, _: &crate::editor::Copy, _, cx| {
+                        v.copy_transcript(cx);
+                    }))
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(transcript)
+                    .child(crate::ui::scrollbar("agent-transcript-scrollbar", &self.list, cx))
+                    // Scrolled up: a way back to the newest.
+                    .when(self.list.logical_scroll_top().item_ix + 1 < self.list.item_count(), |el| {
+                        el.child(
+                            div().absolute().bottom(px(10.)).left_0().right_0().flex().justify_center().child(
+                                div()
+                                    .id("agent-to-bottom")
+                                    .size(px(30.))
+                                    .rounded_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .bg(theme.elevated)
+                                    .border_1()
+                                    .border_color(theme.border_subtle)
+                                    .shadow(crate::ui::soft_shadow(&theme, 1))
+                                    .child(icon_el(Icon::ArrowDown, px(16.), theme.text_muted.into()))
+                                    .tooltip(|_, cx| tooltip_view("Scroll to the newest", cx))
+                                    .on_click(cx.listener(|v, _, _, cx| {
+                                        // Following the end again, as a new session does.
+                                        let count = v.list.item_count();
+                                        v.list.reset(count);
+                                        cx.notify();
+                                    })),
+                            ),
+                        )
+                    }),
+            )
             .children(self.render_changes(cx))
             .child(self.render_composer(window, cx))
     }
@@ -1044,8 +1229,7 @@ fn title_spans(title: &str, theme: &Theme) -> Vec<AnyElement> {
 }
 
 /// Added and removed line counts, and the changed lines (with a line of
-/// context around each run), at most `PREVIEW_LINES`.
-/// Lines added, removed, and the first changed lines with their sign.
+/// context around each run), at most `PREVIEW_LINES`, each with its sign.
 type Preview = (usize, usize, Vec<(char, String)>);
 
 impl SessionView {
@@ -1111,6 +1295,22 @@ fn chip(label: String, icon: Icon, theme: &Theme) -> gpui::Div {
 }
 
 /// A rounded button with a label that isn't static (an agent's option names).
+/// The composer's round button (Send, Stop): filled in the accent when it
+/// does something, faint when not.
+fn round_button(id: &'static str, icon: Icon, on: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .size(px(28.))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(if on { theme.accent } else { theme.hover })
+        .when(on, |el| el.cursor_pointer().hover(|s| s.opacity(0.85)))
+        .child(icon_el(icon, px(16.), if on { theme.background.into() } else { theme.text_dim.into() }))
+}
+
 fn pill(id: SharedString, label: SharedString, primary: bool, danger: bool, theme: &Theme) -> crate::ui::Button {
     let (rest, hover) = if primary {
         (Hsla::from(theme.accent_soft), Hsla::from(theme.accent).alpha(0.24))

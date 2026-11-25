@@ -73,6 +73,8 @@ fn composer() -> Vec<KeyBinding> {
         KeyBinding::new("shift-enter", Newline, composer),
         KeyBinding::new("escape", StopAgent, composer),
         KeyBinding::new("tab", AcceptSuggestion, composer),
+        // Text selected in a session's transcript.
+        KeyBinding::new("secondary-c", Copy, Some("AgentTranscript")),
     ]
 }
 

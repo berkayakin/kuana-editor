@@ -189,6 +189,8 @@ impl Render for MarkdownPreview {
                 this.update(cx, |p, cx| p.code_action(action, cx)).ok();
             })),
             copied: self.copied.as_ref().map(|(ix, _)| *ix),
+            selection: None,
+            pieces: Default::default(),
         };
         div()
             .id("markdown-preview-item")
