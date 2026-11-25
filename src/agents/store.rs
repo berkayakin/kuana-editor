@@ -1,0 +1,283 @@
+//! The app's agents and sessions, one store for every window: the agents
+//! Kuana can run (its own and the ACP registry's), installs in progress, the
+//! sessions open now and the saved ones' summaries.
+
+use std::{collections::HashMap, path::Path};
+
+use gpui::{App, AppContext as _, Context, Entity, Global, Subscription, Task};
+
+use super::{
+    history,
+    session::{Launcher, Session, SessionEvent},
+};
+use crate::acp::{install, registry};
+use crate::settings::Settings;
+
+pub const KUANA_AGENT: &str = "kuana";
+
+/// An agent the user can start a session with.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentChoice {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub installed: bool,
+    pub installing: bool,
+    pub update: bool,
+    /// Why the last install failed.
+    pub error: Option<String>,
+}
+
+pub struct AgentStore {
+    registry: Vec<registry::Entry>,
+    installing: HashMap<String, Task<()>>,
+    errors: HashMap<String, String>,
+    sessions: Vec<Entity<Session>>,
+    saved: Vec<history::Summary>,
+    subscriptions: HashMap<String, Subscription>,
+    _quit: Subscription,
+}
+
+struct GlobalStore(Entity<AgentStore>);
+
+impl Global for GlobalStore {}
+
+/// Makes the store (from `main`); the saved sessions' index and the registry
+/// are read in the background.
+pub fn init(cx: &mut App) {
+    let store = cx.new(|cx| {
+        let index = cx.background_executor().spawn(async { (history::index(), registry::load()) });
+        cx.spawn(async move |this, cx| {
+            let (saved, registry) = index.await;
+            this.update(cx, |s: &mut AgentStore, cx| {
+                s.saved = saved;
+                s.registry = registry;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        AgentStore {
+            registry: registry::fallback(),
+            installing: HashMap::new(),
+            errors: HashMap::new(),
+            sessions: Vec::new(),
+            saved: Vec::new(),
+            subscriptions: HashMap::new(),
+            _quit: cx.on_app_quit(|s, cx| {
+                s.quit(cx);
+                async {}
+            }),
+        }
+    });
+    cx.set_global(GlobalStore(store));
+}
+
+pub fn store(cx: &App) -> Option<Entity<AgentStore>> {
+    cx.try_global::<GlobalStore>().map(|g| g.0.clone())
+}
+
+impl AgentStore {
+    /// Kuana's agent first, then the registry's, installed ones first.
+    pub fn choices(&self) -> Vec<AgentChoice> {
+        let mut choices = vec![AgentChoice {
+            id: KUANA_AGENT.into(),
+            name: "Kuana Agent".into(),
+            description: "Kuana's own agent, on the model you choose in Settings → AI".into(),
+            installed: true,
+            installing: false,
+            update: false,
+            error: None,
+        }];
+        let mut others: Vec<AgentChoice> = self
+            .registry
+            .iter()
+            .filter(|e| e.install_kind().is_some())
+            .map(|e| AgentChoice {
+                id: e.id.clone(),
+                name: e.name.clone(),
+                description: e.description.clone(),
+                installed: install::installed(&e.id).is_some(),
+                installing: self.installing.contains_key(&e.id),
+                update: install::update_available(e),
+                error: self.errors.get(&e.id).cloned(),
+            })
+            .collect();
+        others.sort_by(|a, b| b.installed.cmp(&a.installed).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+        choices.extend(others);
+        choices
+    }
+
+    pub fn agent_name(&self, id: &str) -> String {
+        if id == KUANA_AGENT {
+            return "Kuana Agent".into();
+        }
+        self.registry.iter().find(|e| e.id == id).map_or_else(|| id.to_string(), |e| e.name.clone())
+    }
+
+    /// Removes an installed agent (to the Trash). Sessions already running
+    /// keep their process.
+    pub fn uninstall(&mut self, id: &str, cx: &mut Context<Self>) {
+        let id = id.to_string();
+        let job = cx.background_executor().spawn({
+            let id = id.clone();
+            async move { install::uninstall(&id) }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job.await;
+            this.update(cx, |s, cx| {
+                match result {
+                    Ok(()) => s.errors.remove(&id),
+                    Err(error) => s.errors.insert(id, format!("Couldn't uninstall: {error}")),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Installs (or updates) a registry agent in the background.
+    pub fn install(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(entry) = self.registry.iter().find(|e| e.id == id).cloned() else { return };
+        if self.installing.contains_key(id) {
+            return;
+        }
+        self.errors.remove(id);
+        let job = cx.background_executor().spawn(async move { install::install(&entry) });
+        let key = id.to_string();
+        let task = cx.spawn(async move |this, cx| {
+            let result = job.await;
+            this.update(cx, |s, cx| {
+                s.installing.remove(&key);
+                if let Err(error) = result {
+                    s.errors.insert(key, format!("Couldn't install: {error}"));
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        self.installing.insert(id.to_string(), task);
+        cx.notify();
+    }
+
+    /// How a session with `agent` starts in `cwd`.
+    pub fn launcher(&self, agent: &str, cwd: &Path, cx: &App) -> Result<Launcher, String> {
+        if agent == KUANA_AGENT {
+            let settings = Settings::get(cx).ai.clone().unwrap_or_default();
+            return Ok(Launcher::Kuana(std::sync::Arc::new(move || settings.choice())));
+        }
+        let installed = install::installed(agent).ok_or_else(|| format!("{} isn't installed", self.agent_name(agent)))?;
+        install::launch(&installed, cwd).map(Launcher::Process)
+    }
+
+    /// A new session (not started until its first prompt).
+    pub fn new_session(&mut self, agent: &str, cwd: &Path, cx: &mut Context<Self>) -> Result<Entity<Session>, String> {
+        let launcher = self.launcher(agent, cwd, cx)?;
+        let name = self.agent_name(agent);
+        let session = cx.new(|_| Session::new(agent.to_string(), name, cwd.to_path_buf(), launcher));
+        self.adopt(&session, cx);
+        Ok(session)
+    }
+
+    /// An open session by id, or a saved one opened.
+    pub fn open(&mut self, id: &str, cx: &mut Context<Self>) -> Option<Entity<Session>> {
+        if let Some(session) = self.sessions.iter().find(|s| s.read(cx).id == id) {
+            return Some(session.clone());
+        }
+        let saved = history::load(id)?;
+        let launcher = match self.launcher(&saved.summary.agent, &saved.summary.cwd, cx) {
+            Ok(launcher) => launcher,
+            // Its agent is gone: the transcript still opens, Kuana's agent
+            // takes the next prompt.
+            Err(_) => self.launcher(KUANA_AGENT, &saved.summary.cwd, cx).ok()?,
+        };
+        let session = cx.new(|_| Session::restored(saved, launcher));
+        self.adopt(&session, cx);
+        Some(session)
+    }
+
+    fn adopt(&mut self, session: &Entity<Session>, cx: &mut Context<Self>) {
+        let id = session.read(cx).id.clone();
+        let subscription = cx.subscribe(session, |store, session, event: &SessionEvent, cx| {
+            if matches!(event, SessionEvent::Finished | SessionEvent::TitleChanged) {
+                let summary = session.read(cx).summary();
+                if !session.read(cx).transcript.entries.is_empty() {
+                    store.saved.retain(|s| s.id != summary.id);
+                    store.saved.insert(0, summary);
+                }
+                cx.notify();
+            }
+        });
+        self.subscriptions.insert(id, subscription);
+        self.sessions.push(session.clone());
+        cx.notify();
+    }
+
+    /// Kuana quits: every live session is saved as it stands and its agent
+    /// stopped (GPUI doesn't drop globals at quit, and an agent's process
+    /// would outlive Kuana).
+    fn quit(&mut self, cx: &mut Context<Self>) {
+        for session in std::mem::take(&mut self.sessions) {
+            session.update(cx, |s, _| s.shut_down());
+        }
+        self.subscriptions.clear();
+    }
+
+    /// Closes a session: its agent stops (it stays saved).
+    pub fn close(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(session) = self.sessions.iter().find(|s| s.read(cx).id == id).cloned() {
+            session.update(cx, |s, cx| {
+                s.cancel(cx);
+                s.save(cx);
+            });
+        }
+        self.sessions.retain(|s| s.read(cx).id != id);
+        self.subscriptions.remove(id);
+        cx.notify();
+    }
+
+    /// Deletes a session for good.
+    pub fn delete(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.close(id, cx);
+        self.saved.retain(|s| s.id != id);
+        let id = id.to_string();
+        cx.background_executor()
+            .spawn(async move {
+                let _ = history::delete(&id);
+            })
+            .detach();
+        cx.notify();
+    }
+
+    /// The sessions of a project (open ones and saved ones), newest first.
+    pub fn sessions_in(&self, folders: &[std::path::PathBuf], cx: &App) -> Vec<Row> {
+        let inside = |cwd: &Path| folders.iter().any(|f| cwd.starts_with(f));
+        let mut rows: Vec<Row> = self
+            .sessions
+            .iter()
+            .filter(|s| inside(&s.read(cx).cwd))
+            .map(|s| {
+                let session = s.read(cx);
+                Row { summary: session.summary(), live: Some(s.clone()) }
+            })
+            .collect();
+        for saved in &self.saved {
+            if inside(&saved.cwd) && !rows.iter().any(|r| r.summary.id == saved.id) {
+                rows.push(Row { summary: saved.clone(), live: None });
+            }
+        }
+        rows.sort_by_key(|r| std::cmp::Reverse(r.summary.updated));
+        rows
+    }
+
+    pub fn live(&self) -> &[Entity<Session>] {
+        &self.sessions
+    }
+}
+
+/// A session in the Agents view.
+pub struct Row {
+    pub summary: history::Summary,
+    pub live: Option<Entity<Session>>,
+}

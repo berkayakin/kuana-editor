@@ -136,6 +136,7 @@ impl Workspace {
                 TabKind::Editor if tab.path.as_deref().is_some_and(crate::preview::is_image) => self.restore_image(tab, cx),
                 TabKind::Editor => self.restore_editor(tab, &mut restored, cx),
                 TabKind::MarkdownPreview => None,
+                TabKind::AgentSession => self.restore_agent_session(tab, cx),
             });
         }
         // Previews once their documents are there (a preview may be in a pane

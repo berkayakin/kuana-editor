@@ -88,6 +88,7 @@ use crate::ui::{
 mod activity_bar;
 mod app_menu;
 mod background;
+mod agents;
 mod bookmarks;
 mod agent_ide;
 mod claude_ide;
@@ -309,6 +310,14 @@ actions!(
         ToggleCommit,
         /// The Database view in the sidebar.
         ToggleDatabase,
+        /// The Agents view in the sidebar (`workspace/agents.rs`).
+        ToggleAgents,
+        /// A new session with the agent used last (Kuana Agent at first).
+        NewAgentSession,
+        /// The selection (or file) into an agent session's composer.
+        AskAgent,
+        /// Asks an agent to fix the problem at the caret.
+        FixWithAgent,
         NewDatabaseConnection,
         /// The Database panel (query results) in the bottom area.
         ToggleDatabaseResults,
@@ -375,6 +384,8 @@ enum SidebarMode {
     Commit,
     /// Database connections and their objects (`crate::database::view`).
     Database,
+    /// Agent sessions (`crate::agents::sidebar`).
+    Agents,
     /// A view an extension adds (`extension_ui`), by its slot.
     Extension(u16),
 }
@@ -415,6 +426,8 @@ enum ToastButton {
     Reconnect,
     /// Open the project in its dev container (`offer_dev_container`).
     OpenInDevContainer,
+    /// Show the Agents view (a session in the background needs the user).
+    ShowAgents,
 }
 
 impl ToastButton {
@@ -426,6 +439,7 @@ impl ToastButton {
             ToastButton::InstallExtension(_) => "Install",
             ToastButton::Reconnect => "Reconnect",
             ToastButton::OpenInDevContainer => "Open in Container",
+            ToastButton::ShowAgents => "Show",
         }
     }
 }
@@ -934,6 +948,14 @@ pub struct Workspace {
     git_panel: Entity<GitPanel>,
     /// The Database view.
     database: Entity<DatabaseView>,
+    /// The Agents view.
+    agents_view: Entity<crate::agents::sidebar::AgentsView>,
+    /// The agent sessions' tabs' subscriptions, by view.
+    agent_tabs: HashMap<EntityId, Vec<Subscription>>,
+    /// Each open session heard once (by its id), whatever tabs show it.
+    agent_sessions: HashMap<String, Subscription>,
+    /// The agent a new session starts with (the one chosen last).
+    last_agent: String,
     /// The Database panel: the last SQL run's results.
     db_results: Entity<QueryResults>,
     /// The last SQL run: its editor and its statements' ranges (Output's rows go to them).
@@ -1211,6 +1233,8 @@ impl Workspace {
             }
         });
         let database = cx.new(DatabaseView::new);
+        let agents_view = cx.new(crate::agents::sidebar::AgentsView::new);
+        let agents_subscription = cx.subscribe_in(&agents_view, window, |ws, _, event, window, cx| ws.on_agents_view(event, window, cx));
         let database_subscription = cx.subscribe_in(&database, window, |ws, _, event: &DatabaseEvent, window, cx| ws.on_database_event(event, window, cx));
         // SQL files' ▶ marks show while a connection exists.
         let db_model = database.read(cx).model().clone();
@@ -1442,6 +1466,10 @@ impl Workspace {
             second_width: px(state.second_sidebar_width.unwrap_or(280.).clamp(SIDEBAR_MIN_WIDTH, 4000.)),
             git_panel,
             database,
+            agents_view,
+            agent_tabs: HashMap::new(),
+            agent_sessions: HashMap::new(),
+            last_agent: crate::agents::store::KUANA_AGENT.to_string(),
             db_results,
             db_run: None,
             has_db_results: false,
@@ -1519,6 +1547,7 @@ impl Workspace {
                 preferences_observer,
                 extensions_observer,
                 trust_observer,
+                agents_subscription,
                 claude_observer,
                 lsp_subscription,
                 documents_subscription,
@@ -1649,6 +1678,7 @@ impl Workspace {
             PaneItem::Diff(diff) => self.add_diff(diff, window, cx),
             PaneItem::Excerpts(view) => self.add_multibuffer(view, window, cx),
             PaneItem::Preview(preview) => self.add_preview(preview, window, cx),
+            PaneItem::Agent(view) => self.add_agent_tab(view, window, cx),
             PaneItem::Image(_) => {}
         }
         self.active_pane.update(cx, |pane, cx| {
@@ -1820,7 +1850,7 @@ impl Workspace {
                     self.load_tab(&editor, cx);
                 }
             }
-            PaneItem::Image(_) | PaneItem::Diff(_) | PaneItem::Excerpts(_) => {}
+            PaneItem::Image(_) | PaneItem::Diff(_) | PaneItem::Excerpts(_) | PaneItem::Agent(_) => {}
         }
     }
 

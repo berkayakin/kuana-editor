@@ -18,6 +18,13 @@ impl Workspace {
         let in_conflict = e.has_conflict_at_cursor(cx);
         let soft_wrap = e.soft_wrap();
         let claude = path.is_some() && self.claude_connected();
+        // A problem on the caret's line: Fix with Agent.
+        let problem_here = {
+            let doc = e.doc.read(cx);
+            let rope = doc.rope();
+            let row = rope.byte_to_line(e.primary_selection().head.min(rope.len_bytes()));
+            doc.diagnostics.iter().any(|d| d.severity.is_problem() && rope.byte_to_line(d.range.start.min(rope.len_bytes())) == row)
+        };
         let mut entries: Vec<MenuEntry> = Vec::new();
         let mut actions: Vec<Option<MenuAction>> = Vec::new();
         let mut add = |entry: MenuEntry, action: Option<MenuAction>| {
@@ -67,8 +74,14 @@ impl Workspace {
             let (entry, action) = run(MenuEntry::text(label), action);
             add(entry, action);
         }
+        add(MenuEntry::Separator, None);
+        if problem_here {
+            let (entry, action) = run(MenuEntry::item("Fix with Agent", Icon::Sparkle), Box::new(FixWithAgent));
+            add(entry, action);
+        }
+        let (entry, action) = run(MenuEntry::item("Ask Agent", Icon::Sparkle), Box::new(AskAgent));
+        add(entry, action);
         if claude {
-            add(MenuEntry::Separator, None);
             let (entry, action) = run(MenuEntry::text("Add to Claude Context"), Box::new(AddToClaudeContext));
             add(entry, action);
         }
@@ -1051,6 +1064,7 @@ impl Workspace {
             ToastButton::InstallExtension(_) => true,
             ToastButton::Reconnect => self.connecting.is_none() && self.primary_folder().and_then(kuana_core::remote::connection::host_of).is_some_and(|h| kuana_core::remote::connection::connected(&h).is_none()),
             ToastButton::OpenInDevContainer => self.connecting.is_none() && self.primary_folder().is_some_and(|r| !crate::fs::is_remote(r)),
+            ToastButton::ShowAgents => true,
         }
     }
 
@@ -1069,6 +1083,11 @@ impl Workspace {
             ToastButton::InstallExtension(id) => self.install_suggested_extension(id, cx),
             ToastButton::Reconnect => self.reconnect(window, cx),
             ToastButton::OpenInDevContainer => self.open_in_dev_container(&OpenInDevContainer, window, cx),
+            ToastButton::ShowAgents => {
+                if !self.view_shown(SidebarMode::Agents) {
+                    self.toggle_agents(&ToggleAgents, window, cx);
+                }
+            }
         }
     }
 

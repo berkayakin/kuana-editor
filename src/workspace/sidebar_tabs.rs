@@ -17,13 +17,14 @@ const MENU_WIDTH: f32 = 40.;
 
 impl SidebarMode {
     /// The views in their tabs' order.
-    pub(super) const ALL: [SidebarMode; 3] = [SidebarMode::Files, SidebarMode::Commit, SidebarMode::Database];
+    pub(super) const ALL: [SidebarMode; 4] = [SidebarMode::Files, SidebarMode::Commit, SidebarMode::Database, SidebarMode::Agents];
 
     pub(super) fn label(self) -> SharedString {
         match self {
             SidebarMode::Files => "Files".into(),
             SidebarMode::Commit => "Commit".into(),
             SidebarMode::Database => "Database".into(),
+            SidebarMode::Agents => "Agents".into(),
             SidebarMode::Extension(_) => self.extension_look().map_or_else(|| "Extension".into(), |(title, _)| title),
         }
     }
@@ -34,6 +35,7 @@ impl SidebarMode {
             SidebarMode::Files => Icon::Folder.path().into(),
             SidebarMode::Commit => Icon::GitBranch.path().into(),
             SidebarMode::Database => Icon::Database.path().into(),
+            SidebarMode::Agents => Icon::Sparkle.path().into(),
             SidebarMode::Extension(_) => self.extension_look().map_or_else(|| Icon::Puzzle.path().into(), |(_, icon)| icon),
         }
     }
@@ -44,6 +46,7 @@ impl SidebarMode {
             SidebarMode::Files => Icon::Folder,
             SidebarMode::Commit => Icon::GitBranch,
             SidebarMode::Database => Icon::Database,
+            SidebarMode::Agents => Icon::Sparkle,
             SidebarMode::Extension(_) => Icon::Puzzle,
         }
     }
@@ -54,6 +57,7 @@ impl SidebarMode {
             SidebarMode::Files => Some("files".into()),
             SidebarMode::Commit => Some("commit".into()),
             SidebarMode::Database => Some("database".into()),
+            SidebarMode::Agents => Some("agents".into()),
             SidebarMode::Extension(_) => self.extension_key().map(|key| format!("extension:{key}")),
         }
     }
@@ -63,6 +67,7 @@ impl SidebarMode {
             "files" => Some(SidebarMode::Files),
             "commit" => Some(SidebarMode::Commit),
             "database" => Some(SidebarMode::Database),
+            "agents" => Some(SidebarMode::Agents),
             other => super::extension_ui::restore_extension_mode(other),
         }
     }
@@ -73,6 +78,7 @@ impl SidebarMode {
             SidebarMode::Files => Box::new(ToggleSidebar),
             SidebarMode::Commit => Box::new(ToggleCommit),
             SidebarMode::Database => Box::new(ToggleDatabase),
+            SidebarMode::Agents => Box::new(ToggleAgents),
             SidebarMode::Extension(_) => match self.extension_key() {
                 Some(view) => Box::new(ToggleExtensionView { view }),
                 None => Box::new(gpui::NoAction),
@@ -292,6 +298,7 @@ impl Workspace {
             SidebarMode::Files => self.toggle_sidebar(&ToggleSidebar, window, cx),
             SidebarMode::Commit => self.toggle_commit(&ToggleCommit, window, cx),
             SidebarMode::Database => self.toggle_database(&ToggleDatabase, window, cx),
+            SidebarMode::Agents => self.toggle_agents(&ToggleAgents, window, cx),
             SidebarMode::Extension(_) => self.toggle_extension_mode(mode, window, cx),
         }
     }

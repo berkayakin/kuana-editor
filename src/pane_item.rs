@@ -1,5 +1,6 @@
 //! What a pane's tab shows: a text editor, an image, a Markdown preview, a
-//! Git / Local History diff or a multibuffer (excerpts of many files).
+//! Git / Local History diff, a multibuffer (excerpts of many files) or an
+//! agent session.
 //! Each kind is its own view implementing
 //! [`Item`], the surface the workspace needs to draw its tab, save, close
 //! and keep it in the session; [`PaneItem`] is the handle panes hold.
@@ -18,6 +19,7 @@ use gpui::{AnyView, App, AppContext, Entity, EntityId, FocusHandle, Focusable};
 use ropey::Rope;
 
 use crate::{
+    agents::view::SessionView,
     assets::Icon,
     diff_view::DiffView,
     editor::Editor,
@@ -231,6 +233,45 @@ impl Item for MultiBufferView {
     }
 }
 
+impl Item for SessionView {
+    fn tab_title(&self, cx: &App) -> String {
+        self.session.read(cx).title.clone()
+    }
+
+    fn path(&self, _: &App) -> Option<PathBuf> {
+        None
+    }
+
+    fn tab_icon(&self, cx: &App) -> TabIcon {
+        let session = self.session.read(cx);
+        // What it's doing shows on its tab.
+        TabIcon::Ui(if session.needs_you() {
+            Icon::CircleAlert
+        } else if session.state.busy() {
+            Icon::Refresh
+        } else {
+            Icon::Sparkle
+        })
+    }
+
+    fn has_errors(&self, cx: &App) -> bool {
+        self.session.read(cx).needs_you()
+    }
+
+    fn saving(&self) -> Saving {
+        Saving::Nothing
+    }
+
+    fn session(&self, cx: &App) -> Option<(TabSession, Option<Rope>)> {
+        let session = self.session.read(cx);
+        // One never sent anything has nothing to come back to.
+        if session.transcript.entries.is_empty() {
+            return None;
+        }
+        Some((TabSession { kind: TabKind::AgentSession, agent_session: Some(session.id.clone()), ..TabSession::default() }, None))
+    }
+}
+
 /// What a tab bar shows of an item. The workspace keeps it and updates it
 /// when the item changes, so drawing the tab bars reads no item: one that
 /// changes (diagnostics arriving for a tab out of sight) would redraw the
@@ -253,6 +294,7 @@ pub enum PaneItem {
     Preview(Entity<MarkdownPreview>),
     Diff(Entity<DiffView>),
     Excerpts(Entity<MultiBufferView>),
+    Agent(Entity<SessionView>),
 }
 
 impl From<Entity<Editor>> for PaneItem {
@@ -288,6 +330,7 @@ impl PaneItem {
             PaneItem::Preview(p) => p.read(cx),
             PaneItem::Diff(d) => d.read(cx),
             PaneItem::Excerpts(m) => m.read(cx),
+            PaneItem::Agent(a) => a.read(cx),
         }
     }
 
@@ -298,6 +341,7 @@ impl PaneItem {
             PaneItem::Preview(p) => p.entity_id(),
             PaneItem::Diff(d) => d.entity_id(),
             PaneItem::Excerpts(m) => m.entity_id(),
+            PaneItem::Agent(a) => a.entity_id(),
         }
     }
 
@@ -318,6 +362,13 @@ impl PaneItem {
     pub fn excerpts(&self) -> Option<&Entity<MultiBufferView>> {
         match self {
             PaneItem::Excerpts(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    pub fn agent(&self) -> Option<&Entity<SessionView>> {
+        match self {
+            PaneItem::Agent(a) => Some(a),
             _ => None,
         }
     }
@@ -349,6 +400,7 @@ impl PaneItem {
             PaneItem::Preview(p) => p.clone().into(),
             PaneItem::Diff(d) => d.clone().into(),
             PaneItem::Excerpts(m) => m.clone().into(),
+            PaneItem::Agent(a) => a.clone().into(),
         }
     }
 
@@ -393,6 +445,7 @@ impl PaneItem {
             PaneItem::Preview(p) => PaneItem::Preview(cx.new(|cx| MarkdownPreview::split_of(p, cx))),
             PaneItem::Diff(d) => PaneItem::Diff(cx.new(|cx| DiffView::split_of(d, cx))),
             PaneItem::Excerpts(m) => PaneItem::Excerpts(cx.new(|cx| MultiBufferView::split_of(m, cx))),
+            PaneItem::Agent(a) => PaneItem::Agent(cx.new(|cx| SessionView::split_of(a, cx))),
         }
     }
 }

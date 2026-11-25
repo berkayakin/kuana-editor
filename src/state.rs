@@ -530,6 +530,9 @@ pub struct TabSession {
     /// A file's encoding when it isn't UTF-8 (a chosen one isn't guessed again).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encoding: Option<String>,
+    /// The agent session an `AgentSession` tab shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session: Option<String>,
 }
 
 /// The kinds of pane items a session brings back (see `pane_item`).
@@ -541,6 +544,8 @@ pub enum TabKind {
     Image,
     /// The Markdown preview of the file at `path`, which a text tab has open.
     MarkdownPreview,
+    /// An agent session, by `agent_session` (`agents::history`).
+    AgentSession,
 }
 
 impl TabKind {
@@ -650,8 +655,8 @@ mod tests {
             root: "/work/kuana".into(),
             folders: vec!["/work/site".into()],
             tabs: vec![
-                TabSession { kind: TabKind::Editor, path: Some("/work/kuana/a.rs".into()), cursor: 12, top_line: Some(40), unsaved: None, pane: 0, pinned: true, folds: vec![[3, 9]], encoding: Some("windows-1254".into()) },
-                TabSession { kind: TabKind::Editor, path: None, cursor: 0, top_line: None, unsaved: Some("draft".into()), pane: 1, pinned: false, folds: Vec::new(), encoding: None },
+                TabSession { kind: TabKind::Editor, path: Some("/work/kuana/a.rs".into()), cursor: 12, top_line: Some(40), unsaved: None, pane: 0, pinned: true, folds: vec![[3, 9]], encoding: Some("windows-1254".into()), agent_session: None },
+                TabSession { kind: TabKind::Editor, path: None, cursor: 0, top_line: None, unsaved: Some("draft".into()), pane: 1, pinned: false, folds: Vec::new(), encoding: None, agent_session: None },
                 TabSession { kind: TabKind::MarkdownPreview, path: Some("/work/kuana/README.md".into()), pane: 1, ..TabSession::default() },
                 TabSession { kind: TabKind::Image, path: Some("/work/kuana/logo.png".into()), pane: 3, ..TabSession::default() },
             ],

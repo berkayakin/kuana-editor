@@ -1,0 +1,925 @@
+//! An agent session in a pane tab: its header (agent, title, mode, model,
+//! context meter), the transcript (answers in Markdown, thoughts folded,
+//! tool calls with their diffs, terminal output and permission questions,
+//! runs of finished steps folded into one line, the plan), the files it
+//! changed, and the composer. Menus and anything that needs the workspace
+//! (opening files and diffs, attaching context, reviewing changes) go out
+//! as [`SessionViewEvent`]s.
+
+use std::{collections::HashMap, collections::HashSet, path::PathBuf, rc::Rc};
+
+use gpui::{
+    AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, InteractiveElement as _,
+    IntoElement, ListAlignment, ListState, ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions,
+    div, list, prelude::FluentBuilder as _, px,
+};
+
+use super::session::{ContextItem, Session, SessionEvent, State};
+use super::transcript::{Entry, Group, Kind, Level, Status, Tool, ToolContent};
+use crate::{
+    assets::Icon,
+    editor::Editor,
+    markdown_preview::{self, Block, CodeAction, Draw},
+    theme::Theme,
+    ui::{HoverFill as _, icon_button, icon_el, tooltip_view},
+};
+
+actions!(agents, [SendMessage, StopAgent]);
+
+/// The transcript's column, for reading comfort in a wide pane.
+const COLUMN: f32 = 780.;
+/// Lines of a terminal's output or a diff shown in a tool call.
+const PREVIEW_LINES: usize = 14;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum MenuKind {
+    Mode,
+    Option(String),
+    AddContext,
+    More,
+}
+
+pub enum SessionViewEvent {
+    OpenFile { path: PathBuf, line: Option<u32> },
+    OpenDiff { path: PathBuf, old: Option<String> },
+    Menu { kind: MenuKind, position: gpui::Point<Pixels> },
+    Review,
+    RejectAll,
+    KeepAll,
+    RunCommand(String),
+}
+
+pub struct SessionView {
+    pub session: Entity<Session>,
+    composer: Entity<Editor>,
+    list: ListState,
+    groups: Vec<Group>,
+    seen: Option<(u64, usize, bool)>,
+    /// Open: tool calls and folded runs by their key, thoughts by entry.
+    open: HashSet<String>,
+    /// Closed by the user though open by default (a diff, a permission).
+    closed: HashSet<String>,
+    markdown: HashMap<usize, (usize, Rc<Vec<Block>>)>,
+    /// Context to send with the next prompt.
+    pub context: Vec<ContextItem>,
+    copied: Option<usize>,
+    focus: FocusHandle,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl EventEmitter<SessionViewEvent> for SessionView {}
+
+impl SessionView {
+    pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> SessionView {
+        let composer = cx.new(|cx| Editor::multi_line("Ask the agent… (@ adds a file, / its commands)", cx));
+        let subscriptions = vec![
+            cx.observe(&session, |view, _, cx| {
+                view.sync(cx);
+                cx.notify();
+            }),
+            cx.subscribe(&session, |_, _, _: &SessionEvent, cx| cx.notify()),
+            cx.observe(&composer, |_, _, cx| cx.notify()),
+        ];
+        let mut view = SessionView {
+            session,
+            composer,
+            list: ListState::new(0, ListAlignment::Bottom, px(800.)),
+            groups: Vec::new(),
+            seen: None,
+            open: HashSet::new(),
+            closed: HashSet::new(),
+            markdown: HashMap::new(),
+            context: Vec::new(),
+            copied: None,
+            focus: cx.focus_handle(),
+            _subscriptions: subscriptions,
+        };
+        view.sync(cx);
+        view
+    }
+
+    /// Another view of the same session (a split).
+    pub fn split_of(other: &Entity<SessionView>, cx: &mut Context<Self>) -> SessionView {
+        SessionView::new(other.read(cx).session.clone(), cx)
+    }
+
+    /// Re-groups the transcript when it changed and has the list measure again.
+    fn sync(&mut self, cx: &mut Context<Self>) {
+        let session = self.session.read(cx);
+        let key = (session.transcript.generation, session.transcript.entries.len(), session.state.busy() || session.needs_you());
+        if self.seen == Some(key) {
+            return;
+        }
+        let old = self.list.item_count();
+        self.groups = session.transcript.groups();
+        let count = self.groups.len() + 1;
+        self.seen = Some(key);
+        self.list.splice(0..old, count);
+    }
+
+    pub fn composer(&self) -> &Entity<Editor> {
+        &self.composer
+    }
+
+    pub fn add_context(&mut self, item: ContextItem, cx: &mut Context<Self>) {
+        if !self.context.contains(&item) {
+            self.context.push(item);
+        }
+        cx.notify();
+    }
+
+    fn send(&mut self, _: &SendMessage, _: &mut Window, cx: &mut Context<Self>) {
+        let text = self.composer.read(cx).text(cx);
+        if text.trim().is_empty() && self.context.is_empty() {
+            return;
+        }
+        let context = std::mem::take(&mut self.context);
+        self.composer.update(cx, |e, cx| e.set_text("", cx));
+        self.session.update(cx, |s, cx| s.send(text.trim().to_string(), context, cx));
+        // The newest message shows.
+        self.list.scroll_to_reveal_item(self.list.item_count().saturating_sub(1));
+    }
+
+    fn stop(&mut self, _: &StopAgent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.session.read(cx).state.busy() {
+            self.session.update(cx, |s, cx| s.cancel(cx));
+        } else {
+            cx.propagate();
+        }
+    }
+
+    fn toggle(&mut self, key: String, default_open: bool, cx: &mut Context<Self>) {
+        let open = self.is_open(&key, default_open);
+        if open {
+            self.open.remove(&key);
+            if default_open {
+                self.closed.insert(key);
+            }
+        } else {
+            self.closed.remove(&key);
+            self.open.insert(key);
+        }
+        self.list.splice(0..self.list.item_count(), self.list.item_count());
+        cx.notify();
+    }
+
+    fn is_open(&self, key: &str, default_open: bool) -> bool {
+        if default_open { !self.closed.contains(key) } else { self.open.contains(key) }
+    }
+
+    // ---- Rows -------------------------------------------------------------------
+
+    fn render_item(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let row = match self.groups.get(ix).cloned() {
+            Some(Group::One(entry)) => self.render_entry(entry, window, cx),
+            Some(Group::Tools(run)) => self.render_run(ix, &run, cx),
+            None => self.render_footer(cx),
+        };
+        // A centered column, like a document.
+        div().w_full().flex().justify_center().px_4().child(div().w_full().max_w(px(COLUMN)).py_1p5().child(row)).into_any_element()
+    }
+
+    fn render_entry(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::get(cx).clone();
+        let Some(entry) = self.session.read(cx).transcript.entries.get(ix).cloned() else { return div().into_any_element() };
+        match entry {
+            Entry::User { text, context } => div()
+                .mt_2()
+                .px_3()
+                .py_2()
+                .rounded(px(10.))
+                .bg(theme.elevated)
+                .border_1()
+                .border_color(theme.border_subtle)
+                .child(div().text_color(theme.text).whitespace_normal().child(text))
+                .when(!context.is_empty(), |el| {
+                    el.child(div().mt_1p5().flex().flex_wrap().gap_1().children(context.iter().map(|label| chip(label.clone(), Icon::FileText, &theme))))
+                })
+                .into_any_element(),
+            Entry::Assistant { text } => {
+                let blocks = self.markdown_of(ix, &text, cx);
+                let view = cx.entity().downgrade();
+                let draw = Draw {
+                    zoom: 0.92,
+                    on_code: Some(Rc::new(move |action, _, cx| match action {
+                        CodeAction::Copy { ix, text } => {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                            view.update(cx, |v, cx| {
+                                v.copied = Some(ix);
+                                cx.notify();
+                            })
+                            .ok();
+                        }
+                        CodeAction::Run(command) => {
+                            view.update(cx, |_, cx| cx.emit(SessionViewEvent::RunCommand(command))).ok();
+                        }
+                    })),
+                    copied: self.copied,
+                };
+                let _ = window;
+                div().py_1().child(markdown_preview::render(&blocks, &draw, cx)).into_any_element()
+            }
+            Entry::Thought { text } => {
+                let key = format!("thought-{ix}");
+                let open = self.is_open(&key, false);
+                let toggle = key.clone();
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .id(SharedString::from(key))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .cursor_pointer()
+                            .text_size(px(12.))
+                            .text_color(theme.text_dim)
+                            .hover(|s| s.text_color(theme.text_muted))
+                            .child(icon_el(if open { Icon::ChevronDown } else { Icon::ChevronRight }, px(12.), theme.text_dim.into()))
+                            .child("Thought")
+                            .on_click(cx.listener(move |v, _, _, cx| v.toggle(toggle.clone(), false, cx))),
+                    )
+                    .when(open, |el| {
+                        el.child(div().mt_1().pl_4().text_size(px(12.5)).italic().text_color(theme.text_muted).whitespace_normal().child(text))
+                    })
+                    .into_any_element()
+            }
+            Entry::Tool(tool) => self.render_tool(&tool, true, cx),
+            Entry::Plan { items } => div()
+                .px_3()
+                .py_2()
+                .rounded(px(10.))
+                .border_1()
+                .border_color(theme.border_subtle)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_dim).child("PLAN"))
+                .children(items.into_iter().map(|item| {
+                    let (icon, color): (Icon, Hsla) = match item.status {
+                        Status::Done => (Icon::SquareCheck, theme.success.into()),
+                        Status::Running => (Icon::ArrowRight, theme.accent.into()),
+                        _ => (Icon::Square, theme.text_dim.into()),
+                    };
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap_2()
+                        .child(div().pt(px(2.)).child(icon_el(icon, px(14.), color)))
+                        .child(
+                            div()
+                                .whitespace_normal()
+                                .text_color(if item.status == Status::Done { theme.text_dim } else { theme.text })
+                                .when(item.status == Status::Done, |el| el.line_through())
+                                .child(item.text),
+                        )
+                }))
+                .into_any_element(),
+            Entry::Notice { level, text } => {
+                let (icon, color): (Icon, Hsla) = match level {
+                    Level::Info => (Icon::CircleAlert, theme.text_dim.into()),
+                    Level::Warning => (Icon::TriangleAlert, theme.warning.into()),
+                    Level::Error => (Icon::CircleX, theme.error.into()),
+                };
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .text_size(px(12.5))
+                    .text_color(color)
+                    .child(div().pt(px(2.)).child(icon_el(icon, px(14.), color)))
+                    .child(div().whitespace_normal().child(text))
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn markdown_of(&mut self, ix: usize, text: &str, cx: &App) -> Rc<Vec<Block>> {
+        if let Some((len, blocks)) = self.markdown.get(&ix)
+            && *len == text.len()
+        {
+            return blocks.clone();
+        }
+        let base = self.session.read(cx).cwd.clone();
+        let blocks = Rc::new(markdown_preview::parse(text, Some(&base)));
+        self.markdown.insert(ix, (text.len(), blocks.clone()));
+        blocks
+    }
+
+    /// A run of finished tool calls, folded into one line until opened.
+    fn render_run(&mut self, ix: usize, run: &[usize], cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::get(cx).clone();
+        let session = self.session.read(cx);
+        let key = format!("run-{}", run.first().copied().unwrap_or(ix));
+        let open = self.is_open(&key, false);
+        let summary = session.transcript.summary(run);
+        let tools: Vec<Tool> = run
+            .iter()
+            .filter_map(|i| match session.transcript.entries.get(*i) {
+                Some(Entry::Tool(tool)) => Some(tool.clone()),
+                _ => None,
+            })
+            .collect();
+        let toggle = key.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .id(SharedString::from(key))
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .cursor_pointer()
+                    .text_size(px(12.5))
+                    .text_color(theme.text_muted)
+                    .hover(|s| s.text_color(theme.text))
+                    .child(icon_el(if open { Icon::ChevronDown } else { Icon::ChevronRight }, px(12.), theme.text_dim.into()))
+                    .child(icon_el(Icon::Check, px(13.), theme.success.into()))
+                    .child(summary)
+                    .on_click(cx.listener(move |v, _, _, cx| v.toggle(toggle.clone(), false, cx))),
+            )
+            .when(open, |el| el.child(div().pl_4().flex().flex_col().gap_1().children(tools.iter().map(|t| self.render_tool(t, false, cx)))))
+            .into_any_element()
+    }
+
+    fn render_tool(&self, tool: &Tool, standalone: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::get(cx).clone();
+        let key = format!("tool-{}", tool.id);
+        let asking = tool.permission.as_ref().is_some_and(|p| p.open);
+        let has_body = !tool.content.is_empty() || asking;
+        let default_open = asking || tool.content.iter().any(|c| matches!(c, ToolContent::Diff { .. } | ToolContent::Terminal { .. }));
+        let open = standalone && has_body && self.is_open(&key, default_open);
+        let (status_icon, status_color): (Icon, Hsla) = match tool.status {
+            Status::Running | Status::Pending if asking => (Icon::CircleAlert, theme.warning.into()),
+            Status::Running | Status::Pending => (Icon::Refresh, theme.accent.into()),
+            Status::Done => (kind_icon(tool.kind), theme.text_muted.into()),
+            Status::Failed => (Icon::CircleX, theme.error.into()),
+        };
+        let location = tool.locations.first().cloned();
+        let toggle = key.clone();
+        let header = div()
+            .id(SharedString::from(key))
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .min_w_0()
+            .text_size(px(12.5))
+            .when(has_body && standalone, |el| el.cursor_pointer().on_click(cx.listener(move |v, _, _, cx| v.toggle(toggle.clone(), default_open, cx))))
+            .when(has_body && standalone, |el| el.child(icon_el(if open { Icon::ChevronDown } else { Icon::ChevronRight }, px(12.), theme.text_dim.into())))
+            .child(icon_el(status_icon, px(14.), status_color))
+            .child(div().min_w_0().flex().flex_wrap().items_baseline().children(title_spans(&tool.title, &theme)))
+            .when_some(location, |el, loc| {
+                let label = format!("{}{}", loc.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), loc.line.map(|l| format!(":{l}")).unwrap_or_default());
+                let (path, line) = (loc.path.clone(), loc.line);
+                el.child(
+                    div()
+                        .id(SharedString::from(format!("loc-{}", tool.id)))
+                        .ml_1()
+                        .px_1p5()
+                        .rounded(px(6.))
+                        .text_size(px(11.5))
+                        .text_color(theme.text_dim)
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.accent))
+                        .child(label)
+                        .on_click(cx.listener(move |_, _, _, cx| cx.emit(SessionViewEvent::OpenFile { path: path.clone(), line }))),
+                )
+            });
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(header)
+            .when(open, |el| el.child(div().pl_5().flex().flex_col().gap_1p5().children(tool.content.iter().map(|c| self.render_content(tool, c, cx)))))
+            .when(open && asking, |el| el.child(self.render_permission(tool, cx)))
+            .when(!asking && standalone, |el| {
+                let chosen = tool.permission.as_ref().and_then(|p| p.chosen.as_ref().and_then(|c| p.options.iter().find(|o| &o.id == c)));
+                el.when_some(chosen, |el, option| {
+                    el.child(div().pl_5().text_size(px(11.5)).text_color(theme.text_dim).child(format!("You chose: {}", option.name)))
+                })
+            })
+            .into_any_element()
+    }
+
+    fn render_content(&self, tool: &Tool, content: &ToolContent, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::get(cx).clone();
+        match content {
+            ToolContent::Text { text } => {
+                let shown: String = text.lines().take(PREVIEW_LINES).collect::<Vec<_>>().join("\n");
+                div().text_size(px(12.)).text_color(theme.text_muted).font_family(theme.mono_font.clone()).whitespace_normal().child(shown).into_any_element()
+            }
+            ToolContent::Diff { path, old, new } => {
+                let (added, removed, lines) = diff_preview(old.as_deref().unwrap_or(""), new);
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let (p, o) = (path.clone(), old.clone());
+                div()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(theme.border_subtle)
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .bg(theme.elevated)
+                            .text_size(px(12.))
+                            .child(crate::ui::file_icon(path, px(14.), &theme))
+                            .child(div().text_color(theme.text).child(name.clone()))
+                            .when(old.is_none(), |el| el.child(div().text_color(theme.git_added).child("new file")))
+                            .child(div().text_color(theme.git_added).child(format!("+{added}")))
+                            .child(div().text_color(theme.git_deleted).child(format!("−{removed}")))
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("open-diff-{}-{name}", tool.id)))
+                                    .px_1p5()
+                                    .rounded(px(6.))
+                                    .cursor_pointer()
+                                    .text_color(theme.text_muted)
+                                    .hover(|s| s.text_color(theme.accent))
+                                    .child("Open Diff")
+                                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(SessionViewEvent::OpenDiff { path: p.clone(), old: o.clone() }))),
+                            ),
+                    )
+                    .child(
+                        div().px_2().py_1().font_family(theme.mono_font.clone()).text_size(px(11.5)).flex().flex_col().children(lines.into_iter().map(|(sign, line)| {
+                            let (color, bg): (Hsla, Hsla) = match sign {
+                                '+' => (theme.git_added.into(), Hsla::from(theme.git_added).alpha(0.08)),
+                                '-' => (theme.git_deleted.into(), Hsla::from(theme.git_deleted).alpha(0.08)),
+                                _ => (theme.text_dim.into(), Hsla::transparent_black()),
+                            };
+                            div().bg(bg).text_color(color).whitespace_nowrap().overflow_hidden().child(format!("{sign} {line}"))
+                        })),
+                    )
+                    .into_any_element()
+            }
+            ToolContent::Terminal { id } => {
+                let shown = self.session.read(cx).terminals.shown(id);
+                let (output, exit) = shown.unwrap_or_default();
+                let lines: Vec<&str> = output.lines().collect();
+                let tail = lines[lines.len().saturating_sub(PREVIEW_LINES)..].join("\n");
+                let status = match exit {
+                    None => "running…".to_string(),
+                    Some(e) => e.code.map_or("stopped".to_string(), |c| format!("exit {c}")),
+                };
+                div()
+                    .rounded(px(8.))
+                    .bg(theme.elevated)
+                    .px_2()
+                    .py_1p5()
+                    .font_family(theme.mono_font.clone())
+                    .text_size(px(11.5))
+                    .text_color(theme.text_muted)
+                    .child(div().whitespace_normal().child(if tail.is_empty() { "(no output yet)".to_string() } else { tail }))
+                    .child(div().mt_1().text_color(theme.text_dim).child(status))
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn render_permission(&self, tool: &Tool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::get(cx).clone();
+        let Some(permission) = &tool.permission else { return div().into_any_element() };
+        let first_allow = permission.options.iter().position(|o| o.kind == "allow_once");
+        div()
+            .pl_5()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1p5()
+            .children(permission.options.iter().enumerate().map(|(i, option)| {
+                let (tool_id, option_id) = (tool.id.clone(), option.id.clone());
+                pill(SharedString::from(format!("perm-{}-{}", tool.id, option.id)), option.name.clone().into(), Some(i) == first_allow, !option.allows(), &theme)
+                    .on_click(cx.listener(move |v, _, _, cx| {
+                        let (tool_id, option_id) = (tool_id.clone(), option_id.clone());
+                        v.session.update(cx, |s, cx| s.answer_permission(&tool_id, &option_id, cx));
+                    }))
+            }))
+            .into_any_element()
+    }
+
+    /// After the last entry: what the agent is doing, the sign-in, the queue.
+    fn render_footer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::get(cx).clone();
+        let session = self.session.read(cx);
+        let mut col = div().flex().flex_col().gap_2().pb_2();
+        let status = match &session.state {
+            State::Connecting => Some(format!("Starting {}…", session.agent_name)),
+            State::Running => Some("Working…".to_string()),
+            State::Waiting => Some("Waiting for your answer".to_string()),
+            _ => None,
+        };
+        if let Some(status) = status {
+            col = col.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .text_size(px(12.5))
+                    .text_color(theme.text_dim)
+                    .child(icon_el(Icon::Sparkle, px(13.), theme.accent.into()))
+                    .child(status),
+            );
+        }
+        if session.state == State::NeedsAuth {
+            let methods = session.auth_methods.clone();
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_1p5()
+                    .children(methods.into_iter().map(|m| {
+                        let id = m.id.clone();
+                        pill(SharedString::from(format!("auth-{}", m.id)), m.name.clone().into(), true, false, &theme).on_click(cx.listener(move |v, _, _, cx| {
+                            let id = id.clone();
+                            v.session.update(cx, |s, cx| s.sign_in(&id, cx));
+                        }))
+                    }))
+                    .child(pill("auth-retry".into(), "I've signed in".into(), false, false, &theme).on_click(cx.listener(|v, _, _, cx| v.session.update(cx, |s, cx| s.retry(cx))))),
+            );
+        }
+        if session.transcript.entries.is_empty() && !session.state.busy() {
+            col = col.child(
+                div()
+                    .pt_8()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(icon_el(Icon::Sparkle, px(28.), theme.accent.into()))
+                    .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(session.agent_name.clone()))
+                    .child(div().text_color(theme.text_dim).text_center().whitespace_normal().child(format!(
+                        "Ask for a change, a fix, an explanation. It works in {}.",
+                        session.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                    ))),
+            );
+        }
+        col.into_any_element()
+    }
+
+    // ---- Header, changes, composer -----------------------------------------------------
+
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::get(cx).clone();
+        let session = self.session.read(cx);
+        let mode = session.mode.as_ref().and_then(|m| session.modes.iter().find(|x| &x.id == m)).map(|m| m.name.clone());
+        let options: Vec<(String, String)> = session
+            .options
+            .iter()
+            .filter(|o| !o.choices.is_empty())
+            .map(|o| {
+                let current = o.current.as_str().unwrap_or_default();
+                let name = o.choices.iter().find(|(v, _)| v == current).map_or_else(|| current.to_string(), |(_, n)| n.clone());
+                (o.id.clone(), name)
+            })
+            .collect();
+        let usage = session.usage.filter(|(_, size)| *size > 0).map(|(used, size)| (used as f64 / size as f64 * 100.).round() as u64);
+        crate::ui::panel_header()
+            .px_3()
+            .child(icon_el(Icon::Sparkle, px(14.), theme.accent.into()))
+            .child(div().min_w_0().flex_shrink().truncate().font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(session.title.clone()))
+            .child(div().flex_shrink_0().text_size(px(12.)).text_color(theme.text_dim).child(session.agent_name.clone()))
+            .child(div().flex_1())
+            .when_some(mode, |el, mode| {
+                el.child(menu_pill("agent-mode", mode, &theme).on_click(cx.listener(|_, e: &ClickEvent, _, cx| cx.emit(SessionViewEvent::Menu { kind: MenuKind::Mode, position: e.position() }))))
+            })
+            .children(options.into_iter().map(|(id, name)| {
+                let kind = MenuKind::Option(id.clone());
+                menu_pill(SharedString::from(format!("agent-opt-{id}")), name, &theme)
+                    .on_click(cx.listener(move |_, e: &ClickEvent, _, cx| cx.emit(SessionViewEvent::Menu { kind: kind.clone(), position: e.position() })))
+            }))
+            .when_some(usage, |el, pct| {
+                el.child(
+                    div()
+                        .id("agent-usage")
+                        .flex_shrink_0()
+                        .text_size(px(11.5))
+                        .text_color(if pct >= 80 { theme.warning } else { theme.text_dim })
+                        .child(format!("{pct}%"))
+                        .tooltip(move |_, cx| tooltip_view(format!("{pct}% of the model's context used"), cx)),
+                )
+            })
+            .child(
+                icon_button("agent-more", Icon::More, theme.text_dim.into(), cx)
+                    .on_click(cx.listener(|_, e: &ClickEvent, _, cx| cx.emit(SessionViewEvent::Menu { kind: MenuKind::More, position: e.position() }))),
+            )
+    }
+
+    fn render_changes(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = Theme::get(cx).clone();
+        let count = self.session.read(cx).changes.len();
+        if count == 0 {
+            return None;
+        }
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .px_3()
+                .py_1()
+                .mx_3()
+                .mb_1()
+                .rounded(px(10.))
+                .bg(theme.elevated)
+                .text_size(px(12.5))
+                .child(icon_el(Icon::GitCompare, px(14.), theme.text_muted.into()))
+                .child(div().text_color(theme.text).child(format!("{count} file{} changed", if count == 1 { "" } else { "s" })))
+                .child(div().flex_1())
+                .child(pill("agent-review".into(), "Review".into(), true, false, &theme).on_click(cx.listener(|_, _, _, cx| cx.emit(SessionViewEvent::Review))))
+                .child(pill("agent-keep".into(), "Keep All".into(), false, false, &theme).on_click(cx.listener(|_, _, _, cx| cx.emit(SessionViewEvent::KeepAll))))
+                .child(pill("agent-reject".into(), "Reject All".into(), false, true, &theme).on_click(cx.listener(|_, _, _, cx| cx.emit(SessionViewEvent::RejectAll))))
+                .into_any_element(),
+        )
+    }
+
+    fn render_composer(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::get(cx).clone();
+        let session = self.session.read(cx);
+        let busy = session.state.busy();
+        let queued = session.queued.len();
+        let text = self.composer.read(cx).text(cx);
+        // The agent's `/` commands while one is being typed.
+        let commands: Vec<(String, String)> = match text.strip_prefix('/') {
+            Some(typed) if !typed.contains(char::is_whitespace) => {
+                session.commands.iter().filter(|(name, _)| name.starts_with(typed)).take(6).cloned().collect()
+            }
+            _ => Vec::new(),
+        };
+        let focused = self.composer.focus_handle(cx).is_focused(window);
+        div()
+            .mx_3()
+            .mb_3()
+            .flex()
+            .flex_col()
+            .when(!commands.is_empty(), |el| {
+                el.child(
+                    div()
+                        .mb_1()
+                        .rounded(px(10.))
+                        .border_1()
+                        .border_color(theme.border_subtle)
+                        .bg(theme.elevated)
+                        .py_1()
+                        .children(commands.into_iter().map(|(name, description)| {
+                            let insert = format!("/{name} ");
+                            div()
+                                .id(SharedString::from(format!("cmd-{name}")))
+                                .flex()
+                                .gap_2()
+                                .px_2()
+                                .py(px(3.))
+                                .cursor_pointer()
+                                .row_hover(theme.hover)
+                                .child(div().text_color(theme.accent).child(format!("/{name}")))
+                                .child(div().min_w_0().truncate().text_color(theme.text_dim).child(description))
+                                .on_click(cx.listener(move |v, _, window, cx| {
+                                    let insert = insert.clone();
+                                    v.composer.update(cx, |e, cx| e.set_text(&insert, cx));
+                                    window.focus(&v.composer.focus_handle(cx));
+                                }))
+                        })),
+                )
+            })
+            .child(
+                crate::ui::focus_ring(
+                    div()
+                        .id("agent-composer")
+                        .key_context("AgentComposer")
+                        .on_action(cx.listener(Self::send))
+                        .on_action(cx.listener(Self::stop))
+                        .rounded(px(12.))
+                        .border_1()
+                        .bg(theme.background)
+                        .px_2()
+                        .pt_1p5()
+                        .pb_1()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .when(!self.context.is_empty(), |el| {
+                            el.child(div().flex().flex_wrap().gap_1().children(self.context.iter().enumerate().map(|(i, item)| {
+                                chip(item.label(), Icon::FileText, &theme).child(
+                                    div()
+                                        .id(SharedString::from(format!("ctx-x-{i}")))
+                                        .cursor_pointer()
+                                        .child(icon_el(Icon::X, px(11.), theme.text_dim.into()))
+                                        .on_click(cx.listener(move |v, _, _, cx| {
+                                            if i < v.context.len() {
+                                                v.context.remove(i);
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
+                            })))
+                        })
+                        .child(div().min_h(px(44.)).max_h(px(220.)).child(self.composer.clone()))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    icon_button("agent-add-context", Icon::Plus, theme.text_dim.into(), cx)
+                                        .tooltip(|_, cx| tooltip_view("Add context: a file, the selection, the problems, the Git diff", cx))
+                                        .on_click(cx.listener(|_, e: &ClickEvent, _, cx| cx.emit(SessionViewEvent::Menu { kind: MenuKind::AddContext, position: e.position() }))),
+                                )
+                                .child(div().text_size(px(11.5)).text_color(theme.text_dim).child(if queued > 0 {
+                                    format!("{queued} queued · sent when the agent is done")
+                                } else if busy {
+                                    "Esc stops · messages queue".to_string()
+                                } else {
+                                    "Enter sends · Shift+Enter new line".to_string()
+                                }))
+                                .child(div().flex_1())
+                                .when(busy, |el| {
+                                    el.child(
+                                        icon_button("agent-stop", Icon::Stop, theme.error.into(), cx)
+                                            .tooltip(|_, cx| tooltip_view("Stop", cx))
+                                            .on_click(cx.listener(|v, _, _, cx| v.session.update(cx, |s, cx| s.cancel(cx)))),
+                                    )
+                                })
+                                .child(
+                                    icon_button("agent-send", Icon::ArrowUp, if text.trim().is_empty() { theme.text_dim.into() } else { theme.accent.into() }, cx)
+                                        .tooltip(|_, cx| tooltip_view("Send", cx))
+                                        .on_click(cx.listener(|v, _, window, cx| v.send(&SendMessage, window, cx))),
+                                ),
+                        ),
+                    "agent-composer-ring",
+                    focused,
+                    &theme,
+                ),
+            )
+    }
+}
+
+impl Focusable for SessionView {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        // The tab's keyboard goes to the composer.
+        let _ = &self.focus;
+        self.composer.focus_handle(cx)
+    }
+}
+
+impl Render for SessionView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync(cx);
+        let theme = Theme::get(cx).clone();
+        let transcript = list(self.list.clone(), cx.processor(|this, ix: usize, window, cx| this.render_item(ix, window, cx))).size_full();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(theme.background)
+            .child(self.render_header(cx))
+            .child(div().flex_1().min_h_0().relative().child(transcript).child(crate::ui::scrollbar("agent-transcript-scrollbar", &self.list, cx)))
+            .children(self.render_changes(cx))
+            .child(self.render_composer(window, cx))
+    }
+}
+
+fn kind_icon(kind: Kind) -> Icon {
+    match kind {
+        Kind::Read => Icon::FileText,
+        Kind::Edit => Icon::Pencil,
+        Kind::Delete => Icon::Trash,
+        Kind::Move => Icon::ArrowRight,
+        Kind::Search => Icon::Search,
+        Kind::Execute => Icon::Terminal,
+        Kind::Think => Icon::Sparkle,
+        Kind::Fetch => Icon::Link,
+        Kind::Other => Icon::Bolt,
+    }
+}
+
+/// A tool title with its `code` parts in the code font.
+fn title_spans(title: &str, theme: &Theme) -> Vec<AnyElement> {
+    title
+        .split('`')
+        .enumerate()
+        .filter(|(_, s)| !s.is_empty())
+        .map(|(i, s)| {
+            if i % 2 == 1 {
+                div().px(px(3.)).font_family(theme.mono_font.clone()).text_size(px(12.)).text_color(theme.text).child(s.to_string()).into_any_element()
+            } else {
+                div().text_color(theme.text_muted).child(s.to_string()).into_any_element()
+            }
+        })
+        .collect()
+}
+
+/// Added and removed line counts, and the changed lines (with a line of
+/// context around each run), at most `PREVIEW_LINES`.
+fn diff_preview(old: &str, new: &str) -> (usize, usize, Vec<(char, String)>) {
+    let diff = similar::TextDiff::from_lines(old, new);
+    let (mut added, mut removed) = (0, 0);
+    let mut lines = Vec::new();
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            similar::ChangeTag::Insert => added += 1,
+            similar::ChangeTag::Delete => removed += 1,
+            similar::ChangeTag::Equal => {}
+        }
+    }
+    for group in diff.grouped_ops(1) {
+        for op in group {
+            for change in diff.iter_changes(&op) {
+                if lines.len() >= PREVIEW_LINES {
+                    return (added, removed, lines);
+                }
+                let sign = match change.tag() {
+                    similar::ChangeTag::Insert => '+',
+                    similar::ChangeTag::Delete => '-',
+                    similar::ChangeTag::Equal => ' ',
+                };
+                lines.push((sign, change.value().trim_end_matches(['\n', '\r']).to_string()));
+            }
+        }
+    }
+    (added, removed, lines)
+}
+
+fn chip(label: String, icon: Icon, theme: &Theme) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_1p5()
+        .h(px(20.))
+        .rounded(px(6.))
+        .bg(theme.elevated)
+        .border_1()
+        .border_color(theme.border_subtle)
+        .text_size(px(11.5))
+        .text_color(theme.text_muted)
+        .child(icon_el(icon, px(11.), theme.text_dim.into()))
+        .child(label)
+}
+
+/// A rounded button with a label that isn't static (an agent's option names).
+fn pill(id: SharedString, label: SharedString, primary: bool, danger: bool, theme: &Theme) -> crate::ui::Button {
+    let (rest, hover) = if primary {
+        (Hsla::from(theme.accent_soft), Hsla::from(theme.accent).alpha(0.24))
+    } else {
+        (Hsla::from(theme.hover), Hsla::from(theme.active))
+    };
+    div()
+        .id(id)
+        .h(px(24.))
+        .px_2p5()
+        .flex()
+        .items_center()
+        .rounded(px(12.))
+        .cursor_pointer()
+        .text_size(px(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(if primary {
+            theme.accent
+        } else if danger {
+            theme.error
+        } else {
+            theme.text
+        })
+        .child(label)
+        .hover_fill(rest, hover)
+}
+
+/// A header control that opens a menu: its current value and a chevron.
+fn menu_pill(id: impl Into<SharedString>, label: String, theme: &Theme) -> crate::ui::Button {
+    div()
+        .id(gpui::ElementId::Name(id.into()))
+        .h(px(24.))
+        .px_2()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap_1()
+        .rounded(px(8.))
+        .cursor_pointer()
+        .text_size(px(12.))
+        .text_color(theme.text_muted)
+        .child(label)
+        .child(icon_el(Icon::ChevronDown, px(11.), theme.text_dim.into()))
+        .hover_bg(theme.hover)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diff_previews_count_and_show_changed_lines() {
+        let (added, removed, lines) = diff_preview("a\nb\nc\nd\n", "a\nB\nc\nd\ne\n");
+        assert_eq!((added, removed), (2, 1));
+        assert!(lines.contains(&('-', "b".to_string())) && lines.contains(&('+', "B".to_string())) && lines.contains(&('+', "e".to_string())));
+        let (added, _, lines) = diff_preview("", &"x\n".repeat(100));
+        assert_eq!(added, 100);
+        assert_eq!(lines.len(), PREVIEW_LINES);
+    }
+}

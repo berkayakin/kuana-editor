@@ -174,6 +174,7 @@ impl Pane {
             PaneItem::Preview(preview) => cx.observe(preview, |pane, preview, cx| pane.look_changed(&PaneItem::Preview(preview), cx)),
             PaneItem::Diff(diff) => cx.observe(diff, |pane, diff, cx| pane.look_changed(&PaneItem::Diff(diff), cx)),
             PaneItem::Excerpts(view) => cx.observe(view, |pane, view, cx| pane.look_changed(&PaneItem::Excerpts(view), cx)),
+            PaneItem::Agent(view) => cx.observe(view, |pane, view, cx| pane.look_changed(&PaneItem::Agent(view), cx)),
         };
         self.observers.insert(id, observer);
         let current = self.tabs.get(self.active).cloned();

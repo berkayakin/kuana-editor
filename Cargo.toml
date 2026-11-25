@@ -110,6 +110,12 @@ url = "2.5.8"
 percent-encoding = "2.3.2"
 # Claude Code's `/ide` connection (`claude_ide.rs`): a WebSocket server on plain threads.
 tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+# Model providers' HTTP APIs (`src/ai/`): blocking, on threads of their own, streamed line by
+# line; the system's certificates, so a company's TLS proxy works.
+ureq = { version = "3.5", default-features = false, features = ["rustls", "gzip", "platform-verifier"] }
+# Agent Client Protocol message types (`src/acp/`), the protocol agents like Claude, Codex and
+# Gemini CLI speak over stdio.
+agent-client-protocol-schema = { version = "1.7", default-features = false }
 # Zed extensions' own code (`extension.wasm`, a WebAssembly component) for their
 # language servers: the wasmtime tree-sitter already brings, with components and WASI,
 # compiling on several threads (with the rayon Kuana already has).

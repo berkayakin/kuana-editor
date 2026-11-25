@@ -3,6 +3,7 @@
 //! them. It looks the same on every platform. Changes apply and save right
 //! away; the files stay the source of truth and keep their comments.
 
+mod ai_page;
 mod keymap_page;
 mod window;
 
@@ -55,6 +56,8 @@ pub enum PreferencesEvent {
 pub enum Page {
     Appearance,
     Editor,
+    /// Model providers, agents, suggestions (`ai_page.rs`).
+    Ai,
     Saving,
     Languages,
     Extensions,
@@ -66,9 +69,10 @@ pub enum Page {
 }
 
 impl Page {
-    const ALL: [Page; 10] = [
+    const ALL: [Page; 11] = [
         Page::Appearance,
         Page::Editor,
+        Page::Ai,
         Page::Saving,
         Page::Languages,
         Page::Extensions,
@@ -83,6 +87,7 @@ impl Page {
         match self {
             Page::Appearance => "Appearance",
             Page::Editor => "Editor",
+            Page::Ai => "AI",
             Page::Saving => "Saving",
             Page::Languages => "Languages",
             Page::Extensions => "Extensions",
@@ -98,6 +103,7 @@ impl Page {
         match self {
             Page::Appearance => "Color themes for the whole window",
             Page::Editor => "Font, indentation and line wrapping",
+            Page::Ai => "The model Kuana's agent and AI features use, coding agents, suggestions",
             Page::Saving => "When files are saved and what saving does",
             Page::Languages => "Per-language options, language servers and formatters",
             Page::Extensions => "More languages, themes and snippets; Zed's extensions work too",
@@ -113,6 +119,7 @@ impl Page {
         match self {
             Page::Appearance => Icon::Palette,
             Page::Editor => Icon::Type,
+            Page::Ai => Icon::Sparkle,
             Page::Saving => Icon::Save,
             Page::Languages => Icon::Braces,
             Page::Extensions => Icon::Puzzle,
@@ -256,7 +263,8 @@ impl Setting {
             Setting::FontFamily | Setting::FontSize | Setting::LineHeight => Page::Editor,
             Setting::TabSize | Setting::HardTabs | Setting::LinkedEditing | Setting::CursorBlink | Setting::SoftWrap => Page::Editor,
             Setting::Rulers | Setting::ShowWhitespace | Setting::InlayHints | Setting::InlineValues | Setting::DocumentColors | Setting::SemanticTokens | Setting::CodeLens | Setting::VimMode | Setting::TodoPatterns | Setting::OpenFolderIn => Page::Editor,
-            Setting::Minimap | Setting::MinimapWidth | Setting::EditPredictions | Setting::ClaudeCode | Setting::GeminiCli => Page::Editor,
+            Setting::Minimap | Setting::MinimapWidth => Page::Editor,
+            Setting::EditPredictions | Setting::ClaudeCode | Setting::GeminiCli => Page::Ai,
             Setting::AutoSave
             | Setting::AutoSaveDelay
             | Setting::FormatOnSave
@@ -292,8 +300,7 @@ impl Setting {
             Setting::SemanticTokens => "Colors",
             Setting::Minimap | Setting::MinimapWidth => "Minimap",
             Setting::EditPredictions => "Edit predictions",
-            Setting::ClaudeCode => "Claude Code",
-            Setting::GeminiCli => "Gemini CLI",
+            Setting::ClaudeCode | Setting::GeminiCli => "Terminal agents",
             Setting::VimMode => "Vim",
             Setting::TodoPatterns => "TODO",
             Setting::OpenFolderIn => "Projects",
@@ -523,6 +530,9 @@ enum Menu {
     ToolsLocation,
     PullStrategy,
     EditPredictions,
+    AiProvider,
+    AiModel,
+    AiEffort,
     LanguageServer,
     Formatter,
     /// One of an extension's settings (which one: `Preferences::ext_menu`).
@@ -726,6 +736,11 @@ pub struct Preferences {
     file_error: Option<String>,
     /// Writes typed text a moment after typing stops.
     commit_task: Option<Task<()>>,
+    /// The AI page's state and fields (`ai_page.rs`).
+    ai: ai_page::AiPage,
+    ai_key: Entity<Editor>,
+    ai_url: Entity<Editor>,
+    ai_model: Entity<Editor>,
     /// Where each dropdown's button was last drawn (by `Menu`), and the open
     /// one's list for this frame.
     menu_anchors: [Rc<Cell<Bounds<Pixels>>>; Menu::COUNT],
@@ -767,6 +782,9 @@ impl Preferences {
         let keymap = cx.new(|cx| KeymapPage::new(window, cx));
         let extension_url = cx.new(|cx| Editor::single_line("Git URL of an extension (Zed extensions work too)", cx));
         let registry_query = cx.new(|cx| Editor::single_line("Search available extensions", cx));
+        let ai_key = cx.new(|cx| Editor::password("Paste a key to save it", cx));
+        let ai_url = cx.new(|cx| Editor::single_line("The provider's usual address", cx));
+        let ai_model = cx.new(|cx| Editor::single_line("A model's id", cx));
         let mut subscriptions = vec![
             // A grammar finished building, an extension came or went.
             cx.observe_global::<ExtensionsChanged>(|this, cx| {
@@ -787,7 +805,7 @@ impl Preferences {
             cx.subscribe(&registry_query, |_, _, _: &EditorEvent, cx| cx.notify()),
             cx.subscribe(&keymap, |_, _, event: &PreferencesEvent, cx| cx.emit(clone_event(event))),
         ];
-        for field in [&shell, &rulers, &todo_patterns, &server_command, &formatter_command] {
+        for field in [&shell, &rulers, &todo_patterns, &server_command, &formatter_command, &ai_url, &ai_model] {
             subscriptions.push(cx.subscribe(field, |this, _, _: &EditorEvent, cx| this.schedule_commit(cx)));
         }
         let settings = Settings::get(cx).clone();
@@ -821,6 +839,10 @@ impl Preferences {
             keymap,
             file_error: settings_file_error(),
             commit_task: None,
+            ai: Default::default(),
+            ai_key,
+            ai_url,
+            ai_model,
             menu_anchors: Default::default(),
             overlay: None,
             extension_url,
@@ -843,6 +865,7 @@ impl Preferences {
             this.add_run_row(run, cx);
         }
         this.load_language_fields(cx);
+        this.fill_ai_fields(cx);
         this
     }
 
@@ -1055,6 +1078,7 @@ impl Preferences {
                 Settings::set("run_configurations", Value::Array(list))
             });
         }
+        results.extend(self.commit_ai_fields(cx));
         for ((extension, key), field) in &self.ext_fields {
             let text = field.editor.read(cx).text(cx);
             let value = if field.number {
@@ -1590,6 +1614,7 @@ impl Preferences {
             Page::Languages => return self.render_languages(window, cx).into_any_element(),
             Page::Extensions => return self.render_extensions(window, cx).into_any_element(),
             Page::Trust => return self.render_trust(window, cx).into_any_element(),
+            Page::Ai => return self.render_ai(window, cx).into_any_element(),
             Page::Keymap => {
                 let theme = Theme::get(cx).clone();
                 let row = self.render_setting(Setting::BaseKeymap, window, cx);

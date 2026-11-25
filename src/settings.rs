@@ -146,6 +146,9 @@ pub struct Settings {
     /// Gemini CLI in a terminal connects to the window (`gemini_ide.rs`):
     /// `true` unless set.
     pub gemini_cli_integration: Option<bool>,
+    /// Model providers for Kuana's AI features (`crate::ai`): which, the
+    /// model, other URLs. Only the user's settings, never a project's.
+    pub ai: Option<crate::ai::AiSettings>,
     /// Words that make a comment a TODO item (the TODO list, the editor's
     /// highlight), in any case; `todo_patterns()` has the defaults.
     pub todo_patterns: Option<Vec<String>>,
@@ -589,6 +592,7 @@ const TOP_LEVEL_KEYS: &[&str] = &[
     "edit_prediction_provider",
     "claude_code_integration",
     "gemini_cli_integration",
+    "ai",
     "todo_patterns",
 ];
 
@@ -926,6 +930,7 @@ impl Settings {
             "edit_prediction_provider" => self.edit_prediction_provider.is_some(),
             "claude_code_integration" => self.claude_code_integration.is_some(),
             "gemini_cli_integration" => self.gemini_cli_integration.is_some(),
+            "ai" => self.ai.is_some(),
             "minimap_width" => self.minimap_width.is_some(),
             "zen_full_screen" => self.zen_full_screen.is_some(),
             "zen_width" => self.zen_width.is_some(),
@@ -1340,6 +1345,13 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // Gemini CLI running in a terminal knows which files are open here and
   // what's selected, and proposes edits as diffs (its /ide enable command).
   // "gemini_cli_integration": true,
+
+  // AI: the model provider Kuana's agent, inline assist and commit messages
+  // use. Nothing is sent anywhere until a provider is chosen; keys live in the
+  // system keychain (Settings → AI), or come from the provider's environment
+  // variable (ANTHROPIC_API_KEY, OPENAI_API_KEY…).
+  // "ai": { "provider": "anthropic", "model": "claude-opus-5-5", "effort": "medium",
+  //         "providers": { "ollama": { "url": "http://localhost:11434/v1" } } },
 
   // File icons from an extension's icon theme (Zed's format), by name.
   // "icon_theme": "Soft Charmed Icons",

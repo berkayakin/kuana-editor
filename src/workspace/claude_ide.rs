@@ -232,7 +232,7 @@ impl Workspace {
     /// The problems Kuana shows: open files' (built-in lint, linters and
     /// language servers, moved by edits since) and what servers published
     /// for files that aren't open. `only` one file, listed even without any.
-    fn claude_diagnostics(&self, only: Option<PathBuf>, cx: &App) -> Value {
+    pub(super) fn claude_diagnostics(&self, only: Option<PathBuf>, cx: &App) -> Value {
         let map = self.agent_map();
         let mut files = Vec::new();
         let mut open = HashSet::new();

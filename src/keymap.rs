@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
+    agents::view::{SendMessage, StopAgent},
     about::About,
     editor::*,
     picker::ActionEntry,
@@ -30,7 +31,7 @@ use crate::{
         AddLogpoint, OpenExtensions, ReloadExtensions, ProjectTrust, UndoFileChange, RedoFileChange, OpenProjectSettings,
         ToggleResults, NextResult, PreviousResult, RerunFailedTests, ShowLocalHistory,
         ToggleAutoSave, ToggleSidebar, ToggleSidebarPosition, ToggleSecondSidebar, ToggleClassicLayout, ToggleToolsInTitleBar, ToggleCompactActivityBar, ToggleZenMode, AddToClaudeContext, ImportSettings, CheckForUpdates, WelcomeSetup, GoToSymbol, SplitTerminal, RenameTerminal, SelectOpenedFile, InstallShellCommand,
-        ToggleDatabase, NewDatabaseConnection, ToggleDatabaseResults, RunSqlStatement, RunSqlScript, NewSqlScript,
+        ToggleDatabase, NewDatabaseConnection, ToggleDatabaseResults, ToggleAgents, NewAgentSession, AskAgent, FixWithAgent, RunSqlStatement, RunSqlScript, NewSqlScript,
         ToggleBookmark, ToggleBookmarkWithMnemonic, EditBookmarkDescription, ShowBookmarks, NextBookmark, PreviousBookmark, GoToBookmark, ShowTodo, ShowTestExplorer,
         OpenResultsInEditor, ProblemsInEditor, CompareWithClipboard, CompareWithFile, CompareWithBranch, NewScratchFile, ShowScratches,
     },
@@ -57,7 +58,20 @@ pub fn bindings(base: BaseKeymap) -> Vec<KeyBinding> {
     // so between the two the later one wins: a keymap's global ⌘T would beat
     // the terminal's own. Context bindings go last so they win where they apply.
     let (global, contextual): (Vec<KeyBinding>, Vec<KeyBinding>) = b.into_iter().partition(|b| b.predicate().is_none());
-    global.into_iter().chain(contextual).collect()
+    global.into_iter().chain(contextual).chain(composer()).collect()
+}
+
+/// An agent session's composer: Enter sends, Shift+Enter breaks the line,
+/// Escape stops a running turn. Last of all: the editor's own Enter and
+/// Escape match at the same depth, and of those the later binding wins.
+fn composer() -> Vec<KeyBinding> {
+    let composer = Some("AgentComposer > Editor");
+    vec![
+        KeyBinding::new("enter", SendMessage, composer),
+        KeyBinding::new("secondary-enter", SendMessage, composer),
+        KeyBinding::new("shift-enter", Newline, composer),
+        KeyBinding::new("escape", StopAgent, composer),
+    ]
 }
 
 /// How `base` binds `action` out of the box (its first binding that works in
@@ -191,6 +205,20 @@ fn common(mac: bool) -> Vec<KeyBinding> {
         KeyBinding::new("secondary-shift-z", Redo, e),
         KeyBinding::new("secondary-/", ToggleComment, e),
     ];
+    // Agent sessions (`workspace/agents.rs`), the same in every keymap.
+    if mac {
+        b.extend([
+            KeyBinding::new("cmd-alt-a", ToggleAgents, None),
+            KeyBinding::new("cmd-alt-n", NewAgentSession, None),
+            KeyBinding::new("cmd-alt-i", AskAgent, None),
+        ]);
+    } else {
+        b.extend([
+            KeyBinding::new("ctrl-shift-y", ToggleAgents, None),
+            KeyBinding::new("ctrl-shift-u", NewAgentSession, None),
+            KeyBinding::new("ctrl-shift-h", AskAgent, None),
+        ]);
+    }
     if mac {
         b.extend([
             KeyBinding::new("cmd-g", FindNext, None),
@@ -964,6 +992,10 @@ pub fn action_entries() -> Vec<ActionEntry> {
         a("Commit…", ShowCommit),
         a("Toggle Commit Panel", ToggleCommit),
         a("Database", ToggleDatabase),
+        a("Agents", ToggleAgents),
+        a("New Agent Session", NewAgentSession),
+        a("Ask Agent", AskAgent),
+        a("Fix with Agent", FixWithAgent),
         a("New Database Connection…", NewDatabaseConnection),
         a("Toggle Database Results", ToggleDatabaseResults),
         a("Run SQL Statement", RunSqlStatement),
@@ -1450,6 +1482,18 @@ mod tests {
             }
             assert_eq!(resolve(base, "left", &["Workspace", "FileTree"]), Some("editor::MoveLeft"), "{base:?}");
             assert_eq!(resolve(base, "right", &["Workspace", "FileTree"]), Some("editor::MoveRight"), "{base:?}");
+        }
+    }
+
+    #[test]
+    fn the_agent_composer_sends_on_enter() {
+        let at = ["Workspace", "AgentComposer", "Editor"];
+        for base in BaseKeymap::ALL {
+            assert_eq!(resolve(base, "enter", &at), Some("agents::SendMessage"), "{base:?}");
+            assert_eq!(resolve(base, "shift-enter", &at), Some("editor::Newline"), "{base:?}");
+            assert_eq!(resolve(base, "escape", &at), Some("agents::StopAgent"), "{base:?}");
+            // Other editors keep theirs.
+            assert_eq!(resolve(base, "enter", &["Workspace", "Editor"]), Some("editor::Newline"), "{base:?}");
         }
     }
 

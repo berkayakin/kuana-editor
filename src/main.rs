@@ -4,6 +4,9 @@
 // The GPUI-free core (`crates/kuana-core`), at the root as before.
 use kuana_core::{encoding, exec, fs, paths, process, project, project_folders, search, watcher};
 mod about;
+mod acp;
+mod agents;
+mod ai;
 #[cfg(test)]
 mod host_lint;
 // The server runs in-process, so this computer is the host, and remote
@@ -558,6 +561,7 @@ fn main() {
         theme::init(cx);
         updater::init(cx);
         state::init(cx);
+        agents::store::init(cx);
         // Quitting doesn't leave a file being saved half written.
         cx.on_app_quit(|_| {
             document::wait_for_saves();

@@ -277,7 +277,8 @@ impl Workspace {
             SidebarMode::Files => 0.,
             SidebarMode::Commit => 1.,
             SidebarMode::Database => 2.,
-            mode @ SidebarMode::Extension(_) => 3. + self.extension_modes().iter().position(|m| *m == mode).unwrap_or(0) as f32,
+            SidebarMode::Agents => 3.,
+            mode @ SidebarMode::Extension(_) => 4. + self.extension_modes().iter().position(|m| *m == mode).unwrap_or(0) as f32,
         };
         let bar = BarSize::of(cx);
         let top = TAB_STRIP_INSET + index * (bar.row + bar.gap(Theme::get(cx)));
@@ -371,6 +372,7 @@ impl Workspace {
                     .child(self.render_view_tab(SidebarMode::Files, cx))
                     .child(self.render_view_tab(SidebarMode::Commit, cx))
                     .child(self.render_view_tab(SidebarMode::Database, cx))
+                    .child(self.render_view_tab(SidebarMode::Agents, cx))
                     .children(self.extension_modes().to_vec().into_iter().map(|mode| self.render_view_tab(mode, cx))),
             )
             // The free space between the views and the tools moves the window,
@@ -557,6 +559,7 @@ impl Workspace {
             SidebarMode::Files => ("activity-files".into(), Icon::Folder.path().into()),
             SidebarMode::Commit => ("activity-commit".into(), Icon::GitBranch.path().into()),
             SidebarMode::Database => ("activity-database".into(), Icon::Database.path().into()),
+            SidebarMode::Agents => ("activity-agents".into(), Icon::Sparkle.path().into()),
             SidebarMode::Extension(slot) => {
                 let icon = mode.extension_look().map_or_else(|| SharedString::from(Icon::Puzzle.path()), |(_, icon)| icon);
                 (format!("activity-ext-{slot}").into(), icon)
@@ -584,6 +587,7 @@ impl Workspace {
                 SidebarMode::Files => ws.toggle_sidebar(&ToggleSidebar, window, cx),
                 SidebarMode::Commit => ws.toggle_commit(&ToggleCommit, window, cx),
                 SidebarMode::Database => ws.toggle_database(&ToggleDatabase, window, cx),
+                SidebarMode::Agents => ws.toggle_agents(&ToggleAgents, window, cx),
                 SidebarMode::Extension(_) => ws.toggle_extension_mode(mode, window, cx),
             }))
             // No tooltip while a menu is open: a right-click's opens under the
@@ -591,6 +595,7 @@ impl Workspace {
             .when(self.context_menu.is_none(), |el| match mode {
                 SidebarMode::Files => el.tooltip(|window, cx| status_tooltip("Files", &ToggleSidebar, window, cx)),
                 SidebarMode::Database => el.tooltip(|window, cx| status_tooltip("Database", &ToggleDatabase, window, cx)),
+                SidebarMode::Agents => el.tooltip(|window, cx| status_tooltip("Agents", &ToggleAgents, window, cx)),
                 SidebarMode::Extension(_) => {
                     let title = mode.extension_look().map_or_else(|| SharedString::from("Extension"), |(title, _)| title);
                     let action = mode.extension_key().map(|view| ToggleExtensionView { view });

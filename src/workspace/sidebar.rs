@@ -109,6 +109,8 @@ impl Workspace {
             div().flex_1().min_h_0().child(cached(&self.git_panel)).into_any_element()
         } else if mode == SidebarMode::Database {
             div().flex_1().min_h_0().child(cached(&self.database)).into_any_element()
+        } else if mode == SidebarMode::Agents {
+            div().flex_1().min_h_0().child(cached(&self.agents_view)).into_any_element()
         } else if let SidebarMode::Extension(slot) = mode {
             // Its view is made when it first shows (`make_shown_extension_views`).
             self.render_extension_sidebar(slot).unwrap_or_else(|| div().flex_1().into_any_element())
