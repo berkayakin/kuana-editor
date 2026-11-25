@@ -610,10 +610,18 @@ impl SessionView {
                     .into_any_element()
             }
             ToolContent::Terminal { id } => {
-                let (tail, exit) = self.session.read(cx).terminals.tail(id, PREVIEW_LINES).unwrap_or_default();
+                // A terminal let go of long ago (`Terminals::prune`) has ended.
+                let (tail, exit) = match self.session.read(cx).terminals.tail(id, PREVIEW_LINES) {
+                    Some(shown) => shown,
+                    None => ("(output no longer kept)".to_string(), Some(super::terminals::Exit { code: None, signal: None })),
+                };
                 let status = match exit {
                     None => "running…".to_string(),
-                    Some(e) => e.code.map_or("stopped".to_string(), |c| format!("exit {c}")),
+                    Some(e) => match (e.code, e.signal) {
+                        (Some(c), _) => format!("exit {c}"),
+                        (None, Some(_)) => "stopped".to_string(),
+                        (None, None) => "ended".to_string(),
+                    },
                 };
                 div()
                     .rounded(px(8.))

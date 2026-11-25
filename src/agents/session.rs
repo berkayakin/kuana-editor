@@ -380,7 +380,10 @@ impl Session {
 
     /// Opens the agent's side: loads the earlier session when it can, else a new one.
     fn open_session(&mut self, previous: Option<String>, cwd: PathBuf, cx: &mut Context<Self>) {
-        let Some(agent) = self.agent.clone() else { return };
+        let Some(agent) = self.agent.clone() else {
+            self.fail(format!("{} stopped while starting.", self.agent_name), cx);
+            return;
+        };
         let mcp = self.mcp_servers.clone();
         let loading = previous.is_some();
         self.replaying = loading;
@@ -413,7 +416,7 @@ impl Session {
                     }
                     // The agent no longer has it: a new one (with a notice
                     // that the agent forgot the conversation).
-                    Err(_) if loading => s.open_session(None, cwd, cx),
+                    Err(e) if loading && e.code != RpcError::CLOSED && s.agent.is_some() => s.open_session(None, cwd, cx),
                     Err(e) => s.fail(e.message, cx),
                 }
                 cx.notify();

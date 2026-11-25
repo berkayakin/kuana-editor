@@ -100,7 +100,8 @@ pub fn install(entry: &Entry) -> Result<Installed, String> {
             let cmd = binary.cmd.trim_start_matches("./").replace('\\', "/");
             let program = dir.join(&cmd);
             // The program must be in what was unpacked.
-            if Path::new(&cmd).is_absolute() || cmd.split('/').any(|part| part == "..") || !program.is_file() {
+            let outside = Path::new(&cmd).components().any(|c| matches!(c, std::path::Component::Prefix(_) | std::path::Component::RootDir | std::path::Component::ParentDir));
+            if outside || !program.is_file() {
                 return Err(format!("{} didn't unpack as expected (no {})", entry.name, binary.cmd));
             }
             lsp_install::make_executable(&program)?;

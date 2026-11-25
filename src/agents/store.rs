@@ -75,6 +75,7 @@ pub fn init(cx: &mut App) {
             }),
         }
     });
+    store.update(cx, |s, cx| s.refresh_installed(cx));
     cx.set_global(GlobalStore(store));
 }
 
@@ -144,9 +145,17 @@ impl AgentStore {
     }
 
     /// Reads what's installed again (in the background).
+    /// The registry's agents and every folder in Kuana's agents folder, so
+    /// what's installed is known before the registry is (offline too).
     fn refresh_installed(&mut self, cx: &mut Context<Self>) {
-        let ids: Vec<String> = self.registry.iter().map(|e| e.id.clone()).collect();
-        let read = cx.background_executor().spawn(async move { ids.into_iter().filter_map(|id| install::installed(&id).map(|i| (id, i.version().to_string()))).collect() });
+        let mut ids: Vec<String> = self.registry.iter().map(|e| e.id.clone()).collect();
+        let read = cx.background_executor().spawn(async move {
+            let folders = install::agents_dir().and_then(|d| std::fs::read_dir(d).ok());
+            ids.extend(folders.into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok()));
+            ids.sort();
+            ids.dedup();
+            ids.into_iter().filter_map(|id| install::installed(&id).map(|i| (id, i.version().to_string()))).collect()
+        });
         cx.spawn(async move |this, cx| {
             let installed = read.await;
             this.update(cx, |s, cx| {

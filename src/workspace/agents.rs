@@ -619,8 +619,10 @@ impl Workspace {
             if !path.exists() {
                 return Ok(());
             }
-            if let Some(editor) = self.tab_for(path, cx) {
-                self.remove_item(&PaneItem::Editor(editor), window, cx);
+            // Every tab of it closes for good (document released, the
+            // language server told), so nothing holds the old text.
+            while let Some(editor) = self.tab_for(path, cx) {
+                self.remove_tab(&editor, window, cx);
             }
             return crate::file_history::move_to_trash(path).map(|_| ()).map_err(|e| e.to_string());
         }
@@ -824,6 +826,10 @@ impl Workspace {
 /// followed as far as the path exists, so `/proj/../../.ssh/x` or a link out
 /// of the project isn't taken for a file in it.
 fn resolve_agent_path(path: &Path) -> PathBuf {
+    resolve_within(path, 0)
+}
+
+fn resolve_within(path: &Path, depth: usize) -> PathBuf {
     let mut plain = PathBuf::new();
     for part in path.components() {
         match part {
@@ -834,13 +840,27 @@ fn resolve_agent_path(path: &Path) -> PathBuf {
             other => plain.push(other),
         }
     }
-    // The deepest part that exists, with its links resolved, then the rest.
+    // The deepest part that's there (a link counts, even to nothing), with
+    // its links resolved, then the rest.
     let mut existing = plain.as_path();
     let mut rest = Vec::new();
-    while !existing.exists() {
+    while std::fs::symlink_metadata(existing).is_err() {
         let (Some(name), Some(parent)) = (existing.file_name(), existing.parent()) else { return plain };
         rest.push(name.to_os_string());
         existing = parent;
+    }
+    // A link to something that isn't there: where it points decides (a write
+    // through it lands there).
+    if !existing.exists()
+        && depth < 16
+        && let Ok(target) = std::fs::read_link(existing)
+    {
+        let mut target = match existing.parent() {
+            Some(parent) if target.is_relative() => parent.join(target),
+            _ => target,
+        };
+        target.extend(rest.iter().rev());
+        return resolve_within(&target, depth + 1);
     }
     let mut resolved = crate::paths::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
     resolved.extend(rest.iter().rev());
@@ -882,6 +902,9 @@ mod tests {
         {
             std::os::unix::fs::symlink(&root, root.join("proj/link")).unwrap();
             assert_eq!(resolve(&root.join("proj/link/secret")), root.join("secret"));
+            // A link to a file that isn't there yet: where a write would land.
+            std::os::unix::fs::symlink(root.join("elsewhere/new.txt"), root.join("proj/dangling")).unwrap();
+            assert_eq!(resolve(&root.join("proj/dangling")), root.join("elsewhere/new.txt"));
         }
         std::fs::remove_dir_all(&root).ok();
     }

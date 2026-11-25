@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 /// Output kept when the agent names no limit.
 const DEFAULT_LIMIT: usize = 1024 * 1024;
 /// Finished terminals kept (their output shows in the session's cards);
-/// older ones are let go.
+/// older ones are let go, their cards saying so.
 const KEPT: usize = 40;
 /// How long the end waits for the last output once the process exited (a
 /// child it left in the background may hold the pipes open).
@@ -312,10 +312,19 @@ mod tests {
         let mut terminals = Terminals::default();
         let id = terminals.create("sleep 30 | cat", &[], &std::env::temp_dir(), &[], None).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));
+        let group = terminals.procs[&id].child.lock().unwrap().as_ref().unwrap().id() as libc::pid_t;
         let started = std::time::Instant::now();
         assert!(terminals.kill(&id));
         futures::executor::block_on(terminals.wait(&id).unwrap()).unwrap();
         assert!(!terminals.running());
+        // `sleep` and `cat` went with `sh`: nothing is left in the group.
+        let gone = (0..50).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            // Safety: signal 0 only asks whether the group exists.
+            let alive = unsafe { libc::kill(-group, 0) };
+            alive == -1
+        });
+        assert!(gone, "the pipeline outlived its shell");
         // A background child holding the pipe doesn't hold up the end.
         let id = terminals.create("sleep 30 & echo started", &[], &std::env::temp_dir(), &[], None).unwrap();
         let exit = futures::executor::block_on(terminals.wait(&id).unwrap()).unwrap();
