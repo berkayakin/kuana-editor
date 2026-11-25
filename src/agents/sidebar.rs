@@ -1,13 +1,14 @@
 //! The Agents view (a sidebar view, on either side): New Session, and the
-//! project's sessions, newest first, each with a light for what it's doing
-//! (working, waiting for you, failed), its agent and how long ago it was
-//! active. Choosing an agent, opening and deleting go to the workspace as
+//! project's sessions, those waiting for you first, then newest first, each
+//! with a light for what it's doing (working, waiting for you, failed), its
+//! agent and how long ago it was active; a field filters them by title.
+//! Choosing an agent, opening and deleting go to the workspace as
 //! [`AgentsViewEvent`]s.
 
 use std::path::PathBuf;
 
 use gpui::{
-    App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
+    App, AppContext as _, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
     ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 
@@ -30,6 +31,7 @@ pub enum AgentsViewEvent {
 
 pub struct AgentsView {
     folders: Vec<PathBuf>,
+    filter: Entity<crate::editor::Editor>,
     scroll: ScrollHandle,
     focus: FocusHandle,
     watched: Vec<Subscription>,
@@ -42,7 +44,9 @@ impl EventEmitter<AgentsViewEvent> for AgentsView {}
 impl AgentsView {
     pub fn new(cx: &mut Context<Self>) -> AgentsView {
         let store_sub = store::store(cx).map(|s| cx.observe(&s, |_, _, cx| cx.notify()));
-        AgentsView { folders: Vec::new(), scroll: ScrollHandle::new(), focus: cx.focus_handle(), watched: Vec::new(), watched_ids: Vec::new(), _store: store_sub }
+        let filter = cx.new(|cx| crate::editor::Editor::single_line("Filter sessions", cx));
+        cx.observe(&filter, |_, _, cx| cx.notify()).detach();
+        AgentsView { folders: Vec::new(), filter, scroll: ScrollHandle::new(), focus: cx.focus_handle(), watched: Vec::new(), watched_ids: Vec::new(), _store: store_sub }
     }
 
     pub fn set_folders(&mut self, folders: Vec<PathBuf>, cx: &mut Context<Self>) {
@@ -71,11 +75,19 @@ impl Focusable for AgentsView {
 }
 
 impl Render for AgentsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
         let Some(store) = store::store(cx) else { return div().into_any_element() };
         self.watch(&store, cx);
-        let rows = store.read(cx).sessions_in(&self.folders, cx);
+        let mut rows = store.read(cx).sessions_in(&self.folders, cx);
+        let any = !rows.is_empty();
+        let filter = self.filter.read(cx).text(cx).trim().to_lowercase();
+        if !filter.is_empty() {
+            rows.retain(|r| r.summary.title.to_lowercase().contains(&filter) || r.summary.agent_name.to_lowercase().contains(&filter));
+        }
+        // Sessions waiting for an answer first (the sort keeps the rest's order).
+        rows.sort_by_key(|r| !r.live.as_ref().is_some_and(|s| s.read(cx).needs_you()));
+        let none_match = any && rows.is_empty();
         // The quick-start buttons, only for an empty list.
         let installed: Vec<(String, String)> =
             if rows.is_empty() { store.read(cx).choices().into_iter().filter(|c| c.installed).map(|c| (c.id, c.name)).collect() } else { Vec::new() };
@@ -95,7 +107,7 @@ impl Render for AgentsView {
             .track_scroll(&self.scroll)
             .px_1()
             .pb_2()
-            .when(rows.is_empty(), |el| {
+            .when(rows.is_empty() && !any, |el| {
                 el.child(
                     div()
                         .px_2()
@@ -178,6 +190,8 @@ impl Render for AgentsView {
             .flex()
             .flex_col()
             .child(header)
+            .when(any, |el| el.child(div().px_2().pb_1p5().child(crate::ui::input_box(&self.filter, Some(Icon::Search), window, cx))))
+            .when(none_match, |el| el.child(div().px_3().py_2().text_color(theme.text_dim).child("No session matches")))
             .child(div().flex_1().min_h_0().relative().flex().flex_col().child(list).child(crate::ui::scrollbar("agents-scrollbar", &self.scroll, cx)))
             .into_any_element()
     }

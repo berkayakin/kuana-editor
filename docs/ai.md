@@ -35,8 +35,9 @@ can set it, not a project's.
 ## Agent sessions
 
 The **Agents** view (the ✦ tab on the activity bar, **⌥⌘A** / **Alt+Shift+Y**) lists the
-project's sessions, newest first. A light shows what each is doing: working, waiting for you,
-failed, open or saved. **New Session** (+, **⌥⌘N** / **Alt+Shift+N**) picks an agent:
+project's sessions: those waiting for your answer first, then the newest. A light shows what each
+is doing: working, waiting for you, failed, open or saved. The field at the top filters them by
+title or agent. **New Session** (+, **⌥⌘N** / **Alt+Shift+N**) picks an agent:
 
 - **Kuana Agent**, built in, on the model you chose in Settings → AI. See [below](#kuana-agent).
 - **Agents from the ACP registry**: Claude Agent (Claude Code's agent), Codex, Gemini CLI, GitHub
@@ -68,9 +69,13 @@ A session opens in a tab beside your code, which you can split, move and keep op
   as a diff against what it was before the session touched it. **Keep All** keeps them, and
   **Reject All** puts every file back as it was. Every agent write is one undoable edit in its open
   document, and Local History keeps the version before it ("Before an agent's edit").
+- **Checkpoints**: hover one of your messages and click ↶ (**Restore Files to Here**) to put back
+  every file the agent changed from that message on, as it was just before. Files it created go
+  to the Trash. A file that wasn't open goes back byte for byte, whatever its encoding.
 
 Writes go through Kuana: an agent writing a file that's open edits its document (your unsaved
-edits included), and a file outside the project asks first. Commands run in Kuana's terminals and
+edits included), and a file outside the project asks first (`..` and links are followed to see
+where a path really goes). Commands run in Kuana's terminals and
 their output shows in the session.
 
 Sessions are kept: each one's transcript is saved as it goes and when Kuana quits. Reopening a
@@ -78,7 +83,8 @@ project brings its session tabs back. Clicking a saved session in the Agents vie
 An agent that can (Kuana Agent, Claude, others) continues the same conversation; one that can't
 starts afresh, and the session says so.
 
-Agents work in local projects; in a [remote project](remote.md), run them in Kuana's terminal there.
+Closing a project or its window stops its sessions (they're saved). Agents work in local projects;
+in a [remote project](remote.md), run them in Kuana's terminal there.
 
 ### Kuana Agent
 
