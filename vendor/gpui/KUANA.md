@@ -43,6 +43,13 @@ Kuana's own, in `src/platform/mac/window.rs`, `src/platform/mac/display_link.rs`
   Unlike `font_id`, it keeps no misses (and drops one already kept), so a font
   installed while Kuana runs is found on the next settings change.
 
+- **Truncated text with several runs** (`src/elements/text.rs`): a text cut with
+  an ellipsis (`text_ellipsis`, `truncate`) shortens its runs to the cut text, and
+  the measuring closure kept those for its next measurement of the whole text
+  (taffy measures a text more than once a frame, at different widths), so the
+  text and its runs disagreed, shaping failed and the text came out empty. Each
+  measurement now cuts a copy of the runs.
+
 And in `src/taffy.rs`, two float literals are typed (`0.0_f32`, `1.0_f32`): a path
 dependency's warnings aren't silenced as a registry crate's are, and Kuana's build
 stays warning-free.
