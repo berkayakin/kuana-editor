@@ -88,6 +88,7 @@ Updates are signed.
 | --- | --- |
 | **Code intelligence** | Completion, hover docs, Go to Declaration / Implementation, Find Usages and Call / Type Hierarchy in a Find panel, Rename, quick fixes, inlay hints, code lenses and [semantic highlighting](docs/editing.md#semantic-highlighting) through [language servers](docs/languages.md), imports updated when you move files; tree-sitter highlighting for 13 languages built in, any other through extensions |
 | **Editing** | Multi-cursor, syntax-aware Extend Selection, column selection, folding, sticky scroll, breadcrumbs, [Back and Forward](docs/editing.md#back-and-forward), snippets (VS Code format) and [postfix completion](docs/editing.md#postfix-completion), [multibuffers](docs/editing.md#multibuffers) (search results and problems from many files, edited in one tab), [color swatches and a picker](docs/editing.md#colors), [linked editing](docs/editing.md#linked-editing) of tag names, [Vim mode](docs/editing.md#vim-mode), Markdown preview, [Zen mode](docs/editing.md#zen-mode), [compare anything](docs/editing.md#comparing-files) (the clipboard, another file, a branch), [scratch files](docs/editing.md#scratch-files), GitHub Copilot's suggestions as [ghost text](docs/editing.md#edit-predictions) (off until you turn them on), [Claude Code](docs/editing.md#claude-code) seeing your selection and proposing edits as diffs |
+| **AI** | [Agent sessions](docs/ai.md#agent-sessions) in tabs beside your code, with Kuana's own agent or Claude, Codex, Gemini CLI, GitHub Copilot and more: every step shown with its diff or output, permissions asked, changes reviewed and undone; [Inline Assist](docs/ai.md#inline-assist) on a selection, commit messages, merge conflicts and [MCP servers](docs/ai.md#mcp-servers), on Anthropic, OpenAI, Ollama and other providers; off until you choose |
 | **Git** | Gutter changes with inline diffs, staging single changes, side-by-side diffs with word highlights, a commit graph with commit actions (cherry-pick, revert, reset, tag), inline blame, branches, stashes, remotes, merge conflicts resolved in the editor; see [Git](docs/git.md) |
 | **Run & debug** | ▶ next to every test and `main` (Rust, Go, Python, JS/TS), a [Test Explorer](docs/run-and-debug.md#test-explorer) with every test before it runs, [test results](docs/run-and-debug.md#test-results) as a tree with ✓ / ✕ in the gutter and Rerun Failed, a [debugger](docs/run-and-debug.md#debugging) with conditional breakpoints, logpoints, values inline in the code while paused and on hover, errors from a run's output in Problems |
 | **Databases** | A [Database](docs/database.md) view for PostgreSQL, MySQL, MariaDB, SQLite and Oracle: browse tables, views, functions and procedures, edit and save routines with errors in place, run SQL with results in a grid; drivers built in |
@@ -141,6 +142,7 @@ read what it [doesn't do yet](#known-limitations).
 | [Key bindings](docs/keybindings.md) | The keymaps and how to change shortcuts |
 | [Languages](docs/languages.md) | Language servers, formatting, Python environments |
 | [Editing, panes and windows](docs/editing.md) | Splits, tabs, Vim mode, snippets, Copilot's suggestions, Claude Code, projects |
+| [AI](docs/ai.md) | Agent sessions, Inline Assist, commit messages, conflicts, MCP servers |
 | [Terminal, run and debug](docs/run-and-debug.md) | Terminal, running tests, the debugger |
 | [Remote development](docs/remote.md) | Projects over SSH, in WSL and in containers, ports, reconnecting |
 | [Git](docs/git.md) | Everything Git |
@@ -163,9 +165,8 @@ says what's planned):
 - **Remote development is new**: the other machine must run Linux or macOS (a Windows PC is
   reached through WSL), and language servers it lacks are installed there by hand, not with
   Kuana's one-click install.
-- **AI**: GitHub Copilot's suggestions ([Edit predictions](docs/editing.md#edit-predictions)) and
-  [Claude Code's IDE connection](docs/editing.md#claude-code), no chat or agent panel; agents like
-  Claude Code or Codex run in the terminal.
+- **AI is new**: [agent sessions](docs/ai.md) work in local projects only (in a remote one, run an
+  agent in Kuana's terminal there), and edit predictions come from GitHub Copilot only.
 - **Languages**: 13 are built in; the rest, C/C++, Kotlin and Swift included, are
   [extensions](docs/extensions.md) from Kuana's registry, installed with one click.
 - **Editing**: no spell checking.

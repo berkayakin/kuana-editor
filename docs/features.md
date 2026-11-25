@@ -40,6 +40,14 @@ Everything Kuana does, in one list. Each area has its own page with the details.
 - Edit predictions from GitHub Copilot, off until you choose it: code suggested after the caret as
   dimmed ghost text (several lines too), accepted with Tab; install and sign in from the status bar;
   see [Edit predictions](editing.md#edit-predictions)
+- AI, off until you choose a model or start an agent ([AI](ai.md)): agent sessions in tabs beside the
+  code with Kuana's own agent or ACP agents from the registry (Claude, Codex, Gemini CLI, GitHub
+  Copilot…), each step shown with its diff or output, permissions asked, changes reviewed and
+  rejected per session, `@` file mentions, sessions kept and continued after a restart; Inline
+  Assist (a selection rewritten as asked, reviewed as a diff; SQL written for your database's
+  tables), commit messages written from the diff in the repository's style, merge conflicts
+  resolved by the model, MCP servers as tools; Claude Code and Gemini CLI in the terminal connect
+  to Kuana and propose edits as diffs
 - Inlay hints from the language server (types, parameter names), rulers, visible whitespace,
   control characters shown as dim symbols (␌ for a form feed, ␛, NEL, LS for U+2028),
   column (box) selection with Alt+drag, sort/reverse/de-duplicate lines and case conversions

@@ -123,10 +123,10 @@ off until you choose it: Settings → Editor → Edit predictions → GitHub Cop
 Suggestions show with one caret and nothing selected, and in Vim mode only in Insert mode. On a line
 that soft wrap breaks, nothing shows until the caret is on a line that fits.
 
-For chat and agents, use the tools you already have: Claude Code, Codex or Gemini CLI run in
-Kuana's terminal, and Kuana picks up the files they change (the Git gutter and the Commit view show
-what they did, Local History undoes it). Claude Code and Gemini CLI go further: they connect to
-Kuana, as below.
+For agents, Kuana has [agent sessions](ai.md#agent-sessions): Kuana's own agent, Claude, Codex,
+Gemini CLI and others in a tab beside your code. Agents you run in Kuana's terminal work too, and
+Kuana picks up the files they change (the Git gutter and the Commit view show what they did, Local
+History undoes it). Claude Code and Gemini CLI go further: they connect to Kuana, as below.
 
 ## Claude Code
 

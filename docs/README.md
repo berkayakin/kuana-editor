@@ -5,6 +5,7 @@
 - [Key bindings](keybindings.md): the JetBrains, VS Code, Sublime Text and Zed keymaps, and your own
 - [Languages](languages.md): language servers, formatting, Python environments
 - [Editing, panes and windows](editing.md): splits and tabs, Vim mode, snippets, Copilot's suggestions, Claude Code, projects, hot exit
+- [AI](ai.md): agent sessions (Kuana Agent, Claude, Codex, Gemini CLI…), Inline Assist, commit messages, conflicts, MCP servers
 - [Terminal, run and debug](run-and-debug.md): the terminal, running tests, the debugger
 - [Remote development](remote.md): projects on other machines over SSH, in WSL and in containers (dev containers too), forwarded ports
 - [Git](git.md): gutter, staging, diffs, log, branches, merge conflicts

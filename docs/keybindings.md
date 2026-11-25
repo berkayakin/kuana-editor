@@ -47,6 +47,9 @@ The table below is the JetBrains keymap.
 | Toggle bookmark / with mnemonic | F3 / ⌥F3 | F11 / Ctrl+F11 |
 | Show Bookmarks | ⌘F3 | Shift+F11 |
 | [Add to Claude Context](editing.md#claude-code) (also Sublime Text; VS Code and Zed: Find Action) | ⌥⌘K | Ctrl+Alt+K |
+| [Agents view](ai.md#agent-sessions) / new agent session / Ask Agent (every keymap) | ⌥⌘A / ⌥⌘N / ⌥⌘I | Ctrl+Shift+Y / Ctrl+Shift+U / Ctrl+Shift+H |
+| [Inline Assist](ai.md#inline-assist) (every keymap) | ⌃↩ | Alt+Shift+I |
+| Accept / reject a proposed change (in its diff tab) | ⌘↩ / ⌘⌫ | Ctrl+Enter / Ctrl+Backspace |
 | Open the file at the caret (in a multibuffer's excerpt) | F4 | F4 |
 | Go to bookmark 0–9 | ⌃0–⌃9 | Ctrl+0–Ctrl+9 |
 | Attach to Process… | ⌥⇧F5 | Ctrl+Alt+F5 |
