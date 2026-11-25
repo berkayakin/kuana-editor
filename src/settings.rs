@@ -228,16 +228,20 @@ pub enum EditPredictionProvider {
     None,
     /// GitHub Copilot, through its language server.
     Copilot,
+    /// The model chosen in Settings → AI (`ai.completion_model`, else
+    /// `ai.model`), asked directly (`editor/prediction.rs`).
+    Ai,
 }
 
 impl EditPredictionProvider {
-    pub const ALL: [EditPredictionProvider; 2] = [EditPredictionProvider::None, EditPredictionProvider::Copilot];
+    pub const ALL: [EditPredictionProvider; 3] = [EditPredictionProvider::None, EditPredictionProvider::Copilot, EditPredictionProvider::Ai];
 
     /// The value in `settings.json`.
     pub fn key(self) -> &'static str {
         match self {
             EditPredictionProvider::None => "none",
             EditPredictionProvider::Copilot => "copilot",
+            EditPredictionProvider::Ai => "ai",
         }
     }
 
@@ -245,6 +249,7 @@ impl EditPredictionProvider {
         match self {
             EditPredictionProvider::None => "Off",
             EditPredictionProvider::Copilot => "GitHub Copilot",
+            EditPredictionProvider::Ai => "Your AI model",
         }
     }
 }
@@ -1333,10 +1338,11 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // and the editor's highlight.
   // "todo_patterns": ["TODO", "FIXME", "HACK", "XXX"],
 
-  // Ghost-text suggestions after the caret, accepted with Tab: "none" or
-  // "copilot" (GitHub Copilot; sign in from the status bar). Code goes to
-  // the provider only when this is set; "edit_predictions": false turns
-  // them off per language or project.
+  // Ghost-text suggestions after the caret, accepted with Tab: "none",
+  // "copilot" (GitHub Copilot; sign in from the status bar) or "ai" (the
+  // model chosen under "ai": its "completion_model", else its "model"). Code
+  // goes to the provider only when this is set; "edit_predictions": false
+  // turns them off per language or project.
   // "edit_prediction_provider": "none",
   // "edit_predictions": true,
   // Claude Code running in a terminal sees the selection here, reads the

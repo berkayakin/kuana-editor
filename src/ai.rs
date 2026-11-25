@@ -10,6 +10,7 @@
 
 pub mod anthropic;
 pub mod http;
+pub mod ignore;
 pub mod message;
 pub mod openai;
 pub mod providers;
@@ -39,6 +40,9 @@ pub struct AiSettings {
     /// Per provider: another URL (a proxy, a remote Ollama, the custom
     /// server's).
     pub providers: BTreeMap<String, ProviderSettings>,
+    /// The model tab completion asks (`edit_prediction_provider: "ai"`):
+    /// a fast one; `model` when unset.
+    pub completion_model: Option<String>,
     /// MCP servers agent sessions get, by name (`agents/mcp.rs`).
     pub mcp_servers: BTreeMap<String, crate::agents::mcp::ServerSettings>,
 }
@@ -70,6 +74,16 @@ impl AiSettings {
             .or_else(|| endpoint.provider.default_model.map(str::to_string))
             .ok_or_else(|| format!("No model chosen for {}: pick one in Settings → AI", endpoint.provider.name))?;
         Ok(Choice { endpoint, model, effort: self.effort })
+    }
+
+    /// What tab completion asks: `completion_model` when set, at low effort.
+    pub fn completion_choice(&self) -> Result<Choice, String> {
+        let mut choice = self.choice()?;
+        if let Some(model) = self.completion_model.clone().filter(|m| !m.trim().is_empty()) {
+            choice.model = model;
+        }
+        choice.effort = Some(Effort::Low);
+        Ok(choice)
     }
 }
 

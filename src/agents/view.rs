@@ -75,6 +75,9 @@ pub struct SessionView {
     files: Arc<Vec<PathBuf>>,
     mentions: Option<(String, Vec<PathBuf>)>,
     mention_task: Option<(String, gpui::Task<()>)>,
+    /// Why the last thing attached wasn't, shown over the composer until
+    /// the next try.
+    pub notice: Option<SharedString>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -107,6 +110,7 @@ impl SessionView {
             files: Arc::default(),
             mentions: None,
             mention_task: None,
+            notice: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
@@ -209,6 +213,37 @@ impl SessionView {
         })
         .detach();
         window.focus(&self.composer.focus_handle(cx));
+    }
+
+    /// ⌘V / Ctrl+V with a picture on the clipboard: it's attached (and the
+    /// editor doesn't paste); anything else pastes as usual.
+    fn paste_image(&mut self, _: &crate::editor::Paste, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(clipboard) = cx.read_from_clipboard() else { return };
+        let image = clipboard.entries().iter().find_map(|entry| match entry {
+            gpui::ClipboardEntry::Image(image) => Some(image.clone()),
+            _ => None,
+        });
+        let Some(image) = image else { return };
+        cx.stop_propagation();
+        let mime = match image.format {
+            gpui::ImageFormat::Png => "image/png",
+            gpui::ImageFormat::Jpeg => "image/jpeg",
+            gpui::ImageFormat::Gif => "image/gif",
+            gpui::ImageFormat::Webp => "image/webp",
+            _ => {
+                self.notice = Some("Agents take PNG, JPEG, GIF and WebP pictures".into());
+                cx.notify();
+                return;
+            }
+        };
+        if image.bytes.len() > super::session::MAX_IMAGE_BYTES {
+            self.notice = Some("The picture is over 5 MB".into());
+            cx.notify();
+            return;
+        }
+        let n = self.context.iter().filter(|c| matches!(c, ContextItem::Image { .. })).count() + 1;
+        self.notice = None;
+        self.add_context(ContextItem::Image { name: format!("Pasted picture {n}"), mime: mime.into(), data: image.bytes.clone().into() }, cx);
     }
 
     /// Tab (and Enter, while suggestions show): the first `@` suggestion.
@@ -880,6 +915,9 @@ impl SessionView {
                     div()
                         .id("agent-composer")
                         .key_context("AgentComposer")
+                        // Before the composer's own paste: a picture on the
+                        // clipboard is attached, text goes on to the editor.
+                        .capture_action(cx.listener(Self::paste_image))
                         .on_action(cx.listener(Self::send))
                         .on_action(cx.listener(Self::accept_suggestion))
                         .on_action(cx.listener(Self::stop))
@@ -892,9 +930,11 @@ impl SessionView {
                         .flex()
                         .flex_col()
                         .gap_1()
+                        .when_some(self.notice.clone(), |el, notice| el.child(div().text_size(px(12.)).text_color(theme.warning).child(notice)))
                         .when(!self.context.is_empty(), |el| {
                             el.child(div().flex().flex_wrap().gap_1().children(self.context.iter().enumerate().map(|(i, item)| {
-                                chip(item.label(), Icon::FileText, &theme).child(
+                                let icon = if matches!(item, ContextItem::Image { .. }) { Icon::Palette } else { Icon::FileText };
+                                chip(item.label(), icon, &theme).child(
                                     div()
                                         .id(SharedString::from(format!("ctx-x-{i}")))
                                         .cursor_pointer()

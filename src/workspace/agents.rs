@@ -342,6 +342,8 @@ impl Workspace {
                 actions.push(add(|ws, view, cx| ws.attach_problems(view, cx), view.clone()));
                 entries.push(MenuEntry::item("Uncommitted Changes (Git Diff)", Icon::GitCompare));
                 actions.push(add(|ws, view, cx| ws.attach_git_diff(view, cx), view.clone()));
+                entries.push(MenuEntry::item("Picture File…", Icon::Palette));
+                actions.push(add(|ws, view, cx| ws.attach_pictures(view, cx), view.clone()));
             }
             MenuKind::More => {
                 entries.push(MenuEntry::item("Copy as Markdown", Icon::Copy));
@@ -693,6 +695,45 @@ impl Workspace {
         }
         let item = ContextItem::Text { label: format!("Problems ({})", lines.len()), text: lines.join("\n") };
         view.update(cx, |v, cx| v.add_context(item, cx));
+    }
+
+    /// Picture File…: PNG, JPEG, GIF or WebP files chosen in the system's
+    /// dialog, read off the UI thread.
+    fn attach_pictures(&mut self, view: &Entity<SessionView>, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: None });
+        let view = view.clone();
+        cx.spawn(async move |_, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else { return };
+            let read = cx
+                .background_executor()
+                .spawn(async move {
+                    paths
+                        .into_iter()
+                        .map(|path| {
+                            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                            let mime = crate::agents::session::image_mime(&path).ok_or_else(|| format!("{name} isn't a PNG, JPEG, GIF or WebP picture"))?;
+                            let data = std::fs::read(&path).map_err(|e| format!("{name}: {e}"))?;
+                            if data.len() > crate::agents::session::MAX_IMAGE_BYTES {
+                                return Err(format!("{name} is over 5 MB"));
+                            }
+                            Ok(ContextItem::Image { name, mime: mime.into(), data: data.into() })
+                        })
+                        .collect::<Vec<Result<ContextItem, String>>>()
+                })
+                .await;
+            view.update(cx, |v, cx| {
+                v.notice = None;
+                for item in read {
+                    match item {
+                        Ok(item) => v.add_context(item, cx),
+                        Err(why) => v.notice = Some(why.into()),
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn attach_git_diff(&mut self, view: &Entity<SessionView>, cx: &mut Context<Self>) {

@@ -533,6 +533,7 @@ enum Menu {
     AiProvider,
     AiModel,
     AiEffort,
+    AiCompletionModel,
     LanguageServer,
     Formatter,
     /// One of an extension's settings (which one: `Preferences::ext_menu`).

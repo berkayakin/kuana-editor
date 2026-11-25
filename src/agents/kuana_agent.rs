@@ -711,7 +711,7 @@ impl Tools<'_> {
         };
         let files = crate::search::project_files(&root);
         let mut out = Vec::new();
-        for file in &files {
+        for file in files.iter().filter(|f| !ai::ignore::excluded(f)) {
             let rel = self.rel(file);
             if glob.as_ref().is_none_or(|g| g.is_match(&rel)) {
                 out.push(rel);
@@ -738,7 +738,8 @@ impl Tools<'_> {
             Some(_) => self.path(input, "path")?,
             None => self.cwd.to_path_buf(),
         };
-        let files = crate::search::project_files(&root);
+        let mut files = crate::search::project_files(&root);
+        files.retain(|f| !ai::ignore::excluded(f));
         let mut lines = Vec::new();
         let label = crate::search::relative_to(self.cwd);
         let end = crate::search::search_project(&label, files, &query, &HashMap::new(), self.cancelled, |found, _| {
@@ -755,8 +756,17 @@ impl Tools<'_> {
         Ok(if text.is_empty() { "No matches".into() } else { text })
     }
 
+    /// Refuses a path an `.aiignore` (or `.cursorignore`) keeps away.
+    fn allowed_path(&self, path: &Path) -> Result<(), String> {
+        if ai::ignore::excluded(path) {
+            return Err(format!("{} is kept away from AI by the project's .aiignore; don't use it", self.rel(path)));
+        }
+        Ok(())
+    }
+
     fn read_file(&self, input: &Value) -> Result<String, String> {
         let path = self.path(input, "path")?;
+        self.allowed_path(&path)?;
         let mut params = json!({ "path": path });
         if let Some(line) = input["line"].as_u64() {
             params["line"] = json!(line);
@@ -797,6 +807,7 @@ impl Tools<'_> {
     /// says, then written through the client.
     fn write(&self, id: &str, name: &str, input: &Value) -> Result<String, String> {
         let path = self.path(input, "path")?;
+        self.allowed_path(&path)?;
         let rel = self.rel(&path);
         let old = match self.request("fs/read_text_file", json!({ "path": path })) {
             Ok(answer) => Some(answer["content"].as_str().unwrap_or_default().to_string()),
@@ -1031,6 +1042,8 @@ mod tests {
         assert_eq!(parts[1], Part::text("<context source=\"/p/a.rs\">\nfn main() {}\n</context>"));
         assert_eq!(parts[2], Part::text("(The user refers to /p/b.rs)"));
         assert_eq!(prompt_parts(&[]), vec![Part::text("(empty message)")]);
+        let picture = prompt_parts(&[json!({ "type": "image", "mimeType": "image/jpeg", "data": "AAA=" })]);
+        assert_eq!(picture, vec![Part::Image { media_type: "image/jpeg".into(), data: "AAA=".into() }]);
     }
 
     #[test]

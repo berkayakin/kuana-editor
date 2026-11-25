@@ -7,6 +7,7 @@ start an agent.
   Copilot and more) work in your project in a tab beside the code. You watch, allow what they ask
   and review what they changed.
 - [Inline Assist](#inline-assist): select code, say how it should change, review the rewrite as a diff.
+- [Tab completion](#tab-completion): code suggested as you type, from your own model.
 - [Commit messages](#commit-messages), [conflicts](#resolving-conflicts) and
   [explanations](#asking-about-code) from the same model.
 - [MCP servers](#mcp-servers) give agents more tools.
@@ -63,8 +64,10 @@ A session opens in a tab beside your code, which you can split, move and keep op
 - **The composer**: **Enter** sends, **Shift+Enter** starts a new line, **Esc** stops the agent.
   Messages you send while it works wait their turn. Type **@** and part of a name to attach a
   project file (Tab, Enter or a click picks the first match). Type **/** for the agent's commands.
-  **+** attaches the current file, the selection, the open files, the problems or the uncommitted
-  changes (Git diff).
+  **+** attaches the current file, the selection, the open files, the problems, the uncommitted
+  changes (Git diff) or a picture file. **⌘V** / **Ctrl+V** with a picture on the clipboard (a
+  screenshot, a design) attaches it too: PNG, JPEG, GIF or WebP, up to 5 MB, for agents that take
+  pictures (Kuana Agent does, on a model that sees images).
 - **Changes**: the bar over the composer counts the files the agent changed. **Review** opens each
   as a diff against what it was before the session touched it. **Keep All** keeps them, and
   **Reject All** puts every file back as it was. Every agent write is one undoable edit in its open
@@ -93,6 +96,10 @@ Kuana's own agent runs in Kuana on the model you chose. It lists and searches th
 commands, and reads the problems Kuana shows (language servers', linters'), something agents in a
 terminal can't see. It follows the project's instructions in `AGENTS.md`, `CLAUDE.md` or
 `.kuana/agent.md`.
+
+Files an `.aiignore` or `.cursorignore` names (gitignore syntax, in the file's folder or any folder
+above it) are kept away from it: it doesn't list, search, read or change them. Tab completion
+doesn't send them either.
 
 Its modes, in the session's header:
 
@@ -131,6 +138,19 @@ the rewrite over your changes; run Inline Assist again.
 In a SQL file with a [database connection](database.md), the model is told the database's kind
 and the tables, views and columns the Database view has read, so "the ten customers who ordered
 most this month" becomes SQL for your schema.
+
+## Tab completion
+
+Kuana can suggest code as you type, as dimmed ghost text, from the model you chose. Set **Settings →
+AI → Edit predictions** to **Your AI model** (`"edit_prediction_provider": "ai"`), and pick a fast,
+inexpensive **Tab completion model** there (`ai.completion_model`; the main model otherwise). A
+moment after you stop typing, Kuana sends the code around the caret and shows the answer: **Tab**
+accepts it, **Esc** or typing something else dismisses it, typing what it suggests keeps the rest,
+and **⌥\\** (**Alt+\\**) asks right away. Each suggestion is one request to your provider, so it
+costs what that request costs (nothing with Ollama or LM Studio). As with Copilot, files that hold
+secrets (`.env`, keys, certificates) are never sent, nor files an `.aiignore` names;
+`"edit_predictions": false` turns it off for a language or a project, and projects in Restricted Mode
+don't get it.
 
 ## Commit messages
 

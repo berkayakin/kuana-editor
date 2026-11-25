@@ -94,9 +94,10 @@ An extension's language brings its own in a `[postfix]` table of its `config.tom
 
 ## Edit predictions
 
-Kuana can show code suggested after the caret as dimmed ghost text, from **GitHub Copilot**. It's
-off until you choose it: Settings → Editor → Edit predictions → GitHub Copilot (or
-`"edit_prediction_provider": "copilot"` in `settings.json`). Your code goes to GitHub only then.
+Kuana can show code suggested after the caret as dimmed ghost text, from **GitHub Copilot** or
+from [your own AI model](ai.md#tab-completion). It's off until you choose one: Settings → AI → Edit
+predictions (or `"edit_prediction_provider": "copilot"` / `"ai"` in `settings.json`). Your code goes
+to GitHub, or to your model's provider, only then. The rest of this section is about Copilot.
 
 - The status bar's **Install Copilot** installs GitHub's Copilot language server
   (`@github/copilot-language-server`, from npm, into Kuana's own folder; one on your PATH is used

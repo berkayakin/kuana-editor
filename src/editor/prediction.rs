@@ -1,4 +1,5 @@
-//! Edit predictions: the code a provider (GitHub Copilot, `lsp::copilot`)
+//! Edit predictions: the code a provider (GitHub Copilot, `lsp::copilot`, or
+//! the model chosen in Settings → AI, asked directly: `ai_prediction`)
 //! suggests after the caret, shown as ghost text until Tab accepts it or
 //! anything else dismisses it. The suggestion's first line sits inline at
 //! the caret, as an inlay (`display_part`), and the rest as block rows under
@@ -27,6 +28,9 @@ use crate::lsp::{
 /// How long after an edit a suggestion is asked for: typing doesn't send a
 /// request per key (Zed waits as long).
 const DEBOUNCE: Duration = Duration::from_millis(75);
+/// The same for your own AI model: each request is a paid one, so a longer
+/// pause in typing.
+const AI_DEBOUNCE: Duration = Duration::from_millis(350);
 
 #[derive(Default)]
 pub(super) struct Predictions {
@@ -134,6 +138,10 @@ impl Editor {
         if !self.predicts(cx) {
             return;
         }
+        if crate::settings::Settings::get(cx).edit_prediction_provider == Some(crate::settings::EditPredictionProvider::Ai) {
+            self.ai_prediction(if delay.is_zero() { delay } else { AI_DEBOUNCE }, cx);
+            return;
+        }
         let Some(server) = self.prediction_server(cx) else { return };
         let Some(path) = self.doc.read(cx).path.clone() else { return };
         let insert_spaces = self.indent_unit != "\t";
@@ -169,6 +177,68 @@ impl Editor {
                 let len = doc.len();
                 server.client.notify("textDocument/didShowCompletion", json!({ "item": item }));
                 e.prediction.shown = Some(Shown { at: head, version, len, skip, text, item, server: Arc::downgrade(&server) });
+                e.prediction.generation += 1;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Asks the model chosen in Settings → AI what goes at the caret, `delay`
+    /// from now (a newer request drops this one, which stops it). Not for
+    /// files that usually hold secrets, files the settings turn it off for or
+    /// an `.aiignore` keeps away, or projects in Restricted Mode.
+    fn ai_prediction(&mut self, delay: Duration, cx: &mut Context<Self>) {
+        let (language, path) = {
+            let doc = self.doc.read(cx);
+            (doc.language, doc.path.clone())
+        };
+        let Some(path) = path else { return };
+        let settings = crate::settings::Settings::get(cx);
+        if crate::lsp::copilot::holds_secrets(&path)
+            || !settings.for_file(language, Some(&path)).edit_predictions
+            || !crate::trust::is_trusted(&path)
+            || crate::ai::ignore::excluded(&path)
+        {
+            return;
+        }
+        let Ok(choice) = settings.ai.clone().unwrap_or_default().completion_choice() else { return };
+        self.prediction.task = Some(cx.spawn(async move |this, cx| {
+            if !delay.is_zero() {
+                cx.background_executor().timer(delay).await;
+            }
+            let Ok(Some((request, head, version, rest))) = this.update(cx, |e, cx| {
+                let doc = e.doc.read(cx);
+                let rope = doc.rope();
+                let head = e.primary_selection().head.min(rope.len_bytes());
+                // Only what the request sends is copied, on character boundaries.
+                let snap = |at: usize| rope.char_to_byte(rope.byte_to_char(at.min(rope.len_bytes())));
+                let before = rope.byte_slice(snap(head.saturating_sub(16_000))..head).to_string();
+                let after = rope.byte_slice(head..snap(head + 4_000)).to_string();
+                let rest = after.split('\n').next().unwrap_or_default().to_string();
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let request = crate::ai::tasks::completion(&name, language.name(), &before, &after);
+                e.predicts(cx).then_some((request, head, doc.version(), rest))
+            }) else {
+                return;
+            };
+            let mut stream = choice.stream(request);
+            let mut reply = String::new();
+            while let Some(event) = futures::StreamExt::next(&mut stream.events).await {
+                match event {
+                    crate::ai::StreamEvent::Text { text, .. } => reply.push_str(&text),
+                    crate::ai::StreamEvent::Error(_) => return,
+                    _ => {}
+                }
+            }
+            let Some(text) = crate::ai::tasks::completion_text(&reply, &rest) else { return };
+            this.update(cx, |e, cx| {
+                let doc = e.doc.read(cx);
+                if doc.version() != version || e.primary_selection().head != head || !e.predicts(cx) {
+                    return;
+                }
+                let len = doc.len();
+                e.prediction.shown = Some(Shown { at: head, version, len, skip: String::new(), text, item: json!({}), server: Weak::new() });
                 e.prediction.generation += 1;
                 cx.notify();
             })
@@ -300,6 +370,46 @@ mod tests {
 
     use super::*;
     use crate::document::Document;
+
+    /// With `"edit_prediction_provider": "ai"`, the model in the settings is
+    /// asked what goes at the caret; its answer shows as ghost text, minus
+    /// what's already after the caret, and Tab puts it in.
+    #[gpui::test]
+    fn your_own_model_suggests_at_the_caret(cx: &mut TestAppContext) {
+        use crate::ai::stream::test_server;
+        crate::trust::set_trust_all(true);
+        let chunk = |v: Value| format!("data: {v}\n\n");
+        let body = [chunk(json!({ "choices": [{ "delta": { "content": "a + b);" }, "finish_reason": "stop" }] })), "data: [DONE]\n\n".to_string()].concat();
+        let server = test_server::start(vec![(200, "text/event-stream", body)]);
+        let settings = crate::settings::Settings::parse(
+            &json!({ "edit_prediction_provider": "ai", "ai": { "provider": "ollama", "model": "big", "completion_model": "fast", "providers": { "ollama": { "url": server.url } } } }).to_string(),
+        )
+        .unwrap();
+        cx.update(|cx| cx.set_global(settings));
+        let text = "fn add(a: i32, b: i32) -> i32 {\n    sum(;\n}\n";
+        let path = std::env::temp_dir().join("kuana-ai-prediction.rs");
+        let editor = cx.new(|cx| Editor::new(Document::from_text(text.into(), Some(path)), cx));
+        let at = "fn add(a: i32, b: i32) -> i32 {\n    sum(".len();
+        editor.update(cx, |e, cx| {
+            e.set_selections(vec![Selection::cursor(at)], 0, cx);
+            e.show_prediction(cx);
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while editor.read_with(cx, |e, cx| e.prediction_inline(cx).is_none()) {
+            assert!(std::time::Instant::now() < deadline, "no suggestion came");
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        editor.update(cx, |e, cx| {
+            // The `;` it wrote again is the line's own; the `)` the line lacks stays.
+            assert_eq!(e.prediction_inline(cx), Some((at, "a + b)")));
+            assert!(e.accept_prediction(cx));
+            assert_eq!(e.doc.read(cx).rope().to_string(), "fn add(a: i32, b: i32) -> i32 {\n    sum(a + b);\n}\n");
+        });
+        let request: Value = serde_json::from_str(&server.requests.lock().unwrap()[0].1).unwrap();
+        assert_eq!(request["model"], "fast", "the completion model, not the main one");
+        assert!(request["messages"][1]["content"].as_str().unwrap().contains("    sum(<cursor/>;\n}"));
+    }
 
     #[gpui::test]
     fn a_suggestion_shows_follows_typing_and_goes_in_with_tab(cx: &mut TestAppContext) {

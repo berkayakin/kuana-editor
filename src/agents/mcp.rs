@@ -150,6 +150,9 @@ impl Client {
     /// Calls a tool: its result as text, and whether it's an error. `cancel`
     /// (the user's Stop) ends the wait.
     pub fn call(&self, tool: &str, arguments: &Value, cancel: &AtomicBool) -> (String, bool) {
+        if cancel.load(Ordering::Relaxed) {
+            return (format!("The call to {tool} was stopped"), true);
+        }
         let params = json!({ "name": tool, "arguments": arguments });
         match wait(self.rpc.request("tools/call", params), CALL_TIMEOUT, cancel) {
             Ok(result) => (result_text(&result), result["isError"].as_bool().unwrap_or(false)),
@@ -226,6 +229,10 @@ mod tests {
             futures::executor::block_on(async {
                 while let Some(message) = incoming.next().await {
                     let Incoming::Request { id, method, params } = message else { continue };
+                    // A tool that never answers.
+                    if params["name"] == "silent" {
+                        continue;
+                    }
                     let answer = match method.as_str() {
                         "initialize" => json!({ "protocolVersion": PROTOCOL_VERSION, "capabilities": { "tools": {} }, "serverInfo": { "name": "fake" } }),
                         "tools/list" if params.get("cursor").is_none() => json!({ "tools": [{ "name": "echo", "description": "Says it back", "inputSchema": { "type": "object" } }], "nextCursor": "2" }),
@@ -250,9 +257,16 @@ mod tests {
         assert_eq!(client.call("echo", &json!({ "text": "hi" }), &go), ("hi".to_string(), false));
         assert_eq!(client.call("fail", &json!({}), &go), ("broken".to_string(), true));
         // Stop ends a call that gets no answer.
-        let stopped = AtomicBool::new(true);
+        let stopped = std::sync::Arc::new(AtomicBool::new(false));
+        let stop = stopped.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            stop.store(true, Ordering::Relaxed);
+        });
         let (text, failed) = client.call("silent", &json!({}), &stopped);
         assert!(failed && text.ends_with("stopped"), "{text}");
+        // One already stopped isn't sent.
+        assert!(client.call("echo", &json!({ "text": "hi" }), &stopped).1);
     }
 
     #[test]

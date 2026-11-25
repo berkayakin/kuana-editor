@@ -117,6 +117,51 @@ pub fn assist_code_so_far(reply: &str) -> String {
     code.trim_start_matches(['\n', '\r']).to_string()
 }
 
+/// The most of the text before the caret a completion request sends, and
+/// of the text after it.
+const COMPLETION_BEFORE: usize = 8_000;
+const COMPLETION_AFTER: usize = 2_000;
+
+/// Tab completion's request: the code before and after the caret; the reply
+/// is the text to insert there.
+pub fn completion(path: &str, language: &str, before: &str, after: &str) -> Request {
+    let mut start = before.len().saturating_sub(COMPLETION_BEFORE);
+    while !before.is_char_boundary(start) {
+        start += 1;
+    }
+    let mut end = after.len().min(COMPLETION_AFTER);
+    while !after.is_char_boundary(end) {
+        end -= 1;
+    }
+    let system = "You are a code completion engine in Kuana, a code editor. Reply with only the text to insert at \
+                  <cursor/>: the most likely continuation of what's being written there, usually the rest of the \
+                  line or the next few lines (at most 15), in the file's language, style and indentation. Never \
+                  repeat text that's already before or after the cursor. No explanation, no Markdown fences. If \
+                  nothing sensible fits, reply with nothing.";
+    let user = format!("<file path=\"{path}\" language=\"{language}\">\n{}<cursor/>{}\n</file>", &before[start..], &after[..end]);
+    let mut request = Request::simple("", system, user);
+    request.max_tokens = 400;
+    request.effort = Some(Effort::Low);
+    request
+}
+
+/// The ghost text in a completion reply, for a caret with `rest` after it on
+/// its line: fences and an echoed cursor tag removed; text the reply repeats
+/// of the rest of the line dropped from its end; several lines only where the
+/// line has nothing after the caret (the first line otherwise). None when
+/// nothing's left.
+pub fn completion_text(reply: &str, rest: &str) -> Option<String> {
+    let text = strip_fences(reply).replace("<cursor/>", "").replace("\r\n", "\n");
+    let text = text.trim_end();
+    let rest = rest.trim_end();
+    let text = match text.strip_suffix(rest) {
+        Some(head) if !rest.is_empty() => head,
+        _ => text,
+    };
+    let text = if rest.trim().is_empty() { text } else { text.split('\n').next().unwrap_or_default() };
+    (!text.trim().is_empty()).then(|| text.to_string())
+}
+
 /// A commit message request: `diff` is what's committed (staged, else all
 /// changes), `recent` the repository's last subjects, newest first, `notes`
 /// what the user had typed in the message box (a hint, maybe empty).
@@ -290,6 +335,28 @@ mod tests {
         assert_eq!(conflict_resolution("```python\na = 3\n```").as_deref(), Some("a = 3\n"));
         assert_eq!(conflict_resolution("\n").as_deref(), Some(""));
         assert_eq!(conflict_resolution("<<<<<<< HEAD\na\n=======\nb\n>>>>>>> x"), None);
+    }
+
+    #[test]
+    fn completions_take_the_text_around_the_caret() {
+        let request = completion("a.rs", "Rust", "fn main() {\n    let x = ", ";\n}\n");
+        let user = request.messages[0].text();
+        assert!(user.contains("fn main() {\n    let x = <cursor/>;\n}\n"), "{user}");
+        assert_eq!(request.effort, Some(Effort::Low));
+        let long = "é".repeat(10_000);
+        let user = completion("a.txt", "Text", &long, &long).messages[0].text();
+        assert!(user.len() < COMPLETION_BEFORE + COMPLETION_AFTER + 200);
+    }
+
+    #[test]
+    fn completion_replies_fit_the_line() {
+        assert_eq!(completion_text("```rust\n42\n```", ";").as_deref(), Some("42"));
+        // The rest of the line, written again, isn't inserted twice.
+        assert_eq!(completion_text("compute(a, b);", ";").as_deref(), Some("compute(a, b)"));
+        // Several lines only at the line's end.
+        assert_eq!(completion_text("a\nb", "").as_deref(), Some("a\nb"));
+        assert_eq!(completion_text("a\nb", ")").as_deref(), Some("a"));
+        assert_eq!(completion_text("  \n", ""), None);
     }
 
     #[test]

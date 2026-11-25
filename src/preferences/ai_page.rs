@@ -181,6 +181,28 @@ impl Preferences {
                 setting_row("URL", Some(format!("Its API's address; empty for {}.", info.url).into()), url_control, None, stacked, &theme).into_any_element(),
             );
 
+            // ---- Tab completion's model (from the same list; none: the main one)
+            if !listed.is_empty() {
+                let chosen = settings.completion_model.clone();
+                let mut options: Vec<(SharedString, bool)> = vec![("Same as the model above".into(), chosen.is_none())];
+                options.extend(listed.iter().map(|(id, name)| (SharedString::from(if id == name { id.clone() } else { format!("{name} ({id})") }), chosen.as_deref() == Some(id))));
+                let choices: Vec<Option<String>> = std::iter::once(None).chain(listed.iter().map(|(id, _)| Some(id.clone()))).collect();
+                let label: SharedString = chosen.clone().unwrap_or_else(|| "Same as the model above".into()).into();
+                let control = self.dropdown(Menu::AiCompletionModel, label, px(300.), options, cx, move |this, ix, _, cx| {
+                    let choice = choices.get(ix).cloned().flatten();
+                    this.write_ai(cx, |map| match choice {
+                        Some(id) => {
+                            map.insert("completion_model".into(), json!(id));
+                        }
+                        None => {
+                            map.remove("completion_model");
+                        }
+                    });
+                });
+                let note = "For tab completion with “Your AI model” (Edit predictions below): a fast, inexpensive one is best.";
+                rows.push(setting_row("Tab completion model", Some(note.into()), control, None, stacked, &theme).into_any_element());
+            }
+
             // ---- Effort
             let efforts = [None, Some(ai::Effort::Low), Some(ai::Effort::Medium), Some(ai::Effort::High), Some(ai::Effort::Xhigh), Some(ai::Effort::Max)];
             let effort_options: Vec<(SharedString, bool)> =

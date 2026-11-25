@@ -90,6 +90,22 @@ pub enum ContextItem {
     Selection { path: PathBuf, lines: (usize, usize), text: String },
     /// Anything else Kuana gathered (the problems, a Git diff, a run's output).
     Text { label: String, text: String },
+    /// A picture (pasted, or a file): its name, MIME type and bytes.
+    Image { name: String, mime: String, data: Arc<[u8]> },
+}
+
+/// The largest picture sent (providers refuse bigger ones).
+pub const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+/// The MIME type of a picture models take, by its file suffix.
+pub fn image_mime(path: &std::path::Path) -> Option<&'static str> {
+    match path.extension()?.to_string_lossy().to_lowercase().as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
 }
 
 impl ContextItem {
@@ -99,15 +115,25 @@ impl ContextItem {
             ContextItem::File { path, .. } => name(path),
             ContextItem::Selection { path, lines: (a, b), .. } if a == b => format!("{}:{a}", name(path)),
             ContextItem::Selection { path, lines: (a, b), .. } => format!("{}:{a}-{b}", name(path)),
-            ContextItem::Text { label, .. } => label.clone(),
+            ContextItem::Text { label, .. } | ContextItem::Image { name: label, .. } => label.clone(),
         }
     }
 
-    fn block(&self, embedded: bool) -> Value {
+    /// As a prompt's content block: embedded (`resource`) where the agent
+    /// takes files, else text; a picture as an image where it takes those.
+    fn block(&self, embedded: bool, images: bool) -> Value {
+        if let ContextItem::Image { name, mime, data } = self {
+            return if images {
+                json!({ "type": "image", "mimeType": mime, "data": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data) })
+            } else {
+                json!({ "type": "text", "text": format!("[The user attached a picture, {name}, but this agent doesn't take pictures.]") })
+            };
+        }
         let (uri, text) = match self {
             ContextItem::File { path, text } => (format!("file://{}", path.display()), text.clone()),
             ContextItem::Selection { path, lines: (a, b), text } => (format!("file://{}#L{a}-L{b}", path.display()), text.clone()),
             ContextItem::Text { label, text } => (format!("kuana:{}", label.replace(' ', "-").to_lowercase()), text.clone()),
+            ContextItem::Image { .. } => unreachable!("answered above"),
         };
         if embedded {
             json!({ "type": "resource", "resource": { "uri": uri, "text": text, "mimeType": "text/plain" } })
@@ -161,6 +187,8 @@ pub struct Session {
     agent: Option<Arc<Agent>>,
     acp_session: Option<String>,
     embedded_context: bool,
+    /// Whether the agent takes pictures in a prompt.
+    takes_images: bool,
     /// While `session/load` replays the conversation, which the saved
     /// transcript already holds.
     replaying: bool,
@@ -231,6 +259,7 @@ impl Session {
             agent: None,
             acp_session,
             embedded_context: false,
+            takes_images: false,
             replaying: false,
             // Turns go on from the saved transcript's (`turn_of` counts them).
             turn: user_messages,
@@ -353,6 +382,7 @@ impl Session {
             let agent = Arc::new(agent);
             let can_load = agent.init.agent_capabilities.load_session;
             let embedded = agent.init.agent_capabilities.prompt_capabilities.embedded_context;
+            let images = agent.init.agent_capabilities.prompt_capabilities.image;
             let auth: Vec<AuthMethod> = agent.init.auth_methods.iter().filter_map(|m| auth_method(serde_json::to_value(m).ok()?)).collect();
             let pump = cx.spawn({
                 let (this, gone) = (this.clone(), Arc::downgrade(&agent));
@@ -369,6 +399,7 @@ impl Session {
             this.update(cx, |s, _| {
                 s.agent = Some(agent.clone());
                 s.embedded_context = embedded;
+                s.takes_images = images;
                 s.auth_methods = auth;
                 s.pump = Some(pump);
             })
@@ -572,7 +603,7 @@ impl Session {
     /// where the agent takes them, else text).
     fn blocks(&self, text: &str, context: &[ContextItem]) -> Vec<Value> {
         let mut blocks = vec![json!({ "type": "text", "text": text })];
-        blocks.extend(context.iter().map(|c| c.block(self.embedded_context)));
+        blocks.extend(context.iter().map(|c| c.block(self.embedded_context, self.takes_images)));
         blocks
     }
 
@@ -1226,8 +1257,14 @@ read l"#;
     fn context_items_label_and_embed() {
         let sel = ContextItem::Selection { path: "/p/a.rs".into(), lines: (3, 5), text: "x".into() };
         assert_eq!(sel.label(), "a.rs:3-5");
-        assert_eq!(sel.block(true)["resource"]["uri"], "file:///p/a.rs#L3-L5");
-        assert!(sel.block(false)["text"].as_str().unwrap().starts_with("<context source=\"file:///p/a.rs#L3-L5\">"));
+        assert_eq!(sel.block(true, true)["resource"]["uri"], "file:///p/a.rs#L3-L5");
+        assert!(sel.block(false, true)["text"].as_str().unwrap().starts_with("<context source=\"file:///p/a.rs#L3-L5\">"));
+        let image = ContextItem::Image { name: "shot.png".into(), mime: "image/png".into(), data: Arc::from(&b"png"[..]) };
+        assert_eq!(image.label(), "shot.png");
+        assert_eq!(image.block(true, true), json!({ "type": "image", "mimeType": "image/png", "data": "cG5n" }));
+        assert!(image.block(true, false)["text"].as_str().unwrap().contains("doesn't take pictures"));
+        assert_eq!(image_mime(std::path::Path::new("a/B.JPG")), Some("image/jpeg"));
+        assert_eq!(image_mime(std::path::Path::new("a.svg")), None);
         assert_eq!(ContextItem::Text { label: "Problems".into(), text: "".into() }.label(), "Problems");
     }
 }

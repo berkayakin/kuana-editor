@@ -37,7 +37,7 @@ pub fn wanted(language: Language, path: &Path, cx: &App) -> bool {
 /// Files whose text shouldn't leave the computer: environment files
 /// (`.env`, `.env.local`), keys and certificates, credentials for package
 /// registries.
-fn holds_secrets(path: &Path) -> bool {
+pub(crate) fn holds_secrets(path: &Path) -> bool {
     let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     name == ".env" || name.starts_with(".env.") || [".netrc", ".npmrc", ".pypirc"].contains(&name.as_str()) || ["pem", "key", "p12", "pfx"].contains(&ext.as_str())
