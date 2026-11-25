@@ -192,6 +192,18 @@ impl Preferences {
             );
         }
 
+        // ---- MCP servers (edited in settings.json)
+        let servers: Vec<String> = settings.mcp_servers.keys().cloned().collect();
+        let mcp_note: SharedString = if servers.is_empty() {
+            "Tools agent sessions may use, from programs speaking the Model Context Protocol. Add them under \"ai\" → \"mcp_servers\" in settings.json.".into()
+        } else {
+            format!("{}: given to every agent session (Kuana Agent asks before each tool call).", servers.join(", ")).into()
+        };
+        let mcp_control = text_button("ai-mcp-edit", "Edit in settings.json", false, cx)
+            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(PreferencesEvent::OpenSettingsFile)))
+            .into_any_element();
+        let mcp_rows = vec![setting_row("MCP Servers", Some(mcp_note), mcp_control, None, stacked, &theme).into_any_element()];
+
         // ---- Agents
         let agent_rows = self.render_agent_rows(&theme, cx);
         let predictions = vec![self.render_setting(Setting::EditPredictions, window, cx)];
@@ -199,6 +211,7 @@ impl Preferences {
         self.body()
             .child(section("Model", rows, &theme))
             .child(section("Agents", agent_rows, &theme))
+            .child(section("Tools", mcp_rows, &theme))
             .child(section(Setting::EditPredictions.section(), predictions, &theme))
             .child(section(Setting::ClaudeCode.section(), terminal_agents, &theme))
     }

@@ -3,6 +3,7 @@
 
 pub mod history;
 pub mod kuana_agent;
+pub mod mcp;
 pub mod mentions;
 pub mod session;
 pub mod sidebar;

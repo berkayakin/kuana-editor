@@ -1351,7 +1351,9 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
   // system keychain (Settings → AI), or come from the provider's environment
   // variable (ANTHROPIC_API_KEY, OPENAI_API_KEY…).
   // "ai": { "provider": "anthropic", "model": "claude-opus-5-5", "effort": "medium",
-  //         "providers": { "ollama": { "url": "http://localhost:11434/v1" } } },
+  //         "providers": { "ollama": { "url": "http://localhost:11434/v1" } },
+  //         // MCP servers every agent session gets (their tools):
+  //         "mcp_servers": { "github": { "command": "github-mcp-server", "args": ["stdio"], "env": {} } } },
 
   // File icons from an extension's icon theme (Zed's format), by name.
   // "icon_theme": "Soft Charmed Icons",

@@ -12,6 +12,11 @@
 //! Modes: Ask (asks before each edit and command), Edit (edits freely, asks
 //! before commands), Plan (reads only). "Always allow" lasts the session.
 //!
+//! MCP servers the client names (`mcpServers`, from `ai.mcp_servers`) start
+//! on the session's first prompt (`agents/mcp.rs`); their tools join the
+//! agent's own as `mcp__<server>__<tool>`, each call asked about (outside
+//! Plan mode, where they're left out) unless always allowed.
+//!
 //! Each session's conversation with the model (tool calls and results
 //! included) is kept in `<config>/agents/kuana/<session>.json` after every
 //! turn, so `session/load` continues it after Kuana restarts. Kuana keeps the
@@ -30,6 +35,7 @@ use std::{
 use futures::{StreamExt as _, channel::oneshot};
 use serde_json::{Value, json};
 
+use super::mcp;
 use crate::acp::rpc::{Connection, Incoming, RpcError};
 use crate::ai::{self, Message, Part, Role, StopReason, StreamEvent, ToolSpec};
 
@@ -88,9 +94,13 @@ struct Session {
     mode: Mode,
     model: Option<String>,
     models: Vec<(String, String)>,
-    /// What "always allow" covered: `edit`, or `run:<program>`.
+    /// What "always allow" covered: `edit`, `run:<program>`, `mcp:<server>/<tool>`.
     allowed: HashSet<String>,
     cancelled: Arc<AtomicBool>,
+    /// The MCP servers it was given, and the running ones (None until the
+    /// first prompt starts them).
+    mcp_settings: Vec<(String, mcp::ServerSettings)>,
+    mcp: Option<Vec<Arc<mcp::Client>>>,
 }
 
 type Sessions = Arc<Mutex<HashMap<String, Session>>>;
@@ -186,6 +196,8 @@ fn handle(conn: &Connection, sessions: &Sessions, choose: &Chooser, method: &str
                 models,
                 allowed: HashSet::new(),
                 cancelled: Arc::default(),
+                mcp_settings: mcp::from_acp(&params["mcpServers"]),
+                mcp: None,
             };
             let options = config_options(&session, &choice.model);
             sessions.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), session);
@@ -205,6 +217,8 @@ fn handle(conn: &Connection, sessions: &Sessions, choose: &Chooser, method: &str
                 models: choice.endpoint.models().unwrap_or_default(),
                 allowed: HashSet::new(),
                 cancelled: Arc::default(),
+                mcp_settings: mcp::from_acp(&params["mcpServers"]),
+                mcp: None,
             };
             let (mode, options) = (session.mode, config_options(&session, &choice.model));
             sessions.lock().unwrap_or_else(|e| e.into_inner()).insert(session_id, session);
@@ -400,6 +414,7 @@ fn tool_specs(mode: Mode) -> Vec<ToolSpec> {
 /// Runs model calls and tools until the model ends its turn; the stop
 /// reason for `session/prompt`.
 fn run_turn(conn: &Connection, sessions: &Sessions, session_id: &str, choice: &ai::Choice, cancelled: &Arc<AtomicBool>) -> Result<&'static str, RpcError> {
+    start_mcp(conn, sessions, session_id)?;
     for _ in 0..MAX_STEPS {
         if cancelled.load(Ordering::Relaxed) {
             return Ok("cancelled");
@@ -407,11 +422,15 @@ fn run_turn(conn: &Connection, sessions: &Sessions, session_id: &str, choice: &a
         let (request, cwd, mode) = {
             let sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
             let session = sessions.get(session_id).ok_or_else(not_found)?;
+            let mut tools = tool_specs(session.mode);
+            if session.mode != Mode::Plan {
+                tools.extend(mcp_specs(session.mcp.as_deref().unwrap_or_default()));
+            }
             let request = ai::Request {
                 model: choice.model.clone(),
                 system: system_prompt(&session.cwd, session.mode),
                 messages: session.messages.clone(),
-                tools: tool_specs(session.mode),
+                tools,
                 max_tokens: MAX_TOKENS,
                 effort: choice.effort,
             };
@@ -472,6 +491,53 @@ fn run_turn(conn: &Connection, sessions: &Sessions, session_id: &str, choice: &a
         });
     }
     Ok("max_turn_requests")
+}
+
+/// Starts the session's MCP servers the first time (side by side), telling
+/// the user (as a thought) about those that didn't start.
+fn start_mcp(conn: &Connection, sessions: &Sessions, session_id: &str) -> Result<(), RpcError> {
+    let wanted = with_session(sessions, session_id, |s| s.mcp.is_none().then(|| (s.mcp_settings.clone(), s.cwd.clone())))?;
+    let Some((servers, cwd)) = wanted else { return Ok(()) };
+    let starting: Vec<_> = servers
+        .into_iter()
+        .map(|(name, settings)| {
+            let cwd = cwd.clone();
+            std::thread::spawn(move || mcp::Client::spawn(&name, &settings, &cwd))
+        })
+        .collect();
+    let mut clients = Vec::new();
+    for started in starting {
+        match started.join() {
+            Ok(Ok(client)) => clients.push(Arc::new(client)),
+            Ok(Err(error)) => {
+                conn.notify("session/update", json!({ "sessionId": session_id, "update": { "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": format!("{error}\n") } } }));
+            }
+            Err(_) => {}
+        }
+    }
+    with_session(sessions, session_id, |s| s.mcp = Some(clients))
+}
+
+/// A tool's name for the model: `mcp__<server>__<tool>`, in the characters
+/// providers allow, at most 64 long.
+fn mcp_name(server: &str, tool: &str) -> String {
+    let clean = |s: &str| s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect::<String>();
+    let mut name = format!("mcp__{}__{}", clean(server), clean(tool));
+    name.truncate(64);
+    name
+}
+
+fn mcp_specs(clients: &[Arc<mcp::Client>]) -> Vec<ToolSpec> {
+    clients
+        .iter()
+        .flat_map(|client| {
+            client.tools.iter().map(|tool| ToolSpec {
+                name: mcp_name(&client.name, &tool.name),
+                description: format!("{} (from the MCP server {})", tool.description, client.name),
+                schema: tool.schema.clone(),
+            })
+        })
+        .collect()
 }
 
 fn with_session<T>(sessions: &Sessions, id: &str, f: impl FnOnce(&mut Session) -> T) -> Result<T, RpcError> {
@@ -536,6 +602,7 @@ impl Tools<'_> {
             "get_problems" => self.get_problems(input),
             "edit_file" | "write_file" if self.mode != Mode::Plan => self.write(id, name, input),
             "run_command" if self.mode != Mode::Plan => self.run_command(id, input),
+            _ if name.starts_with("mcp__") && self.mode != Mode::Plan => self.call_mcp(id, name, input),
             _ => Err(format!("No tool named {name} here")),
         };
         let (text, failed) = match result {
@@ -544,7 +611,7 @@ impl Tools<'_> {
         };
         // The terminal's or diff's content stays; a text result shows short.
         let mut update = json!({ "sessionUpdate": "tool_call_update", "toolCallId": id, "status": if failed { "failed" } else { "completed" } });
-        if failed || matches!(name, "list_files" | "search" | "get_problems") {
+        if failed || matches!(name, "list_files" | "search" | "get_problems") || name.starts_with("mcp__") {
             let shown: String = text.lines().take(40).collect::<Vec<_>>().join("\n");
             update["content"] = json!([{ "type": "content", "content": { "type": "text", "text": shown } }]);
         }
@@ -564,7 +631,10 @@ impl Tools<'_> {
             "edit_file" => (format!("Edit `{rel}`"), "edit", locations),
             "write_file" => (format!("Write `{rel}`"), "edit", locations),
             "run_command" => (format!("Run `{}`", input["command"].as_str().unwrap_or_default()), "execute", json!([])),
-            other => (other.to_string(), "other", json!([])),
+            other => match self.mcp_tool(other) {
+                Some((client, tool)) => (format!("Use {tool} ({})", client.name), "other", json!([])),
+                None => (other.to_string(), "other", json!([])),
+            },
         }
     }
 
@@ -698,6 +768,27 @@ impl Tools<'_> {
             Some(_) => format!("Edited {rel}"),
             None => format!("Created {rel} ({lines} lines)"),
         })
+    }
+
+    /// The MCP server and tool a model's tool name stands for.
+    fn mcp_tool(&self, name: &str) -> Option<(Arc<mcp::Client>, String)> {
+        let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let clients = sessions.get(self.session_id)?.mcp.as_ref()?;
+        clients.iter().find_map(|client| client.tools.iter().find(|t| mcp_name(&client.name, &t.name) == name).map(|t| (client.clone(), t.name.clone())))
+    }
+
+    fn call_mcp(&self, id: &str, name: &str, input: &Value) -> Result<String, String> {
+        let (client, tool) = self.mcp_tool(name).ok_or_else(|| format!("No tool named {name} here"))?;
+        let key = format!("mcp:{}/{tool}", client.name);
+        if !self.allowed(&key) {
+            let arguments = serde_json::to_string_pretty(input).unwrap_or_default();
+            let content = json!([{ "type": "content", "content": { "type": "text", "text": arguments } }]);
+            self.ask(id, &format!("Use {tool} ({})", client.name), "other", content, &format!("Always allow {tool}"), &key)?;
+        }
+        match client.call(&tool, input) {
+            (text, false) => Ok(text),
+            (text, true) => Err(text),
+        }
     }
 
     fn allowed(&self, key: &str) -> bool {

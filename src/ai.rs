@@ -39,6 +39,8 @@ pub struct AiSettings {
     /// Per provider: another URL (a proxy, a remote Ollama, the custom
     /// server's).
     pub providers: BTreeMap<String, ProviderSettings>,
+    /// MCP servers agent sessions get, by name (`agents/mcp.rs`).
+    pub mcp_servers: BTreeMap<String, crate::agents::mcp::ServerSettings>,
 }
 
 #[derive(Deserialize, JsonSchema, Default, Clone, PartialEq, Debug)]

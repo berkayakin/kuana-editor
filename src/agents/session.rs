@@ -174,6 +174,8 @@ pub struct Session {
     /// A prompt sent before the agent was ready: made into content blocks
     /// once it's connected, when it's known whether it takes embedded files.
     pending_prompt: Option<(String, Vec<ContextItem>)>,
+    /// The MCP servers the agent was given (ACP's `mcpServers`).
+    mcp_servers: Vec<Value>,
     permissions: HashMap<String, Responder>,
     requests: HashMap<u64, Responder>,
     next_request: u64,
@@ -237,6 +239,7 @@ impl Session {
             replaying: false,
             turn: 0,
             pending_prompt: None,
+            mcp_servers: Vec::new(),
             permissions: HashMap::new(),
             requests: HashMap::new(),
             next_request: 0,
@@ -314,6 +317,8 @@ impl Session {
         self.state = State::Connecting;
         let launcher = self.launcher.clone();
         let (cwd, previous) = (self.cwd.clone(), self.acp_session.clone());
+        // The MCP servers as the settings have them now.
+        self.mcp_servers = super::mcp::acp_servers(&crate::settings::Settings::get(cx).ai.clone().unwrap_or_default().mcp_servers);
         self.connecting = Some(cx.spawn(async move |this, cx| {
             let connected = match launcher {
                 Launcher::Process(launch) => cx.background_executor().spawn(async move { Agent::spawn(&launch).await }).await,
@@ -360,12 +365,13 @@ impl Session {
     /// Opens the agent's side: loads the earlier session when it can, else a new one.
     fn open_session(&mut self, previous: Option<String>, cwd: PathBuf, cx: &mut Context<Self>) {
         let Some(agent) = self.agent.clone() else { return };
+        let mcp = self.mcp_servers.clone();
         let loading = previous.is_some();
         self.replaying = loading;
         self.connecting = Some(cx.spawn(async move |this, cx| {
             let opened = match &previous {
-                Some(id) => agent.load_session(id, &cwd, Vec::new()).await.map(|r| (id.clone(), r.modes, r.config_options)),
-                None => agent.new_session(&cwd, Vec::new()).await.map(|r| (r.session_id.to_string(), r.modes, r.config_options)),
+                Some(id) => agent.load_session(id, &cwd, mcp).await.map(|r| (id.clone(), r.modes, r.config_options)),
+                None => agent.new_session(&cwd, mcp).await.map(|r| (r.session_id.to_string(), r.modes, r.config_options)),
             };
             this.update(cx, |s, cx| {
                 s.replaying = false;
@@ -945,7 +951,7 @@ mod tests {
             (200, "application/json", json!({ "data": [{ "id": "claude-opus-5-5" }] }).to_string()),
             (200, "text/event-stream", tool_turn("t1", "read_file", json!({ "path": "a.txt" }))),
             (200, "text/event-stream", tool_turn("t2", "edit_file", json!({ "path": "a.txt", "old_text": "hello", "new_text": "goodbye" }))),
-            (200, "text/event-stream", tool_turn("t3", "run_command", json!({ "command": "printf ran" }))),
+            (200, "text/event-stream", tool_turn("t3", "run_command", json!({ "command": "echo ran" }))),
             (200, "text/event-stream", sse(vec![
                 ("content_block_start", json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } })),
                 ("content_block_delta", json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "Done." } })),
@@ -1017,9 +1023,10 @@ mod tests {
 
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "goodbye world\n");
         let first: Value = serde_json::from_str(&server.requests.lock().unwrap()[1].1).unwrap();
-        let embedded = format!("<context source=\"{}\">\nbe brief\n</context>", dir.join("notes.md").display());
+        // Embedded: Kuana's agent names its file by path, not as a URL in text.
         let parts = first["messages"][0]["content"].as_array().unwrap();
-        assert!(parts.iter().any(|p| p["text"] == embedded.as_str()), "{first}");
+        let embedded = parts.iter().filter_map(|p| p["text"].as_str()).find(|t| t.ends_with("notes.md\">\nbe brief\n</context>"));
+        assert!(embedded.is_some_and(|t| !t.contains("file://")), "{first}");
         assert_eq!(needs_you.get(), 2, "the edit and the command asked");
         session.read_with(cx, |s, _| {
             let tools: Vec<(&str, Status)> = s.transcript.entries.iter().filter_map(|e| match e {
@@ -1036,7 +1043,7 @@ mod tests {
                 crate::agents::transcript::ToolContent::Terminal { id } => Some(id.clone()),
                 _ => None,
             }).expect("the command's output shows in its card");
-            assert_eq!(s.terminals.shown(&terminal).unwrap().0, "ran");
+            assert_eq!(s.terminals.shown(&terminal).unwrap().0.trim(), "ran");
             assert_eq!(s.changes.len(), 1);
             assert_eq!(s.changes[0].before.as_deref(), Some("hello world\n"));
         });
@@ -1078,6 +1085,73 @@ mod tests {
         drop(requests);
         history::delete(&id).unwrap();
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Kuana's agent uses an MCP server from the settings: it starts on the
+    /// first prompt, its tool is offered to the model, asked about, called.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn kuana_agent_calls_mcp_tools(cx: &mut gpui::TestAppContext) {
+        use crate::ai::stream::test_server;
+        use gpui::AppContext as _;
+
+        // An MCP server in `sh`: canned answers, in the order the client asks.
+        let script = r#"read l; echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"t"}}}'
+read l; read l; echo '{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"forecast","description":"The weather","inputSchema":{"type":"object"}}]}}'
+read l; echo '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"sunny"}]}}'
+read l"#;
+        let settings = crate::settings::Settings::parse(&json!({ "ai": { "mcp_servers": { "weather": { "command": "sh", "args": ["-c", script] } } } }).to_string()).unwrap();
+        cx.update(|cx| cx.set_global(settings));
+        let sse = |events: Vec<(&str, Value)>| events.into_iter().map(|(n, d)| format!("event: {n}\ndata: {d}\n\n")).collect::<String>();
+        let server = test_server::start(vec![
+            (200, "application/json", json!({ "data": [] }).to_string()),
+            (200, "text/event-stream", sse(vec![
+                ("content_block_start", json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "tool_use", "id": "t1", "name": "mcp__weather__forecast", "input": {} } })),
+                ("content_block_delta", json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "{\"city\":\"Warsaw\"}" } })),
+                ("message_delta", json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" } })),
+            ])),
+            (200, "text/event-stream", sse(vec![
+                ("content_block_start", json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } })),
+                ("content_block_delta", json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "It's sunny." } })),
+                ("message_delta", json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" } })),
+            ])),
+        ]);
+        let url = server.url.clone();
+        let choose: crate::agents::kuana_agent::Chooser = Arc::new(move || {
+            let endpoint = crate::ai::Endpoint { provider: crate::ai::providers::info("anthropic").unwrap(), url: url.clone(), key: Some("k".into()) };
+            Ok(crate::ai::Choice { endpoint, model: "claude-opus-5-5".into(), effort: None })
+        });
+        let session = cx.new(|_| Session::new("kuana".into(), "Kuana Agent".into(), std::env::temp_dir(), Launcher::Kuana(choose)));
+        session.update(cx, |s, cx| s.send("Weather in Warsaw?".into(), Vec::new(), cx));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            cx.run_until_parked();
+            let waiting: Option<String> = session.read_with(cx, |s, _| {
+                s.transcript.entries.iter().find_map(|e| match e {
+                    Entry::Tool(t) if t.permission.as_ref().is_some_and(|p| p.chosen.is_none()) => Some(t.id.clone()),
+                    _ => None,
+                })
+            });
+            if let Some(id) = waiting {
+                session.update(cx, |s, cx| s.answer_permission(&id, "allow", cx));
+            }
+            if session.read_with(cx, |s, _| s.state == State::Idle && s.transcript.entries.iter().any(|e| matches!(e, Entry::Assistant { text } if text == "It's sunny."))) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the turn didn't end");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        session.read_with(cx, |s, _| {
+            let tool = s.transcript.tool("t1").expect("the MCP call shows");
+            assert_eq!((tool.title.as_str(), tool.status), ("Use forecast (weather)", crate::agents::transcript::Status::Done));
+        });
+        let requests = server.requests.lock().unwrap();
+        let first: Value = serde_json::from_str(&requests[1].1).unwrap();
+        assert!(first["tools"].as_array().unwrap().iter().any(|t| t["name"] == "mcp__weather__forecast"), "offered to the model");
+        let second: Value = serde_json::from_str(&requests[2].1).unwrap();
+        assert!(second.to_string().contains("sunny"), "{second}");
+        drop(requests);
+        session.update(cx, |s, _| s.shut_down());
     }
 
     #[test]
