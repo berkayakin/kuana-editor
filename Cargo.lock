@@ -4164,6 +4164,7 @@ dependencies = [
  "image",
  "keyring",
  "kuana-core",
+ "kuana-os",
  "libc",
  "libloading",
  "minisign-verify",
@@ -4184,6 +4185,7 @@ dependencies = [
  "percent-encoding",
  "polling",
  "pulldown-cmark",
+ "raw-window-handle",
  "regex",
  "ropey",
  "rumdl",
@@ -4239,6 +4241,20 @@ dependencies = [
  "regex",
  "ropey",
  "serde_json",
+]
+
+[[package]]
+name = "kuana-os"
+version = "0.3.2"
+dependencies = [
+ "block2",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-foundation",
+ "objc2-foundation",
+ "objc2-user-notifications",
+ "windows 0.61.3",
+ "zbus",
 ]
 
 [[package]]
@@ -5135,6 +5151,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
 dependencies = [
  "bitflags 2.13.2",
+ "block2",
  "objc2",
  "objc2-core-foundation",
 ]
@@ -5184,6 +5201,18 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation",
  "objc2-quartz-core",
+]
+
+[[package]]
+name = "objc2-user-notifications"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
+dependencies = [
+ "bitflags 2.13.2",
+ "block2",
+ "objc2",
+ "objc2-foundation",
 ]
 
 [[package]]

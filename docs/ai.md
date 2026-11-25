@@ -76,6 +76,14 @@ Your messages sit on the right, the agent's answers across the column, as in Cla
 - **Permissions**: when the agent asks before doing something, the card offers the agent's choices
   (Allow, Always Allow, Reject…). A session that waits for you lights its tab and its row, shows
   the question even if you'd scrolled up, and a toast tells you if you're elsewhere.
+- **Notifications**: when a session finishes or needs your answer while you're in another window
+  or app, the system tells you (as Claude's desktop app does) and the Dock icon bounces; clicking
+  the notification brings the session back. macOS asks once whether Kuana may notify, when you
+  start your first session. On Linux the desktop's notifications show it (a click isn't heard);
+  on Windows the taskbar button flashes. Settings → AI → Sessions → **Notify me** turns it off.
+- **Staying awake**: while a session works, the computer doesn't fall asleep from being idle (the
+  display may still turn off), so a long task isn't cut short. Settings → AI → Sessions → **Keep
+  the computer awake** turns it off.
 - **The header**: the session's title and agent, how full its context is, and **⋯** for Copy as
   Markdown, Review Changes and Delete.
 - **The composer**: **Enter** sends, **Shift+Enter** starts a new line, **Esc** stops the agent.
@@ -84,11 +92,17 @@ Your messages sit on the right, the agent's answers across the column, as in Cla
   Plan) and, by the send button, the model with its effort and switches (Fast mode…), each a menu
   that says what its choices do. Type **@** and part of a name to attach a project file, or **/**
   for the agent's commands: ↑/↓ pick, Tab or Enter takes the pick, Esc hides the list. Deleting
-  an `@` mention before sending drops its file.
+  an `@` mention before sending drops its file. The composer grows with what you write, up to a
+  dozen lines.
+  **↑** in an empty composer brings back your earlier prompts in this project (newest first, from
+  any of its sessions); **↓** goes forward again and past the newest back to empty. Text you've
+  typed is never replaced: ↑ then just moves the caret.
   **+** attaches the current file, the selection, the open files, the problems, the uncommitted
   changes (Git diff) or a picture file. **⌘V** / **Ctrl+V** with a picture on the clipboard (a
   screenshot, a design) attaches it too: PNG, JPEG, GIF or WebP, up to 5 MB, for agents that take
-  pictures (Kuana Agent does, on a model that sees images).
+  pictures (Kuana Agent does, on a model that sees images). **Drop** files on the session (from
+  Finder or the file tree) to attach them: text files and pictures join the message; a folder, or
+  a file that's neither, is named in the prompt (`@src/`) for the agent to look at.
 - **Changes**: the bar over the composer counts the files the agent changed. **Review** opens each
   as a diff against what it was before the session touched it. **Keep All** keeps them, and
   **Reject All** puts every file back as it was. Every agent write is one undoable edit in its open
@@ -220,6 +234,7 @@ doesn't start is noted in the session's thinking. Settings → AI → Tools list
 | Accept / reject a proposed change (in its tab) | ⌘↩ / ⌘⌫ | Ctrl+Enter / Ctrl+Backspace |
 | Send / new line / stop (in a session's composer) | ↩ / ⇧↩ / ⎋ | Enter / Shift+Enter / Esc |
 | Pick an @ or / suggestion / take it / hide the list (in the composer) | ↑↓ / ⇥ / ⎋ | ↑↓ / Tab / Esc |
+| Earlier prompts (in an empty composer) | ↑ / ↓ | ↑ / ↓ |
 
 Explain with Agent, Fix with Agent and Write Commit Message with AI are in Find Action and the
 menus.

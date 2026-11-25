@@ -1,8 +1,8 @@
 [workspace]
-members = ["crates/kuana-core", "crates/kuana-server"]
+members = ["crates/kuana-core", "crates/kuana-os", "crates/kuana-server"]
 # `cargo build` / `test` / `run`: the app and the library it uses. The remote
 # server builds with `-p kuana-server` (or `--workspace`).
-default-members = [".", "crates/kuana-core"]
+default-members = [".", "crates/kuana-core", "crates/kuana-os"]
 
 [workspace.package]
 edition = "2024"
@@ -30,6 +30,7 @@ info_plist_exts = ["assets/macos/document-types.plist"]
 [dependencies]
 # The GPUI-free part shared with the remote server (`crates/kuana-core`).
 kuana-core = { path = "crates/kuana-core" }
+kuana-os = { path = "crates/kuana-os" }
 alacritty_terminal = { version = "0.26.0", default-features = false }
 # alacritty_terminal's own, for wrapping its pty (`terminal::run_log::Teed`).
 polling = "3.11"
@@ -137,6 +138,10 @@ libc = "0.2"
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSDocumentController", "NSImage", "NSResponder"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSBundle", "NSData", "NSDictionary", "NSError", "NSFileManager", "NSObject", "NSString", "NSURL"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# The window's HWND, whose taskbar button flashes for an agent session's news.
+raw-window-handle = "0.6"
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"

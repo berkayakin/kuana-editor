@@ -29,6 +29,50 @@ actions!(agents, [SendMessage, StopAgent, AcceptSuggestion]);
 /// The most of a mentioned file attached.
 const MENTION_BYTES: usize = 256 * 1024;
 
+/// What a file or folder dropped on a session becomes (`attachment`).
+#[derive(Debug, PartialEq)]
+pub enum Attachment {
+    /// Its text or picture, in the context sent with the prompt.
+    Context(ContextItem),
+    /// Named in the prompt for the agent to look at: a folder, or a file
+    /// that's neither text nor a picture (why, for a file).
+    Mention { path: PathBuf, folder: bool, why: Option<String> },
+    /// Not taken, and why.
+    Refused(String),
+}
+
+/// Reads a path dropped on a session (blocking: call it off the UI thread).
+pub fn attachment(path: &std::path::Path) -> Attachment {
+    let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+    if crate::fs::metadata(path).is_ok_and(|m| m.is_dir()) {
+        return Attachment::Mention { path: path.to_path_buf(), folder: true, why: None };
+    }
+    let bytes = match crate::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) => return Attachment::Refused(format!("{name}: {e}")),
+    };
+    if let Some(mime) = super::session::image_mime(path) {
+        if bytes.len() > super::session::MAX_IMAGE_BYTES {
+            return Attachment::Refused(format!("{name} is over 5 MB"));
+        }
+        return Attachment::Context(ContextItem::Image { name, mime: mime.into(), data: bytes.into() });
+    }
+    if crate::encoding::looks_binary(&bytes) {
+        let why = format!("{name} isn't text or a picture: it's named in the prompt for the agent to open");
+        return Attachment::Mention { path: path.to_path_buf(), folder: false, why: Some(why) };
+    }
+    Attachment::Context(ContextItem::File { path: path.to_path_buf(), text: mentioned_text(&bytes) })
+}
+
+/// A file's text as attached: at most `MENTION_BYTES`, what's left out said.
+fn mentioned_text(bytes: &[u8]) -> String {
+    let mut text = crate::encoding::decode(&bytes[..bytes.len().min(MENTION_BYTES)], None).0;
+    if bytes.len() > MENTION_BYTES {
+        text.push_str(&format!("\n[… {} more bytes left out]", bytes.len() - MENTION_BYTES));
+    }
+    text
+}
+
 /// The transcript's column, for reading comfort in a wide pane.
 const COLUMN: f32 = 780.;
 /// Lines of a terminal's output or a diff shown in a tool call.
@@ -108,6 +152,9 @@ pub struct SessionView {
     /// Files attached by an `@` mention, with the text it put in the
     /// composer: deleting that text drops the file too.
     mentioned: Vec<(PathBuf, String)>,
+    /// Earlier prompts brought back with ↑ (newest first) and the one shown;
+    /// over once the composer holds something else (`prompts::step`).
+    recall: Option<(Vec<String>, usize)>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -179,9 +226,12 @@ impl SessionView {
             picked: (0, String::new()),
             dismissed: None,
             mentioned: Vec::new(),
+            recall: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
+        // The prompts ↑ brings back, read now so the first ↑ needn't.
+        cx.background_executor().spawn(async { super::prompts::load() }).detach();
         view.sync(cx);
         // Scrolling redraws the view: the ↓ button shows while it's scrolled up.
         let this = cx.entity().downgrade();
@@ -315,6 +365,59 @@ impl SessionView {
         true
     }
 
+    /// ↑ (`older`) or ↓ with no suggestions showing: an earlier prompt into
+    /// the empty composer, as `prompts::step` says; whether the key was taken.
+    fn recall(&mut self, older: bool, cx: &mut Context<Self>) -> bool {
+        let (text, caret) = {
+            let composer = self.composer.read(cx);
+            let text = composer.text(cx);
+            let caret = composer.primary_selection().head.min(text.len());
+            (text, caret)
+        };
+        let showing = self.recall.as_ref().filter(|(list, at)| list.get(*at) == Some(&text)).map(|(_, at)| *at);
+        if showing.is_none() {
+            self.recall = None;
+            if !(older && text.is_empty()) {
+                return false;
+            }
+            let session = self.session.read(cx);
+            let own: Vec<String> = session.transcript.entries.iter().filter_map(|e| if let Entry::User { text, .. } = e { Some(text.clone()) } else { None }).collect();
+            self.recall = Some((super::prompts::recallable(own.into_iter(), &session.cwd), 0));
+        }
+        let len = self.recall.as_ref().map_or(0, |(list, _)| list.len());
+        let on_edge_line = if older { !text[..caret].contains('\n') } else { !text[caret..].contains('\n') };
+        match super::prompts::step(showing, len, text.is_empty(), on_edge_line, older) {
+            super::prompts::Recall::Pass => {
+                if showing.is_none() {
+                    self.recall = None;
+                }
+                false
+            }
+            super::prompts::Recall::Stay => true,
+            super::prompts::Recall::Clear => {
+                self.recall = None;
+                self.composer.update(cx, |e, cx| e.set_text("", cx));
+                true
+            }
+            super::prompts::Recall::Show(at) => {
+                let Some((list, shown)) = self.recall.as_mut() else { return false };
+                *shown = at;
+                let prompt = list[at].clone();
+                // A recalled `/command` or `@file` doesn't open suggestions.
+                self.dismissed = Some(prompt.clone());
+                // Going back, the caret starts at the top (the next ↑ goes on
+                // back); going forward, at the end.
+                let caret = if older { 0 } else { prompt.len() };
+                self.composer.update(cx, |e, cx| {
+                    e.set_text(&prompt, cx);
+                    e.select_range(caret..caret, cx);
+                });
+                cx.notify();
+                true
+            }
+        }
+    }
+
     /// A command taken: `/name ` in the composer, the caret after it.
     fn accept_command(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         let text = format!("/{name} ");
@@ -347,14 +450,44 @@ impl SessionView {
         });
         cx.spawn(async move |view, cx| {
             let Ok(bytes) = read.await else { return };
-            let mut text = crate::encoding::decode(&bytes[..bytes.len().min(MENTION_BYTES)], None).0;
-            if bytes.len() > MENTION_BYTES {
-                text.push_str(&format!("\n[… {} more bytes left out]", bytes.len() - MENTION_BYTES));
-            }
+            let text = mentioned_text(&bytes);
             view.update(cx, |v, cx| v.add_context(ContextItem::File { path, text }, cx)).ok();
         })
         .detach();
         window.focus(&self.composer.focus_handle(cx));
+    }
+
+    /// Files and folders dropped on the session, read (`attachment`): text
+    /// and pictures join the context, folders and other files are named in
+    /// the prompt at the caret (`@path`), and why one wasn't taken shows.
+    pub fn add_attachments(&mut self, attachments: Vec<Attachment>, window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = self.session.read(cx).cwd.clone();
+        let mut named = Vec::new();
+        self.notice = None;
+        for attachment in attachments {
+            match attachment {
+                Attachment::Context(item) => self.add_context(item, cx),
+                Attachment::Mention { path, folder, why } => {
+                    let rel = path.strip_prefix(&cwd).unwrap_or(&path).to_string_lossy().into_owned();
+                    named.push(if folder && !rel.ends_with('/') { format!("@{rel}/") } else { format!("@{rel}") });
+                    if let Some(why) = why {
+                        self.notice = Some(why.into());
+                    }
+                }
+                Attachment::Refused(why) => self.notice = Some(why.into()),
+            }
+        }
+        if !named.is_empty() {
+            self.composer.update(cx, |e, cx| {
+                let text = e.text(cx);
+                let caret = e.primary_selection().head.min(text.len());
+                // Apart from a word the caret's right after.
+                let lead = if text[..caret].chars().next_back().is_some_and(|c| !c.is_whitespace()) { " " } else { "" };
+                e.insert_text(&format!("{lead}{} ", named.join(" ")), cx);
+            });
+        }
+        window.focus(&self.composer.focus_handle(cx));
+        cx.notify();
     }
 
     fn copy_selection(&mut self, _: &crate::editor::Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -487,6 +620,10 @@ impl SessionView {
         if text.trim().is_empty() && context.is_empty() {
             return;
         }
+        // For ↑ later, in this project's other sessions too.
+        let (folder, sent) = (self.session.read(cx).cwd.clone(), text.trim().to_string());
+        cx.background_executor().spawn(async move { super::prompts::record(&folder, &sent) }).detach();
+        self.recall = None;
         self.composer.update(cx, |e, cx| e.set_text("", cx));
         if let Some(turn) = self.editing.take() {
             cx.emit(SessionViewEvent::Resend { turn, text: text.trim().to_string(), context });
@@ -1307,6 +1444,7 @@ impl SessionView {
             all_commands.into_iter().enumerate().skip(first_shown).take(8).map(|(i, (name, description))| (i, name, description)).collect();
         let picked_mention = self.mention_query(cx).map(|(_, query)| query).map_or(0, |query| self.pick_index(&query, usize::MAX));
         let focused = self.composer.focus_handle(cx).is_focused(window);
+        let composer_height = self.composer.read(cx).content_height(cx);
         div()
             .mx_3()
             .mb_3()
@@ -1382,14 +1520,15 @@ impl SessionView {
                         // ⌘C with text selected in the transcript (and none in
                         // the composer) copies that.
                         .capture_action(cx.listener(Self::copy_selection))
-                        // ↑/↓ pick among suggestions while they show.
+                        // ↑/↓ pick among suggestions while they show, else
+                        // bring back earlier prompts into an empty composer.
                         .capture_action(cx.listener(|v, _: &crate::editor::MoveUp, _, cx| {
-                            if v.move_pick(-1, cx) {
+                            if v.move_pick(-1, cx) || v.recall(true, cx) {
                                 cx.stop_propagation();
                             }
                         }))
                         .capture_action(cx.listener(|v, _: &crate::editor::MoveDown, _, cx| {
-                            if v.move_pick(1, cx) {
+                            if v.move_pick(1, cx) || v.recall(false, cx) {
                                 cx.stop_propagation();
                             }
                         }))
@@ -1450,7 +1589,8 @@ impl SessionView {
                                 )
                             })))
                         })
-                        .child(div().px_0p5().min_h(px(24.)).max_h(px(240.)).child(self.composer.clone()))
+                        // As tall as its text, up to a dozen lines; then it scrolls.
+                        .child(div().px_0p5().h(px(f32::from(composer_height).clamp(24., 240.))).child(self.composer.clone()))
                         .child(
                             div()
                                 .flex()
@@ -1902,6 +2042,27 @@ mod tests {
         link_files(&mut inline, &dir);
         assert_eq!(inline.links, vec![(4..17, format!("kuana-file:{}#3", dir.join("src/main.rs").display()))]);
         assert!(inline.styles.contains(&(4..17, markdown_preview::Style::Link)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn dropped_files_become_context_or_mentions() {
+        let dir = std::env::temp_dir().join(format!("kuana-dropped-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("folder")).unwrap();
+        std::fs::write(dir.join("notes.md"), "# Notes\n").unwrap();
+        std::fs::write(dir.join("shot.png"), [0x89, b'P', b'N', b'G', 0, 1, 2]).unwrap();
+        std::fs::write(dir.join("data.bin"), [0u8, 159, 146, 150, 0, 0]).unwrap();
+        std::fs::write(dir.join("big.png"), vec![0u8; super::super::session::MAX_IMAGE_BYTES + 1]).unwrap();
+        let text = Attachment::Context(ContextItem::File { path: dir.join("notes.md"), text: "# Notes\n".into() });
+        assert_eq!(attachment(&dir.join("notes.md")), text);
+        assert!(matches!(attachment(&dir.join("shot.png")), Attachment::Context(ContextItem::Image { ref name, ref mime, ref data }) if name == "shot.png" && mime == "image/png" && data.len() == 7));
+        assert_eq!(attachment(&dir.join("folder")), Attachment::Mention { path: dir.join("folder"), folder: true, why: None });
+        assert!(matches!(attachment(&dir.join("data.bin")), Attachment::Mention { folder: false, why: Some(_), .. }));
+        assert_eq!(attachment(&dir.join("big.png")), Attachment::Refused("big.png is over 5 MB".into()));
+        assert!(matches!(attachment(&dir.join("gone.txt")), Attachment::Refused(_)));
+        // A long file is cut, what's left out said.
+        let long = mentioned_text(&vec![b'a'; MENTION_BYTES + 10]);
+        assert!(long.ends_with("[… 10 more bytes left out]"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

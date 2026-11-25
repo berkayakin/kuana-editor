@@ -563,6 +563,20 @@ fn main() {
         updater::init(cx);
         state::init(cx);
         agents::store::init(cx);
+        // A click on an agent session's notification brings it back.
+        let (clicked_tx, mut clicked_rx) = futures::channel::mpsc::unbounded::<String>();
+        kuana_os::notify::on_click(move |id| {
+            let _ = clicked_tx.unbounded_send(id);
+        });
+        cx.spawn(async move |cx| {
+            use futures::StreamExt as _;
+            while let Some(id) = clicked_rx.next().await {
+                if cx.update(|cx| workspace::show_notified_session(&id, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         // Quitting doesn't leave a file being saved half written.
         cx.on_app_quit(|_| {
             document::wait_for_saves();

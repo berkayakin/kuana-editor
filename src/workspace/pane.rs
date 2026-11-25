@@ -31,6 +31,9 @@ pub(super) enum PaneEvent {
     OpenPaths(Vec<PathBuf>),
     /// A file from the tree was dropped on the pane.
     OpenPath(PathBuf),
+    /// Files or folders were dropped on the agent session the pane shows:
+    /// they go to its prompt.
+    AttachPaths(Vec<PathBuf>),
 }
 
 impl gpui::EventEmitter<PaneEvent> for Pane {}
@@ -650,6 +653,8 @@ impl Render for Pane {
             );
         let bounds = self.bounds.clone();
         let drop_group = SharedString::from(format!("pane-drop-{}", cx.entity_id()));
+        // Over an agent session, files (and folders) dropped go to its prompt.
+        let attach = item.as_ref().is_some_and(|item| item.agent().is_some());
         div()
             .relative()
             .flex()
@@ -670,26 +675,28 @@ impl Render for Pane {
             // After the island, so the current tab paints over its top border.
             .when(!self.tabs.is_empty() && !self.chrome.hide_tabs, |el| el.child(self.render_strip(edge, window, cx)))
             // Finder files, and files dragged from the file tree, dropped anywhere
-            // over the pane (tabs included) open in it.
+            // over the pane (tabs included) open in it, or go to the prompt of
+            // the agent session it shows.
             .group(drop_group.clone())
             .on_drag_move(cx.listener(|pane, ev: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
                 pane.set_file_drop(ev.bounds.contains(&ev.event.position), cx)
             }))
-            .on_drag_move(cx.listener(|pane, ev: &gpui::DragMoveEvent<crate::project_tree::DraggedEntry>, _, cx| {
-                let over = ev.bounds.contains(&ev.event.position) && !ev.drag(cx).path.is_dir_on_host();
+            .on_drag_move(cx.listener(move |pane, ev: &gpui::DragMoveEvent<crate::project_tree::DraggedEntry>, _, cx| {
+                let over = ev.bounds.contains(&ev.event.position) && (attach || !ev.drag(cx).path.is_dir_on_host());
                 pane.set_file_drop(over, cx)
             }))
             .child(
-                file_drop_overlay(drop_group, &theme)
-                    .on_drop(cx.listener(|pane, paths: &gpui::ExternalPaths, _, cx| {
+                file_drop_overlay(drop_group, &theme, attach)
+                    .on_drop(cx.listener(move |pane, paths: &gpui::ExternalPaths, _, cx| {
                         cx.stop_propagation();
                         pane.set_file_drop(false, cx);
-                        cx.emit(PaneEvent::OpenPaths(paths.paths().to_vec()));
+                        let paths = paths.paths().to_vec();
+                        cx.emit(if attach { PaneEvent::AttachPaths(paths) } else { PaneEvent::OpenPaths(paths) });
                     }))
-                    .on_drop(cx.listener(|pane, entry: &crate::project_tree::DraggedEntry, _, cx| {
+                    .on_drop(cx.listener(move |pane, entry: &crate::project_tree::DraggedEntry, _, cx| {
                         cx.stop_propagation();
                         pane.set_file_drop(false, cx);
-                        cx.emit(PaneEvent::OpenPath(entry.path.clone()));
+                        cx.emit(if attach { PaneEvent::AttachPaths(vec![entry.path.clone()]) } else { PaneEvent::OpenPath(entry.path.clone()) });
                     })),
             )
     }
@@ -710,17 +717,20 @@ fn drop_zone_overlay(zone: DropZone, theme: &Theme) -> Div {
 }
 
 /// "Drop to open" over a pane while files from Finder or the tree are dragged
-/// over it (the `group` the pane's root names). GPUI shows it by its drag-over
-/// styles, so there's no state to go stale; being a drop target gives it the
-/// hitbox GPUI needs to apply them, and hidden it takes no events. Callers add
-/// the drop listeners.
-pub(super) fn file_drop_overlay(group: SharedString, theme: &Theme) -> Div {
+/// over it (the `group` the pane's root names), or "Drop to attach" over an
+/// agent session (`attach`). GPUI shows it by its drag-over styles, so
+/// there's no state to go stale; being a drop target gives it the hitbox GPUI
+/// needs to apply them, and hidden it takes no events. Callers add the drop
+/// listeners.
+pub(super) fn file_drop_overlay(group: SharedString, theme: &Theme, attach: bool) -> Div {
+    let (icon, label) = if attach { (Icon::Plus, "Drop to attach to the prompt") } else { (Icon::FileCode, "Drop to open") };
     div()
         .invisible()
         .group_drag_over::<gpui::ExternalPaths>(group.clone(), |s| s.visible())
         .group_drag_over::<crate::project_tree::DraggedEntry>(group, |s| s.visible())
-        // A tree folder isn't opened by dropping it here.
-        .can_drop(|dragged, _, _| dragged.downcast_ref::<crate::project_tree::DraggedEntry>().is_none_or(|entry| !entry.path.is_dir_on_host()))
+        // A tree folder isn't opened by dropping it here (an agent's prompt
+        // takes one: it's named there).
+        .can_drop(move |dragged, _, _| attach || dragged.downcast_ref::<crate::project_tree::DraggedEntry>().is_none_or(|entry| !entry.path.is_dir_on_host()))
         .absolute()
         .inset_0()
         .child(
@@ -750,8 +760,8 @@ pub(super) fn file_drop_overlay(group: SharedString, theme: &Theme) -> Div {
                         .border_color(theme.border)
                         .shadow(soft_shadow(theme, 2))
                         .text_color(theme.text)
-                        .child(icon_el(Icon::FileCode, px(15.), theme.accent.into()))
-                        .child("Drop to open"),
+                        .child(icon_el(icon, px(15.), theme.accent.into()))
+                        .child(label),
                 ),
         )
 }

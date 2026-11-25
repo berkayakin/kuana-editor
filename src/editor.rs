@@ -439,6 +439,9 @@ pub struct Editor {
     /// See `debug_value_rows`: (document, version, tree, values, paused row).
     debug_values: (Option<(u64, u64, u64, usize, usize)>, Arc<Vec<(usize, String)>>),
     marked_range: Option<Range<usize>>,
+    /// A multi-line field's rows when last laid out: its view (sized by
+    /// `content_height`) hears when they change.
+    drawn_rows: usize,
     indent_unit: String,
     /// Display width of a tab character (and of an indent level with tabs).
     tab_size: usize,
@@ -637,6 +640,7 @@ impl Editor {
             semantic_task: None,
             semantic_retries: 0,
             marked_range: None,
+            drawn_rows: 1,
             indent_unit: String::new(),
             tab_size: file_settings.tab_size,
             file_settings,
@@ -1613,6 +1617,12 @@ impl Editor {
         cx.notify();
     }
 
+    /// Puts `text` in place of the selections, as typing it would (a prompt
+    /// names files dropped on it).
+    pub fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.insert(text, cx);
+    }
+
     fn insert(&mut self, text: &str, cx: &mut Context<Self>) {
         let kind = if text.contains(char::is_whitespace) || text.len() > 1 {
             EditKind::Other
@@ -2522,6 +2532,19 @@ impl Editor {
 
     fn display_row_count(&self, cx: &App) -> usize {
         self.wrap.as_ref().map_or(self.doc.read(cx).line_count(), WrapMap::row_count)
+    }
+
+    /// How tall the text is (its rows as last laid out): a text field that
+    /// grows with what's typed (an agent's prompt) sizes itself by it.
+    pub fn content_height(&self, cx: &App) -> Pixels {
+        let doc = self.doc.read(cx);
+        // Soft wrap's rows are made when it's drawn: for text changed since,
+        // its lines (a wrapped line's other rows follow a frame later).
+        let rows = match &self.wrap {
+            Some(wrap) if wrap.version == doc.version() => wrap.row_count(),
+            _ => doc.line_count(),
+        };
+        self.line_height(cx) * rows.max(1) as f32
     }
 
     fn first_display_row(&self, row: usize) -> usize {
@@ -3992,6 +4015,13 @@ impl Editor {
 
         // Visible display rows, and the buffer lines they show.
         let display_rows = self.display_row_count(cx);
+        if self.mode == EditorMode::MultiLine && self.drawn_rows != display_rows {
+            // A field that grows with its text is sized by them: its view
+            // hears right after this frame (not while it's being drawn).
+            self.drawn_rows = display_rows;
+            let this = cx.entity();
+            cx.defer(move |cx| this.update(cx, |_, cx| cx.notify()));
+        }
         let mut first_drow = (self.scroll.y / line_height).floor() as usize;
         let mut visible_rows = (bounds.size.height / line_height).ceil() as usize + 1;
         if self.excerpt.is_some() {

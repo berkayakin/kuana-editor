@@ -20,9 +20,11 @@
 //!   content (points from its top left), the pointer moved there first
 //! - `hover <x> <y>`: the pointer moved to a point, without a click (what shows
 //!   under it, a tooltip or a hover button, can be screenshot)
-//! - `drag <x> <y> <to x> <to y>`: press, move in steps, release (mouse steps
-//!   are macOS only: GPUI takes mouse events from the system alone, so they're
-//!   handed to its view as AppKit events, still without leaving Kuana)
+//! - `drag <x> <y> <to x> <to y> [mark <name>]`: press, move in steps, release
+//!   (mouse steps are macOS only: GPUI takes mouse events from the system
+//!   alone, so they're handed to its view as AppKit events, still without
+//!   leaving Kuana); with a mark, it's printed before the release and the
+//!   button held a moment, for a screenshot of what a drag shows (a drop target)
 //! - `answer <button>`: click the button so named on the question the window
 //!   asks (a sheet on macOS: `window.prompt`'s Undo Changes, Cancel…)
 //! - `size <width> <height>`: resize the window's content, in points
@@ -49,7 +51,8 @@ enum Step {
     /// A click at a point: the button and how many presses.
     Click(f32, f32, MouseButton, usize),
     Hover(f32, f32),
-    Drag((f32, f32), (f32, f32)),
+    /// From, to, and a mark printed while the button's still down.
+    Drag((f32, f32), (f32, f32), Option<String>),
     Mark(String),
     /// Click a button of the window's question (a sheet), by its title.
     Answer(String),
@@ -133,9 +136,13 @@ fn parse(text: &str) -> Result<Vec<(usize, Step)>, String> {
                 Step::Hover(x, y)
             }
             "drag" => {
-                let n: Vec<f32> = rest.split_whitespace().filter_map(|n| n.parse().ok()).collect();
+                let (points, mark) = match rest.split_once(" mark ") {
+                    Some((points, mark)) => (points, Some(mark.trim().to_string())),
+                    None => (rest, None),
+                };
+                let n: Vec<f32> = points.split_whitespace().filter_map(|n| n.parse().ok()).collect();
                 let [x, y, to_x, to_y] = n[..] else { return Err(format!("line {line_no}: drag takes two points")) };
-                Step::Drag((x, y), (to_x, to_y))
+                Step::Drag((x, y), (to_x, to_y), mark)
             }
             "mark" => Step::Mark(rest.trim().to_string()),
             "answer" => Step::Answer(rest.trim().to_string()),
@@ -259,7 +266,7 @@ async fn perform(step: &Step, pace: &mut u64, cx: &mut AsyncApp) -> Result<(), S
             mouse(cx, Mouse::Moved, (*x, *y), 0)?;
             sleep(*pace).await;
         }
-        Step::Drag(from, to) => {
+        Step::Drag(from, to, mark) => {
             const STEPS: usize = 8;
             let at = |step: usize| {
                 let t = step as f32 / STEPS as f32;
@@ -268,12 +275,25 @@ async fn perform(step: &Step, pace: &mut u64, cx: &mut AsyncApp) -> Result<(), S
             mouse(cx, Mouse::Moved, at(0), 0)?;
             sleep(*pace).await;
             mouse(cx, Mouse::Down, at(0), 1)?;
-            // A frame between moves: what a drag draws (a resize tracker) takes the next ones.
+            // A frame between moves: what a drag draws (a resize tracker, a
+            // drop target's drag-over styles and hitbox) takes the next ones.
+            // A covered window draws no frames by itself, so each is drawn.
             for step in 1..=STEPS {
                 sleep(30).await;
                 mouse(cx, Mouse::Dragged, at(step), 0)?;
+                draw();
             }
             sleep(30).await;
+            draw();
+            if let Some(name) = mark {
+                use std::io::Write as _;
+                println!("kuana-autopilot: mark {name}");
+                std::io::stdout().flush().ok();
+                // The screenshot's taken from outside meanwhile.
+                sleep(900).await;
+                mouse(cx, Mouse::Dragged, at(STEPS), 0)?;
+                draw();
+            }
             mouse(cx, Mouse::Up, at(STEPS), 1)?;
             sleep(*pace).await;
         }
@@ -526,13 +546,14 @@ mod tests {
         assert_eq!(steps[6], Step::Size(1280., 800.));
         assert_eq!(steps[7], Step::Mark("start".into()));
         assert_eq!(steps[8], Step::Quit);
-        let steps = parse("click 10 20\nclick 5.5 6 right\nclick 1 2 double\ndrag 1 2 30 40\nhover 7 8\n").unwrap();
+        let steps = parse("click 10 20\nclick 5.5 6 right\nclick 1 2 double\ndrag 1 2 30 40\nhover 7 8\ndrag 1 2 30 40 mark over the pane\n").unwrap();
         let steps: Vec<Step> = steps.into_iter().map(|(_, s)| s).collect();
         assert_eq!(steps[0], Step::Click(10., 20., MouseButton::Left, 1));
         assert_eq!(steps[1], Step::Click(5.5, 6., MouseButton::Right, 1));
         assert_eq!(steps[2], Step::Click(1., 2., MouseButton::Left, 2));
-        assert_eq!(steps[3], Step::Drag((1., 2.), (30., 40.)));
+        assert_eq!(steps[3], Step::Drag((1., 2.), (30., 40.), None));
         assert_eq!(steps[4], Step::Hover(7., 8.));
+        assert_eq!(steps[5], Step::Drag((1., 2.), (30., 40.), Some("over the pane".into())));
     }
 
     #[test]

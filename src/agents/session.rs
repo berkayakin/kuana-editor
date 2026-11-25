@@ -991,6 +991,18 @@ impl Session {
         self.state == State::Waiting || self.state == State::NeedsAuth
     }
 
+    /// What the agent asks now: the title of the step it wants permission for
+    /// (a notification says so), or that it needs a sign-in.
+    pub fn open_question(&self) -> Option<String> {
+        if self.state == State::NeedsAuth {
+            return Some(format!("Sign in to {} to go on", self.agent_name));
+        }
+        self.transcript.entries.iter().rev().find_map(|entry| match entry {
+            Entry::Tool(tool) if tool.permission.as_ref().is_some_and(|p| p.open) => Some(format!("May it: {}?", tool.title.trim_end_matches(['.', '?']))),
+            _ => None,
+        })
+    }
+
     // ---- The agent's side -----------------------------------------------------------
 
     fn on_agent(&mut self, event: FromAgent, cx: &mut Context<Self>) {

@@ -71,7 +71,7 @@ impl Workspace {
             .child(area(&theme).flex_1().min_w_0().min_h_0().child(div().flex_1().min_h_0().overflow_hidden().child(content)))
             .group(drop_group.clone())
             .child(
-                file_drop_overlay(drop_group, &theme)
+                file_drop_overlay(drop_group, &theme, false)
                     .on_drop(cx.listener(|ws, paths: &gpui::ExternalPaths, window, cx| {
                         cx.stop_propagation();
                         ws.open_dropped(paths.paths(), window, cx);

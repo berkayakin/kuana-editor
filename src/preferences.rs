@@ -172,6 +172,8 @@ enum Setting {
     EditPredictions,
     ClaudeCode,
     GeminiCli,
+    AgentNotifications,
+    AgentKeepAwake,
     VimMode,
     AutoSave,
     AutoSaveDelay,
@@ -193,7 +195,7 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Setting; 54] = [
+    const ALL: [Setting; 56] = [
         Setting::Theme,
         Setting::IconTheme,
         Setting::UiFontSize,
@@ -228,6 +230,8 @@ impl Setting {
         Setting::EditPredictions,
         Setting::ClaudeCode,
         Setting::GeminiCli,
+        Setting::AgentNotifications,
+        Setting::AgentKeepAwake,
         Setting::VimMode,
         Setting::TodoPatterns,
         Setting::OpenFolderIn,
@@ -264,7 +268,7 @@ impl Setting {
             Setting::TabSize | Setting::HardTabs | Setting::LinkedEditing | Setting::CursorBlink | Setting::SoftWrap => Page::Editor,
             Setting::Rulers | Setting::ShowWhitespace | Setting::InlayHints | Setting::InlineValues | Setting::DocumentColors | Setting::SemanticTokens | Setting::CodeLens | Setting::VimMode | Setting::TodoPatterns | Setting::OpenFolderIn => Page::Editor,
             Setting::Minimap | Setting::MinimapWidth => Page::Editor,
-            Setting::EditPredictions | Setting::ClaudeCode | Setting::GeminiCli => Page::Ai,
+            Setting::EditPredictions | Setting::ClaudeCode | Setting::GeminiCli | Setting::AgentNotifications | Setting::AgentKeepAwake => Page::Ai,
             Setting::AutoSave
             | Setting::AutoSaveDelay
             | Setting::FormatOnSave
@@ -301,6 +305,7 @@ impl Setting {
             Setting::Minimap | Setting::MinimapWidth => "Minimap",
             Setting::EditPredictions => "Edit predictions",
             Setting::ClaudeCode | Setting::GeminiCli => "Terminal agents",
+            Setting::AgentNotifications | Setting::AgentKeepAwake => "Sessions",
             Setting::VimMode => "Vim",
             Setting::TodoPatterns => "TODO",
             Setting::OpenFolderIn => "Projects",
@@ -354,6 +359,8 @@ impl Setting {
             Setting::EditPredictions => "Suggestions from",
             Setting::ClaudeCode => "Connect to Claude Code",
             Setting::GeminiCli => "Connect to Gemini CLI",
+            Setting::AgentNotifications => "Notify me",
+            Setting::AgentKeepAwake => "Keep the computer awake",
             Setting::VimMode => "Vim mode",
             Setting::AutoSave => "Auto-save",
             Setting::AutoSaveDelay => "Delay",
@@ -419,6 +426,10 @@ impl Setting {
             Setting::GeminiCli => {
                 "Gemini CLI running in a terminal (after /ide enable) knows which files are open and what's selected, and proposes its edits as diffs to accept or reject here. Nothing leaves your machine through Kuana."
             }
+            Setting::AgentNotifications => {
+                "A system notification when a session finishes or needs your answer while you're in another window or app; clicking it takes you back to the session."
+            }
+            Setting::AgentKeepAwake => "While a session works, the computer doesn't fall asleep from being idle. The display may still turn off.",
             Setting::VimMode => "Vim's Normal, Insert and Visual modes. The status bar shows the mode.",
             Setting::AutoSave => "Every mode but Off also saves when Kuana quits or a tab closes.",
             Setting::AutoSaveDelay => "How long after you stop typing.",
@@ -479,6 +490,8 @@ impl Setting {
             Setting::EditPredictions => "ai copilot github edit predictions inline suggestions ghost text completion autocomplete llm",
             Setting::ClaudeCode => "ai claude code anthropic agent ide integration terminal selection diagnostics",
             Setting::GeminiCli => "ai gemini cli google agent ide companion integration terminal selection diff",
+            Setting::AgentNotifications => "ai agent session notification notify alert finished done needs answer permission dock badge",
+            Setting::AgentKeepAwake => "ai agent session keep awake sleep caffeinate power idle prevent",
             Setting::VimMode => "vim vi modal normal insert visual keys",
             Setting::AutoSave => "autosave save automatically",
             Setting::AutoSaveDelay => "autosave milliseconds idle",
@@ -1943,6 +1956,8 @@ impl Preferences {
             Setting::AutoFetch => self.switch_with_default("pref-auto-fetch", "auto_fetch", settings.auto_fetch, true, cx),
             Setting::ClaudeCode => self.switch_with_default("pref-claude-code", "claude_code_integration", settings.claude_code_integration, true, cx),
             Setting::GeminiCli => self.switch_with_default("pref-gemini-cli", "gemini_cli_integration", settings.gemini_cli_integration, true, cx),
+            Setting::AgentNotifications => self.switch_with_default("pref-agent-notify", "agent_notifications", settings.agent_notifications, true, cx),
+            Setting::AgentKeepAwake => self.switch_with_default("pref-agent-awake", "agent_keep_awake", settings.agent_keep_awake, true, cx),
             Setting::ShellIntegration => {
                 self.switch_with_default("pref-shell-integration", "terminal_shell_integration", settings.terminal_shell_integration, true, cx)
             }
@@ -3187,6 +3202,8 @@ fn setting_key(setting: Setting) -> &'static str {
         Setting::EditPredictions => "edit_prediction_provider",
         Setting::ClaudeCode => "claude_code_integration",
         Setting::GeminiCli => "gemini_cli_integration",
+        Setting::AgentNotifications => "agent_notifications",
+        Setting::AgentKeepAwake => "agent_keep_awake",
         Setting::VimMode => "vim_mode",
         Setting::AutoSave => "auto_save",
         Setting::AutoSaveDelay => "auto_save_delay",

@@ -89,6 +89,12 @@ impl Workspace {
                 // Started now: its modes, models and commands show while
                 // the first prompt is written.
                 session.update(cx, |s, cx| s.start(cx));
+                // The system's permission to notify, asked now that the user
+                // is here (once; macOS remembers the answer).
+                static ASKED: std::sync::Once = std::sync::Once::new();
+                if Settings::get(cx).agent_notifications() {
+                    ASKED.call_once(kuana_os::notify::prepare);
+                }
                 if self.last_agent != agent {
                     let remembered = agent.clone();
                     cx.background_executor()
@@ -480,11 +486,23 @@ impl Workspace {
                 let shown = self.active_item(cx).and_then(|i| i.agent().cloned()).is_some_and(|v| v.read(cx).session == *session) && window.is_window_active();
                 if !shown {
                     let s = session.read(cx);
+                    let failed = matches!(s.state, crate::agents::session::State::Failed(_));
                     let message = match event {
                         SessionEvent::NeedsYou => format!("{} needs your answer", s.agent_name),
-                        _ if matches!(s.state, crate::agents::session::State::Failed(_)) => format!("{} stopped", s.agent_name),
+                        _ if failed => format!("{} stopped", s.agent_name),
                         _ => format!("{} finished: {}", s.agent_name, s.title),
                     };
+                    // Elsewhere (another window, another app): the system tells
+                    // too, and a click comes back here (`show_notified_session`).
+                    if !window.is_window_active() && Settings::get(cx).agent_notifications() {
+                        let (title, body) = match event {
+                            SessionEvent::NeedsYou => (format!("{} needs your answer", s.agent_name), s.open_question().unwrap_or_else(|| s.title.clone())),
+                            _ if failed => (format!("{} stopped", s.agent_name), s.title.clone()),
+                            _ => (format!("{} finished", s.agent_name), s.title.clone()),
+                        };
+                        kuana_os::notify::show(&title, &body, &s.id);
+                        kuana_os::notify::request_attention(native_window(window));
+                    }
                     self.toast_with_button(ToastKind::Info, message, None, Some(ToastButton::ShowAgents), cx);
                 }
             }
@@ -884,6 +902,28 @@ impl Workspace {
         view.update(cx, |v, cx| v.add_context(item, cx));
     }
 
+    /// Files and folders dropped on a session (from Finder or the file tree):
+    /// a file open in a tab as the tab has it (unsaved edits included), the
+    /// rest read off the UI thread (`view::attachment`).
+    pub(super) fn attach_paths(&mut self, view: &Entity<SessionView>, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let mut open = Vec::new();
+        let mut rest = Vec::new();
+        for path in paths {
+            let tab = self.tab_for(&path, cx).filter(|e| e.read(cx).is_loaded() && crate::agents::session::image_mime(&path).is_none());
+            match tab {
+                Some(editor) => open.push(crate::agents::view::Attachment::Context(ContextItem::File { path, text: editor.read(cx).doc.read(cx).rope().to_string() })),
+                None => rest.push(path),
+            }
+        }
+        let read = cx.background_executor().spawn(async move { rest.iter().map(|path| crate::agents::view::attachment(path)).collect::<Vec<_>>() });
+        let view = view.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            open.extend(read.await);
+            view.update_in(cx, |v, window, cx| v.add_attachments(open, window, cx)).ok();
+        })
+        .detach();
+    }
+
     /// Picture File…: PNG, JPEG, GIF or WebP files chosen in the system's
     /// dialog, read off the UI thread.
     fn attach_pictures(&mut self, view: &Entity<SessionView>, cx: &mut Context<Self>) {
@@ -1114,6 +1154,50 @@ fn selection_context(editor: &Entity<Editor>, cx: &App) -> Option<ContextItem> {
     Some(ContextItem::Selection { path, lines: (first, last), text })
 }
 
+/// A click on an agent session's system notification: Kuana comes forward
+/// with the session's window and the session in front.
+pub fn show_notified_session(id: &str, cx: &mut App) {
+    cx.activate(true);
+    let session = store::store(cx).and_then(|store| store.read(cx).live().iter().find(|s| s.read(cx).id == id).cloned());
+    let Some(session) = session else { return };
+    for handle in cx.windows() {
+        let Some(workspace) = handle.downcast::<Workspace>() else { continue };
+        let shown = workspace
+            .update(cx, |ws, window, cx| {
+                if !ws.agent_sessions.contains_key(id) {
+                    return false;
+                }
+                window.activate_window();
+                ws.open_session_view(session.clone(), window, cx);
+                true
+            })
+            .unwrap_or(false);
+        if shown {
+            return;
+        }
+    }
+}
+
+/// The window's native handle where the system wants one for attention
+/// (Windows' `HWND`, whose taskbar button flashes).
+fn native_window(window: &Window) -> Option<isize> {
+    #[cfg(target_os = "windows")]
+    {
+        use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+        if let Ok(handle) = window.window_handle()
+            && let RawWindowHandle::Win32(win32) = handle.as_raw()
+        {
+            return Some(win32.hwnd.get());
+        }
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// `..` and links out of a folder are resolved before anything checks
@@ -1137,3 +1221,4 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 }
+

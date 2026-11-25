@@ -150,6 +150,7 @@ use self::{
     windows::*,
 };
 pub use self::{
+    agents::show_notified_session,
     bookmarks::GoToBookmark,
     extension_ui::{ToggleExtensionView, handle_extension_request},
     sessions::update_recent_projects,
@@ -2018,6 +2019,11 @@ impl Workspace {
                 self.active_pane = pane.clone();
                 self.open_path(path.clone(), window, cx);
                 cx.notify();
+            }
+            PaneEvent::AttachPaths(paths) => {
+                if let Some(view) = pane.read(cx).active_item().and_then(|item| item.agent().cloned()) {
+                    self.attach_paths(&view, paths.clone(), window, cx);
+                }
             }
         }
     }

@@ -38,8 +38,17 @@ pub struct AgentStore {
     sessions: Vec<Entity<Session>>,
     saved: Vec<history::Summary>,
     subscriptions: HashMap<String, Subscription>,
+    /// Held while a session works (`agent_keep_awake`): the computer doesn't
+    /// idle-sleep then. `keep_awake` says whether it's wanted (the hold is
+    /// taken in the background).
+    awake: Option<kuana_os::power::Awake>,
+    keep_awake: bool,
+    _settings: Subscription,
     _quit: Subscription,
 }
+
+/// What the system shows where it lists what keeps the computer awake.
+const AWAKE_REASON: &str = "Kuana: an agent session is working";
 
 struct GlobalStore(Entity<AgentStore>);
 
@@ -69,6 +78,9 @@ pub fn init(cx: &mut App) {
             sessions: Vec::new(),
             saved: Vec::new(),
             subscriptions: HashMap::new(),
+            awake: None,
+            keep_awake: false,
+            _settings: cx.observe_global::<Settings>(|s, cx| s.sync_awake(cx)),
             _quit: cx.on_app_quit(|s, cx| {
                 s.quit(cx);
                 async {}
@@ -245,9 +257,47 @@ impl AgentStore {
                 cx.notify();
             }
         });
-        self.subscriptions.insert(id, subscription);
+        self.subscriptions.insert(id.clone(), subscription);
+        // A session starting or ending a turn keeps the computer awake or lets it sleep.
+        let observed = cx.observe(session, |store, _, cx| store.sync_awake(cx));
+        self.subscriptions.insert(format!("{id}:awake"), observed);
         self.sessions.push(session.clone());
         cx.notify();
+    }
+
+    /// Keeps the computer awake while any session works (not while it waits
+    /// for the user's answer: nothing goes on then), if `agent_keep_awake`.
+    fn sync_awake(&mut self, cx: &mut Context<Self>) {
+        let wanted = Settings::get(cx).agent_keep_awake()
+            && self.sessions.iter().any(|s| {
+                let s = s.read(cx);
+                s.working() && s.state != super::session::State::Waiting
+            });
+        if wanted == self.keep_awake {
+            return;
+        }
+        self.keep_awake = wanted;
+        if !wanted {
+            // Letting go may be a D-Bus call (Linux): off the UI thread.
+            if let Some(awake) = self.awake.take() {
+                cx.background_executor().spawn(async move { drop(awake) }).detach();
+            }
+            return;
+        }
+        let taken = cx.background_executor().spawn(async { kuana_os::power::keep_awake(AWAKE_REASON) });
+        cx.spawn(async move |this, cx| {
+            let awake = taken.await;
+            this.update(cx, |s, cx| {
+                // Wanted no longer (the turn ended meanwhile): dropped at once.
+                if s.keep_awake && s.awake.is_none() {
+                    s.awake = awake;
+                } else if let Some(awake) = awake {
+                    cx.background_executor().spawn(async move { drop(awake) }).detach();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Kuana quits: every live session is saved as it stands and its agent
@@ -274,6 +324,8 @@ impl AgentStore {
         }
         self.sessions.retain(|s| s.read(cx).id != id);
         self.subscriptions.remove(id);
+        self.subscriptions.remove(&format!("{id}:awake"));
+        self.sync_awake(cx);
         cx.notify();
     }
 
