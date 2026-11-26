@@ -135,11 +135,12 @@ impl GitStore {
     /// its status. `root` is the project folder, if `dir` is one's.
     pub fn detect(&mut self, dir: PathBuf, root: Option<PathBuf>, cx: &mut Context<Self>) {
         self.root = root;
+        let look = !no_git_in_tests();
         cx.spawn(async move |this, cx| {
             let found = cx
                 .background_executor()
                 .spawn(async move {
-                    if !git::is_available() {
+                    if !look || !git::is_available() {
                         return None;
                     }
                     let repo = git::discover(&dir)?;
@@ -700,6 +701,22 @@ fn perform(dir: &Path, op: GitOp, status: &RepoStatus) -> Result<Outcome, String
         GitOp::Reset { sha, mode } => git::reset(dir, &sha, mode).map(|_| Some(format!("Reset to {}", short(&sha)))),
     };
     message.map(Outcome::Done)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Set by workspace tests (`workspace::harness`), whose projects aren't
+    /// repositories: no store looks for one, so no Git runs (nor the login
+    /// shell `git::is_available` asks for its PATH).
+    pub static NO_GIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether this test left Git out (`NO_GIT`); never outside tests.
+fn no_git_in_tests() -> bool {
+    #[cfg(test)]
+    return NO_GIT.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    false
 }
 
 #[cfg(test)]

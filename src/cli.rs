@@ -25,14 +25,15 @@ pub fn paths_from_urls(urls: &[String]) -> Vec<PathBuf> {
 /// jump list, for Kuana's list to drop too.
 pub fn show_recent_projects(projects: &[PathBuf], cx: &mut gpui::App) -> Vec<PathBuf> {
     let projects: Vec<PathBuf> = projects.iter().filter(|p| p.is_dir()).cloned().collect();
-    #[cfg(target_os = "macos")]
+    // Not from tests: the Dock's list is the user's.
+    #[cfg(all(target_os = "macos", not(test)))]
     show_in_dock(projects.clone(), cx);
     let entries = projects.into_iter().map(|p| std::iter::once(p).collect()).collect();
     cx.update_jump_list(Vec::new(), entries).into_iter().flatten().collect()
 }
 
 /// Replaces the system's recent items for Kuana, which the Dock lists.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn show_in_dock(projects: Vec<PathBuf>, cx: &mut gpui::App) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     // Which call last changed the list.
@@ -58,7 +59,7 @@ fn show_in_dock(projects: Vec<PathBuf>, cx: &mut gpui::App) {
 /// Oldest first: each one goes to the end, and the Dock shows the newest at
 /// the bottom, nearest the icon (like VS Code), keeping the newest when the
 /// system's limit on recent items is lower.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn add_to_dock(projects: &[PathBuf], cx: &mut gpui::App) {
     for path in projects.iter().rev() {
         cx.add_recent_document(path);

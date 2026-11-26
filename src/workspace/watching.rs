@@ -9,6 +9,14 @@ use ignore::gitignore::Gitignore;
 use super::*;
 use crate::lsp::{FileWatchers, ServerKey};
 
+#[cfg(test)]
+thread_local! {
+    /// Set by workspace tests (`harness`): a watcher's events come from
+    /// another thread, whenever the system sends them, so a test that
+    /// changes files would see them at a different moment each run.
+    pub(super) static NO_WATCHER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl Workspace {
     // ---- Watching the disk --------------------------------------------------------
 
@@ -18,6 +26,10 @@ impl Workspace {
         self.watch_task = None;
         let Some(project) = self.folders.clone() else { return };
         self.ignores = project.folders().iter().filter_map(|f| Some((f.clone(), Arc::new(project_ignore(f)?)))).collect();
+        #[cfg(test)]
+        if NO_WATCHER.with(std::cell::Cell::get) {
+            return;
+        }
         let (mut watcher, mut changes) = match Watcher::new(project.primary()) {
             Ok(watching) => watching,
             Err(err) => {

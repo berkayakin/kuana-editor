@@ -140,6 +140,10 @@ mod watching;
 mod welcome;
 mod windows;
 mod zen;
+#[cfg(test)]
+mod harness;
+#[cfg(test)]
+mod saving_tests;
 use self::{
     file_tree::*,
     pane::{Pane, PaneChrome, PaneEvent, file_drop_overlay},

@@ -844,6 +844,11 @@ pub fn display_path(path: &Path) -> String {
 /// Where user configuration lives: `~/.config/kuana` (or `$XDG_CONFIG_HOME/kuana`)
 /// on macOS and Linux, `%APPDATA%\kuana` on Windows.
 pub fn config_dir() -> Option<PathBuf> {
+    // Tests never read or write the user's own configuration: theirs is a
+    // folder of this test run's.
+    if cfg!(test) {
+        return Some(std::env::temp_dir().join(format!("kuana-tests-{}", std::process::id())).join("config"));
+    }
     if cfg!(windows) {
         return std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("kuana"));
     }
