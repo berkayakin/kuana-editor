@@ -105,7 +105,8 @@ their own text size (15 points unless Settings → AI → Sessions → **Text si
   screenshot, a design) attaches it too: PNG, JPEG, GIF or WebP, up to 5 MB, for agents that take
   pictures (Kuana Agent does, on a model that sees images). **Drop** files on the session (from
   Finder or the file tree) to attach them: text files and pictures join the message; a folder, or
-  a file that's neither, is named in the prompt (`@src/`) for the agent to look at.
+  a file that's neither, is named in the prompt (`@src/`) for the agent to look at. An attached
+  text file goes up to its first 256 KB, with a note saying how much was left out.
 - **Changes**: the cap on the composer's top edge counts the files the agent changed. **Review** opens each
   as a diff against what it was before the session touched it. **Keep All** keeps them, and
   **Reject All** puts every file back as it was. Every agent write is one undoable edit in its open

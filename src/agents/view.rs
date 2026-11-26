@@ -42,33 +42,67 @@ pub enum Attachment {
 }
 
 /// Reads a path dropped on a session (blocking: call it off the UI thread).
+/// Only what's taken is read: a picture up to its limit, a text file's start.
 pub fn attachment(path: &std::path::Path) -> Attachment {
     let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
-    if crate::fs::metadata(path).is_ok_and(|m| m.is_dir()) {
-        return Attachment::Mention { path: path.to_path_buf(), folder: true, why: None };
+    let size = match crate::fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => return Attachment::Mention { path: path.to_path_buf(), folder: true, why: None },
+        Ok(meta) => meta.len(),
+        Err(e) => return Attachment::Refused(format!("{name}: {e}")),
+    };
+    let too_big = || Attachment::Refused(format!("{name} is over 5 MB"));
+    if let Some(mime) = super::session::image_mime(path) {
+        if size > super::session::MAX_IMAGE_BYTES as u64 {
+            return too_big();
+        }
+        return match read_start(path, super::session::MAX_IMAGE_BYTES + 1) {
+            // It grew since.
+            Ok(bytes) if bytes.len() > super::session::MAX_IMAGE_BYTES => too_big(),
+            Ok(bytes) => Attachment::Context(ContextItem::Image { name, mime: mime.into(), data: bytes.into() }),
+            Err(e) => Attachment::Refused(format!("{name}: {e}")),
+        };
     }
-    let bytes = match crate::fs::read(path) {
+    let bytes = match read_start(path, MENTION_BYTES) {
         Ok(bytes) => bytes,
         Err(e) => return Attachment::Refused(format!("{name}: {e}")),
     };
-    if let Some(mime) = super::session::image_mime(path) {
-        if bytes.len() > super::session::MAX_IMAGE_BYTES {
-            return Attachment::Refused(format!("{name} is over 5 MB"));
-        }
-        return Attachment::Context(ContextItem::Image { name, mime: mime.into(), data: bytes.into() });
-    }
     if crate::encoding::looks_binary(&bytes) {
         let why = format!("{name} isn't text or a picture: it's named in the prompt for the agent to open");
         return Attachment::Mention { path: path.to_path_buf(), folder: false, why: Some(why) };
     }
-    Attachment::Context(ContextItem::File { path: path.to_path_buf(), text: mentioned_text(&bytes) })
+    Attachment::Context(ContextItem::File { path: path.to_path_buf(), text: mentioned_text(&bytes, size) })
 }
 
-/// A file's text as attached: at most `MENTION_BYTES`, what's left out said.
-fn mentioned_text(bytes: &[u8]) -> String {
-    let mut text = crate::encoding::decode(&bytes[..bytes.len().min(MENTION_BYTES)], None).0;
-    if bytes.len() > MENTION_BYTES {
-        text.push_str(&format!("\n[… {} more bytes left out]", bytes.len() - MENTION_BYTES));
+/// A text file mentioned with `@`, as attached (blocking).
+fn mentioned_file(path: &std::path::Path) -> std::io::Result<String> {
+    let size = crate::fs::metadata(path)?.len();
+    Ok(mentioned_text(&read_start(path, MENTION_BYTES)?, size))
+}
+
+/// A file's first `limit` bytes (blocking), so a huge one isn't read whole.
+fn read_start(path: &std::path::Path, limit: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    crate::fs::open(path)?.take(limit as u64).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// A file's text as attached: its start (`bytes`, of `size` in all), at most
+/// `MENTION_BYTES`, what's left out said.
+fn mentioned_text(bytes: &[u8], size: u64) -> String {
+    let mut kept = &bytes[..bytes.len().min(MENTION_BYTES)];
+    // A cut through a character ends there: UTF-8 cut short isn't UTF-8,
+    // and the whole text would read as Windows-1252.
+    if (kept.len() as u64) < size
+        && let Err(e) = std::str::from_utf8(kept)
+        && e.error_len().is_none()
+    {
+        kept = &kept[..e.valid_up_to()];
+    }
+    let mut text = crate::encoding::decode(kept, None).0;
+    let left = size.saturating_sub(kept.len() as u64);
+    if left > 0 {
+        text.push_str(&format!("\n[… {left} more bytes left out]"));
     }
     text
 }
@@ -556,11 +590,10 @@ impl SessionView {
         // Read off the UI thread; it joins the context when it's in.
         let read = cx.background_executor().spawn({
             let path = path.clone();
-            async move { crate::fs::read(&path) }
+            async move { mentioned_file(&path) }
         });
         cx.spawn(async move |view, cx| {
-            let Ok(bytes) = read.await else { return };
-            let text = mentioned_text(&bytes);
+            let Ok(text) = read.await else { return };
             view.update(cx, |v, cx| v.add_context(ContextItem::File { path, text }, cx)).ok();
         })
         .detach();
@@ -2320,10 +2353,27 @@ mod tests {
         assert!(matches!(attachment(&dir.join("data.bin")), Attachment::Mention { folder: false, why: Some(_), .. }));
         assert_eq!(attachment(&dir.join("big.png")), Attachment::Refused("big.png is over 5 MB".into()));
         assert!(matches!(attachment(&dir.join("gone.txt")), Attachment::Refused(_)));
-        // A long file is cut, what's left out said.
-        let long = mentioned_text(&vec![b'a'; MENTION_BYTES + 10]);
+        // A long file is cut, what's left out said; only its start is read.
+        std::fs::write(dir.join("long.txt"), vec![b'a'; MENTION_BYTES + 10]).unwrap();
+        let Attachment::Context(ContextItem::File { text: long, .. }) = attachment(&dir.join("long.txt")) else { panic!("text expected") };
         assert!(long.ends_with("[… 10 more bytes left out]"));
+        assert_eq!(long.len(), MENTION_BYTES + "\n[… 10 more bytes left out]".len());
+        assert_eq!(mentioned_file(&dir.join("long.txt")).unwrap(), long);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_cut_through_a_character_keeps_the_text_utf8() {
+        // `é` is two bytes: after one `a`, the cut at `MENTION_BYTES` (even)
+        // falls inside one.
+        let bytes = format!("a{}", "é".repeat(MENTION_BYTES / 2 + 8)).into_bytes();
+        let text = mentioned_text(&bytes[..MENTION_BYTES], bytes.len() as u64);
+        let (kept, note) = text.split_once("\n[…").unwrap();
+        assert_eq!(kept, format!("a{}", "é".repeat(MENTION_BYTES / 2 - 1)));
+        assert_eq!(note, format!(" {} more bytes left out]", bytes.len() - kept.len()));
+        // A whole file isn't trimmed: one that isn't UTF-8 reads as Windows-1252.
+        assert_eq!(mentioned_text(&[b'a', 0xE9], 2), "aé");
+        assert_eq!(mentioned_text(b"plain", 5), "plain");
     }
 
     #[test]
