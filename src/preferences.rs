@@ -137,6 +137,7 @@ impl Page {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Setting {
     OpenFolderIn,
+    FollowSystemTheme,
     Theme,
     IconTheme,
     UiFontSize,
@@ -197,7 +198,8 @@ enum Setting {
 }
 
 impl Setting {
-    const ALL: [Setting; 58] = [
+    const ALL: [Setting; 59] = [
+        Setting::FollowSystemTheme,
         Setting::Theme,
         Setting::IconTheme,
         Setting::UiFontSize,
@@ -265,7 +267,7 @@ impl Setting {
 
     fn page(self) -> Page {
         match self {
-            Setting::Theme | Setting::IconTheme | Setting::UiFontSize | Setting::VisualEffects | Setting::UiStyle | Setting::SidebarDock | Setting::ToolsLocation | Setting::ProjectAvatar | Setting::CompactActivityBar => Page::Appearance,
+            Setting::FollowSystemTheme | Setting::Theme | Setting::IconTheme | Setting::UiFontSize | Setting::VisualEffects | Setting::UiStyle | Setting::SidebarDock | Setting::ToolsLocation | Setting::ProjectAvatar | Setting::CompactActivityBar => Page::Appearance,
             Setting::ZenFullScreen | Setting::ZenWidth | Setting::ZenLineNumbers | Setting::ZenTabs => Page::Appearance,
             Setting::BaseKeymap => Page::Keymap,
             Setting::FontFamily | Setting::FontSize | Setting::LineHeight => Page::Editor,
@@ -292,7 +294,7 @@ impl Setting {
 
     fn section(self) -> &'static str {
         match self {
-            Setting::Theme => "Theme",
+            Setting::FollowSystemTheme | Setting::Theme => "Theme",
             Setting::IconTheme => "File icons",
             Setting::UiFontSize => "Text",
             Setting::VisualEffects => "Effects",
@@ -328,6 +330,7 @@ impl Setting {
 
     fn label(self) -> &'static str {
         match self {
+            Setting::FollowSystemTheme => "Follow system light or dark mode",
             Setting::Theme => "Theme",
             Setting::IconTheme => "Icon theme",
             Setting::VisualEffects => "Visual effects",
@@ -391,6 +394,7 @@ impl Setting {
 
     fn description(self) -> &'static str {
         match self {
+            Setting::FollowSystemTheme => "Switches between a light and a dark theme with the system, without a restart. Pick one of each below.",
             Setting::Theme => "Add your own themes as .json files in the themes folder.",
             Setting::IconTheme => "File and folder icons. Extensions can add icon themes (Zed's work too).",
             Setting::VisualEffects => "Reduced uses solid colors instead of gradients; Minimal also drops shadows, glows and animations.",
@@ -466,6 +470,7 @@ impl Setting {
     /// More words people may search for.
     fn keywords(self) -> &'static str {
         match self {
+            Setting::FollowSystemTheme => "system os mode light dark automatic auto switch follow night day light_theme dark_theme",
             Setting::Theme => "color scheme dark light appearance",
             Setting::IconTheme => "icons file icons folder icon theme",
             Setting::VisualEffects => "reduce simple simplify plain flat minimal gradient shadow glow animation transition motion effects decoration",
@@ -1005,13 +1010,25 @@ impl Preferences {
     }
 
     fn choose_theme(&mut self, name: SharedString, cx: &mut Context<Self>) {
-        theme::apply_theme(&name, cx);
-        let result = if name.as_ref() == theme::DEFAULT_THEME && Settings::get(cx).theme.is_none() {
-            Ok(())
-        } else {
-            Settings::set("theme", name.as_ref().into())
-        };
+        let result = theme::save_choice(&name, cx);
         self.write(result, cx);
+        // Following the system, a theme for the other mode waits for it.
+        if theme::follows_system(Settings::get(cx)) {
+            theme::apply_wanted(cx);
+        } else {
+            theme::apply_theme(&name, cx);
+        }
+    }
+
+    /// The Follow system switch: `"theme": "System"`, the shown theme going on
+    /// for its mode (the other mode keeps its own); off, the theme shown now stays.
+    fn toggle_follow_system(&mut self, cx: &mut Context<Self>) {
+        let settings = Settings::get(cx).clone();
+        let shown = Theme::get(cx).clone();
+        let keys = theme::follow_system_keys(!theme::follows_system(&settings), &shown.name, shown.appearance);
+        let result = theme::write_keys(keys);
+        self.write(result, cx);
+        theme::apply_wanted(cx);
     }
 
     fn schedule_commit(&mut self, cx: &mut Context<Self>) {
@@ -1767,6 +1784,12 @@ impl Preferences {
         });
         let control: AnyElement = match setting {
             Setting::Theme => return self.render_themes(cx).into_any_element(),
+            Setting::FollowSystemTheme => div()
+                .id("pref-theme-follow-system")
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_follow_system(cx)))
+                .child(switch(theme::follows_system(&settings), &theme))
+                .into_any_element(),
             Setting::RunConfigurations => return self.render_runs(window, cx).into_any_element(),
             Setting::FontFamily | Setting::TerminalFontFamily => {
                 let (trigger, list) = self.render_font_menu(setting == Setting::TerminalFontFamily, window, cx);
@@ -2363,9 +2386,15 @@ impl Preferences {
             cx.global::<ThemeRegistry>().entries.iter().map(|e| (e.theme.clone(), e.path.is_some())).collect();
         entries.sort_by_key(|(t, _)| t.appearance == Appearance::Light);
         let errors = cx.global::<ThemeRegistry>().errors.clone();
+        // Following the system, each group has its chosen theme, the shown one among them.
+        let settings = Settings::get(cx);
+        let follows = theme::follows_system(settings);
+        let chosen = [Appearance::Light, Appearance::Dark].map(|a| theme::wanted(settings, a));
         let cards: Vec<(Appearance, AnyElement)> = entries.into_iter().enumerate().map(|(ix, (t, custom))| {
             let appearance = t.appearance;
             let selected = t.name == theme.name;
+            // Each group checks its own mode's choice (`chosen` is light, then dark).
+            let picked = if follows { chosen[usize::from(appearance == Appearance::Dark)] == t.name.as_ref() } else { selected };
             let name = t.name.clone();
             // A few lines of "code" in the theme's own colors, painted rather
             // than laid out: a page of cards made of divs took most of a
@@ -2427,7 +2456,7 @@ impl Preferences {
                         .text_color(t.text)
                         .child(div().flex_1().min_w_0().truncate().child(t.name.clone()))
                         .when(custom, |el| el.child(div().text_size(px(10.5)).text_color(t.text_dim).child("Custom")))
-                        .when(selected, |el| el.child(icon_el(Icon::CircleCheck, px(13.), t.accent.into()))),
+                        .when(picked, |el| el.child(icon_el(Icon::CircleCheck, px(13.), t.accent.into()))),
                 );
             (appearance, card.into_any_element())
         }).collect();
@@ -2436,7 +2465,8 @@ impl Preferences {
         const PER_ROW: usize = 4;
         let mut groups: Vec<AnyElement> = Vec::new();
         let (dark, light): (Vec<_>, Vec<_>) = cards.into_iter().partition(|(a, _)| *a == Appearance::Dark);
-        for (title, cards) in [("Dark", dark), ("Light", light)] {
+        let titles = if follows { ["Dark: used while the system is dark", "Light: used while the system is light"] } else { ["Dark", "Light"] };
+        for (title, cards) in [(titles[0], dark), (titles[1], light)] {
             if cards.is_empty() {
                 continue;
             }
@@ -3217,7 +3247,7 @@ fn page_sections(page: Page) -> Vec<&'static str> {
 /// The `settings.json` key a row resets; empty for rows without one.
 fn setting_key(setting: Setting) -> &'static str {
     match setting {
-        Setting::Theme | Setting::RunConfigurations => "",
+        Setting::Theme | Setting::FollowSystemTheme | Setting::RunConfigurations => "",
         Setting::BaseKeymap => "base_keymap",
         Setting::FontFamily => "editor_font_family",
         Setting::FontSize => "editor_font_size",
