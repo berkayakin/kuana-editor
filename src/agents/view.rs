@@ -159,8 +159,10 @@ pub struct SessionView {
     /// over once the composer holds something else (`prompts::step`).
     recall: Option<(Vec<String>, usize)>,
     /// Whether the session's project is in a Git repository (it may work in
-    /// a worktree of its own then), set by the workspace.
+    /// a worktree of its own then), and how many folders the window's
+    /// project has (another may be chosen); set by the workspace.
     pub in_repo: bool,
+    pub project_folders: usize,
     /// What's being done to its worktree (made, removed…), shown on its pill.
     pub place_busy: Option<SharedString>,
     /// The chat's text size (`agent_font_size`) and its scale against the
@@ -244,6 +246,7 @@ impl SessionView {
             mentioned: Vec::new(),
             recall: None,
             in_repo: false,
+            project_folders: 1,
             place_busy: None,
             chat_size: crate::settings::DEFAULT_AGENT_FONT_SIZE,
             scale: crate::settings::DEFAULT_AGENT_FONT_SIZE / 13.,
@@ -997,7 +1000,8 @@ impl SessionView {
                             .on_click(cx.listener(move |v, _, _, cx| v.toggle(toggle.clone(), false, cx))),
                     )
                     .when(open, |el| {
-                        el.child(div().mt_1().pl_4().text_size(px(12.5 * k)).italic().text_color(theme.text_muted).whitespace_normal().child(text))
+                        // Agents end it with blank lines; no gap before the answer.
+                        el.child(div().mt_1().pl_4().text_size(px(12.5 * k)).italic().text_color(theme.text_muted).whitespace_normal().child(text.trim().to_string()))
                     })
                     .into_any_element()
             }
@@ -1581,8 +1585,12 @@ impl SessionView {
             (None, Some(wt)) if !wt.removed => {
                 Some((Icon::GitBranch, wt.branch.trim_start_matches("kuana/").to_string(), format!("Works in a worktree of its own, on branch {}", wt.branch)))
             }
-            (None, None) if self.in_repo && session.transcript.entries.is_empty() => {
-                Some((Icon::Folder, "Project folder".to_string(), "Where the agent works: here, or a worktree of its own".to_string()))
+            // The folder it works in, by name; another (a project of several
+            // folders) or a worktree of its own may be chosen.
+            (None, None) if (self.in_repo || self.project_folders > 1) && session.transcript.entries.is_empty() => {
+                let folder = session.folder();
+                let name = folder.file_name().map_or_else(|| folder.display().to_string(), |n| n.to_string_lossy().into_owned());
+                Some((Icon::Folder, name, format!("Works in {}", tilde(folder))))
             }
             _ => None,
         };
@@ -1599,7 +1607,7 @@ impl SessionView {
             all_commands.into_iter().enumerate().skip(first_shown).take(8).map(|(i, (name, description))| (i, name, description)).collect();
         let picked_mention = self.mention_query(cx).map(|(_, query)| query).map_or(0, |query| self.pick_index(&query, usize::MAX));
         let focused = self.composer.focus_handle(cx).is_focused(window);
-        let composer_height = self.composer.read(cx).content_height(cx);
+        let composer_height = self.composer.update(cx, |e, cx| e.measured_height(cx));
         let dictate_key = crate::ui::binding_label_at(&crate::dictation::Dictate, &self.composer.focus_handle(cx), window);
         div()
             .mx_3()
@@ -2192,6 +2200,15 @@ fn cap_button(id: &'static str, label: &'static str, color: Hsla, theme: &Theme)
         .text_color(color)
         .child(label)
         .hover_fill(Hsla::from(theme.elevated).alpha(0.), theme.hover)
+}
+
+/// A path with the home folder written `~`, for showing.
+pub fn tilde(path: &std::path::Path) -> String {
+    match std::env::home_dir().and_then(|home| path.strip_prefix(&home).ok().map(|rel| rel.to_path_buf())) {
+        Some(rel) if rel.as_os_str().is_empty() => "~".into(),
+        Some(rel) => format!("~/{}", rel.display()),
+        None => path.display().to_string(),
+    }
 }
 
 /// How much an element gives way when its row is too narrow (flex shrink).

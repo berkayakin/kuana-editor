@@ -557,6 +557,11 @@ impl WrapMap {
         *self.row_starts.last().unwrap_or(&1)
     }
 
+    /// The buffer lines it has rows for.
+    pub fn line_count(&self) -> usize {
+        self.rows.len()
+    }
+
     /// Whether a fold hides buffer line `row`.
     pub fn hidden(&self, row: usize) -> bool {
         if self.row_starts.len() <= row + 1 {

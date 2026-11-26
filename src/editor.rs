@@ -2586,15 +2586,31 @@ impl Editor {
         self.wrap.as_ref().map_or(self.doc.read(cx).line_count(), WrapMap::row_count)
     }
 
+    /// How tall the text is now, its changed lines wrapped first at the
+    /// width it was last drawn at: a field that grows with what's typed (an
+    /// agent's prompt) asks this before it's drawn, so a line that has just
+    /// started wrapping gets its row in the same frame.
+    pub fn measured_height(&mut self, cx: &mut Context<Self>) -> Pixels {
+        if self.layout.is_some() {
+            self.sync_wrap(cx);
+        }
+        self.content_height(cx)
+    }
+
     /// How tall the text is (its rows as last laid out): a text field that
     /// grows with what's typed (an agent's prompt) sizes itself by it.
     pub fn content_height(&self, cx: &App) -> Pixels {
         let doc = self.doc.read(cx);
-        // Soft wrap's rows are made when it's drawn: for text changed since,
-        // its lines (a wrapped line's other rows follow a frame later).
+        let lines = doc.line_count();
+        // Soft wrap's rows are made when it's drawn. For text changed since:
+        // its rows then, give or take the lines added or taken out since, so a
+        // keystroke on a wrapped line keeps its rows (counting lines alone
+        // shrank it to one row and back every keystroke); a line that has
+        // just started wrapping gets its row a frame later (`drawn_rows`).
         let rows = match &self.wrap {
             Some(wrap) if wrap.version == doc.version() => wrap.row_count(),
-            _ => doc.line_count(),
+            Some(wrap) => (wrap.row_count() + lines).saturating_sub(wrap.line_count()).max(lines),
+            None => lines,
         };
         self.line_height(cx) * rows.max(1) as f32
     }

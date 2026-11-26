@@ -1187,7 +1187,7 @@ mod tests {
         let (read, write) = start(choose).unwrap();
         futures::executor::block_on(async {
             let (agent, mut events) = Agent::connect(read, write).await.unwrap();
-            let session = agent.new_session(Path::new("/proj"), Vec::new()).await.unwrap();
+            let session = agent.new_session(Path::new("/proj"), Vec::new(), None).await.unwrap();
             let id = session.session_id.to_string();
             let turn = agent.prompt(&id, vec![json!({ "type": "text", "text": "Say goodbye" })]);
             let mut written = None;

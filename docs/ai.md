@@ -69,7 +69,9 @@ their own text size (15 points unless Settings → AI → Sessions → **Text si
   back. Other agents can't go back (ACP has no way to), so there Edit puts the text in the
   composer to send as a new message.
 
-- **The transcript**: your messages, the agent's answers in Markdown, its thinking (folded), and
+- **The transcript**: your messages, the agent's answers in Markdown, its thinking (folded; Claude
+  Agent sends Claude's thinking summaries, as Claude's apps show them, unless your Claude Code
+  settings set `showThinkingSummaries`), and
   each step it takes as a card: files read, searches, edits with their diff (**Open Diff** shows
   it in full), commands with what they're for and their output (its end first; click for the
   rest). Runs of finished steps fold into one line ("Read 4 files, edited 2"). The agent's plan
@@ -111,10 +113,11 @@ their own text size (15 points unless Settings → AI → Sessions → **Text si
   write files themselves (Claude Agent) are followed too: Kuana keeps each file as it was when the
   agent's edit comes up. What each session changed is kept with it, so Review, Reject All and
   Restore still work after Kuana restarts.
-- **Worktrees**: in a project in a Git repository, the folder pill under a new session's composer
-  chooses where it works before you send anything: the **Project Folder**, or a **New Worktree**,
-  a checkout of its own on a new branch (`kuana/agent-…`) from the last commit, kept in Kuana's own
-  folder, so the agent's edits touch neither your files nor other sessions'. Its pill then shows
+- **Where it works**: a session works in the project folder of the file you're editing (the
+  window's first folder otherwise). Before you send anything, the folder pill under its composer
+  names that folder and changes it: with several folders, pick another; in a Git repository, pick
+  a **New Worktree**, a checkout of its own on a new branch (`kuana/agent-…`) from the last commit,
+  kept in Kuana's own folder, so the agent's edits touch neither your files nor other sessions'. Its pill then shows
   the branch, with **Open Worktree in New Window** (to run or test it), **Commit Changes on Its
   Branch** (the session's title as the message), **Merge into** your branch (commits what's left,
   then merges with Kuana's own merge; conflicts show in the Commit view as for any merge) and

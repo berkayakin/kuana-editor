@@ -169,12 +169,21 @@ impl Agent {
         async move { answer.await.map(|_| ()) }
     }
 
-    pub fn new_session(&self, cwd: &Path, mcp_servers: Vec<Value>) -> impl Future<Output = Result<schema::NewSessionResponse, RpcError>> + use<> {
-        typed(self.rpc.request("session/new", json!({ "cwd": cwd, "mcpServers": mcp_servers })))
+    /// `meta`: what this agent takes beyond ACP (`_meta`), if anything.
+    pub fn new_session(&self, cwd: &Path, mcp_servers: Vec<Value>, meta: Option<Value>) -> impl Future<Output = Result<schema::NewSessionResponse, RpcError>> + use<> {
+        let mut params = json!({ "cwd": cwd, "mcpServers": mcp_servers });
+        if let Some(meta) = meta {
+            params["_meta"] = meta;
+        }
+        typed(self.rpc.request("session/new", params))
     }
 
-    pub fn load_session(&self, id: &str, cwd: &Path, mcp_servers: Vec<Value>) -> impl Future<Output = Result<schema::LoadSessionResponse, RpcError>> + use<> {
-        typed(self.rpc.request("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": mcp_servers })))
+    pub fn load_session(&self, id: &str, cwd: &Path, mcp_servers: Vec<Value>, meta: Option<Value>) -> impl Future<Output = Result<schema::LoadSessionResponse, RpcError>> + use<> {
+        let mut params = json!({ "sessionId": id, "cwd": cwd, "mcpServers": mcp_servers });
+        if let Some(meta) = meta {
+            params["_meta"] = meta;
+        }
+        typed(self.rpc.request("session/load", params))
     }
 
     /// An extension request (`_<name>/…`) an agent serves beyond ACP, its
@@ -298,7 +307,7 @@ mod tests {
         futures::executor::block_on(async {
             let (agent, mut events) = fake.connect().await;
             assert_eq!(agent.init.agent_info.as_ref().map(|i| i.name.as_str()), Some("fake"));
-            let session = agent.new_session(Path::new("/proj"), Vec::new()).await.unwrap();
+            let session = agent.new_session(Path::new("/proj"), Vec::new(), None).await.unwrap();
             assert_eq!(session.session_id.to_string(), "s1");
             assert_eq!(session.modes.unwrap().available_modes.len(), 2);
             let turn = agent.prompt("s1", vec![json!({ "type": "text", "text": "hi" })]);

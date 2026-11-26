@@ -576,12 +576,13 @@ impl Session {
             return;
         };
         let mcp = self.mcp_servers.clone();
+        let meta = session_meta(&self.agent_id);
         let loading = previous.is_some();
         self.replaying = loading;
         self.connecting = Some(cx.spawn(async move |this, cx| {
             let opened = match &previous {
-                Some(id) => agent.load_session(id, &cwd, mcp).await.map(|r| (id.clone(), r.modes, r.config_options)),
-                None => agent.new_session(&cwd, mcp).await.map(|r| (r.session_id.to_string(), r.modes, r.config_options)),
+                Some(id) => agent.load_session(id, &cwd, mcp, meta).await.map(|r| (id.clone(), r.modes, r.config_options)),
+                None => agent.new_session(&cwd, mcp, meta).await.map(|r| (r.session_id.to_string(), r.modes, r.config_options)),
             };
             this.update(cx, |s, cx| {
                 s.replaying = false;
@@ -1257,6 +1258,27 @@ impl Drop for Session {
             agent.cancel(id);
         }
     }
+}
+
+/// What a session asks of its agent beyond ACP (`_meta` on session/new and
+/// session/load). Claude's agent shows its thinking (summaries, as Claude's
+/// desktop app does) unless the user's own Claude Code settings decide it:
+/// Claude Code's `--thinking-display summarized`, through the Agent SDK's
+/// `extraArgs` (the API leaves thinking's text out otherwise).
+fn session_meta(agent: &str) -> Option<Value> {
+    (agent == "claude-acp" && !claude_decides_thinking()).then(|| json!({ "claudeCode": { "options": { "extraArgs": { "thinking-display": "summarized" } } } }))
+}
+
+/// Whether the user's Claude Code settings say whether to show thinking
+/// (`showThinkingSummaries` in `~/.claude/settings.json`, or the folder
+/// `CLAUDE_CONFIG_DIR` names).
+fn claude_decides_thinking() -> bool {
+    if cfg!(test) {
+        return false;
+    }
+    let dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| std::env::home_dir().map(|h| h.join(".claude")));
+    let settings: Option<Value> = dir.and_then(|d| std::fs::read(d.join("settings.json")).ok()).and_then(|b| serde_json::from_slice(&b).ok());
+    settings.is_some_and(|s| s.get("showThinkingSummaries").is_some())
 }
 
 fn auth_method(value: Value) -> Option<AuthMethod> {

@@ -96,6 +96,10 @@ impl Workspace {
         let Some(project) = self.folders.clone() else { return };
         let folders = project.folders().to_vec();
         self.tree.update(cx, |t, cx| t.update_roots(folders.clone(), cx));
+        // Sessions' folder pills offer the folders there are now.
+        for view in self.items(cx).into_iter().filter_map(|i| i.agent().cloned()) {
+            self.sync_agent_place(&view, cx);
+        }
         self.problems.update(cx, |p, cx| p.set_project(Some(project.clone()), cx));
         // Files: the removed folders' go, the added ones are scanned.
         self.files = self.files.keeping(&folders);

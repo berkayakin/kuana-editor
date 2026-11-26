@@ -168,12 +168,8 @@ impl Workspace {
     /// A session tab: the workspace hears it, and its session once.
     pub(super) fn add_agent_tab(&mut self, view: &Entity<SessionView>, window: &mut Window, cx: &mut Context<Self>) {
         let files = self.files.openable();
-        let folder = view.read(cx).session.read(cx).folder().to_path_buf();
-        let in_repo = self.store_for(&folder, cx).is_some_and(|store| store.read(cx).repo().is_some());
-        view.update(cx, |v, cx| {
-            v.set_files(files, cx);
-            v.in_repo = in_repo;
-        });
+        view.update(cx, |v, cx| v.set_files(files, cx));
+        self.sync_agent_place(view, cx);
         let sub = cx.subscribe_in(view, window, |ws, view, event: &SessionViewEvent, window, cx| ws.on_session_view(view, event, window, cx));
         self.agent_tabs.insert(view.entity_id(), vec![sub]);
         let session = view.read(cx).session.clone();
@@ -181,6 +177,22 @@ impl Workspace {
         if let std::collections::hash_map::Entry::Vacant(slot) = self.agent_sessions.entry(id) {
             slot.insert(cx.subscribe_in(&session, window, |ws, session, event: &SessionEvent, window, cx| ws.on_session_event(session, event, window, cx)));
         }
+    }
+
+    /// Tells a session's view about its folder: whether it's in a Git
+    /// repository (a worktree may be made) and how many folders the project
+    /// has (another may be chosen).
+    pub(super) fn sync_agent_place(&self, view: &Entity<SessionView>, cx: &mut Context<Self>) {
+        let folder = view.read(cx).session.read(cx).folder().to_path_buf();
+        let in_repo = self.store_for(&folder, cx).is_some_and(|store| store.read(cx).repo().is_some());
+        let folders = self.folders.as_ref().map_or(1, |p| p.folders().len());
+        view.update(cx, |v, cx| {
+            if v.in_repo != in_repo || v.project_folders != folders {
+                v.in_repo = in_repo;
+                v.project_folders = folders;
+                cx.notify();
+            }
+        });
     }
 
     /// A restored session tab (`TabKind::AgentSession`).
@@ -471,15 +483,30 @@ impl Workspace {
                 let fresh = s.transcript.entries.is_empty();
                 match (s.worktree.clone(), fresh) {
                     (worktree, true) => {
-                        let here = worktree.is_none();
-                        let entry = if here { MenuEntry::item("Project Folder", Icon::Check) } else { MenuEntry::text("Project Folder") };
-                        entries.push(entry.detail(Some("Its edits land in your working copy, as you'd make them.".to_string())));
-                        let (session_a, view_a) = (session.clone(), view.clone());
-                        actions.push((!here).then(|| MenuAction::Call(std::rc::Rc::new(move |ws: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| ws.agent_to_project_folder(&session_a, &view_a, cx)))));
-                        let entry = if here { MenuEntry::text("New Worktree") } else { MenuEntry::item("New Worktree", Icon::Check) };
-                        entries.push(entry.detail(Some("A checkout of its own on a new branch, from the last commit: its edits don't touch your files or other sessions'.".to_string())));
-                        let (session_b, view_b) = (session.clone(), view.clone());
-                        actions.push(here.then(|| MenuAction::Call(std::rc::Rc::new(move |ws: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| ws.agent_to_worktree(&session_b, &view_b, cx)))));
+                        // The project's folders (it works in one; with several,
+                        // another may be picked), then a worktree of its own.
+                        let current = s.folder().to_path_buf();
+                        let folders: Vec<PathBuf> = self.folders.as_ref().map(|p| p.folders().to_vec()).unwrap_or_else(|| vec![current.clone()]);
+                        if folders.len() > 1 {
+                            entries.push(MenuEntry::Header("Works in".into()));
+                            actions.push(None);
+                        }
+                        for folder in folders {
+                            let here = worktree.is_none() && folder == current;
+                            let name = folder.file_name().map_or_else(|| folder.display().to_string(), |n| n.to_string_lossy().into_owned());
+                            let entry = if here { MenuEntry::item(name, Icon::Check) } else { MenuEntry::text(name) };
+                            let detail = if folder == current { "Its edits land in your working copy, as you'd make them.".to_string() } else { crate::agents::view::tilde(&folder) };
+                            entries.push(entry.detail(Some(detail)));
+                            let (session_a, view_a) = (session.clone(), view.clone());
+                            actions.push((!here).then(|| MenuAction::Call(std::rc::Rc::new(move |ws: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| ws.agent_to_folder(&session_a, &view_a, folder.clone(), cx)))));
+                        }
+                        if self.store_for(&current, cx).is_some_and(|store| store.read(cx).repo().is_some()) {
+                            let in_worktree = worktree.is_some();
+                            let entry = if in_worktree { MenuEntry::item("New Worktree", Icon::Check) } else { MenuEntry::text("New Worktree") };
+                            entries.push(entry.detail(Some("A checkout of its own on a new branch, from the last commit: its edits don't touch your files or other sessions'.".to_string())));
+                            let (session_b, view_b) = (session.clone(), view.clone());
+                            actions.push((!in_worktree).then(|| MenuAction::Call(std::rc::Rc::new(move |ws: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| ws.agent_to_worktree(&session_b, &view_b, cx)))));
+                        }
                     }
                     (Some(wt), false) if !wt.removed => {
                         // The project's branch as Git last told (read when the status was).
@@ -1008,12 +1035,12 @@ impl Workspace {
         .detach();
     }
 
-    /// Project Folder, before the first message: the unused worktree goes
-    /// (with its branch) and the agent starts over in the project folder.
-    fn agent_to_project_folder(&mut self, session: &Entity<Session>, view: &Entity<SessionView>, cx: &mut Context<Self>) {
-        let Some(wt) = session.read(cx).worktree.clone() else { return };
+    /// A project folder picked, before the first message: an unused worktree
+    /// goes (with its branch) and the agent starts over in that folder.
+    fn agent_to_folder(&mut self, session: &Entity<Session>, view: &Entity<SessionView>, folder: PathBuf, cx: &mut Context<Self>) {
         let Some(store) = store::store(cx) else { return };
-        if let Err(why) = store.update(cx, |s, cx| s.move_session(session, wt.project.clone(), None, cx)) {
+        let worktree = session.read(cx).worktree.clone();
+        if let Err(why) = store.update(cx, |s, cx| s.move_session(session, folder, None, cx)) {
             self.toast(ToastKind::Error, "Couldn't move the session", Some(why), cx);
             return;
         }
@@ -1021,13 +1048,16 @@ impl Workspace {
             v.place_busy = None;
             cx.notify();
         });
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(err) = crate::agents::worktree::remove(&wt, true) {
-                    eprintln!("couldn't remove the worktree {}: {err}", wt.checkout.display());
-                }
-            })
-            .detach();
+        self.sync_agent_place(view, cx);
+        if let Some(wt) = worktree {
+            cx.background_executor()
+                .spawn(async move {
+                    if let Err(err) = crate::agents::worktree::remove(&wt, true) {
+                        eprintln!("couldn't remove the worktree {}: {err}", wt.checkout.display());
+                    }
+                })
+                .detach();
+        }
     }
 
     fn open_agent_worktree(&mut self, session: &Entity<Session>, window: &mut Window, cx: &mut Context<Self>) {
