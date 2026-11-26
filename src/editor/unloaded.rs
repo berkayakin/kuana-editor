@@ -147,8 +147,9 @@ impl Editor {
                 cx.emit(EditorLoaded { error: Some(err.to_string()) });
                 return Err(err);
             }
-            // Untitled, or a deleted file with edits: keep the text.
-            _ => Document::empty(),
+            // Untitled, or a deleted file with edits: keep the text, and the
+            // file it's for (Save writes it there again).
+            _ => Document::from_text(String::new(), self.doc.read(cx).path.clone()),
         };
         // A fresh editor for the text, in the same view (tabs and focus refer
         // to it) and the same document entity (other editors may show it).

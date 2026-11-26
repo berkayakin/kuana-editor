@@ -138,6 +138,42 @@ fn unsaved_text_the_file_has_by_now_comes_back_clean(cx: &mut TestAppContext) {
     assert!(ws.active_dirty(cx));
 }
 
+/// A tab whose file was deleted since: gone when it had nothing unsaved,
+/// kept with its text when it had.
+#[gpui::test]
+fn a_restored_tab_whose_file_is_gone(cx: &mut TestAppContext) {
+    harness::init(cx);
+    let project = TempProject::new(&[("a.txt", "a\n"), ("b.txt", "b\n"), ("c.txt", "c\n")]);
+    let ws = open(cx, &project);
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        ws.open(cx, &project.path(name));
+    }
+    edit(ws, cx, &project.path("b.txt"), 0, "new ");
+    close(ws, cx);
+    std::fs::remove_file(project.path("a.txt")).unwrap();
+    std::fs::remove_file(project.path("b.txt")).unwrap();
+
+    let ws = open(cx, &project);
+    assert_eq!(ws.tabs(cx), [["b.txt", "c.txt"]]);
+    ws.open(cx, &project.path("b.txt"));
+    assert_eq!(ws.tabs(cx), [["b.txt", "c.txt"]]);
+    assert_eq!(ws.active_path(cx), Some(project.path("b.txt")));
+    assert_eq!(ws.active_text(cx), "new b\n");
+    assert!(ws.active_dirty(cx));
+    // Still the file's tab the time after.
+    close(ws, cx);
+    let ws = open(cx, &project);
+    assert_eq!(ws.tabs(cx), [["b.txt", "c.txt"]]);
+    ws.open(cx, &project.path("b.txt"));
+    assert_eq!(ws.active_text(cx), "new b\n");
+    // Saved, the file is back. (Unlike a file deleted while its tab was
+    // open, nothing asks: the restored text was never the file's.)
+    ws.act(cx, |ws, window, cx| ws.save(&Save, window, cx));
+    assert!(prompt(cx).is_none());
+    assert_eq!(project.read("b.txt"), "new b\n");
+    assert!(!ws.active_dirty(cx));
+}
+
 /// A file deleted after it was shown and before the window closed, with
 /// nothing unsaved: its tab doesn't come back, and the pane it was alone in
 /// neither.
