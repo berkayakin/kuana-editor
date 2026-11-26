@@ -216,6 +216,28 @@ fn direct_edits_to_a_restored_tab_before_its_text_change_nothing(cx: &mut TestAp
     assert_eq!(project.read("b.txt"), "one\ntwo\n");
 }
 
+/// Keys pressed in a restored tab before its text is there change nothing:
+/// until then the tab draws a placeholder, which takes no keys or actions.
+#[gpui::test]
+fn keys_sent_to_a_restored_tab_before_its_text_change_nothing(cx: &mut TestAppContext) {
+    let project = TempProject::new(&[("a.txt", "a\n"), ("b.txt", "one\ntwo\n")]);
+    let ws = restored(cx, &project, false);
+    ws.open_soon(cx, &project.path("b.txt"));
+    let editor = ws.active_editor(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_loaded()));
+    ws.type_soon(cx, "typed\n");
+    ws.press_soon(cx, crate::editor::DuplicateLine);
+    assert!(!editor.read_with(cx, |e, _| e.is_loaded()));
+    assert!(!ws.active_dirty(cx));
+    settle(cx);
+    assert_eq!(ws.active_text(cx), "one\ntwo\n");
+    assert!(!ws.active_dirty(cx));
+    // Once it's there, keys reach it.
+    ws.type_text(cx, "x");
+    ws.press(cx, crate::editor::DuplicateLine);
+    assert_eq!(ws.active_text(cx), "xone\nxone\ntwo\n");
+}
+
 /// The harness's project is trusted: no dialog over the workspace. One
 /// opened without trusting it is in Restricted Mode, the trust dialog asking.
 #[gpui::test]

@@ -22,11 +22,13 @@
 //! no trust dialog covers the workspace and the project isn't in Restricted
 //! Mode; a test of Restricted Mode opens it with `open_project_restricted`.
 //! No modal is open, the current tab has the keyboard once it's shown, and
-//! settings are the defaults: auto-save after a delay (see `set_auto_save`).
+//! settings are the defaults: auto-save after a delay (see `set_auto_save`),
+//! the default key bindings installed, so keys sent to the window
+//! (`type_text`, `press`) go where a user's would.
 //! The test window never counts as the active one, so what Kuana does when
 //! its window gains or loses focus doesn't happen.
 
-use gpui::{EntityInputHandler, TestAppContext, WindowHandle};
+use gpui::{AnyWindowHandle, TestAppContext, WindowHandle};
 
 use super::*;
 
@@ -87,6 +89,9 @@ pub(super) fn init(cx: &mut TestAppContext) {
         cx.set_global(Theme::blank_for_tests());
         // As if extensions had loaded (none are installed in the test config).
         cx.set_global(extensions::ExtensionsChanged::default());
+        // The default key bindings, as at startup (no keymap.json in the
+        // test configuration), so keys reach actions as in the app.
+        crate::keymap::install(cx);
     });
 }
 
@@ -181,12 +186,48 @@ impl Ws {
         self.read(cx, |ws, cx| ws.editors.iter().find(|e| e.read(cx).doc.read(cx).path.as_deref() == Some(path)).cloned())
     }
 
-    /// Types into the current tab where its caret is, as the keyboard does
-    /// (through the input handler).
+    /// Types `text` (ASCII) into the current tab as the keyboard does: the
+    /// tab gets the keyboard, then each character is a key pressed in the
+    /// window, through its key bindings and then its input handler (Enter
+    /// is the editor's Newline action). Keys reach only what the window drew
+    /// and focused, so a tab that can't take them doesn't change.
     pub fn type_text(&self, cx: &mut TestAppContext, text: &str) {
-        let editor = self.active_editor(cx);
-        self.update(cx, |_, window, cx| editor.update(cx, |e, cx| e.replace_text_in_range(None, text, window, cx)));
+        self.type_soon(cx, text);
         settle(cx);
+    }
+
+    /// `type_text` without letting anything else run meanwhile (a file
+    /// being read stays unread).
+    pub fn type_soon(&self, cx: &mut TestAppContext, text: &str) {
+        self.update(cx, |ws, window, cx| {
+            let item = ws.active_item(cx).expect("a tab is current");
+            window.focus(&item.focus_handle(cx));
+        });
+        for c in text.chars() {
+            assert!(c.is_ascii(), "type_text takes ASCII: {c:?}");
+            let key = match c {
+                ' ' => "space".to_string(),
+                '\n' => "enter".to_string(),
+                '\t' => "tab".to_string(),
+                c => c.to_string(),
+            };
+            let keystroke = gpui::Keystroke::parse(&key).expect("a key");
+            cx.dispatch_keystroke(self.0.into(), keystroke);
+        }
+    }
+
+    /// Runs an editor action in the current tab as its shortcut would: sent
+    /// to what has the keyboard (see `type_text`), so it does nothing where
+    /// the window wouldn't take it.
+    pub fn press(&self, cx: &mut TestAppContext, action: impl gpui::Action) {
+        self.press_soon(cx, action);
+        settle(cx);
+    }
+
+    /// `press` without letting anything else run meanwhile.
+    pub fn press_soon(&self, cx: &mut TestAppContext, action: impl gpui::Action) {
+        let window: AnyWindowHandle = self.0.into();
+        cx.update_window(window, |_, window, cx| window.dispatch_action(action.boxed_clone(), cx)).unwrap();
     }
 
     /// Moves the current tab's caret to a byte offset.
