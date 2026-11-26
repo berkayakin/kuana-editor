@@ -652,7 +652,7 @@ impl Workspace {
     /// that hadn't yet (so its unsaved text is what the agent sees and edits).
     fn agent_document(&mut self, path: &Path, cx: &mut Context<Self>) -> Option<Entity<Editor>> {
         let editor = self.tab_for(path, cx)?;
-        self.load_tab(&editor, cx);
+        self.load_tab_now(&editor, cx);
         editor.read(cx).is_loaded().then_some(editor)
     }
 

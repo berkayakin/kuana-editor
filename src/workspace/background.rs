@@ -13,7 +13,7 @@ impl Workspace {
     /// `Err` is why it couldn't be read.
     pub(super) fn document_to_edit(&mut self, path: &Path, cx: &mut Context<Self>) -> Task<crate::document_store::Loaded> {
         if let Some(editor) = self.tab_for(path, cx) {
-            self.load_tab(&editor, cx);
+            self.load_tab_now(&editor, cx);
             return match editor.read(cx).is_loaded() {
                 true => Task::ready(Ok(editor.read(cx).doc.clone())),
                 false => Task::ready(Err("it couldn't be read".into())),

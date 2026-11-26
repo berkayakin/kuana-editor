@@ -53,18 +53,15 @@ impl Workspace {
     /// Opens a result's place; `focus`: in its editor, else the panel keeps
     /// the keyboard (moving through results with the arrows).
     pub(super) fn open_result(&mut self, target: ResultTarget, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(window, cx, |ws, window, cx| {
-            ws.open_path(target.path.clone(), window, cx);
-            if let Some(editor) = ws.tab_for(&target.path, cx) {
-                editor.update(cx, |e, cx| {
-                    let offset = protocol::position_to_offset(e.doc.read(cx).rope(), target.position, target.encoding);
-                    e.go_to(offset, window, cx);
-                });
+        self.navigate_to(target.path.clone(), window, cx, move |ws, editor, window, cx| {
+            editor.update(cx, |e, cx| {
+                let offset = protocol::position_to_offset(e.doc.read(cx).rope(), target.position, target.encoding);
+                e.go_to(offset, window, cx);
+            });
+            if !focus {
+                window.focus(&ws.results.focus_handle(cx));
             }
         });
-        if !focus {
-            window.focus(&self.results.focus_handle(cx));
-        }
     }
 
     pub(super) fn next_result(&mut self, _: &NextResult, window: &mut Window, cx: &mut Context<Self>) {

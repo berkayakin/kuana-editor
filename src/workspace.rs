@@ -112,6 +112,7 @@ mod menus;
 mod multibuffer;
 mod nav_history;
 mod navigation;
+mod opening;
 mod pane;
 mod remote;
 mod pane_tree;
@@ -929,6 +930,12 @@ pub struct Workspace {
     recent: Vec<PathBuf>,
     /// Back / Forward (`workspace/nav_history.rs`).
     nav: crate::nav_history::NavHistory,
+    /// Files being opened (`workspace/opening.rs`): the last one asked for,
+    /// which the next one's tab waits for, and how many aren't shown yet.
+    opening: Option<futures::future::Shared<Task<()>>>,
+    opens: usize,
+    /// What runs in a restored tab once its file is read, by its editor.
+    when_loaded: HashMap<EntityId, Vec<opening::WhenLoaded>>,
     /// Remote projects (`workspace/remote.rs`): the host being connected to,
     /// the project waiting for its host to come back, and the task watching
     /// the project's connection.
@@ -1166,13 +1173,14 @@ impl Workspace {
         let tree = cx.new(ProjectTree::new);
         let tree_subscription = cx.subscribe_in(&tree, window, |ws, _, event: &TreeEvent, window, cx| match event {
             TreeEvent::Open { path, focus } => {
-                ws.open_path(path.clone(), window, cx);
+                let focus = *focus;
                 // A click shows the file and leaves the keyboard in the tree (typing
-                // searches it), unless opening it asked something first: the
-                // question has the keyboard then.
-                if !*focus && ws.active_item(cx).is_some_and(|item| item.focus_handle(cx).is_focused(window)) {
-                    window.focus(&ws.tree.focus_handle(cx));
-                }
+                // searches it), once its tab has it.
+                ws.open_path_then(path.clone(), window, cx, move |ws, _, window, cx| {
+                    if !focus && ws.active_item(cx).is_some_and(|item| item.focus_handle(cx).is_focused(window)) {
+                        window.focus(&ws.tree.focus_handle(cx));
+                    }
+                });
             }
             TreeEvent::Menu { path, is_dir, position } => ws.open_tree_menu(path.clone(), *is_dir, *position, window, cx),
             TreeEvent::SpaceMenu { position } => ws.open_tree_space_menu(*position, window, cx),
@@ -1467,6 +1475,9 @@ impl Workspace {
             folders_gone: HashSet::new(),
             recent: Vec::new(),
             nav: Default::default(),
+            opening: None,
+            opens: 0,
+            when_loaded: HashMap::new(),
             connecting: None,
             reconnecting: None,
             connection_task: None,
@@ -1599,92 +1610,6 @@ impl Workspace {
             Some(item) => window.focus(&item.focus_handle(cx)),
             None => window.focus(&self.focus_handle),
         }
-    }
-
-    pub fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_path_as(path, false, window, cx);
-    }
-
-    /// `binary`: a file that looks binary opens as text too (Open Anyway).
-    fn open_path_as(&mut self, path: PathBuf, binary: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let path = crate::paths::canonicalize(&path).unwrap_or(path);
-        if path.is_dir_on_host() {
-            self.set_root(path, window, cx);
-            return;
-        }
-        // Open already (a preview or diff of it doesn't count).
-        let open = self.items(cx).into_iter().find(|t| t.is_file() && t.path(cx).as_deref() == Some(path.as_path()));
-        if let Some(item) = open {
-            self.activate_item(&item, window, cx);
-            return;
-        }
-        // Open without a tab already (a workspace edit changed it): that one,
-        // edits and undo history included.
-        if let Some(doc) = self.documents.read(cx).get(&path, cx) {
-            let editor = cx.new(|cx| Editor::with_document(doc, cx));
-            self.add_tab(PaneItem::from(editor), window, cx);
-            return;
-        }
-        let mut large = false;
-        let opened = if crate::preview::is_image(&path) {
-            crate::fs::metadata(&path).map(|_| PaneItem::from(cx.new(|cx| ImageView::new(path.clone(), cx))))
-        } else {
-            let read = if binary { Document::open_anyway(&path) } else { Document::open(&path) };
-            match read {
-                Err(err) if BinaryFile::is(&err) => return self.ask_to_open_binary(path, window, cx),
-                read => read.map(|doc| {
-                    large = doc.large;
-                    PaneItem::from(cx.new(|cx| Editor::new(doc, cx)))
-                }),
-            }
-        };
-        match opened {
-            Ok(item) => {
-                if large {
-                    let detail = "Highlighting, linting and language servers are off for files this big.";
-                    self.toast(ToastKind::Info, "Opened as plain text", Some(detail.into()), cx);
-                }
-                self.add_tab(item, window, cx);
-            }
-            Err(err) => {
-                let message = format!("Couldn't open {}", path.display());
-                let detail = err.to_string();
-                let _ = window.prompt(PromptLevel::Critical, &message, Some(&detail), &["OK"], cx);
-            }
-        }
-    }
-
-    /// A file that looks binary opens as text only when asked to (Open
-    /// Anyway), as in VS Code.
-    fn ask_to_open_binary(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
-        let message = format!("“{name}” looks like a binary file");
-        let detail = "As text it may not show correctly, and saving it can damage it.";
-        let answer = window.prompt(PromptLevel::Warning, &message, Some(detail), &["Open Anyway", "Cancel"], cx);
-        cx.spawn_in(window, async move |this, cx| {
-            if answer.await == Ok(0) {
-                this.update_in(cx, |ws, window, cx| ws.open_path_as(path, true, window, cx)).ok();
-            }
-        })
-        .detach();
-    }
-
-    /// Opens a file at a 1-based line and column (from terminal output).
-    fn open_at(&mut self, path: PathBuf, line: Option<u32>, column: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
-        let path = crate::paths::canonicalize(&path).unwrap_or(path);
-        self.navigate(window, cx, |ws, window, cx| {
-            ws.open_path(path.clone(), window, cx);
-            let (Some(line), Some(editor)) = (line, ws.tab_for(&path, cx)) else { return };
-            editor.update(cx, |e, cx| {
-                let row = (line as usize).saturating_sub(1).min(e.doc.read(cx).line_count().saturating_sub(1));
-                let start = e.doc.read(cx).line_start(row);
-                let text = e.doc.read(cx).line_text(row);
-                let col = column.map_or(0, |c| c as usize).saturating_sub(1);
-                let offset = start + text.char_indices().nth(col).map_or(text.len(), |(i, _)| i);
-                e.go_to(offset, window, cx);
-            });
-            window.focus(&editor.focus_handle(cx));
-        });
     }
 
     fn add_tab(&mut self, item: PaneItem, window: &mut Window, cx: &mut Context<Self>) {
@@ -1843,8 +1768,15 @@ impl Workspace {
 
     /// A restored tab read its file (or couldn't: it closes).
     fn tab_loaded(&mut self, editor: &Entity<Editor>, event: &EditorLoaded, window: &mut Window, cx: &mut Context<Self>) {
+        let waiting = self.when_loaded.remove(&editor.entity_id()).unwrap_or_default();
         match &event.error {
-            None => self.file_opened(editor, cx),
+            None => {
+                self.file_opened(editor, cx);
+                // What was to happen in the tab once it had its text (a jump to a line).
+                for run in waiting {
+                    run(self, window, cx);
+                }
+            }
             Some(err) => {
                 let name = editor.read(cx).doc.read(cx).file_name();
                 self.toast(ToastKind::Error, format!("Couldn't open {name}"), Some(err.clone()), cx);
@@ -1879,19 +1811,50 @@ impl Workspace {
         }
     }
 
-    /// Reads a restored tab's file; for a split of one, the tab holding the
-    /// restored state reads it (the document is theirs together). A failure
-    /// is reported (and the tab closed) through `EditorLoaded`.
+    /// Reads a restored tab's file off the UI thread, for a tab that's
+    /// shown: its text comes a moment later (`EditorLoaded`, which also
+    /// reports a failure and closes the tab). What needs the text at once
+    /// uses `load_tab_now`.
     fn load_tab(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
-        if editor.read(cx).is_loaded() {
+        let Some(reader) = self.reader_of(editor, cx) else { return };
+        if reader.read(cx).is_loading() {
             return;
         }
-        let reader = match editor.read(cx).unloaded().is_some() {
+        // No file to read (untitled): its kept text comes back at once.
+        let Some(job) = reader.update(cx, |e, cx| e.load_job(cx)) else {
+            let _ = reader.update(cx, |e, cx| e.load(cx));
+            return;
+        };
+        let reader = reader.downgrade();
+        cx.spawn(async move |_, cx| {
+            let read = cx.background_executor().spawn(async move { job() }).await;
+            reader
+                .update(cx, |e, cx| {
+                    let _ = e.finish_load(Some(read), cx);
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Reads a restored tab's file here and now, for what's about to use
+    /// its text (an edit from outside the tab, an agent or extension reading it).
+    fn load_tab_now(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
+        if let Some(reader) = self.reader_of(editor, cx) {
+            let _ = reader.update(cx, |e, cx| e.load(cx));
+        }
+    }
+
+    /// The tab that reads the file of a restored tab not read yet: itself,
+    /// or for a split of one, the tab holding the restored state (the
+    /// document is theirs together). None for a tab that has its text.
+    fn reader_of(&self, editor: &Entity<Editor>, cx: &App) -> Option<Entity<Editor>> {
+        if editor.read(cx).is_loaded() {
+            return None;
+        }
+        match editor.read(cx).unloaded().is_some() {
             true => Some(editor.clone()),
             false => self.siblings(editor, cx).into_iter().find(|s| s.read(cx).unloaded().is_some()),
-        };
-        if let Some(reader) = reader {
-            let _ = reader.update(cx, |e, cx| e.load(cx));
         }
     }
 

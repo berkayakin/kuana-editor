@@ -19,6 +19,7 @@ const PROJECT_SIDE: &[&str] = &[
     "workspace/pane.rs",
     "workspace/navigation.rs",
     "workspace/nav_history.rs",
+    "workspace/opening.rs",
     "workspace/bookmarks.rs",
     "workspace/language_servers.rs",
     "workspace/line_endings.rs",

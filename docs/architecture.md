@@ -15,6 +15,9 @@ bindings, colors, icons) are in the [contributing guide](../CONTRIBUTING.md).
 - `src/main.rs` — app setup: fonts, theme, keymap, menus, windows, command-line paths
 - `src/workspace.rs` — window chrome: title bar, activity bar, file tree, panes and tabs, problems, status bar,
   modals and file operations
+- `src/workspace/opening.rs` — opening a file in a tab: found and read off the main thread, tabs
+  in the order asked for; what's to happen in the tab (a jump, a selection) is handed over with
+  the request
 - `src/document.rs` — rope buffer, edits, undo history, file I/O
 - `src/editor.rs` — editor view, input handling and the GPU element that paints it
 - `src/wrap.rs` — soft wrap: where long lines break into display rows

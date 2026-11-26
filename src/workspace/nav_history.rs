@@ -75,17 +75,16 @@ impl Workspace {
                     continue;
                 }
             }
-            self.nav.pause();
-            self.open_path(place.path.clone(), window, cx);
-            if let Some(editor) = self.tab_for(&place.path, cx) {
-                let offset = Self::offset_now(&place, &editor, cx);
-                editor.update(cx, |e, cx| e.go_to(offset, window, cx));
-                window.focus(&editor.focus_handle(cx));
-            }
-            self.nav.resume();
-            if let Some(here) = here {
-                self.nav.passed(back, here);
-            }
+            self.open_for_history(place.path.clone(), window, cx, move |ws, editor, window, cx| {
+                if let Some(editor) = editor {
+                    let offset = Self::offset_now(&place, editor, cx);
+                    editor.update(cx, |e, cx| e.go_to(offset, window, cx));
+                    window.focus(&editor.focus_handle(cx));
+                }
+                if let Some(here) = here {
+                    ws.nav.passed(back, here);
+                }
+            });
             return;
         }
     }

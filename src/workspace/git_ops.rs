@@ -130,15 +130,37 @@ impl Workspace {
         }
         let text = |b: Option<Vec<u8>>| b.map(|b| String::from_utf8_lossy(&b).into_owned());
         let (base, ours, theirs) = (text(base).unwrap_or_default(), text(ours), text(theirs));
-        // Each side as the markers name it ("HEAD", a branch, "Stashed changes").
         if path.exists_on_host() {
-            self.open_path(path.clone(), window, cx);
-        }
-        let Some(file) = self.tab_for(&path, cx) else {
-            // Gone from the working tree (deleted on one side): only a whole side resolves it.
-            self.toast(ToastKind::Info, format!("{rel} was deleted on one side"), Some("Right-click it in the Commit panel for Accept Yours or Accept Theirs.".into()), cx);
+            self.open_path_then(path.clone(), window, cx, move |ws, file, window, cx| {
+                if let Some(file) = file.cloned() {
+                    ws.merge_in_tab(file, path, rel, base, ours, theirs, yours, window, cx);
+                }
+            });
             return;
-        };
+        }
+        match self.tab_for(&path, cx) {
+            // Still in a tab, though the file went.
+            Some(file) => self.merge_in_tab(file, path, rel, base, ours, theirs, yours, window, cx),
+            // Gone from the working tree (deleted on one side): only a whole side resolves it.
+            None => self.toast(ToastKind::Info, format!("{rel} was deleted on one side"), Some("Right-click it in the Commit panel for Accept Yours or Accept Theirs.".into()), cx),
+        }
+    }
+
+    /// The Merge view around a conflicted file's tab, once the tab has its text.
+    #[allow(clippy::too_many_arguments)]
+    fn merge_in_tab(
+        &mut self,
+        file: Entity<Editor>,
+        path: PathBuf,
+        rel: String,
+        base: String,
+        ours: Option<String>,
+        theirs: Option<String>,
+        yours: git::Side,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Each side as the markers name it ("HEAD", a branch, "Stashed changes").
         let labels = file
             .update(cx, |e, cx| e.conflicts(cx))
             .first()

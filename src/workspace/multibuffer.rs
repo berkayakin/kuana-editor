@@ -84,7 +84,7 @@ impl Workspace {
         for (path, places_of) in files {
             // A restored tab not read yet: read now, its document is the file's.
             if let Some(tab) = self.tab_for(&path, cx).filter(|t| !t.read(cx).is_loaded()) {
-                self.load_tab(&tab, cx);
+                self.load_tab_now(&tab, cx);
             }
             let load = self.documents.update(cx, |s, cx| s.open(&path, cx));
             let view = view.downgrade();
@@ -172,7 +172,7 @@ impl Workspace {
         let Some(view) = self.live_problems.as_ref().and_then(|l| l.view.upgrade()) else { return };
         for (path, targets) in files {
             if let Some(tab) = self.tab_for(&path, cx).filter(|t| !t.read(cx).is_loaded()) {
-                self.load_tab(&tab, cx);
+                self.load_tab_now(&tab, cx);
             }
             let load = self.documents.update(cx, |s, cx| s.open(&path, cx));
             let view = view.downgrade();
@@ -267,12 +267,9 @@ impl Workspace {
             }
             MultiBufferEvent::Open { path, offset } => {
                 let offset = *offset;
-                ws.navigate(window, cx, |ws, window, cx| {
-                    ws.open_path(path.clone(), window, cx);
-                    if let Some(editor) = ws.tab_for(path, cx) {
-                        editor.update(cx, |e, cx| e.go_to(offset, window, cx));
-                        window.focus(&editor.focus_handle(cx));
-                    }
+                ws.navigate_to(path.clone(), window, cx, move |_, editor, window, cx| {
+                    editor.update(cx, |e, cx| e.go_to(offset, window, cx));
+                    window.focus(&editor.focus_handle(cx));
                 });
             }
             MultiBufferEvent::Changed => cx.notify(),

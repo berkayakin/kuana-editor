@@ -813,7 +813,8 @@ impl Document {
     ) -> Vec<Range<usize>> {
         let count = edits.len();
         // Nothing changes; each edit's range comes back empty where it starts.
-        if self.read_only {
+        // A stand-in's text isn't there yet: typing meanwhile would be lost with it.
+        if self.read_only || self.stand_in {
             return edits.iter().map(|(range, _)| self.clip(range.start)..self.clip(range.start)).collect();
         }
         let mut edits: Vec<(usize, Range<usize>, String)> = edits

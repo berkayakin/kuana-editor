@@ -310,8 +310,7 @@ impl Workspace {
         if let Some(editor) = self.tab_for(&path, cx)
             && editor.read(cx).doc.read(cx).is_dirty()
         {
-            self.open_path(path, window, cx);
-            self.reveal_subprogram(&file_path_editor(self, &file, cx), at.as_deref(), window, cx);
+            self.open_path_then(path, window, cx, move |ws, editor, window, cx| ws.reveal_subprogram(&editor.cloned(), at.as_deref(), window, cx));
             return;
         }
         let (name, kind) = (object.name.clone(), object.kind);
@@ -336,9 +335,7 @@ impl Workspace {
                         let _ = e.revert(cx);
                     });
                 }
-                ws.open_path(path.clone(), window, cx);
-                let editor = ws.tab_for(&path, cx);
-                ws.reveal_subprogram(&editor, at.as_deref(), window, cx);
+                ws.open_path_then(path.clone(), window, cx, move |ws, editor, window, cx| ws.reveal_subprogram(&editor.cloned(), at.as_deref(), window, cx));
             })
             .ok();
         })
@@ -842,12 +839,6 @@ impl Workspace {
         actions.push(Some(MenuAction::Call(Rc::new(|ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| ws.open_connection_dialog(None, window, cx)))));
         self.show_context_menu(entries, actions, position, None, window, cx);
     }
-}
-
-/// The tab of an object's file, if open.
-fn file_path_editor(ws: &Workspace, file: &ObjectFile, cx: &App) -> Option<Entity<Editor>> {
-    let kind = ws.db_model(cx).read(cx).config(&file.connection)?.kind;
-    ws.tab_for(&database::object_path(file, kind)?, cx)
 }
 
 /// Whether ⌘↩ in this editor runs SQL.

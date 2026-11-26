@@ -1,7 +1,7 @@
 //! Restored tabs that read their file when first shown: a session with many
 //! tabs opens without reading, parsing and linting every one of them.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui::Context;
 use ropey::Rope;
@@ -105,20 +105,43 @@ impl Editor {
     }
 
     /// Reads an unloaded tab's file and brings back its unsaved text, folds
-    /// and caret. Fails (keeping the empty stand-in) when the file can't be
-    /// read and there's no unsaved text.
+    /// and caret, here and now: for what needs the text at once (a save, an
+    /// edit from outside the tab). A tab that's only shown is read off the
+    /// UI thread (`load_job`, then `finish_load`). Fails (keeping the empty
+    /// stand-in) when the file can't be read and there's no unsaved text.
     pub fn load(&mut self, cx: &mut Context<Self>) -> std::io::Result<()> {
+        let Some(unloaded) = &self.unloaded else { return Ok(()) };
+        let encoding = unloaded.encoding;
+        let read = self.doc.read(cx).path.as_deref().map(|path| read_file(path, encoding));
+        self.finish_load(read, cx)
+    }
+
+    /// Whether the file is being read in the background.
+    pub fn is_loading(&self) -> bool {
+        self.loading
+    }
+
+    /// Reading an unloaded tab's file, for a background thread; its result
+    /// goes to `finish_load`. None when there's nothing to read (read
+    /// already, or a tab without a file) or it's being read.
+    pub fn load_job(&mut self, cx: &mut Context<Self>) -> Option<impl FnOnce() -> std::io::Result<Document> + Send + 'static + use<>> {
+        if self.loading {
+            return None;
+        }
+        let encoding = self.unloaded.as_ref()?.encoding;
+        let path = self.doc.read(cx).path.clone()?;
+        self.loading = true;
+        Some(move || read_file(&path, encoding))
+    }
+
+    /// Takes the file as read (None: the tab has no file) and brings back
+    /// the tab's unsaved text, folds and caret. Nothing happens when the
+    /// tab was read meanwhile, or its restored state went to another tab.
+    pub fn finish_load(&mut self, read: Option<std::io::Result<Document>>, cx: &mut Context<Self>) -> std::io::Result<()> {
+        self.loading = false;
         let Some(unloaded) = self.unloaded.take() else { return Ok(()) };
-        // As text even if it looks binary: it was open as text last time.
-        let doc = match self.doc.read(cx).path.as_deref().map(Document::open_anyway) {
-            Some(Ok(mut doc)) => {
-                if let Some(encoding) = unloaded.encoding
-                    && encoding != doc.encoding
-                {
-                    let _ = doc.reload_with_encoding(encoding);
-                }
-                doc
-            }
+        let doc = match read {
+            Some(Ok(doc)) => doc,
             Some(Err(err)) if unloaded.unsaved.is_none() => {
                 self.unloaded = Some(unloaded);
                 cx.emit(EditorLoaded { error: Some(err.to_string()) });
@@ -150,6 +173,22 @@ impl Editor {
         cx.notify();
         Ok(())
     }
+}
+
+/// A restored tab's file as a document, in the encoding picked last time.
+fn read_file(path: &Path, encoding: Option<TextEncoding>) -> std::io::Result<Document> {
+    // As text even if it looks binary: it was open as text last time.
+    let mut doc = Document::open_anyway(path)?;
+    if let Some(encoding) = encoding
+        && encoding != doc.encoding
+    {
+        let _ = doc.reload_with_encoding(encoding);
+    }
+    // What its editor asks for next (also on a background thread, when the
+    // read is): the project settings and `.editorconfig` files above it.
+    crate::project_settings::layers(path);
+    crate::editorconfig::EditorConfig::for_file(path);
+    Ok(doc)
 }
 
 #[cfg(test)]
@@ -187,6 +226,58 @@ mod tests {
             assert!(!e.doc.read(cx).is_dirty());
             assert_eq!(e.primary_selection().head, 5);
         });
+    }
+
+    #[gpui::test]
+    fn a_shown_tab_is_read_off_the_ui_thread(cx: &mut TestAppContext) {
+        let path = temp_file("background.txt", b"one\ntwo\nthree\n");
+        let editor = cx.new(|cx| Editor::new_unloaded(Some(path), unloaded(5, None), cx));
+        let job = editor.update(cx, |e, cx| e.load_job(cx)).expect("a file to read");
+        // One read at a time, and until it's back the tab is as it was.
+        editor.update(cx, |e, cx| {
+            assert!(e.is_loading() && !e.is_loaded());
+            assert!(e.load_job(cx).is_none());
+        });
+        // What a background thread does, then its result back in the editor.
+        let read = job();
+        editor.update(cx, |e, cx| e.finish_load(Some(read), cx)).unwrap();
+        editor.read_with(cx, |e, cx| {
+            assert!(e.is_loaded() && !e.is_loading());
+            assert_eq!(e.text(cx), "one\ntwo\nthree\n");
+            assert_eq!(e.primary_selection().head, 5);
+        });
+    }
+
+    #[gpui::test]
+    fn a_read_that_comes_back_late_changes_nothing(cx: &mut TestAppContext) {
+        let path = temp_file("late.txt", b"saved\n");
+        let editor = cx.new(|cx| Editor::new_unloaded(Some(path), unloaded(0, None), cx));
+        let job = editor.update(cx, |e, cx| e.load_job(cx)).unwrap();
+        // Something needed the text at once (a save, an agent's edit) and typed into it.
+        editor.update(cx, |e, cx| {
+            e.load(cx).unwrap();
+            e.replace_ranges(vec![(0..0, "typed ".into())], cx);
+        });
+        let read = job();
+        editor.update(cx, |e, cx| e.finish_load(Some(read), cx)).unwrap();
+        editor.read_with(cx, |e, cx| {
+            assert_eq!(e.text(cx), "typed saved\n");
+            assert!(e.doc.read(cx).is_dirty());
+        });
+    }
+
+    #[gpui::test]
+    fn a_tab_not_read_yet_takes_no_typing(cx: &mut TestAppContext) {
+        // Typed while its file is read, the text would go when the file's comes.
+        let path = temp_file("early.txt", b"saved\n");
+        let editor = cx.new(|cx| Editor::new_unloaded(Some(path), unloaded(0, None), cx));
+        editor.update(cx, |e, cx| e.replace_ranges(vec![(0..0, "lost".into())], cx));
+        editor.read_with(cx, |e, cx| {
+            assert_eq!(e.text(cx), "");
+            assert!(!e.doc.read(cx).is_dirty());
+        });
+        editor.update(cx, |e, cx| e.load(cx)).unwrap();
+        editor.read_with(cx, |e, cx| assert_eq!(e.text(cx), "saved\n"));
     }
 
     #[gpui::test]

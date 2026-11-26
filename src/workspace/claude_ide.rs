@@ -273,13 +273,12 @@ impl Workspace {
         if !path.is_file_on_host() {
             return Err(format!("File not found: {given}"));
         }
-        let select = OpenSelection::read(arguments);
         let focus = arguments.get("makeFrontmost").and_then(Value::as_bool).unwrap_or(true);
-        self.navigate(window, cx, |ws, window, cx| {
-            ws.open_path(path.clone(), window, cx);
-            let Some(editor) = ws.tab_for(&path, cx) else { return };
+        // What to select, read once the file's text is there.
+        let arguments = arguments.clone();
+        self.navigate_to(path.clone(), window, cx, move |_, editor, window, cx| {
             editor.update(cx, |e, cx| {
-                let range = select.range(e.doc.read(cx).rope());
+                let range = OpenSelection::read(&arguments).range(e.doc.read(cx).rope());
                 if let Some(range) = range {
                     e.select_range(range, cx);
                 }

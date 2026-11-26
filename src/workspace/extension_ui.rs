@@ -314,7 +314,7 @@ impl Workspace {
                 };
                 // A restored tab that wasn't shown yet reads its file now.
                 if let Some(editor) = &editor {
-                    self.load_tab(editor, cx);
+                    self.load_tab_now(editor, cx);
                 }
                 answer.send(editor.and_then(|e| e.read(cx).extension_state(with_text, cx))).ok();
             }

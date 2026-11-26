@@ -551,6 +551,8 @@ pub struct Editor {
     lens_hits: Vec<(Bounds<Pixels>, crate::document::CodeLens)>,
     /// A restored tab whose file isn't read yet (`load` reads it).
     unloaded: Option<Unloaded>,
+    /// Its file is being read in the background (`load_job`).
+    loading: bool,
     /// Showing only some lines of the document (see `excerpt.rs`).
     excerpt: Option<excerpt::Excerpt>,
     /// The document's id and version as this editor last saw them (its own
@@ -702,6 +704,7 @@ impl Editor {
             conflict_hits: Vec::new(),
             lens_hits: Vec::new(),
             unloaded: None,
+            loading: false,
             excerpt: None,
         }
     }
@@ -6482,6 +6485,12 @@ impl Focusable for Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A restored tab whose file is being read: its place, empty, rather
+        // than an empty file's line 1 and caret for a moment.
+        if matches!(self.mode, EditorMode::Full) && !self.is_loaded() {
+            let background = Theme::get(cx).background;
+            return div().id("editor").key_context("Editor").track_focus(&self.focus_handle).size_full().bg(background).into_any_element();
+        }
         if self.blur_subscription.is_none() {
             self.blur_subscription = Some(cx.on_blur(&self.focus_handle.clone(), window, |e, _, cx| e.focus_lost(cx)));
         }
@@ -6644,6 +6653,7 @@ impl Render for Editor {
             .children(lsp_popovers)
             .children(color_picker)
             .children(preview_toggle)
+            .into_any_element()
     }
 }
 

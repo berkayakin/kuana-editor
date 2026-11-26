@@ -1,9 +1,40 @@
 //! `.editorconfig` support (editorconfig.org): the indent and whitespace
 //! properties, read from the file's folder up to the nearest `root = true`.
 
-use std::path::Path;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, LazyLock, Mutex},
+    time::{Duration, Instant},
+};
 
 use regex::Regex;
+
+/// How long a folder's `.editorconfig` (or the lack of one) is taken as
+/// read. Opening a file asks for the same folders several times in a row
+/// (off the UI thread first, see `workspace/opening.rs`), and a settings
+/// change asks for every open file's; on a remote project each asking was
+/// a round trip per folder up to the root.
+const FRESH_FOR: Duration = Duration::from_secs(2);
+
+/// Each folder's `.editorconfig` text (None: it has none) and when it was read.
+static READ: LazyLock<Mutex<HashMap<PathBuf, (Instant, Option<Arc<str>>)>>> = LazyLock::new(Default::default);
+
+/// The text of `dir`'s `.editorconfig`, read at most `fresh_for` ago.
+fn file_in(dir: &Path, fresh_for: Duration) -> Option<Arc<str>> {
+    let known = |read: &HashMap<PathBuf, (Instant, Option<Arc<str>>)>| read.get(dir).filter(|(at, _)| at.elapsed() < fresh_for).map(|(_, text)| text.clone());
+    if let Some(text) = known(&READ.lock().unwrap_or_else(|e| e.into_inner())) {
+        return text;
+    }
+    // Read without the lock: the UI thread never waits behind another thread's read.
+    let text: Option<Arc<str>> = crate::fs::read_to_string(dir.join(".editorconfig")).ok().map(Arc::from);
+    let mut read = READ.lock().unwrap_or_else(|e| e.into_inner());
+    if read.len() > 4096 {
+        read.retain(|_, (at, _)| at.elapsed() < FRESH_FOR);
+    }
+    read.insert(dir.to_path_buf(), (Instant::now(), text.clone()));
+    text
+}
 
 #[derive(Default, Clone, Copy, PartialEq, Debug)]
 pub struct EditorConfig {
@@ -21,9 +52,14 @@ impl EditorConfig {
     /// The properties that apply to `path`. Missing or unreadable files are
     /// skipped; closer files and later sections win.
     pub fn for_file(path: &Path) -> EditorConfig {
+        // Tests write a folder's file and ask right away.
+        Self::read(path, if cfg!(test) { Duration::ZERO } else { FRESH_FOR })
+    }
+
+    fn read(path: &Path, fresh_for: Duration) -> EditorConfig {
         let mut files = Vec::new();
         for dir in path.ancestors().skip(1) {
-            if let Ok(text) = crate::fs::read_to_string(dir.join(".editorconfig")) {
+            if let Some(text) = file_in(dir, fresh_for) {
                 let root = is_root(&text);
                 files.push((dir.to_path_buf(), text));
                 if root {
@@ -235,6 +271,27 @@ mod tests {
         assert_eq!(rs.trim_trailing_whitespace, None);
         let make = EditorConfig::for_file(&dir.join("Makefile"));
         assert_eq!(make.hard_tabs, Some(true));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_folders_file_is_read_once_while_fresh() {
+        let dir = std::env::temp_dir().join(format!("kuana-editorconfig-fresh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".editorconfig"), "root = true\n\n[*]\nindent_size = 4\n").unwrap();
+        let file = dir.join("a.rs");
+        let fresh = Duration::from_secs(60);
+        assert_eq!(EditorConfig::read(&file, fresh).indent_size, Some(4));
+        // Changed on disk: what was read still answers while it's fresh…
+        std::fs::write(dir.join(".editorconfig"), "root = true\n\n[*]\nindent_size = 8\n").unwrap();
+        assert_eq!(EditorConfig::read(&file, fresh).indent_size, Some(4));
+        // …and the file is read again once it isn't.
+        assert_eq!(EditorConfig::read(&file, Duration::ZERO).indent_size, Some(8));
+        // A folder without one is remembered as such too.
+        std::fs::remove_file(dir.join(".editorconfig")).unwrap();
+        assert_eq!(EditorConfig::read(&file, Duration::ZERO).indent_size, None);
+        std::fs::write(dir.join(".editorconfig"), "root = true\n\n[*]\nindent_size = 2\n").unwrap();
+        assert_eq!(EditorConfig::read(&file, fresh).indent_size, None);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

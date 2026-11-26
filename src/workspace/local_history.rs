@@ -66,16 +66,16 @@ impl Workspace {
     /// Restore: the file's text becomes the version's, as one edit (Undo
     /// takes it back); what it was is kept in Local History first.
     pub(super) fn restore_version(&mut self, path: PathBuf, text: Arc<str>, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_path(path.clone(), window, cx);
-        let Some(editor) = self.tab_for(&path, cx) else {
-            self.toast(ToastKind::Error, "Couldn't open the file to restore it", None, cx);
-            return;
-        };
-        let current = editor.read(cx).doc.read(cx).rope().clone();
-        let kept = path.clone();
-        cx.background_executor().spawn(async move { local_history::record_rope(&kept, &current, local_history::Kind::BeforeRestore) }).detach();
-        editor.update(cx, |e, cx| e.replace_text(&text, cx));
-        self.toast(ToastKind::Success, "Restored the version from Local History", Some("Undo takes it back".into()), cx);
+        self.open_path_then(path.clone(), window, cx, move |ws, editor, _, cx| {
+            let Some(editor) = editor else {
+                ws.toast(ToastKind::Error, "Couldn't open the file to restore it", None, cx);
+                return;
+            };
+            let current = editor.read(cx).doc.read(cx).rope().clone();
+            cx.background_executor().spawn(async move { local_history::record_rope(&path, &current, local_history::Kind::BeforeRestore) }).detach();
+            editor.update(cx, |e, cx| e.replace_text(&text, cx));
+            ws.toast(ToastKind::Success, "Restored the version from Local History", Some("Undo takes it back".into()), cx);
+        });
     }
 }
 

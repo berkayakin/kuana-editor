@@ -369,10 +369,11 @@ impl Workspace {
             ProjectSearchEvent::Open { path, range } => {
                 let range = range.clone();
                 ws.close_modal(window, cx);
-                ws.open_path(path.clone(), window, cx);
-                if let Some(editor) = ws.active_editor(cx) {
-                    editor.update(cx, |e, cx| e.select_range(range, cx));
-                }
+                ws.open_path_then(path.clone(), window, cx, move |_, editor, _, cx| {
+                    if let Some(editor) = editor {
+                        editor.update(cx, |e, cx| e.select_range(range, cx));
+                    }
+                });
             }
             ProjectSearchEvent::ReplaceAll { query, replacement, files } => {
                 ws.confirm_replace_in_files(query.clone(), replacement.clone(), files.clone(), window, cx);
