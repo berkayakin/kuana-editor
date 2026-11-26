@@ -1444,8 +1444,9 @@ pub fn show_dictation_error(why: String, cx: &mut App) {
 fn native_window(window: &Window) -> Option<isize> {
     #[cfg(target_os = "windows")]
     {
-        use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
-        if let Ok(handle) = window.window_handle()
+        // Window's own `window_handle()` (a GPUI `AnyWindowHandle`) shadows the trait's.
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        if let Ok(handle) = HasWindowHandle::window_handle(window)
             && let RawWindowHandle::Win32(win32) = handle.as_raw()
         {
             return Some(win32.hwnd.get());
