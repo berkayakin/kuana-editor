@@ -913,11 +913,18 @@ impl Document {
     /// Makes everything done since `mark` one undo step (a Vim change: the
     /// operator and the text typed after it).
     pub fn merge_undo_since(&mut self, mark: usize) {
-        if self.undo_stack.len() <= mark + 1 {
+        self.merge_undo(mark..self.undo_stack.len());
+    }
+
+    /// Makes the undo steps `steps` (between two `undo_mark`s) one; steps
+    /// after them stay their own (typing while words were dictated).
+    pub fn merge_undo(&mut self, steps: Range<usize>) {
+        let end = steps.end.min(self.undo_stack.len());
+        if end <= steps.start + 1 {
             return;
         }
-        let mut merged = self.undo_stack.split_off(mark);
-        let mut first = merged.remove(0);
+        let mut merged = self.undo_stack.drain(steps.start..end);
+        let mut first = merged.next().expect("two steps or more");
         for t in merged {
             first.id = t.id;
             first.edits.extend(t.edits);
@@ -925,7 +932,17 @@ impl Document {
             first.at = t.at;
         }
         first.kind = EditKind::Other;
-        self.undo_stack.push(first);
+        self.undo_stack.insert(steps.start, first);
+    }
+
+    /// Drops the undo steps `steps` (between two `undo_mark`s), which together
+    /// left the text as it was (dictated words taken back out): the history,
+    /// and whether the text is the one saved, are as before them.
+    pub fn forget_undo(&mut self, steps: Range<usize>) {
+        let end = steps.end.min(self.undo_stack.len());
+        if steps.start < end {
+            self.undo_stack.drain(steps.start..end);
+        }
     }
 
     /// Records the selections after the most recent transaction, for redo.
@@ -3564,6 +3581,34 @@ mod tests {
         std::fs::write(&path, &late).unwrap();
         assert_eq!(Document::open(&path).unwrap().len(), 9001);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A run of undo steps merges into one, steps after it staying apart
+    /// (typing while words were dictated); steps that left the text as it was
+    /// go without a trace (dictated words taken back out).
+    #[test]
+    fn undo_steps_merge_or_go_by_range() {
+        let mut doc = Document::from_text("Fix".into(), None);
+        let mark = doc.undo_mark();
+        doc.edit(vec![(3..3, " the".into())], &[], EditKind::Other);
+        doc.edit(vec![(3..7, " the bug".into())], &[], EditKind::Other);
+        let end = doc.undo_mark();
+        doc.edit(vec![(11..11, "!".into())], &[], EditKind::Typing);
+        doc.merge_undo(mark..end);
+        assert_eq!(doc.undo_mark(), mark + 2);
+        doc.undo();
+        assert_eq!(doc.rope().to_string(), "Fix the bug");
+        doc.undo();
+        assert_eq!(doc.rope().to_string(), "Fix");
+
+        let mut doc = Document::from_text("Fix".into(), None);
+        let mark = doc.undo_mark();
+        doc.edit(vec![(3..3, " the bug".into())], &[], EditKind::Other);
+        doc.edit(vec![(3..11, String::new())], &[], EditKind::Other);
+        assert!(doc.is_dirty());
+        doc.forget_undo(mark..doc.undo_mark());
+        assert_eq!(doc.undo_mark(), mark);
+        assert!(!doc.is_dirty(), "the text is the one saved again");
     }
 
     #[test]

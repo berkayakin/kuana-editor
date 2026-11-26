@@ -183,9 +183,10 @@ From the editor's right-click menu or Find Action:
 Speak instead of typing, as in Claude's apps: click the **mic** in a session's composer (or
 **⌥⌘V** / **Ctrl+Alt+V** there), talk, and click it again; or hold it down while you talk and let
 go. Your words appear at the caret as you speak, underlined and dimmed until they're final, then
-stay as typed text: send them, edit them, or keep dictating. **Esc** takes them back out, typing
-meanwhile ends the dictation and keeps what was heard, and Undo takes a whole dictation back in one
-step. Words after text you typed join it (a space, no capital mid-sentence). Your project's name,
+stay as typed text: send them, edit them, or keep dictating. **Esc** ends it and takes them back
+out, from the moment it starts listening. Typing meanwhile ends the dictation and keeps what was
+heard. Undo takes a whole dictation back in one step, apart from what you typed. Words after text
+you typed join it (a space, no capital mid-sentence). Your project's name,
 its files' names and the files you attached are given to the recognizer as words to expect.
 **Edit → Dictate** (Find Action: Dictate) does the same in any text field, such as a commit message.
 

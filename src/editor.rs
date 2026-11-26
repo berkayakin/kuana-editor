@@ -3297,10 +3297,11 @@ impl Editor {
     }
 
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
-        // Escape while words are dictated takes them back out (after this
-        // update: the dictation edits this editor).
-        if self.dictating {
-            let editor = cx.entity();
+        // Escape while dictating here ends it, taking its words back out:
+        // asked of the dictation itself, since it listens (or records for a
+        // service) before any words come. After this update: it edits this editor.
+        let editor = cx.entity();
+        if crate::dictation::store(cx).is_some_and(|store| store.read(cx).is_into(&editor)) {
             cx.defer(move |cx| {
                 crate::dictation::cancel_into(&editor, cx);
             });

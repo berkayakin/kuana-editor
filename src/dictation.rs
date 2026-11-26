@@ -99,7 +99,13 @@ struct Active {
     /// The document's version after its last edit: another one means the
     /// user typed meanwhile.
     version: u64,
+    /// The undo history where it began and after its last edit: its steps
+    /// become one, typing after them stays apart.
     undo_mark: usize,
+    undo_end: usize,
+    /// It began by taking out a selection (so taking its words back out
+    /// still leaves a change).
+    replaced: bool,
     /// The microphone's level, 0 to 1.
     level: f32,
     /// A space goes before the words (they follow a word).
@@ -246,6 +252,8 @@ impl DictationStore {
             range: range.clone(),
             version,
             undo_mark,
+            undo_end: undo_mark,
+            replaced: !range.is_empty(),
             level: 0.,
             spaced,
             carries_on,
@@ -354,12 +362,14 @@ impl DictationStore {
         let Some(editor) = active.editor.upgrade() else { return };
         let text = joined(text, active.spaced, active.carries_on);
         let range = active.range.clone();
-        let (range, version) = editor.update(cx, |e, cx| {
+        let (range, version, undo_end) = editor.update(cx, |e, cx| {
             let range = e.dictate(range, &text, done, cx);
-            (range, e.doc.read(cx).version())
+            let doc = e.doc.read(cx);
+            (range, doc.version(), doc.undo_mark())
         });
         active.range = range;
         active.version = version;
+        active.undo_end = undo_end;
     }
 
     /// Typing (or anything that edits the field) while words come: the
@@ -374,13 +384,21 @@ impl DictationStore {
         }
     }
 
-    /// Over: what it wrote stays (Cancel took it out first) as one undo step.
+    /// Over: what it wrote stays as one undo step, apart from anything typed
+    /// after it. Nothing written in the end (Cancel took the words back out,
+    /// or none were heard) leaves no step, so the text isn't taken for changed.
     fn finish(&mut self, cx: &mut Context<Self>) {
         let Some(active) = self.active.take() else { return };
         if let Some(editor) = active.editor.upgrade() {
+            let steps = active.undo_mark..active.undo_end;
             editor.update(cx, |e, cx| {
                 e.end_dictation(cx);
-                e.doc.update(cx, |doc, _| doc.merge_undo_since(active.undo_mark));
+                e.doc.update(cx, |doc, _| {
+                    // Only while the text is as its last edit left it: an Undo
+                    // meanwhile may have brought words back.
+                    let wrote_nothing = !active.replaced && active.range.is_empty() && doc.version() == active.version;
+                    if wrote_nothing { doc.forget_undo(steps) } else { doc.merge_undo(steps) }
+                });
             });
         }
         cx.notify();
@@ -429,7 +447,7 @@ fn record(tx: futures::channel::mpsc::UnboundedSender<Event>) -> Result<Source, 
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Entity, TestAppContext};
+    use gpui::{Entity, Focusable as _, TestAppContext};
 
     use super::*;
 
@@ -490,6 +508,7 @@ mod tests {
     #[gpui::test]
     fn typing_meanwhile_ends_it_keeping_the_words(cx: &mut TestAppContext) {
         let (store, editor) = setup(cx, "Fix");
+        store.update(cx, |s, cx| s.event(Event::Words { text: "the".into(), done: false }, cx));
         store.update(cx, |s, cx| s.event(Event::Words { text: "the bug".into(), done: false }, cx));
         editor.update(cx, |e, cx| e.insert_text("!", cx));
         cx.run_until_parked();
@@ -499,16 +518,85 @@ mod tests {
         // Later words (on their way) change nothing.
         store.update(cx, |s, cx| s.event(Event::Words { text: "the bug now".into(), done: true }, cx));
         assert_eq!(text(&editor, cx), "Fix the bug!");
+        // What was typed is its own undo step, the dictated words another.
+        editor.update(cx, |e, cx| e.doc.update(cx, |d, _| d.undo()));
+        assert_eq!(text(&editor, cx), "Fix the bug");
+        editor.update(cx, |e, cx| e.doc.update(cx, |d, _| d.undo()));
+        assert_eq!(text(&editor, cx), "Fix");
     }
 
     #[gpui::test]
     fn cancelling_takes_the_words_back_out(cx: &mut TestAppContext) {
         let (store, editor) = setup(cx, "Fix ");
+        let history = |cx: &mut TestAppContext| editor.read_with(cx, |e, cx| (e.doc.read(cx).undo_mark(), e.doc.read(cx).is_dirty()));
+        let before = history(cx);
         store.update(cx, |s, cx| s.event(Event::Words { text: "the bug".into(), done: false }, cx));
         assert_eq!(text(&editor, cx), "Fix the bug", "no second space after one");
         store.update(cx, |s, cx| s.cancel(cx));
         assert_eq!(text(&editor, cx), "Fix ");
         assert!(store.read_with(cx, |s, _| s.active.is_none()));
+        assert_eq!(history(cx), before, "no undo step left, nothing unsaved");
+    }
+
+    /// Undo in the field while it listens ends it; whatever the words did
+    /// stays in the undo history (none of it dropped as "nothing written").
+    #[gpui::test]
+    fn undoing_meanwhile_keeps_the_history_whole(cx: &mut TestAppContext) {
+        let (store, editor) = setup(cx, "Fix");
+        store.update(cx, |s, cx| s.event(Event::Words { text: "the bug".into(), done: false }, cx));
+        store.update(cx, |s, cx| s.event(Event::Words { text: String::new(), done: false }, cx));
+        assert_eq!(text(&editor, cx), "Fix", "heard again as nothing");
+        editor.update(cx, |e, cx| {
+            e.doc.update(cx, |d, _| d.undo());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(store.read_with(cx, |s, _| s.active.is_none()), "the field changed: it ends");
+        assert_eq!(text(&editor, cx), "Fix the bug");
+        editor.update(cx, |e, cx| e.doc.update(cx, |d, _| d.undo()));
+        assert_eq!(text(&editor, cx), "Fix", "the words' own step is still there");
+    }
+
+    #[gpui::test]
+    fn cancelling_after_a_selection_leaves_it_one_undo_away(cx: &mut TestAppContext) {
+        let (store, editor) = setup(cx, "Fix it");
+        store.update(cx, |s, cx| s.cancel(cx));
+        editor.update(cx, |e, cx| e.select_range(4..6, cx));
+        store.update(cx, |s, cx| s.begin(&editor, Source::File("/dev/null".into()), Task::ready(()), Vec::new(), cx));
+        assert_eq!(text(&editor, cx), "Fix ", "the selection goes, as typing would take it");
+        store.update(cx, |s, cx| s.event(Event::Words { text: "the bug".into(), done: false }, cx));
+        store.update(cx, |s, cx| s.cancel(cx));
+        assert_eq!(text(&editor, cx), "Fix ");
+        editor.update(cx, |e, cx| e.doc.update(cx, |d, _| d.undo()));
+        assert_eq!(text(&editor, cx), "Fix it");
+    }
+
+    /// Escape ends a dictation from its start: it listens (or records for a
+    /// service) before any words come, and none must come in later.
+    #[gpui::test]
+    fn escape_ends_it_before_any_words(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::blank_for_tests());
+            cx.bind_keys(crate::keymap::bindings(crate::settings::BaseKeymap::JetBrains));
+            init(cx);
+        });
+        let (editor, cx) = cx.add_window_view(|_, cx| {
+            let mut e = Editor::multi_line("Ask", cx);
+            e.set_text("Fix", cx);
+            e.select_range(3..3, cx);
+            e
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            window.focus(&editor.focus_handle(cx));
+        });
+        let store = cx.update(|_, cx| store(cx).expect("made by init"));
+        store.update(cx, |s, cx| s.begin(&editor, Source::File("/dev/null".into()), Task::ready(()), Vec::new(), cx));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(store.read_with(cx, |s, _| s.active.is_none()), "Escape ended it");
+        store.update(cx, |s, cx| s.event(Event::Words { text: "the bug".into(), done: true }, cx));
+        assert_eq!(editor.read_with(cx, |e, cx| e.text(cx)), "Fix", "words coming later go nowhere");
     }
 
     #[gpui::test]
