@@ -477,6 +477,11 @@ static BUILTIN: &[&str] = &[
 
 /// The theme used when settings name none.
 pub const DEFAULT_THEME: &str = "Ember";
+/// `"theme": "System"`: the theme follows the system's light or dark mode,
+/// `light_theme` in light, `dark_theme` in dark.
+pub const SYSTEM: &str = "System";
+/// The light theme used when following the system and `light_theme` names none.
+pub const DEFAULT_LIGHT_THEME: &str = "Clay Light";
 /// What themes without `extends` fill missing colors from, per appearance.
 pub const DEFAULT_DARK: &str = "Clay Black";
 pub const DEFAULT_LIGHT: &str = "Clay Light";
@@ -531,6 +536,11 @@ impl ThemeRegistry {
                 match parsed {
                     Ok(themes) => {
                         for file in themes {
+                            // `"theme": "System"` follows the system, so no theme may be called that.
+                            if file.name.eq_ignore_ascii_case(SYSTEM) {
+                                errors.push(format!("{}: \"{}\" is reserved for following the system; rename the theme", file_label(&path), file.name));
+                                continue;
+                            }
                             // A theme with a built-in's name replaces it.
                             files.retain(|(f, _)| f.name != file.name);
                             files.push((file, Some(path.clone())));
@@ -989,12 +999,113 @@ fn pick_fonts(has: &dyn Fn(&str) -> bool) -> (SharedString, SharedString) {
     (ui.into(), mono.into())
 }
 
-/// Installs the theme registry and the saved (or default) theme.
+/// Whether the settings have the theme follow the system's light or dark mode.
+pub fn follows_system(settings: &Settings) -> bool {
+    settings.theme.as_deref().is_some_and(|theme| theme.eq_ignore_ascii_case(SYSTEM))
+}
+
+/// What the Follow system switch writes, in order. On: the shown theme goes
+/// on as the theme for its mode (the other mode keeps its own), then
+/// `"theme": "System"`. Off: the shown theme by name, so what's on screen stays.
+pub fn follow_system_keys(on: bool, shown: &str, appearance: Appearance) -> Vec<(&'static str, String)> {
+    if !on {
+        return vec![("theme", shown.to_string())];
+    }
+    let key = match appearance {
+        Appearance::Light => "light_theme",
+        Appearance::Dark => "dark_theme",
+    };
+    vec![(key, shown.to_string()), ("theme", SYSTEM.to_string())]
+}
+
+/// The system's light or dark mode, as the windows are drawn in it.
+pub fn system_appearance(cx: &App) -> Appearance {
+    match cx.window_appearance() {
+        gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight => Appearance::Light,
+        gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark => Appearance::Dark,
+    }
+}
+
+/// The theme the settings ask for: `theme`, or when it's `"System"`, the
+/// one they name for `appearance` (the system's mode).
+pub fn wanted(settings: &Settings, appearance: Appearance) -> String {
+    let name = if follows_system(settings) {
+        match appearance {
+            Appearance::Light => settings.light_theme.as_deref().unwrap_or(DEFAULT_LIGHT_THEME),
+            Appearance::Dark => settings.dark_theme.as_deref().unwrap_or(DEFAULT_THEME),
+        }
+    } else {
+        settings.theme.as_deref().unwrap_or(DEFAULT_THEME)
+    };
+    name.to_string()
+}
+
+/// Applies the theme the settings ask for now, unless it's the one shown.
+/// False when no theme has that name (the shown one stays).
+pub fn apply_wanted(cx: &mut App) -> bool {
+    let name = wanted(Settings::get(cx), system_appearance(cx));
+    Theme::get(cx).name.as_ref() == name || apply_theme(&name, cx)
+}
+
+/// What a theme chosen by name is saved as. It's always remembered as the
+/// theme for its appearance (`light_theme` or `dark_theme`), so following
+/// the system later starts from the last of each picked; when not following,
+/// it's also `theme`, the one in use.
+pub fn choice_keys(settings: &Settings, name: &str, appearance: Appearance) -> Vec<(&'static str, String)> {
+    let key = match appearance {
+        Appearance::Light => "light_theme",
+        Appearance::Dark => "dark_theme",
+    };
+    let mut keys = vec![(key, name.to_string())];
+    if !follows_system(settings) {
+        keys.push(("theme", name.to_string()));
+    }
+    keys
+}
+
+/// Saves a theme chosen by name (the theme picker, Settings' cards, Welcome
+/// Setup). Following the system, it's shown once the system is in its mode.
+pub fn save_choice(name: &str, cx: &App) -> std::io::Result<()> {
+    let appearance = cx.try_global::<ThemeRegistry>().and_then(|r| r.find(name)).map_or(Appearance::Dark, |e| e.theme.appearance);
+    choice_keys(Settings::get(cx), name, appearance).into_iter().try_for_each(|(key, value)| Settings::set(key, value.into()))
+}
+
+/// The settings.json problem for a theme name no theme has.
+pub fn missing_theme(name: &str) -> String {
+    format!("settings.json: there's no theme named \"{name}\"")
+}
+
+/// The system's mode the theme was last made to follow, so the windows that
+/// all hear of a change apply (and report) it once.
+struct FollowedMode(Appearance);
+
+impl Global for FollowedMode {}
+
+/// The system switched between light and dark: a theme that follows it
+/// follows. The problem to report when the theme for the new mode is missing.
+pub fn system_appearance_changed(cx: &mut App) -> Option<String> {
+    let mode = system_appearance(cx);
+    if cx.try_global::<FollowedMode>().is_some_and(|m| m.0 == mode) {
+        return None;
+    }
+    cx.set_global(FollowedMode(mode));
+    (follows_system(Settings::get(cx)) && !apply_wanted(cx)).then(|| missing_theme(&wanted(Settings::get(cx), mode)))
+}
+
+/// Installs the theme registry and the saved (or default) theme. A missing
+/// one is reported with the startup problems, and that mode's default shown.
 pub fn init(cx: &mut App) {
     let registry = ThemeRegistry::load();
-    let wanted = Settings::get(cx).theme.clone().unwrap_or_else(|| DEFAULT_THEME.to_string());
+    let mode = system_appearance(cx);
+    cx.set_global(FollowedMode(mode));
+    let wanted = wanted(Settings::get(cx), mode);
+    let fallback = if follows_system(Settings::get(cx)) && mode == Appearance::Light { DEFAULT_LIGHT_THEME } else { DEFAULT_THEME };
+    if registry.find(&wanted).is_none() && cx.has_global::<crate::settings::StartupProblems>() {
+        cx.global_mut::<crate::settings::StartupProblems>().0.push(missing_theme(&wanted));
+    }
     let entry = registry
         .find(&wanted)
+        .or_else(|| registry.find(fallback))
         .or_else(|| registry.find(DEFAULT_THEME))
         .expect("default theme is built in");
     let theme = (*entry.theme).clone();
@@ -1064,6 +1175,75 @@ pub fn zoom(delta: Option<f32>, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_theme_following_the_system_is_the_one_for_its_mode() {
+        let parse = |text: &str| Settings::parse(text).unwrap();
+        // A theme by name stays, whatever the system's mode.
+        let named = parse(r#"{"theme": "Nord"}"#);
+        assert_eq!(wanted(&named, Appearance::Light), "Nord");
+        assert_eq!(wanted(&Settings::default(), Appearance::Light), DEFAULT_THEME);
+        // "System": each mode's own, else its default.
+        let system = parse(r#"{"theme": "System", "light_theme": "Solarized Light"}"#);
+        assert!(follows_system(&system));
+        assert_eq!(wanted(&system, Appearance::Light), "Solarized Light");
+        assert_eq!(wanted(&system, Appearance::Dark), DEFAULT_THEME);
+        assert_eq!(wanted(&parse(r#"{"theme": "System"}"#), Appearance::Light), DEFAULT_LIGHT_THEME);
+        // A theme chosen meanwhile is kept for its own mode only.
+        let keys = |pairs: &[(&'static str, &str)]| pairs.iter().map(|&(k, v)| (k, v.to_string())).collect::<Vec<_>>();
+        assert_eq!(choice_keys(&system, "Peach Blossom", Appearance::Light), keys(&[("light_theme", "Peach Blossom")]));
+        assert_eq!(choice_keys(&system, "Dracula", Appearance::Dark), keys(&[("dark_theme", "Dracula")]));
+        // Not following, a theme is the one in use and remembered for its mode,
+        // so turning Follow system on later starts from the last dark and light picked.
+        assert_eq!(choice_keys(&named, "Ember", Appearance::Dark), keys(&[("dark_theme", "Ember"), ("theme", "Ember")]));
+        assert_eq!(choice_keys(&named, "Clay Light", Appearance::Light), keys(&[("light_theme", "Clay Light"), ("theme", "Clay Light")]));
+        // Both defaults are built in, each of its mode.
+        let registry = ThemeRegistry::load();
+        assert_eq!(registry.find(DEFAULT_LIGHT_THEME).unwrap().theme.appearance, Appearance::Light);
+        assert_eq!(registry.find(DEFAULT_THEME).unwrap().theme.appearance, Appearance::Dark);
+        // "System" in any case.
+        assert!(follows_system(&parse(r#"{"theme": "system"}"#)));
+        assert!(!follows_system(&named));
+    }
+
+    #[test]
+    fn the_follow_system_switch_goes_on_with_the_shown_theme() {
+        let keys = |pairs: &[(&'static str, &str)]| pairs.iter().map(|&(k, v)| (k, v.to_string())).collect::<Vec<_>>();
+        // On: the theme in use goes on for its own mode, even over one chosen
+        // for it before (Dracula, though Ember was the dark one last time).
+        assert_eq!(follow_system_keys(true, "Dracula", Appearance::Dark), keys(&[("dark_theme", "Dracula"), ("theme", "System")]));
+        assert_eq!(follow_system_keys(true, "Clay Light", Appearance::Light), keys(&[("light_theme", "Clay Light"), ("theme", "System")]));
+        // Off: what's shown stays, by name; the light and dark choices are kept for next time.
+        assert_eq!(follow_system_keys(false, "Solarized Light", Appearance::Light), keys(&[("theme", "Solarized Light")]));
+    }
+
+    /// A misspelled theme name doesn't change what's shown (settings.json
+    /// reports it), and the right one is applied once it's fixed. The test
+    /// platform's system is light.
+    #[gpui::test]
+    fn a_misspelled_theme_for_the_mode_keeps_the_shown_one(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let registry = ThemeRegistry::load();
+            let ember = (*registry.find(DEFAULT_THEME).unwrap().theme).clone();
+            cx.set_global(registry);
+            cx.set_global(ember);
+            assert_eq!(system_appearance(cx), Appearance::Light);
+
+            cx.set_global(Settings::parse(r#"{"theme": "System", "light_theme": "Solarizd Light"}"#).unwrap());
+            assert!(!apply_wanted(cx));
+            assert_eq!(Theme::get(cx).name.as_ref(), DEFAULT_THEME);
+
+            cx.set_global(Settings::parse(r#"{"theme": "System", "light_theme": "Solarized Light"}"#).unwrap());
+            assert!(apply_wanted(cx));
+            assert_eq!(Theme::get(cx).name.as_ref(), "Solarized Light");
+            // Told of a change while still light, or while not following: nothing moves.
+            system_appearance_changed(cx);
+            assert_eq!(Theme::get(cx).name.as_ref(), "Solarized Light", "the system is still light");
+            cx.set_global(Settings::parse(r#"{"theme": "Nord"}"#).unwrap());
+            system_appearance_changed(cx);
+            assert_eq!(Theme::get(cx).name.as_ref(), "Solarized Light", "not following the system, a change of mode changes nothing");
+        });
+    }
 
     #[test]
     fn captures_take_the_longest_prefix_a_theme_colors() {

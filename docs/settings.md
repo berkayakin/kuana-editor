@@ -26,7 +26,9 @@ and theme colors.
 
 | Setting | Default | |
 | --- | --- | --- |
-| `theme` | `"Ember"` | see [Themes](themes.md) |
+| `theme` | `"Ember"` | see [Themes](themes.md); `"System"` follows the system's light or dark mode |
+| `light_theme` | `"Clay Light"` | with `"theme": "System"`, the theme while the system is light |
+| `dark_theme` | `"Ember"` | with `"theme": "System"`, the theme while the system is dark |
 | `base_keymap` | `"JetBrains"` | `"JetBrains"`, `"VSCode"`, `"SublimeText"` or `"Zed"`; see [Key bindings](keybindings.md) |
 | `auto_save` | `"after_delay"` | `"off"`, `"after_delay"`, `"on_focus_change"`, `"on_window_change"` |
 | `auto_save_delay` | `1000` | milliseconds |

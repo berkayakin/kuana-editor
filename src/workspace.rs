@@ -1573,6 +1573,12 @@ impl Workspace {
                 lsp_observer,
                 servers_observer,
                 cx.observe_window_bounds(window, |ws, window, cx| ws.remember_placement(window, cx)),
+                // The system switched between light and dark: so does a theme following it.
+                cx.observe_window_appearance(window, |ws, _, cx| {
+                    if let Some(problem) = crate::theme::system_appearance_changed(cx) {
+                        ws.report_config_problems(vec![problem], cx);
+                    }
+                }),
             ],
         };
         // Problems with settings.json / keymap.json found at startup.

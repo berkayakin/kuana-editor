@@ -30,7 +30,13 @@ use crate::{
 #[derive(Deserialize, JsonSchema, Default, Clone, PartialEq, Debug)]
 #[serde(default)]
 pub struct Settings {
+    /// A theme by name, or `"System"`: the system's light or dark mode picks
+    /// `light_theme` or `dark_theme`.
     pub theme: Option<String>,
+    /// The theme in the system's light mode, with `"theme": "System"`.
+    pub light_theme: Option<String>,
+    /// The theme in the system's dark mode, with `"theme": "System"`.
+    pub dark_theme: Option<String>,
     /// The shortcuts Kuana starts from; `keymap.json` goes on top.
     pub base_keymap: Option<BaseKeymap>,
     /// When edited files are written to disk without an explicit save.
@@ -570,6 +576,8 @@ pub const ZEN_WIDTHS: (f32, f32) = (40., 240.);
 
 const TOP_LEVEL_KEYS: &[&str] = &[
     "theme",
+    "light_theme",
+    "dark_theme",
     "base_keymap",
     "auto_save",
     "auto_save_delay",
@@ -944,6 +952,8 @@ impl Settings {
     pub fn is_set(&self, key: &str) -> bool {
         match key {
             "theme" => self.theme.is_some(),
+            "light_theme" => self.light_theme.is_some(),
+            "dark_theme" => self.dark_theme.is_some(),
             "base_keymap" => self.base_keymap.is_some(),
             "auto_save" => self.auto_save.is_some(),
             "auto_save_delay" => self.auto_save_delay.is_some(),
@@ -1248,7 +1258,8 @@ pub fn reload_if_changed(cx: &mut App) -> Vec<String> {
         problems.extend(invalid);
         if let Some(settings) = settings {
             problems.extend(unknown_key_problems());
-            let theme_changed = settings.theme != Settings::get(cx).theme;
+            let old = Settings::get(cx);
+            let theme_changed = (&settings.theme, &settings.light_theme, &settings.dark_theme) != (&old.theme, &old.light_theme, &old.dark_theme);
             let icons_changed = settings.icon_theme != Settings::get(cx).icon_theme;
             let trust_all = settings.trust_all_projects == Some(true);
             if trust_all != (Settings::get(cx).trust_all_projects == Some(true)) {
@@ -1263,12 +1274,10 @@ pub fn reload_if_changed(cx: &mut App) -> Vec<String> {
             if icons_changed {
                 crate::extensions::apply_icon_theme(cx);
             }
-            // No theme set (any more) means the default one.
-            if theme_changed {
-                let name = settings.theme.as_deref().unwrap_or(theme::DEFAULT_THEME);
-                if !theme::apply_theme(name, cx) {
-                    problems.push(format!("settings.json: there's no theme named \"{name}\""));
-                }
+            // No theme set (any more) means the default one; "System", the one
+            // for the system's mode now.
+            if theme_changed && !theme::apply_wanted(cx) {
+                problems.push(theme::missing_theme(&theme::wanted(&settings, theme::system_appearance(cx))));
             }
             theme::apply_fonts(cx);
         }
@@ -1317,6 +1326,9 @@ pub const SETTINGS_TEMPLATE: &str = r#"// Kuana settings. Changes apply when you
 // .kuana/settings.json (Open Project Settings), which go over these there.
 {
   // "theme": "Ember",
+  // With "theme": "System", the theme follows the system's light or dark mode:
+  // "light_theme": "Clay Light",
+  // "dark_theme": "Ember",
 
   // The shortcuts to start from: "JetBrains", "VSCode", "SublimeText" or "Zed".
   // keymap.json goes on top.

@@ -145,10 +145,15 @@ impl Workspace {
         let picker = cx.new(|cx| ThemePicker::new(window, cx));
         let subscription = cx.subscribe_in(&picker, window, |ws, _, event: &ThemePickerEvent, window, cx| match event {
             ThemePickerEvent::Confirmed(name) => {
-                if let Err(err) = Settings::set("theme", name.as_str().into()) {
+                let saved = theme::save_choice(name, cx);
+                if let Err(err) = &saved {
                     let _ = window.prompt(PromptLevel::Warning, "Couldn't save the theme choice", Some(&err.to_string()), &["OK"], cx);
                 }
                 ws.check_config(cx);
+                // Following the system, a theme for the other mode waits for it.
+                if saved.is_ok() {
+                    theme::apply_wanted(cx);
+                }
                 ws.close_modal(window, cx);
             }
             ThemePickerEvent::Dismissed => ws.close_modal(window, cx),

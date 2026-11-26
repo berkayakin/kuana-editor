@@ -140,8 +140,14 @@ impl Onboarding {
     }
 
     fn choose_theme(&mut self, name: SharedString, cx: &mut Context<Self>) {
-        theme::apply_theme(&name, cx);
-        self.set_or_default("theme", json!(name.as_ref()), json!(theme::DEFAULT_THEME), cx);
+        // Kept for its own mode too, so following the system starts from it.
+        let result = theme::save_choice(&name, cx);
+        self.write(result, cx);
+        if theme::follows_system(Settings::get(cx)) {
+            theme::apply_wanted(cx);
+        } else {
+            theme::apply_theme(&name, cx);
+        }
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {

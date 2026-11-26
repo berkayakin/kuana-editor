@@ -113,7 +113,8 @@ Everything Kuana does, in one list. Each area has its own page with the details.
   settings, per-language settings, shortcuts, snippets, the theme and Vim mode, with a preview first;
   extensions for languages Kuana doesn't have built in come from its registry
 - Welcome screen with quick-start tiles, Recent Projects, a Git card for the open repository and quick actions
-- 50 built-in themes (36 dark, 14 light) and JSON user themes with live preview
+- 50 built-in themes (36 dark, 14 light) and JSON user themes with live preview; the theme can follow
+  the system's light or dark mode, switching with it without a restart
 - [Remote development](remote.md): projects on other machines over SSH (your own `ssh`, config and
   keys), in WSL and in containers, dev containers (`devcontainer.json`) included; files, search,
   Git, language servers, terminals, Run, tests and debugging work there through a small server

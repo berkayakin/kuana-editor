@@ -4,6 +4,19 @@ Pick a theme with **Select Theme** (Ctrl+\` like JetBrains' Quick Switch Scheme,
 Action). Moving through the list previews each theme live; Enter keeps it
 (saved to `settings.json`), Escape restores the previous one.
 
+### Following the system's light or dark mode
+
+Turn on **Follow system light or dark mode** at the top of Settings → Appearance. It starts from the
+last dark and the last light theme you picked (a theme is always remembered for its own mode), and
+you can pick others there or with Select Theme. Kuana switches between them as the system does, at
+once and in every window, on macOS, Windows and Linux. In `settings.json` it's:
+
+```jsonc
+"theme": "System",
+"light_theme": "Clay Light",
+"dark_theme": "Ember"
+```
+
 Built in: Ember (default: charcoal islands on a near-black chrome), Ember Soft, Clay Black (near-black with neutral grays), Onyx (graphite islands on black chrome), Clay Dark, One Dark, Dracula, Nord, Tokyo Night,
 Gruvbox Dark, Catppuccin Mocha, Rosé Pine, Solarized Dark, Everforest Dark, Kanagawa, Ayu Dark, Night Owl,
 Poimandres, Oxocarbon, SynthWave '84, Vesper, Horizon, Vitesse Dark, Cobalt2, Sunset Fig, Campfire,
