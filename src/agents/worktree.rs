@@ -37,6 +37,11 @@ impl Worktree {
     pub fn map(&self, path: &Path) -> PathBuf {
         path.strip_prefix(&self.repo).map_or_else(|_| path.to_path_buf(), |rel| self.checkout.join(rel))
     }
+
+    /// The other way: a file of this checkout's place in the repository.
+    pub fn unmap(&self, path: &Path) -> PathBuf {
+        path.strip_prefix(&self.checkout).map_or_else(|_| path.to_path_buf(), |rel| self.repo.join(rel))
+    }
 }
 
 /// Where worktrees go: Kuana's config folder (a temporary one under test).
@@ -178,6 +183,9 @@ mod tests {
         };
         assert_eq!(wt.map(Path::new("/r/app/main.py")), PathBuf::from("/w/agent-1/app/main.py"));
         assert_eq!(wt.map(Path::new("/elsewhere/x")), PathBuf::from("/elsewhere/x"));
+        // And back: a file of the checkout is the repository's.
+        assert_eq!(wt.unmap(Path::new("/w/agent-1/app/main.py")), PathBuf::from("/r/app/main.py"));
+        assert_eq!(wt.unmap(Path::new("/elsewhere/x")), PathBuf::from("/elsewhere/x"));
     }
 
     #[test]

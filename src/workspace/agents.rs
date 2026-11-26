@@ -669,6 +669,19 @@ impl Workspace {
         }
     }
 
+    /// Whether `path` was there before an agent wrote it, as far as the
+    /// project's file index tells: it hears of a write only after the watcher
+    /// does, so it lists a file that was there and not one just made. A path
+    /// it doesn't cover counts as there (nothing says otherwise); a worktree
+    /// session's file goes by the repository's copy.
+    fn listed_before_agent(&self, session: &Entity<Session>, path: &Path, cx: &App) -> bool {
+        let path = match &session.read(cx).worktree {
+            Some(worktree) => worktree.unmap(path),
+            None => path.to_path_buf(),
+        };
+        self.files.snapshot_of(&path).is_none_or(|folder| folder.lists(&path))
+    }
+
     /// A turn ended: files noted for it that are as they were before it (an
     /// edit refused, or put back) aren't changes.
     fn drop_unchanged_files(&mut self, session: &Entity<Session>, cx: &mut Context<Self>) {
@@ -693,20 +706,18 @@ impl Workspace {
     /// is now is kept for Review, Reject All and Restore, and in Local
     /// History. Agents that write the disk themselves (Claude's) never ask
     /// Kuana to write, so this is the only time to keep it. Should the change
-    /// have landed already (the file has the diff's new text, not its old),
-    /// the old text goes back in the copy kept.
+    /// have landed already, what the file was is worked out where that's
+    /// certain (`landed_before`); else it's kept as it is.
     fn agent_will_edit(&mut self, session: &Entity<Session>, path: PathBuf, old: Option<&str>, new: Option<&str>, cx: &mut Context<Self>) {
         let in_worktree = session.read(cx).worktree.as_ref().is_some_and(|w| path.starts_with(&w.checkout));
         if !(self.in_project(&path) || in_worktree) || session.read(cx).noted(&path) {
             return;
         }
         let Ok(mut before) = self.agent_before(&path, cx) else { return };
-        if let (Some(new), Some(text)) = (new, before.text()) {
-            match old {
-                Some(old) if !old.is_empty() && !text.contains(old) && text.contains(new) => before = Before::Text(text.replacen(new, old, 1)),
-                None if text == new => before = Before::Missing,
-                _ => {}
-            }
+        if let (Some(new), Some(text)) = (new, before.text())
+            && let Some(was) = landed_before(&text, old, new, self.listed_before_agent(session, &path, cx))
+        {
+            before = was;
         }
         if let Some(text) = before.text() {
             crate::local_history::record(&path, &text, crate::local_history::Kind::BeforeAgent);
@@ -1388,6 +1399,33 @@ fn resolve_within(path: &Path, depth: usize) -> PathBuf {
     resolved
 }
 
+/// What a file was before an agent's change that has landed already, where
+/// that's certain: `text` is the file now, `old` and `new` the change's diff
+/// (`old` None: the whole file written), `listed` whether the file was there
+/// before (`listed_before_agent`). None: keep it as it is (the change hasn't
+/// landed, or what it was can't be told).
+fn landed_before(text: &str, old: Option<&str>, new: &str, listed: bool) -> Option<Before> {
+    match old {
+        // The old text gone and the new one there once: it took the old one's
+        // place. A new text that's empty (a deletion) or there more than once
+        // could have gone anywhere.
+        Some(old) if !old.is_empty() && !text.contains(old) => {
+            only_place(text, new).map(|at| Before::Text(format!("{}{old}{}", &text[..at], &text[at + new.len()..])))
+        }
+        // Written whole, and the project didn't have it: it's new.
+        None if text == new && !listed => Some(Before::Missing),
+        _ => None,
+    }
+}
+
+/// Where `needle` is in `text` when it's there exactly once, overlapping
+/// matches counted (`aa` is twice in `aaa`); never for an empty one.
+fn only_place(text: &str, needle: &str) -> Option<usize> {
+    let at = text.find(needle).filter(|_| !needle.is_empty())?;
+    let next = at + text[at..].chars().next().map_or(1, char::len_utf8);
+    text[next..].find(needle).is_none().then_some(at)
+}
+
 fn selection_context(editor: &Entity<Editor>, cx: &App) -> Option<ContextItem> {
     let e = editor.read(cx);
     let doc = e.doc.read(cx);
@@ -1481,6 +1519,26 @@ mod tests {
             assert_eq!(resolve(&root.join("proj/dangling")), root.join("elsewhere/new.txt"));
         }
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// An edit noticed after it landed: what the file was is worked out only
+    /// where that's certain, never guessed into the wrong place.
+    #[test]
+    fn a_landed_edit_is_undone_only_where_certain() {
+        use super::{Before, landed_before};
+        // The new text once: the old one goes back in its place.
+        assert_eq!(landed_before("é fn two() {}\n", Some("one"), "two", true), Some(Before::Text("é fn one() {}\n".into())));
+        // Not landed yet (the old text is there): kept as it is.
+        assert_eq!(landed_before("let one = 1;\n", Some("one"), "two", true), None);
+        // A deletion: where the text was can't be told (it used to go first).
+        assert_eq!(landed_before("a\nc\n", Some("b\n"), "", true), None);
+        // The new text more than once, overlapping too: which one is unknown.
+        assert_eq!(landed_before("}\n}\n", Some("x }"), "}", true), None);
+        assert_eq!(landed_before("aaa", Some("b"), "aa", true), None);
+        // A whole file written: new only when the project didn't list it.
+        assert_eq!(landed_before("hello\n", None, "hello\n", false), Some(Before::Missing));
+        assert_eq!(landed_before("hello\n", None, "hello\n", true), None);
+        assert_eq!(landed_before("before\n", None, "after\n", false), None);
     }
 }
 

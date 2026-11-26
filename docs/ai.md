@@ -111,8 +111,10 @@ their own text size (15 points unless Settings → AI → Sessions → **Text si
   **Reject All** puts every file back as it was. Every agent write is one undoable edit in its open
   document, and Local History keeps the version before it ("Before an agent's edit"). Agents that
   write files themselves (Claude Agent) are followed too: Kuana keeps each file as it was when the
-  agent's edit comes up. What each session changed is kept with it, so Review, Reject All and
-  Restore still work after Kuana restarts.
+  agent's edit comes up. In a mode that doesn't ask first, an edit can land before Kuana hears of
+  it; Kuana then works out what the file was only where that's certain (the edit's new text is
+  there once), and otherwise leaves that file out rather than guess. What each session changed is
+  kept with it, so Review, Reject All and Restore still work after Kuana restarts.
 - **Where it works**: a session works in the project folder of the file you're editing (the
   window's first folder otherwise). Before you send anything, the folder pill under its composer
   names that folder and changes it: with several folders, pick another; in a Git repository, pick
