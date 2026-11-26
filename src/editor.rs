@@ -1554,6 +1554,13 @@ impl Editor {
         edits.extend(mirror);
         let mut new_ranges = self.change_doc(cx, |doc| doc.edit(edits, &before, kind));
         new_ranges.truncate(count);
+        // A document that takes no edits (read-only, or a restored tab's
+        // stand-in until its text is there) changed nothing: the carets stay.
+        // Placed after the text typed, they'd be past the end of it.
+        let refused = self.doc.read(cx).is_read_only() || self.doc.read(cx).is_stand_in();
+        if refused {
+            return new_ranges;
+        }
         self.linked_version = self.doc.read(cx).version();
         let selections = new_ranges
             .iter()

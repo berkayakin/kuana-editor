@@ -1,7 +1,7 @@
 //! Opening files in tabs (`opening.rs`): asked for on the UI thread, looked
 //! at and read in the background, shown in the order asked.
 
-use gpui::TestAppContext;
+use gpui::{EntityInputHandler, TestAppContext};
 
 use super::harness::{self, TempProject, Ws, answer, prompt, settle};
 use super::*;
@@ -189,6 +189,24 @@ fn a_jump_into_a_restored_tab_lands_in_its_unsaved_text(cx: &mut TestAppContext)
     assert_eq!(ws.active_text(cx), "new one\ntwo\nthree\n");
     assert!(ws.active_dirty(cx));
     assert_eq!(ws.active_caret(cx), (1, 6));
+}
+
+/// Typing into a restored tab before its text is there changes nothing
+/// (the empty stand-in takes no edits); the text comes as the file has it.
+#[gpui::test]
+fn typing_before_a_restored_tabs_text_arrives_changes_nothing(cx: &mut TestAppContext) {
+    let project = TempProject::new(&[("a.txt", "a\n"), ("b.txt", "one\ntwo\n")]);
+    let ws = restored(cx, &project, false);
+    ws.open_soon(cx, &project.path("b.txt"));
+    assert_eq!(ws.active_path(cx), Some(project.path("b.txt")));
+    let editor = ws.active_editor(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_loaded()));
+    ws.update(cx, |_, window, cx| editor.update(cx, |e, cx| e.replace_text_in_range(None, "typed", window, cx)));
+    assert!(!ws.active_dirty(cx));
+    settle(cx);
+    assert_eq!(ws.active_text(cx), "one\ntwo\n");
+    assert!(!ws.active_dirty(cx));
+    assert_eq!(project.read("b.txt"), "one\ntwo\n");
 }
 
 /// A folder opens as the project, in this window; no tab.
