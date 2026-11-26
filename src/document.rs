@@ -792,6 +792,14 @@ impl Document {
         self.read_only
     }
 
+    /// Whether `edit` changes the text: not for a read-only document, nor
+    /// for a restored tab's stand-in until its text is there (typing
+    /// meanwhile would be lost with it). Editors check this before moving
+    /// carets for an edit, which would otherwise land past the text.
+    pub fn takes_edits(&self) -> bool {
+        !self.read_only && !self.stand_in
+    }
+
     /// Snaps an arbitrary byte offset to a char boundary at or before it.
     pub fn clip(&self, offset: usize) -> usize {
         let offset = offset.min(self.len());
@@ -813,8 +821,7 @@ impl Document {
     ) -> Vec<Range<usize>> {
         let count = edits.len();
         // Nothing changes; each edit's range comes back empty where it starts.
-        // A stand-in's text isn't there yet: typing meanwhile would be lost with it.
-        if self.read_only || self.stand_in {
+        if !self.takes_edits() {
             return edits.iter().map(|(range, _)| self.clip(range.start)..self.clip(range.start)).collect();
         }
         let mut edits: Vec<(usize, Range<usize>, String)> = edits

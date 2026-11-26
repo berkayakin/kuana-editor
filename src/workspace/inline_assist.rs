@@ -29,7 +29,7 @@ impl Workspace {
         let target = {
             let e = editor.read(cx);
             let doc = e.doc.read(cx);
-            let Some(path) = doc.path.clone().filter(|_| !doc.is_read_only() && !doc.is_stand_in()) else {
+            let Some(path) = doc.path.clone().filter(|_| doc.takes_edits()) else {
                 self.toast(ToastKind::Info, "Inline Assist works in a saved file", None, cx);
                 return;
             };

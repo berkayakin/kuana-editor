@@ -1533,13 +1533,17 @@ impl Editor {
     /// Applies one edit per selection. The closure returns the replaced range,
     /// the new text, and where the cursor lands within the new text (`None`
     /// selects the whole inserted text).
-    /// Returns where each selection's new text went, in their order.
+    /// Returns where each selection's new text went, in their order
+    /// (nothing when the document takes no edits).
     fn edit_selections(
         &mut self,
         kind: EditKind,
         cx: &mut Context<Self>,
         mut f: impl FnMut(&Document, &Selection) -> (Range<usize>, String, Option<usize>),
     ) -> Vec<Range<usize>> {
+        if !self.takes_edits(cx) {
+            return Vec::new();
+        }
         let before = self.selections.clone();
         let mut edits = Vec::with_capacity(before.len());
         let mut placements = Vec::with_capacity(before.len());
@@ -1554,13 +1558,6 @@ impl Editor {
         edits.extend(mirror);
         let mut new_ranges = self.change_doc(cx, |doc| doc.edit(edits, &before, kind));
         new_ranges.truncate(count);
-        // A document that takes no edits (read-only, or a restored tab's
-        // stand-in until its text is there) changed nothing: the carets stay.
-        // Placed after the text typed, they'd be past the end of it.
-        let refused = self.doc.read(cx).is_read_only() || self.doc.read(cx).is_stand_in();
-        if refused {
-            return new_ranges;
-        }
         self.linked_version = self.doc.read(cx).version();
         let selections = new_ranges
             .iter()
@@ -1593,6 +1590,9 @@ impl Editor {
         kind: EditKind,
         cx: &mut Context<Self>,
     ) {
+        if !self.takes_edits(cx) {
+            return;
+        }
         edits.sort_by_key(|e| e.0.start);
         edits.dedup_by(|a, b| a.0 == b.0);
         let map = |offset: usize, edits: &[(Range<usize>, String)]| {
@@ -1622,6 +1622,13 @@ impl Editor {
         self.goal_x = None;
         self.set_selections(selections, self.primary, cx);
         self.after_edit(cx);
+    }
+
+    /// Whether an edit here changes the text (see `Document::takes_edits`).
+    /// The edits below that move carets as their text goes in check it
+    /// first: refused, the text is unchanged and so are the carets.
+    fn takes_edits(&self, cx: &App) -> bool {
+        self.doc.read(cx).takes_edits()
     }
 
     fn after_edit(&mut self, cx: &mut Context<Self>) {
@@ -3157,6 +3164,9 @@ impl Editor {
     }
 
     fn duplicate_line(&mut self, _: &DuplicateLine, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.takes_edits(cx) {
+            return;
+        }
         // Each block's text is inserted after it; cursors move onto the copy.
         let blocks = self.selected_row_blocks(cx);
         let mut edits = Vec::new();
@@ -3187,6 +3197,9 @@ impl Editor {
     }
 
     fn move_lines(&mut self, up: bool, cx: &mut Context<Self>) {
+        if !self.takes_edits(cx) {
+            return;
+        }
         let blocks = self.selected_row_blocks(cx);
         let last_row = self.doc.read(cx).line_count() - 1;
         if (up && blocks.first().is_some_and(|b| b.start == 0)) || (!up && blocks.last().is_some_and(|b| b.end > last_row)) {
@@ -8334,5 +8347,69 @@ mod frame_tests {
             start.elapsed()
         }));
         println!("300k lines, {} fold: keystroke max {fold_max:?}, mean {:?}", if fold { "one" } else { "no" }, fold_sum / 20);
+    }
+}
+
+#[cfg(test)]
+mod refused_edit_tests {
+    use gpui::{EntityInputHandler, TestAppContext};
+
+    use super::*;
+    use crate::syntax::Language;
+
+    /// A restored tab not read yet: an empty stand-in with the caret at 0.
+    fn stand_in(cx: &mut TestAppContext) -> Entity<Editor> {
+        let unloaded = Unloaded { cursor: 0, top_line: None, unsaved: None, folds: Vec::new(), encoding: None };
+        cx.new(|cx| Editor::new_unloaded(Some(std::path::PathBuf::from("/nowhere/a.rs")), unloaded, cx))
+    }
+
+    /// The text and carets, and the selected-character count the status bar
+    /// draws from them (it read past the text when the carets were).
+    fn state(editor: &Entity<Editor>, cx: &mut TestAppContext) -> (String, Vec<Selection>, usize) {
+        editor.read_with(cx, |e, cx| (e.text(cx), e.selections().to_vec(), e.selected_chars(cx)))
+    }
+
+    /// Edits a stand-in refuses leave its carets where they were, by every
+    /// way an editor edits: typing, replacing ranges, line commands.
+    #[gpui::test]
+    fn a_stand_in_keeps_its_carets_through_refused_edits(cx: &mut TestAppContext) {
+        let editor = stand_in(cx);
+        let before = state(&editor, cx);
+        let window = cx.add_empty_window();
+        window.update(|window, cx| {
+            editor.update(cx, |e, cx| {
+                e.replace_text_in_range(None, "typed", window, cx);
+                e.replace_ranges(vec![(0..0, "replaced".into())], cx);
+                e.replace_text("whole\ntext\n", cx);
+                e.duplicate_line(&DuplicateLine, window, cx);
+                e.move_lines(false, cx);
+                e.toggle_line_comments(cx);
+            })
+        });
+        assert_eq!(state(&editor, cx), before);
+    }
+
+    /// The same for a read-only document (the Merge view's sides), with the
+    /// caret at the end of its text: moved for the text that didn't go in,
+    /// it was past the end.
+    #[gpui::test]
+    fn a_read_only_document_keeps_its_carets_through_refused_edits(cx: &mut TestAppContext) {
+        let editor = cx.new(|cx| Editor::new(Document::read_only("fn a() {}\nfn b() {}\n".into(), Language::Rust), cx));
+        editor.update(cx, |e, cx| e.set_selections(vec![Selection::cursor(20)], 0, cx));
+        let before = state(&editor, cx);
+        let window = cx.add_empty_window();
+        window.update(|window, cx| {
+            editor.update(cx, |e, cx| {
+                e.replace_text_in_range(None, "typed", window, cx);
+                e.replace_ranges(vec![(0..0, "replaced".into())], cx);
+                e.duplicate_line(&DuplicateLine, window, cx);
+                e.toggle_line_comments(cx);
+            })
+        });
+        assert_eq!(state(&editor, cx), before);
+        editor.update(cx, |e, cx| e.set_selections(vec![Selection::cursor(0)], 0, cx));
+        let before = state(&editor, cx);
+        editor.update(cx, |e, cx| e.move_lines(false, cx));
+        assert_eq!(state(&editor, cx), before);
     }
 }

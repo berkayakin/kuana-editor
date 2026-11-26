@@ -191,17 +191,24 @@ fn a_jump_into_a_restored_tab_lands_in_its_unsaved_text(cx: &mut TestAppContext)
     assert_eq!(ws.active_caret(cx), (1, 6));
 }
 
-/// Typing into a restored tab before its text is there changes nothing
-/// (the empty stand-in takes no edits); the text comes as the file has it.
+/// Edits made to a restored tab before its text is there, by code that
+/// reaches its editor directly (keys don't reach it: until then the tab
+/// draws a placeholder, without the editor element that takes them),
+/// change nothing, and the next frame draws without reading past the empty
+/// stand-in; the text comes as the file has it.
 #[gpui::test]
-fn typing_before_a_restored_tabs_text_arrives_changes_nothing(cx: &mut TestAppContext) {
+fn direct_edits_to_a_restored_tab_before_its_text_change_nothing(cx: &mut TestAppContext) {
     let project = TempProject::new(&[("a.txt", "a\n"), ("b.txt", "one\ntwo\n")]);
     let ws = restored(cx, &project, false);
     ws.open_soon(cx, &project.path("b.txt"));
     assert_eq!(ws.active_path(cx), Some(project.path("b.txt")));
     let editor = ws.active_editor(cx);
     assert!(!editor.read_with(cx, |e, _| e.is_loaded()));
+    // Each update ends with a frame, which drew the status bar's count of
+    // the selected text where the carets were.
     ws.update(cx, |_, window, cx| editor.update(cx, |e, cx| e.replace_text_in_range(None, "typed", window, cx)));
+    editor.update(cx, |e, cx| e.replace_ranges(vec![(0..0, "replaced".into())], cx));
+    ws.update(cx, |_, _, cx| cx.notify());
     assert!(!ws.active_dirty(cx));
     settle(cx);
     assert_eq!(ws.active_text(cx), "one\ntwo\n");
