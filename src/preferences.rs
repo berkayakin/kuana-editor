@@ -1026,7 +1026,7 @@ impl Preferences {
         let settings = Settings::get(cx).clone();
         let shown = Theme::get(cx).clone();
         let keys = theme::follow_system_keys(!theme::follows_system(&settings), &shown.name, shown.appearance);
-        let result = keys.into_iter().try_for_each(|(key, value)| Settings::set(key, value.into()));
+        let result = theme::write_keys(keys);
         self.write(result, cx);
         theme::apply_wanted(cx);
     }

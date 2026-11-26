@@ -140,7 +140,6 @@ impl Onboarding {
     }
 
     fn choose_theme(&mut self, name: SharedString, cx: &mut Context<Self>) {
-        // Kept for its own mode too, so following the system starts from it.
         let result = theme::save_choice(&name, cx);
         self.write(result, cx);
         if theme::follows_system(Settings::get(cx)) {

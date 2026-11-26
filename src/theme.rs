@@ -1004,18 +1004,41 @@ pub fn follows_system(settings: &Settings) -> bool {
     settings.theme.as_deref().is_some_and(|theme| theme.eq_ignore_ascii_case(SYSTEM))
 }
 
+/// A settings key and what to write there: a theme's name, or `None` to
+/// remove the key, so a default is never pinned in `settings.json`.
+pub type ThemeKey = (&'static str, Option<String>);
+
+/// The key that names the theme for `appearance` while following the
+/// system, and that key's default.
+fn mode_key(appearance: Appearance) -> (&'static str, &'static str) {
+    match appearance {
+        Appearance::Light => ("light_theme", DEFAULT_LIGHT_THEME),
+        Appearance::Dark => ("dark_theme", DEFAULT_THEME),
+    }
+}
+
+/// `key` set to `name`, or removed when `name` is its default.
+fn unless_default(key: &'static str, name: &str, default: &str) -> ThemeKey {
+    (key, (name != default).then(|| name.to_string()))
+}
+
 /// What the Follow system switch writes, in order. On: the shown theme goes
 /// on as the theme for its mode (the other mode keeps its own), then
 /// `"theme": "System"`. Off: the shown theme by name, so what's on screen stays.
-pub fn follow_system_keys(on: bool, shown: &str, appearance: Appearance) -> Vec<(&'static str, String)> {
+pub fn follow_system_keys(on: bool, shown: &str, appearance: Appearance) -> Vec<ThemeKey> {
     if !on {
-        return vec![("theme", shown.to_string())];
+        return vec![unless_default("theme", shown, DEFAULT_THEME)];
     }
-    let key = match appearance {
-        Appearance::Light => "light_theme",
-        Appearance::Dark => "dark_theme",
-    };
-    vec![(key, shown.to_string()), ("theme", SYSTEM.to_string())]
+    let (key, default) = mode_key(appearance);
+    vec![unless_default(key, shown, default), ("theme", Some(SYSTEM.to_string()))]
+}
+
+/// Writes keys from `follow_system_keys` or `choice_keys`.
+pub fn write_keys(keys: Vec<ThemeKey>) -> std::io::Result<()> {
+    keys.into_iter().try_for_each(|(key, value)| match value {
+        Some(name) => Settings::set(key, name.into()),
+        None => Settings::remove(key),
+    })
 }
 
 /// The system's light or dark mode, as the windows are drawn in it.
@@ -1047,27 +1070,23 @@ pub fn apply_wanted(cx: &mut App) -> bool {
     Theme::get(cx).name.as_ref() == name || apply_theme(&name, cx)
 }
 
-/// What a theme chosen by name is saved as. It's always remembered as the
-/// theme for its appearance (`light_theme` or `dark_theme`), so following
-/// the system later starts from the last of each picked; when not following,
-/// it's also `theme`, the one in use.
-pub fn choice_keys(settings: &Settings, name: &str, appearance: Appearance) -> Vec<(&'static str, String)> {
-    let key = match appearance {
-        Appearance::Light => "light_theme",
-        Appearance::Dark => "dark_theme",
-    };
-    let mut keys = vec![(key, name.to_string())];
-    if !follows_system(settings) {
-        keys.push(("theme", name.to_string()));
+/// What a theme chosen by name is saved as: following the system, the
+/// theme for its appearance (`light_theme` or `dark_theme`); otherwise
+/// `theme`, as before following existed.
+pub fn choice_keys(settings: &Settings, name: &str, appearance: Appearance) -> Vec<ThemeKey> {
+    if follows_system(settings) {
+        let (key, default) = mode_key(appearance);
+        vec![unless_default(key, name, default)]
+    } else {
+        vec![unless_default("theme", name, DEFAULT_THEME)]
     }
-    keys
 }
 
 /// Saves a theme chosen by name (the theme picker, Settings' cards, Welcome
 /// Setup). Following the system, it's shown once the system is in its mode.
 pub fn save_choice(name: &str, cx: &App) -> std::io::Result<()> {
     let appearance = cx.try_global::<ThemeRegistry>().and_then(|r| r.find(name)).map_or(Appearance::Dark, |e| e.theme.appearance);
-    choice_keys(Settings::get(cx), name, appearance).into_iter().try_for_each(|(key, value)| Settings::set(key, value.into()))
+    write_keys(choice_keys(Settings::get(cx), name, appearance))
 }
 
 /// The settings.json problem for a theme name no theme has.
@@ -1189,14 +1208,17 @@ mod tests {
         assert_eq!(wanted(&system, Appearance::Light), "Solarized Light");
         assert_eq!(wanted(&system, Appearance::Dark), DEFAULT_THEME);
         assert_eq!(wanted(&parse(r#"{"theme": "System"}"#), Appearance::Light), DEFAULT_LIGHT_THEME);
-        // A theme chosen meanwhile is kept for its own mode only.
-        let keys = |pairs: &[(&'static str, &str)]| pairs.iter().map(|&(k, v)| (k, v.to_string())).collect::<Vec<_>>();
-        assert_eq!(choice_keys(&system, "Peach Blossom", Appearance::Light), keys(&[("light_theme", "Peach Blossom")]));
-        assert_eq!(choice_keys(&system, "Dracula", Appearance::Dark), keys(&[("dark_theme", "Dracula")]));
-        // Not following, a theme is the one in use and remembered for its mode,
-        // so turning Follow system on later starts from the last dark and light picked.
-        assert_eq!(choice_keys(&named, "Ember", Appearance::Dark), keys(&[("dark_theme", "Ember"), ("theme", "Ember")]));
-        assert_eq!(choice_keys(&named, "Clay Light", Appearance::Light), keys(&[("light_theme", "Clay Light"), ("theme", "Clay Light")]));
+        // Following, a theme chosen is kept for its own mode only; its default removes the key.
+        let set = |key: &'static str, name: &str| (key, Some(name.to_string()));
+        assert_eq!(choice_keys(&system, "Peach Blossom", Appearance::Light), [set("light_theme", "Peach Blossom")]);
+        assert_eq!(choice_keys(&system, "Dracula", Appearance::Dark), [set("dark_theme", "Dracula")]);
+        assert_eq!(choice_keys(&system, DEFAULT_LIGHT_THEME, Appearance::Light), [("light_theme", None)]);
+        assert_eq!(choice_keys(&system, DEFAULT_THEME, Appearance::Dark), [("dark_theme", None)]);
+        // Not following, only `theme`, and the default removes it, so a later
+        // default isn't pinned to today's.
+        assert_eq!(choice_keys(&named, "Onyx", Appearance::Dark), [set("theme", "Onyx")]);
+        assert_eq!(choice_keys(&named, "Clay Light", Appearance::Light), [set("theme", "Clay Light")]);
+        assert_eq!(choice_keys(&named, DEFAULT_THEME, Appearance::Dark), [("theme", None)]);
         // Both defaults are built in, each of its mode.
         let registry = ThemeRegistry::load();
         assert_eq!(registry.find(DEFAULT_LIGHT_THEME).unwrap().theme.appearance, Appearance::Light);
@@ -1208,13 +1230,16 @@ mod tests {
 
     #[test]
     fn the_follow_system_switch_goes_on_with_the_shown_theme() {
-        let keys = |pairs: &[(&'static str, &str)]| pairs.iter().map(|&(k, v)| (k, v.to_string())).collect::<Vec<_>>();
+        let set = |key: &'static str, name: &str| (key, Some(name.to_string()));
         // On: the theme in use goes on for its own mode, even over one chosen
-        // for it before (Dracula, though Ember was the dark one last time).
-        assert_eq!(follow_system_keys(true, "Dracula", Appearance::Dark), keys(&[("dark_theme", "Dracula"), ("theme", "System")]));
-        assert_eq!(follow_system_keys(true, "Clay Light", Appearance::Light), keys(&[("light_theme", "Clay Light"), ("theme", "System")]));
-        // Off: what's shown stays, by name; the light and dark choices are kept for next time.
-        assert_eq!(follow_system_keys(false, "Solarized Light", Appearance::Light), keys(&[("theme", "Solarized Light")]));
+        // for it before; the other mode keeps its own. Its default removes the key.
+        assert_eq!(follow_system_keys(true, "Dracula", Appearance::Dark), [set("dark_theme", "Dracula"), set("theme", "System")]);
+        assert_eq!(follow_system_keys(true, "Solarized Light", Appearance::Light), [set("light_theme", "Solarized Light"), set("theme", "System")]);
+        assert_eq!(follow_system_keys(true, DEFAULT_THEME, Appearance::Dark), [("dark_theme", None), set("theme", "System")]);
+        assert_eq!(follow_system_keys(true, DEFAULT_LIGHT_THEME, Appearance::Light), [("light_theme", None), set("theme", "System")]);
+        // Off: what's shown stays, by name, unless it's the default.
+        assert_eq!(follow_system_keys(false, "Solarized Light", Appearance::Light), [set("theme", "Solarized Light")]);
+        assert_eq!(follow_system_keys(false, DEFAULT_THEME, Appearance::Dark), [("theme", None)]);
     }
 
     /// A misspelled theme name doesn't change what's shown (settings.json

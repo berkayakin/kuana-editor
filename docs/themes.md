@@ -6,9 +6,9 @@ Action). Moving through the list previews each theme live; Enter keeps it
 
 ### Following the system's light or dark mode
 
-Turn on **Follow system light or dark mode** at the top of Settings → Appearance. It starts from the
-last dark and the last light theme you picked (a theme is always remembered for its own mode), and
-you can pick others there or with Select Theme. Kuana switches between them as the system does, at
+Turn on **Follow system light or dark mode** at the top of Settings → Appearance. The theme on
+screen becomes the one for its mode, the other mode keeps its own (or its default), and you can pick
+others there or with Select Theme. Kuana switches between them as the system does, at
 once and in every window, on macOS, Windows and Linux. In `settings.json` it's:
 
 ```jsonc
