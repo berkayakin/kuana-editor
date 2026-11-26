@@ -144,6 +144,8 @@ mod zen;
 mod harness;
 #[cfg(test)]
 mod saving_tests;
+#[cfg(test)]
+mod session_tests;
 use self::{
     file_tree::*,
     pane::{Pane, PaneChrome, PaneEvent, file_drop_overlay},
