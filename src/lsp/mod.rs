@@ -440,6 +440,10 @@ impl LspStore {
     /// Opens a tracked document with those of `keys` it isn't with yet,
     /// starting servers that aren't running.
     fn connect(&mut self, path: &Path, language: Language, keys: Vec<(ServerKey, Option<Vec<String>>, &'static servers::ServerSpec)>, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        if NO_SERVERS.with(std::cell::Cell::get) {
+            return;
+        }
         for (key, custom, spec) in keys {
             let Some(doc) = self.documents.get_mut(path).filter(|d| !d.has(&key)) else { continue };
             doc.servers.push((key.clone(), false));
@@ -2137,6 +2141,14 @@ pub(crate) fn fake_server(name: &str, triggers: &str) -> &'static servers::Serve
 /// `initialize`.
 #[cfg(test)]
 pub(crate) const FAKE_SERVER_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[cfg(test)]
+thread_local! {
+    /// Set by workspace tests (`workspace::harness`): no document connects
+    /// to a server, so a test's trusted project never starts one, whatever
+    /// its files' languages and whatever servers this machine has.
+    pub static NO_SERVERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 #[cfg(test)]
 mod tests {

@@ -46,7 +46,34 @@ pub fn is_trusted(path: &Path) -> bool {
 /// not counting: what's installed there (extensions from the registry or
 /// Git, servers) came from elsewhere.
 pub fn is_trusted_by_user(path: &Path) -> bool {
+    #[cfg(test)]
+    if let Some(trusted) = OWN_TRUST.with(|own| own.borrow().as_ref().map(|folders| folders.iter().any(|f| path.starts_with(f)))) {
+        return trusted;
+    }
     TRUST_ALL.load(Ordering::Relaxed) || trusted_by(path).is_some()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own trusted folders (`trust_only_in_this_test`), in place of
+    /// the process's: tests running beside it set that list, reload it from
+    /// `trust.json` and turn trust-all on, at any moment.
+    static OWN_TRUST: std::cell::RefCell<Option<Vec<PathBuf>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// From now on, for the test running on this thread (GPUI's tests run their
+/// foreground and background work on it), only the folders given here are
+/// trusted: none until `trust_in_this_test`.
+#[cfg(test)]
+pub fn trust_only_in_this_test() {
+    OWN_TRUST.with(|own| own.borrow_mut().get_or_insert_with(Vec::new).clear());
+}
+
+/// Trusts `folder` for this test only, as the trust dialog's Trust would,
+/// without changing the list other tests see (see `trust_only_in_this_test`).
+#[cfg(test)]
+pub fn trust_in_this_test(folder: &Path) {
+    OWN_TRUST.with(|own| own.borrow_mut().get_or_insert_with(Vec::new).push(folder.to_path_buf()));
 }
 
 /// The trusted folder that covers `path`.

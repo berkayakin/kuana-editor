@@ -12,9 +12,19 @@
 //! the projects aren't repositories, and looking would ask the login shell
 //! for its PATH), the file watcher (`watching::NO_WATCHER`: its events come
 //! from another thread at any time; a test that changes a file on disk
-//! makes the change it means with `disk_changed`), language servers (the
-//! project isn't trusted, and the files are plain text) and the Dock's
-//! recent items.
+//! makes the change it means with `disk_changed`), language servers
+//! (`lsp::NO_SERVERS`: no document connects to one, whatever its language)
+//! and the Dock's recent items.
+//!
+//! The window as a test finds it: `open_project` trusts the project first
+//! (`trust::trust_in_this_test`; `init` gives the test a trusted list of its
+//! own, since the process's is changed by the tests running beside it), so
+//! no trust dialog covers the workspace and the project isn't in Restricted
+//! Mode; a test of Restricted Mode opens it with `open_project_restricted`.
+//! No modal is open, the current tab has the keyboard once it's shown, and
+//! settings are the defaults: auto-save after a delay (see `set_auto_save`).
+//! The test window never counts as the active one, so what Kuana does when
+//! its window gains or loses focus doesn't happen.
 
 use gpui::{EntityInputHandler, TestAppContext, WindowHandle};
 
@@ -70,6 +80,8 @@ impl Drop for TempProject {
 /// and Git left out. Call once per test, before `workspace`.
 pub(super) fn init(cx: &mut TestAppContext) {
     crate::git_store::NO_GIT.with(|off| off.set(true));
+    crate::lsp::NO_SERVERS.with(|off| off.set(true));
+    crate::trust::trust_only_in_this_test();
     watching::NO_WATCHER.with(|off| off.set(true));
     cx.update(|cx| {
         cx.set_global(Theme::blank_for_tests());
@@ -101,8 +113,17 @@ impl Ws {
         self.0.read_with(cx, f).expect("the workspace window is open")
     }
 
-    /// Opens `dir` as the project, as File → Open does with a folder.
+    /// Opens `dir` as the project, as File → Open does with a folder, the
+    /// folder trusted already (as after the trust dialog's Trust).
     pub fn open_project(&self, cx: &mut TestAppContext, dir: &Path) {
+        crate::trust::trust_in_this_test(dir);
+        self.open_project_restricted(cx, dir);
+    }
+
+    /// Opens `dir` as the project without trusting it: Restricted Mode,
+    /// the trust dialog open over the workspace (unless the folder was
+    /// trusted earlier in the test).
+    pub fn open_project_restricted(&self, cx: &mut TestAppContext, dir: &Path) {
         let dir = dir.to_path_buf();
         self.update(cx, |ws, window, cx| ws.set_root(dir, window, cx));
         settle(cx);

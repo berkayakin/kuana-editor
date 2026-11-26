@@ -216,6 +216,20 @@ fn direct_edits_to_a_restored_tab_before_its_text_change_nothing(cx: &mut TestAp
     assert_eq!(project.read("b.txt"), "one\ntwo\n");
 }
 
+/// The harness's project is trusted: no dialog over the workspace. One
+/// opened without trusting it is in Restricted Mode, the trust dialog asking.
+#[gpui::test]
+fn an_untrusted_project_asks_to_be_trusted(cx: &mut TestAppContext) {
+    let trusted = TempProject::new(&[("a.txt", "a\n")]);
+    let ws = with_project(cx, &trusted);
+    assert!(ws.read(cx, |ws, cx| ws.modals.current.is_none() && !ws.restricted(cx)));
+
+    let untrusted = TempProject::new(&[("a.txt", "a\n")]);
+    let ws = harness::workspace(cx);
+    ws.open_project_restricted(cx, &untrusted.dir);
+    assert!(ws.read(cx, |ws, cx| matches!(ws.modals.current, Some(Modal::Trust(_))) && ws.restricted(cx)));
+}
+
 /// A folder opens as the project, in this window; no tab.
 #[gpui::test]
 fn a_folder_opens_as_the_project(cx: &mut TestAppContext) {
