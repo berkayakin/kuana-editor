@@ -130,6 +130,8 @@ mod tests {
         git(&repo, &["init", "-q", "-b", "main"]);
         git(&repo, &["config", "user.email", "test@example.com"]);
         git(&repo, &["config", "user.name", "Test"]);
+        // Windows runners' core.autocrlf=true would check the merge out with CRLF.
+        git(&repo, &["config", "core.autocrlf", "false"]);
         std::fs::write(repo.join("app/main.py"), "print('one')\n").unwrap();
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-q", "-m", "start"]);
