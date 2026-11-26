@@ -143,6 +143,8 @@ mod zen;
 #[cfg(test)]
 mod harness;
 #[cfg(test)]
+mod opening_tests;
+#[cfg(test)]
 mod saving_tests;
 #[cfg(test)]
 mod session_tests;
