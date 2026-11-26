@@ -33,11 +33,12 @@ fn files_asked_for_in_a_row_get_tabs_in_that_order(cx: &mut TestAppContext) {
     assert_eq!(ws.read(cx, |ws, _| ws.opens), 0);
 }
 
-/// A file in a tab already is shown, not opened again, also when asked
-/// for again while a read is under way.
-#[gpui::test]
+/// A file in a tab already is shown, not opened again; one asked for twice
+/// before either read lands gets one tab. Each iteration runs the reads and
+/// what waits for them in another (seeded) order.
+#[gpui::test(iterations = 10)]
 fn a_file_in_a_tab_is_shown_not_opened_twice(cx: &mut TestAppContext) {
-    let project = TempProject::new(&[("a.txt", "a\n"), ("b.txt", "b\n")]);
+    let project = TempProject::new(&[("a.txt", "a\n"), ("b.txt", "b\n"), ("c.txt", "c\n")]);
     let ws = with_project(cx, &project);
     // Else switching tabs would save the edit.
     ws.set_auto_save(cx, AutoSave::Off);
@@ -45,22 +46,27 @@ fn a_file_in_a_tab_is_shown_not_opened_twice(cx: &mut TestAppContext) {
     ws.open(cx, &project.path("b.txt"));
     ws.type_text(cx, "edited ");
 
-    // Shown at once: no read.
+    // Shown at once, no read: the tab it had, unsaved edits and all.
     ws.open_soon(cx, &project.path("a.txt"));
     assert_eq!(ws.active_path(cx), Some(project.path("a.txt")));
-    settle(cx);
-    assert_eq!(ws.tabs(cx), [["a.txt", "b.txt"]]);
-
-    // Asked for twice in a row before either was read: one tab.
-    for _ in 0..2 {
-        ws.open_soon(cx, &project.path("b.txt"));
-    }
-    settle(cx);
-    assert_eq!(ws.tabs(cx), [["a.txt", "b.txt"]]);
+    ws.open_soon(cx, &project.path("b.txt"));
     assert_eq!(ws.active_path(cx), Some(project.path("b.txt")));
-    // The tab it had, unsaved edits and all.
+    assert_eq!(ws.read(cx, |ws, _| ws.opens), 0);
+    settle(cx);
+    assert_eq!(ws.tabs(cx), [["a.txt", "b.txt"]]);
     assert_eq!(ws.active_text(cx), "edited b\n");
     assert!(ws.active_dirty(cx));
+
+    // A file without a tab asked for twice in a row: both are read, and the
+    // second finds the tab the first made.
+    for _ in 0..2 {
+        ws.open_soon(cx, &project.path("c.txt"));
+    }
+    assert_eq!(ws.read(cx, |ws, _| ws.opens), 2);
+    settle(cx);
+    assert_eq!(ws.tabs(cx), [["a.txt", "b.txt", "c.txt"]]);
+    assert_eq!(ws.active_path(cx), Some(project.path("c.txt")));
+    assert_eq!(ws.active_text(cx), "c\n");
 }
 
 /// The same file by another name (a link to it) ends in its one tab.
